@@ -1265,21 +1265,7 @@ def initialize_db() -> None:
 		# Resilient person_type normalization
 		connection.execute("UPDATE students SET person_type='Öğrenci' WHERE person_type LIKE '%renci%'")
 
-		# Auto-load WHO references if lms_reference has missing indicators or is incomplete
-		lms_count = connection.execute("SELECT COUNT(*) FROM lms_reference").fetchone()[0]
-		if lms_count < 1000:
-			try:
-				import_builtin_who_references()
-			except Exception:
-				pass
-
-	try:
-		import_tr_locations_to_db(force=False)
-	except Exception:
-		pass
-
-
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
 def ensure_db_initialized() -> bool:
 	"""Tek seferlik veritabanı şema ve başlangıç kontrolü (Uygulama açılışında 1 kere çalışır, rerun'larda atlanır)."""
 	initialize_db()
@@ -4579,6 +4565,12 @@ def _ensure_lms_cache() -> None:
 		return
 	with connect_db() as connection:
 		rows = connection.execute("SELECT indicator, sex, age_months, l, m, s FROM lms_reference").fetchall()
+		if len(rows) < 100:
+			try:
+				import_builtin_who_references()
+				rows = connection.execute("SELECT indicator, sex, age_months, l, m, s FROM lms_reference").fetchall()
+			except Exception:
+				pass
 	for r in rows:
 		_LMS_CACHE[(r["indicator"], r["sex"], int(r["age_months"]))] = {
 			"l": float(r["l"]),
@@ -15549,6 +15541,7 @@ def main() -> None:
 	from PIL import Image as _PILImg
 	fav_icon = _PILImg.open(APP_ICON_PATH) if APP_ICON_PATH.exists() else "✚"
 	st.set_page_config(page_title="Revir Defteri", page_icon=fav_icon, layout="wide")
+	ensure_db_initialized()
 	app_cfg = get_app_settings()
 	font_name = app_cfg.get("font_family", "DM Sans")
 	font_css, font_url = FONT_OPTIONS.get(font_name, FONT_OPTIONS["DM Sans"])
@@ -15647,5 +15640,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-	ensure_db_initialized()
 	main()
