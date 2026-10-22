@@ -1,0 +1,31 @@
+# SQLite Veritabani ve Calisma Dosyalari (Ogrenci ve Vizit Verileri)
+revir_defteri.db
+revir_defteri.db-shm
+revir_defteri.db-wal
+*.db
+*.sqlite3
+
+# Bireysel Ogrenci ve Kisi JSON Dosyalari
+kisi_verileri/
+
+# Ogrenciye / Okula Ozel Belgeler ve Ice Aktarim Evraklari
+persantil veriler/ogrenci_*
+persantil veriler/öğrenci_*
+revir_evraklari/
+egitim_yillari/
+
+# Otomatik ve Manuel Yedek Dosyalari
+otomatik_guncelleme_yedekleri/
+*.zip
+*.bak
+
+# Python ve Gelistirme Onbellekleri
+__pycache__/
+*.py[cod]
+*$py.class
+scratch/
+.app_profile/
+.vscode/
+.idea/
+
+.git_local_history_backup/
