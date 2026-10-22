@@ -87,18 +87,22 @@ def connect_master_db() -> Iterator[sqlite3.Connection]:
 
 
 def get_current_db_path() -> Path:
-	ay = get_active_academic_year()
-	folder = ay.get("folder_name", "")
-	if folder:
-		year_dir = APP_DIR / folder
-		year_dir.mkdir(parents=True, exist_ok=True)
-		year_db = year_dir / "revir_defteri.db"
-		if year_db.exists():
+	try:
+		ay = get_active_academic_year()
+		folder = ay.get("folder_name", "")
+		if folder:
+			year_dir = APP_DIR / folder
+			year_dir.mkdir(parents=True, exist_ok=True)
+			year_db = year_dir / "revir_defteri.db"
+			if year_db.exists():
+				return year_db
+			if DB_PATH.exists():
+				import shutil
+				shutil.copy2(DB_PATH, year_db)
+				return year_db
 			return year_db
-		if DB_PATH.exists():
-			import shutil
-			shutil.copy2(DB_PATH, year_db)
-			return year_db
+	except Exception:
+		pass
 	return DB_PATH
 
 
@@ -1206,6 +1210,17 @@ def initialize_db() -> None:
 		for def_k, def_v in DEFAULT_APP_SETTINGS.items():
 			connection.execute("INSERT OR IGNORE INTO app_settings(key, value) VALUES (?, ?)", (def_k, def_v))
 
+		# Ensure default academic year exists in academic_years table
+		try:
+			ch_ay = connection.execute("SELECT COUNT(*) FROM academic_years").fetchone()[0]
+			if ch_ay == 0:
+				connection.execute(
+					"INSERT INTO academic_years(name, start_date, end_date, folder_name, is_active) VALUES (?, ?, ?, ?, 1)",
+					("2026-2027", "2026-09-01", "2027-06-20", "egitim_yillari/2026_2027")
+				)
+		except Exception:
+			pass
+
 		# Ensure newly introduced fields like harmful_habits are appended if setting already existed
 		row_scr = connection.execute("SELECT value FROM app_settings WHERE key='screening_visible_fields'").fetchone()
 		if row_scr and row_scr["value"]:
@@ -1282,32 +1297,45 @@ def _slugify_person_name(name: str) -> str:
 
 
 def get_all_academic_years() -> list[dict]:
-	with connect_master_db() as connection:
-		rows = connection.execute("SELECT * FROM academic_years ORDER BY start_date DESC").fetchall()
-		return [dict(r) for r in rows]
+	try:
+		with connect_master_db() as connection:
+			tbl_check = connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='academic_years'").fetchone()
+			if not tbl_check:
+				return []
+			rows = connection.execute("SELECT * FROM academic_years ORDER BY start_date DESC").fetchall()
+			return [dict(r) for r in rows]
+	except Exception:
+		return []
 
 
 def get_active_academic_year() -> dict:
-	sel_id = st.session_state.get("active_academic_year_id")
-	with connect_master_db() as connection:
-		if sel_id is not None:
-			row = connection.execute("SELECT * FROM academic_years WHERE id=?", (sel_id,)).fetchone()
-			if row:
-				return dict(row)
-		row = connection.execute("SELECT * FROM academic_years WHERE is_active=1").fetchone()
-		if row:
-			return dict(row)
-		row = connection.execute("SELECT * FROM academic_years ORDER BY start_date DESC LIMIT 1").fetchone()
-		if row:
-			return dict(row)
-	return {
-		"id": 2,
-		"name": "2025-2026",
-		"start_date": "2025-09-08",
-		"end_date": "2026-06-19",
-		"folder_name": "egitim_yillari/2025_2026",
+	default_year = {
+		"id": 1,
+		"name": "2026-2027",
+		"start_date": "2026-09-01",
+		"end_date": "2027-06-20",
+		"folder_name": "egitim_yillari/2026_2027",
 		"is_active": 1,
 	}
+	sel_id = st.session_state.get("active_academic_year_id")
+	try:
+		with connect_master_db() as connection:
+			tbl_check = connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='academic_years'").fetchone()
+			if not tbl_check:
+				return default_year
+			if sel_id is not None:
+				row = connection.execute("SELECT * FROM academic_years WHERE id=?", (sel_id,)).fetchone()
+				if row:
+					return dict(row)
+			row = connection.execute("SELECT * FROM academic_years WHERE is_active=1").fetchone()
+			if row:
+				return dict(row)
+			row = connection.execute("SELECT * FROM academic_years ORDER BY start_date DESC LIMIT 1").fetchone()
+			if row:
+				return dict(row)
+	except Exception:
+		pass
+	return default_year
 
 
 def set_active_academic_year(year_id: int) -> None:
