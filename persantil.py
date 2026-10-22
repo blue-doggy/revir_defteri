@@ -239,6 +239,44 @@ def build_app_css(font_css: str, font_url: str, base_fsize: str, pad_top: str, t
 	div[data-baseweb="select"] > div {{ border-radius: 6px !important; background-color: var(--input-bg); color: var(--input-text); }}
 	div[data-baseweb="select"] ul li svg {{ display: none !important; }}
 	div[data-baseweb="select"] ul li[aria-selected="true"]::before {{ content: "📂 "; font-size: 14px; }}
+
+	/* Streamlit Header, Menü, Deploy, GitHub Profil Badge ve Footer Gizleme */
+	#MainMenu, 
+	button[data-testid="stMainMenu"], 
+	[data-testid="stMainMenu"],
+	.stDeployButton, 
+	[data-testid="stDeployButton"], 
+	button[data-testid="stDeployButton"],
+	div[data-testid="stToolbarActions"],
+	[data-testid="stToolbar"],
+	header [data-testid="stToolbar"],
+	header [data-testid="stHeaderActionElements"],
+	[data-testid="stStatusWidget"],
+	[data-testid="manage-app-button"],
+	div[data-testid="stDecoration"],
+	footer, 
+	[data-testid="stFooter"],
+	footer:after, 
+	footer:before,
+	div[class*="viewerBadge"], 
+	a[class*="viewerBadge"], 
+	div[class*="ProfileBadge"],
+	a[class*="ProfileBadge"],
+	img[class*="ProfileBadge"],
+	a[href*="streamlit.io/cloud"],
+	a[href*="streamlit.io"],
+	header img,
+	header a[href*="github.com"] {{
+		display: none !important;
+		visibility: hidden !important;
+		height: 0 !important;
+		width: 0 !important;
+		opacity: 0 !important;
+		pointer-events: none !important;
+	}}
+	header[data-testid="stHeader"] {{
+		background: transparent !important;
+	}}
 	"""
 
 	dark_rules = """
