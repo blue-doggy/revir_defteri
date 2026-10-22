@@ -14468,7 +14468,7 @@ def render_settings() -> None:
 				"📋 Bakım Planı Şablonları (NANDA-I)",
 				"🔍 Okul Taraması Alanları (Görünürlük)",
 				"💊 İlaç Takip Alanları (Görünürlük)",
-				"🗂️ Sınıf / Servis Grupları",
+				"🗂️ Şube ayarları",
 				"💾 Veritabanı & Yedekleme",
 				"🚀 Sürüm & Güncelleme Yönetimi",
 			]
@@ -15197,10 +15197,10 @@ def render_settings() -> None:
 
 
 		# 🗂️ Okul Sınıfları ve Şubeleri Yönetimi
-		elif active_sec == "🗂️ Sınıf / Servis Grupları":
+		elif active_sec == "🗂️ Şube ayarları":
 			top_gc1, top_gc2 = st.columns([3, 1.2])
 			with top_gc1:
-				st.markdown("### 🏫 Okuldaki Sınıflar ve Şubeler Yönetimi")
+				st.markdown("### 🏫 Şube Ayarları (Sınıflar ve Şubeler)")
 				st.caption("Okuldaki mevcut sınıfları inceleyebilir, yeni sınıf/şube ekleyip çıkarabilir veya sağdaki pencere butonundan toplu sınıf ataması yapabilirsiniz. (İl, ilçe ve köy bilgileri sınıf filtresinde yer almaz.)")
 			with top_gc2:
 				if st.button("🪟 Sınıf Yönetimi Penceresini Aç", type="primary", key="cfg_open_cls_modal", use_container_width=True):
