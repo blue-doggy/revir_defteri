@@ -25,13 +25,21 @@ import streamlit as st
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
-import docx
-from docx.shared import Inches, Pt, RGBColor, Cm
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
-from docx.enum.section import WD_ORIENT
-from docx.oxml import parse_xml
-from docx.oxml.ns import nsdecls
+try:
+	import docx
+	from docx.shared import Inches, Pt, RGBColor, Cm
+	from docx.enum.text import WD_ALIGN_PARAGRAPH
+	from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
+	from docx.enum.section import WD_ORIENT
+	from docx.oxml import parse_xml
+	from docx.oxml.ns import nsdecls
+	HAS_DOCX = True
+except ImportError:
+	docx = None
+	Inches = Pt = RGBColor = Cm = None
+	WD_ALIGN_PARAGRAPH = WD_TABLE_ALIGNMENT = WD_ALIGN_VERTICAL = WD_ORIENT = None
+	parse_xml = nsdecls = None
+	HAS_DOCX = False
 
 
 APP_DIR = Path(__file__).resolve().parent
