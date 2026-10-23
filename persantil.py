@@ -23,7 +23,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 from openpyxl import Workbook
-from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 try:
 	import docx
@@ -1530,6 +1530,10 @@ def initialize_db() -> None:
 			CREATE INDEX IF NOT EXISTS idx_care_plans_student_id ON care_plans(student_id);
 			"""
 		)
+		cls_cols = {row["name"] for row in connection.execute("PRAGMA table_info(classes)")}
+		if "teacher_name" not in cls_cols:
+			connection.execute("ALTER TABLE classes ADD COLUMN teacher_name TEXT")
+
 		student_columns = {row["name"] for row in connection.execute("PRAGMA table_info(students)")}
 		if "person_type" not in student_columns:
 			connection.execute("ALTER TABLE students ADD COLUMN person_type TEXT NOT NULL DEFAULT 'Öğrenci'")
@@ -4856,6 +4860,318 @@ def apply_class_template(classes_to_add: list[str], clear_empty: bool = False) -
 
 
 @st.cache_data(show_spinner=False, ttl=120)
+def get_class_teacher_map() -> dict[str, str]:
+	try:
+		with connect_db() as connection:
+			cls_cols = {row["name"] for row in connection.execute("PRAGMA table_info(classes)")}
+			if "teacher_name" not in cls_cols:
+				return {}
+			rows = connection.execute("SELECT name, teacher_name FROM classes").fetchall()
+			return {r["name"]: (r["teacher_name"] or "").strip() for r in rows}
+	except Exception:
+		return {}
+
+
+def set_class_teacher(class_name: str, teacher_name: str) -> None:
+	with connect_db() as connection:
+		connection.execute(
+			"UPDATE classes SET teacher_name = ? WHERE name = ?",
+			(teacher_name.strip() if teacher_name else None, class_name.strip())
+		)
+	clear_all_data_caches()
+
+
+def make_eokul_dogum_ve_yas_template() -> bytes:
+	wb = Workbook()
+	ws = wb.active
+	ws.title = "e-Okul Şube Doğum Tarihleri"
+
+	headers = [
+		"S.No", "Öğrenci No", "Adı", "Soyadı",
+		"Sınıf / Şube", "Sınıf Öğretmeni",
+		"Cinsiyet", "Doğum Tarihi", "Yaşı"
+	]
+
+	header_font = Font(name="Segoe UI", size=11, bold=True, color="FFFFFF")
+	header_fill = PatternFill(start_color="0D9488", end_color="0D9488", fill_type="solid")
+	center_align = Alignment(horizontal="center", vertical="center")
+	left_align = Alignment(horizontal="left", vertical="center")
+	thin_border = Border(
+		left=Side(style='thin', color='CBD5E1'),
+		right=Side(style='thin', color='CBD5E1'),
+		top=Side(style='thin', color='CBD5E1'),
+		bottom=Side(style='thin', color='CBD5E1')
+	)
+
+	ws.append(headers)
+	for col_idx in range(1, len(headers) + 1):
+		cell = ws.cell(row=1, column=col_idx)
+		cell.font = header_font
+		cell.fill = header_fill
+		cell.alignment = center_align
+		cell.border = thin_border
+	ws.row_dimensions[1].height = 26
+
+	sample_rows = [
+		(1, 6, "ALİ ASAF", "DOĞAN", "Özel Eğitim Ana Sınıfı / A Şubesi", "BETÜL CANSU", "Erkek", "10.09.2021", 5),
+		(2, 17, "GÖKTUĞ", "GÖZEL", "Özel Eğitim Ana Sınıfı / A Şubesi", "BETÜL CANSU", "Erkek", "03.08.2022", 4),
+		(3, 95, "ZEYNEP", "BAL", "Özel Eğitim Ana Sınıfı / A Şubesi", "BETÜL CANSU", "Kız", "31.05.2021", 5),
+		(1, 12, "LİYA", "KİZAROĞLU", "Özel Eğitim Ana Sınıfı / B Şubesi", "HAZRA EMİNE KUTUCU SELVİ", "Kız", "19.07.2021", 5),
+		(2, 93, "YAĞIZ HAN", "ALADAĞ", "Özel Eğitim Ana Sınıfı / B Şubesi", "HAZRA EMİNE KUTUCU SELVİ", "Erkek", "23.02.2021", 5),
+	]
+
+	row_font = Font(name="Segoe UI", size=10)
+	for r_idx, r_data in enumerate(sample_rows, start=2):
+		ws.append(r_data)
+		ws.row_dimensions[r_idx].height = 20
+		for col_idx in range(1, len(r_data) + 1):
+			cell = ws.cell(row=r_idx, column=col_idx)
+			cell.font = row_font
+			cell.border = thin_border
+			if col_idx in [1, 2, 7, 8, 9]:
+				cell.alignment = center_align
+			else:
+				cell.alignment = left_align
+
+	col_widths = {1: 8, 2: 14, 3: 18, 4: 18, 5: 35, 6: 28, 7: 12, 8: 15, 9: 10}
+	for col_idx, width in col_widths.items():
+		ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+	buf = io.BytesIO()
+	wb.save(buf)
+	return buf.getvalue()
+
+
+def _normalize_dob_to_iso(dob_str: str) -> str:
+	dob_clean = (str(dob_str) or "").strip()
+	if not dob_clean or dob_clean == "nan":
+		return ""
+	if re.match(r"^\d{4}-\d{2}-\d{2}$", dob_clean):
+		return dob_clean
+	m = re.match(r"^(\d{1,2})[./-](\d{1,2})[./-](\d{4})", dob_clean)
+	if m:
+		d, mth, y = m.groups()
+		return f"{int(y):04d}-{int(mth):02d}-{int(d):02d}"
+	return dob_clean
+
+
+def parse_eokul_dob_and_age_data(file_bytes: bytes, file_name: str) -> list[dict]:
+	lower_name = file_name.lower()
+	classes_data: list[dict] = []
+
+	if lower_name.endswith(".pdf"):
+		import pymupdf
+		doc = pymupdf.open(stream=file_bytes, filetype="pdf")
+		for page in doc:
+			words = page.get_text("words")
+			lines_dict = {}
+			for w in words:
+				x0, y0, x1, y1, text, b_no, l_no, w_no = w
+				found_k = None
+				for k in lines_dict:
+					if abs(k - y0) < 4:
+						found_k = k
+						break
+				if found_k is None:
+					found_k = y0
+					lines_dict[found_k] = []
+				lines_dict[found_k].append((x0, text))
+
+			sorted_y = sorted(lines_dict.keys())
+			class_name = ""
+			teacher_name = ""
+			students = []
+
+			for y in sorted_y:
+				row_words = sorted(lines_dict[y], key=lambda x: x[0])
+				full_line = " ".join(w[1] for w in row_words).strip()
+
+				if ("Şubesi" in full_line or "subesi" in full_line.lower()) and ("Doğum" in full_line or "Dogum" in full_line or "Tarihleri" in full_line):
+					m_cls = re.search(r"^(.*?Şubesi)", full_line, re.IGNORECASE)
+					if m_cls:
+						class_name = " ".join(m_cls.group(1).split())
+					else:
+						class_name = " ".join(full_line.split("Doğum")[0].split())
+
+				if any(k in full_line for k in ["Öğretmeni:", "retmeni:", "Ogretmeni:"]):
+					m_tch = re.search(r"(?:Öğretmeni|retmeni|Ogretmeni):\s*([A-ZÇĞİÖŞÜa-zçğıöşü\s]+?)(?:Sınıf|Snf|S[ıi]n[ıi]f|$)", full_line)
+					if m_tch:
+						teacher_name = " ".join(m_tch.group(1).split())
+
+				date_match = re.search(r"(\d{1,2}[./-]\d{1,2}[./-]\d{4})", full_line)
+				if date_match and 120 < y < 750:
+					st_num = ""
+					name_parts = []
+					surname_parts = []
+					gender = "Belirtilmedi"
+					birth_d = date_match.group(1)
+					age_val = None
+
+					for x, txt in row_words:
+						clean_txt = txt.strip()
+						if 60 <= x < 120 and clean_txt.isdigit():
+							st_num = clean_txt
+						elif 120 <= x < 265 and not clean_txt.isdigit() and "/" not in clean_txt:
+							name_parts.append(clean_txt)
+						elif 265 <= x < 400 and not clean_txt.isdigit() and "/" not in clean_txt:
+							surname_parts.append(clean_txt)
+						elif 400 <= x < 460:
+							if clean_txt.lower().startswith("e"):
+								gender = "Erkek"
+							elif clean_txt.lower().startswith("k"):
+								gender = "Kız"
+						elif x > 520 and clean_txt.isdigit():
+							age_val = int(clean_txt)
+
+					if st_num and (name_parts or surname_parts):
+						f_name = " ".join(name_parts)
+						l_name = " ".join(surname_parts)
+						full_name = f"{f_name} {l_name}".strip()
+						students.append({
+							"student_no": st_num,
+							"first_name": f_name,
+							"last_name": l_name,
+							"full_name": full_name,
+							"sex": gender,
+							"birth_date": _normalize_dob_to_iso(birth_d),
+							"age": age_val,
+						})
+
+			if class_name or students:
+				classes_data.append({
+					"class_name": class_name or "Sınıf Belirtilmedi",
+					"teacher_name": teacher_name or "",
+					"students": students,
+				})
+
+	else:
+		df = pd.read_excel(io.BytesIO(file_bytes), dtype=object)
+		col_map = {}
+		for c in df.columns:
+			c_norm = str(c).strip().lower().replace("ı", "i").replace("ğ", "g").replace("ü", "u").replace("ş", "s").replace("ö", "o").replace("ç", "c")
+			col_map[c_norm] = c
+
+		def _get_val(row, *aliases):
+			for a in aliases:
+				norm_a = a.replace("ı", "i").replace("ğ", "g").replace("ü", "u").replace("ş", "s").replace("ö", "o").replace("ç", "c")
+				if norm_a in col_map:
+					val = row[col_map[norm_a]]
+					if pd.notna(val):
+						return str(val).strip()
+			return ""
+
+		grouped: dict[tuple[str, str], list] = {}
+		for _, r in df.iterrows():
+			st_no = _get_val(r, "ogrenci no", "okul no", "no")
+			f_name = _get_val(r, "adi", "ad", "isim")
+			l_name = _get_val(r, "soyadi", "soyad")
+			full_n = _get_val(r, "adi soyadi", "ad soyad", "ogrenci adi", "tam ad")
+			if not full_n:
+				full_n = f"{f_name} {l_name}".strip()
+			if not full_n and not st_no:
+				continue
+
+			c_name = _get_val(r, "sinif / sube", "sinif", "sube") or "Sınıf Belirtilmedi"
+			t_name = _get_val(r, "sinif ogretmeni", "ogretmen", "ogretmen adi") or ""
+			gender_txt = _get_val(r, "cinsiyet", "cinsiyeti")
+			if gender_txt.lower().startswith("e"):
+				gender = "Erkek"
+			elif gender_txt.lower().startswith("k"):
+				gender = "Kız"
+			else:
+				gender = "Belirtilmedi"
+
+			raw_bdate = _get_val(r, "dogum tarihi", "dogum_tarihi", "d.tarihi")
+			iso_bdate = _normalize_dob_to_iso(raw_bdate)
+			raw_age = _get_val(r, "yasi", "yas")
+			age_val = int(raw_age) if raw_age.isdigit() else None
+
+			grp_key = (c_name, t_name)
+			if grp_key not in grouped:
+				grouped[grp_key] = []
+			grouped[grp_key].append({
+				"student_no": st_no,
+				"first_name": f_name,
+				"last_name": l_name,
+				"full_name": full_n,
+				"sex": gender,
+				"birth_date": iso_bdate,
+				"age": age_val,
+			})
+
+		for (c_name, t_name), stu_list in grouped.items():
+			classes_data.append({
+				"class_name": c_name,
+				"teacher_name": t_name,
+				"students": stu_list,
+			})
+
+	return classes_data
+
+
+def import_eokul_classes_and_students(classes_data: list[dict]) -> tuple[int, int, int]:
+	"""e-Okul Şube Doğum Tarihleri verilerini veritabanına aktarır."""
+	classes_added = 0
+	students_added = 0
+	students_updated = 0
+
+	with connect_db() as connection:
+		for c_info in classes_data:
+			c_name = c_info.get("class_name", "").strip() or "Sınıf Belirtilmedi"
+			t_name = c_info.get("teacher_name", "").strip() or None
+
+			existing_cls = connection.execute("SELECT id, teacher_name FROM classes WHERE name = ?", (c_name,)).fetchone()
+			if existing_cls:
+				class_id = existing_cls["id"]
+				if t_name and (not existing_cls["teacher_name"] or existing_cls["teacher_name"] != t_name):
+					connection.execute("UPDATE classes SET teacher_name = ? WHERE id = ?", (t_name, class_id))
+			else:
+				cur = connection.execute("INSERT INTO classes(name, teacher_name) VALUES (?, ?)", (c_name, t_name))
+				class_id = cur.lastrowid
+				classes_added += 1
+
+			for stu in c_info.get("students", []):
+				st_num = str(stu.get("student_no") or "").strip()
+				full_n = str(stu.get("full_name") or "").strip()
+				sex_val = stu.get("sex") or "Belirtilmedi"
+				b_date = stu.get("birth_date") or None
+
+				if not full_n:
+					continue
+
+				existing_stu = None
+				if st_num:
+					existing_stu = connection.execute("SELECT id, class_id, full_name, sex, birth_date FROM students WHERE student_no = ?", (st_num,)).fetchone()
+				if not existing_stu:
+					existing_stu = connection.execute("SELECT id, class_id, full_name, sex, birth_date FROM students WHERE class_id = ? AND full_name = ?", (class_id, full_n)).fetchone()
+
+				if existing_stu:
+					s_id = existing_stu["id"]
+					connection.execute(
+						"""UPDATE students SET class_id = ?, full_name = ?, sex = ?, birth_date = ?
+						   WHERE id = ?""",
+						(class_id, full_n, sex_val, b_date, s_id)
+					)
+					connection.execute("INSERT OR IGNORE INTO health_profiles(student_id, updated_at) VALUES (?, CURRENT_TIMESTAMP)", (s_id,))
+					students_updated += 1
+				else:
+					cur_s = connection.execute(
+						"""INSERT INTO students(class_id, person_type, student_no, full_name, sex, birth_date)
+						   VALUES (?, 'Öğrenci', ?, ?, ?, ?)""",
+						(class_id, st_num if st_num else None, full_n, sex_val, b_date)
+					)
+					s_id = cur_s.lastrowid
+					connection.execute("INSERT OR IGNORE INTO health_profiles(student_id, updated_at) VALUES (?, CURRENT_TIMESTAMP)", (s_id,))
+					students_added += 1
+
+	try:
+		sync_student_measurements()
+	except Exception:
+		pass
+	clear_all_data_caches()
+	return classes_added, students_added, students_updated
+
+
 def get_classes() -> list[str]:
 	with connect_db() as connection:
 		return [row["name"] for row in connection.execute("SELECT name FROM classes ORDER BY name")]
@@ -9207,26 +9523,30 @@ def open_class_manager_dialog() -> None:
 	with tab_list:
 		with connect_db() as connection:
 			cls_df = pd.read_sql_query(
-				"""SELECT c.id, c.name AS Sinif_Adi, COUNT(s.id) AS Ogrenci_Sayisi
+				"""SELECT c.id, c.name AS Sinif_Adi, COALESCE(c.teacher_name, '—') AS Ogretmen_Adi, COUNT(s.id) AS Ogrenci_Sayisi
 				   FROM classes c LEFT JOIN students s ON s.class_id = c.id
 				   WHERE c.name != 'Sivil / Diğer'
-				   GROUP BY c.id, c.name ORDER BY c.name""",
+				   GROUP BY c.id, c.name, c.teacher_name ORDER BY c.name""",
 				connection,
 			)
 
-		add_c1, add_c2 = st.columns([2.2, 1.8])
+		add_c1, add_c2 = st.columns([2.4, 1.6])
 		with add_c1:
-			st.markdown("##### ➕ Yeni Sınıf Ekle")
-			in_c1, in_c2 = st.columns([2.5, 1.2])
+			st.markdown("##### ➕ Yeni Sınıf / Şube ve Öğretmen Ekle")
+			in_c1, in_c2, in_c3 = st.columns([1.6, 1.6, 1.1])
 			with in_c1:
-				new_cls_input = st.text_input("Sınıf Adı", placeholder="Örn: 1-A, 5-B, 9-A, Anasınıfı (Virgülle birden fazla yazabilirsiniz)", key="modal_new_cls_in", label_visibility="collapsed")
+				new_cls_input = st.text_input("Sınıf / Şube Adı", placeholder="Örn: 1-A veya A Şubesi", key="modal_new_cls_in")
 			with in_c2:
+				new_tch_input = st.text_input("Sınıf Öğretmeni", placeholder="Örn: Betül Cansu (İsteğe bağlı)", key="modal_new_tch_in")
+			with in_c3:
+				st.write("")
 				if st.button("➕ Sınıf Ekle", type="primary", key="modal_btn_add_cls", use_container_width=True):
 					parts = [p.strip() for p in new_cls_input.split(",") if p.strip()]
 					if parts:
 						with connect_db() as connection:
 							for p in parts:
-								connection.execute("INSERT OR IGNORE INTO classes(name) VALUES (?)", (p,))
+								connection.execute("INSERT OR IGNORE INTO classes(name, teacher_name) VALUES (?, ?)", (p, new_tch_input.strip() if new_tch_input.strip() else None))
+						clear_all_data_caches()
 						st.success(f"{len(parts)} sınıf eklendi.")
 						st.rerun()
 
@@ -9249,37 +9569,46 @@ def open_class_manager_dialog() -> None:
 				else:
 					st.warning("Lütfen eklemek istediğiniz şablonu seçin.")
 
-		st.markdown("##### 📋 Kayıtlı Sınıflar Listesi")
+		st.markdown("##### 📋 Kayıtlı Sınıflar ve Öğretmenler Listesi")
 		st.dataframe(
-			cls_df.drop(columns=["id"], errors="ignore").rename(columns={"Sinif_Adi": "Sınıf", "Ogrenci_Sayisi": "Kayıtlı Öğrenci Sayısı"}),
+			cls_df.drop(columns=["id"], errors="ignore").rename(columns={"Sinif_Adi": "Sınıf / Şube", "Ogretmen_Adi": "Sınıf Öğretmeni", "Ogrenci_Sayisi": "Kayıtlı Öğrenci Sayısı"}),
 			width="stretch",
 			hide_index=True,
 			height=230,
 		)
 
 		removable_classes = [r["Sinif_Adi"] for _, r in cls_df.iterrows() if r["Sinif_Adi"] != "Sınıf Belirtilmedi"]
+		tch_map = get_class_teacher_map()
 		if removable_classes:
-			st.markdown("##### 🗑️ Sınıf Çıkar / Sil veya Adını Değiştir")
-			del_c1, del_c2, del_c3 = st.columns([1.6, 1.6, 1.2])
+			st.markdown("##### ✏️ Sınıf Adını / Öğretmenini Düzenle veya Sınıfı Çıkar")
+			del_c1, del_c2, del_c3 = st.columns([1.5, 1.5, 1.5])
 			with del_c1:
 				target_cls = st.selectbox("İşlem Yapılacak Sınıf", removable_classes, key="modal_del_cls_sel")
 			with del_c2:
-				rename_val = st.text_input("Yeni Sınıf Adı (Değiştirmek için)", value=target_cls, key="modal_ren_cls_in")
+				rename_val = st.text_input("Sınıf Adı", value=target_cls, key="modal_ren_cls_in")
 			with del_c3:
-				st.write("")
-				if st.button("✏️ Adını Güncelle", key="modal_btn_ren_cls", use_container_width=True):
-					if rename_val.strip() and rename_val.strip() != target_cls:
-						with connect_db() as connection:
-							old_r = connection.execute("SELECT id FROM classes WHERE name=?", (target_cls,)).fetchone()
-							new_r = connection.execute("SELECT id FROM classes WHERE name=?", (rename_val.strip(),)).fetchone()
-							if old_r:
-								if new_r:
-									connection.execute("UPDATE OR IGNORE students SET class_id=? WHERE class_id=?", (new_r["id"], old_r["id"]))
-									connection.execute("DELETE FROM classes WHERE id=?", (old_r["id"],))
-								else:
-									connection.execute("UPDATE classes SET name=? WHERE id=?", (rename_val.strip(), old_r["id"]))
-						st.success(f"'{target_cls}' -> '{rename_val.strip()}' olarak güncellendi.")
-						st.rerun()
+				cur_tch_val = tch_map.get(target_cls, "")
+				tch_edit_val = st.text_input("Sınıf Öğretmeni", value=cur_tch_val, key="modal_ren_tch_in")
+
+			if st.button("✏️ Sınıf ve Öğretmen Bilgilerini Güncelle", key="modal_btn_ren_cls", type="primary", use_container_width=True):
+				new_c_name = rename_val.strip() or target_cls
+				new_t_name = tch_edit_val.strip() if tch_edit_val.strip() else None
+				with connect_db() as connection:
+					old_r = connection.execute("SELECT id FROM classes WHERE name=?", (target_cls,)).fetchone()
+					if old_r:
+						if new_c_name != target_cls:
+							new_r = connection.execute("SELECT id FROM classes WHERE name=?", (new_c_name,)).fetchone()
+							if new_r:
+								connection.execute("UPDATE OR IGNORE students SET class_id=? WHERE class_id=?", (new_r["id"], old_r["id"]))
+								connection.execute("DELETE FROM classes WHERE id=?", (old_r["id"],))
+								connection.execute("UPDATE classes SET teacher_name=? WHERE id=?", (new_t_name, new_r["id"]))
+							else:
+								connection.execute("UPDATE classes SET name=?, teacher_name=? WHERE id=?", (new_c_name, new_t_name, old_r["id"]))
+						else:
+							connection.execute("UPDATE classes SET teacher_name=? WHERE id=?", (new_t_name, old_r["id"]))
+				clear_all_data_caches()
+				st.success(f"'{target_cls}' bilgileri başarıyla güncellendi.")
+				st.rerun()
 
 			if st.button(f"🗑️ '{target_cls}' Sınıfını Çıkar (İçindeki öğrenciler 'Sınıf Belirtilmedi' olarak korunur)", type="secondary", key="modal_btn_del_cls", use_container_width=True):
 				with connect_db() as connection:
@@ -13113,14 +13442,17 @@ def render_school_screening() -> None:
 		vis_names = [SCREENING_FIELDS_INFO[f]["name"] for f in visible_fields if f in SCREENING_FIELDS_INFO]
 		st.info(f"⚙️ **Aktif Görünür Tarama Alanları ({len(vis_names)}):** {', '.join(vis_names)} · *(Ayarlar > Okul Taraması Alanları sekmesinden değiştirebilirsiniz)*")
 
+		tch_map = get_class_teacher_map()
 		# Render class cards in 3 columns
 		grid_cols = st.columns(3)
 		for idx, c_name in enumerate(all_classes):
 			stats = get_class_screening_stats(c_name)
+			tch_name = tch_map.get(c_name, "")
 			col = grid_cols[idx % 3]
 			with col:
 				with st.container(border=True):
-					st.markdown(f"### 🏫 {c_name}")
+					tch_badge = f"<div style='margin-top:2px;'><span style='background:#f0fdf4; color:#166534; padding:2px 8px; border-radius:12px; font-size:12px; font-weight:600;'>👩‍🏫 {html.escape(tch_name)}</span></div>" if tch_name else ""
+					st.markdown(f"<div style='margin-bottom:6px;'><span style='font-size:17.5px; font-weight:800; color:var(--teal);'>🏫 {html.escape(c_name)}</span>{tch_badge}</div>", unsafe_allow_html=True)
 					c_stat1, c_stat2 = st.columns(2)
 					c_stat1.markdown(f"👥 **Mevcut:** {stats['total']}")
 					c_stat2.markdown(f"🩺 **Taranan:** {stats['screened']}")
@@ -13149,7 +13481,10 @@ def render_school_screening() -> None:
 				st.rerun()
 		with hdr_c2:
 			c_stats = get_class_screening_stats(selected_class)
-			st.markdown(f"### 🏫 **{selected_class}** Sağlık Taraması Paneli")
+			tch_map_sel = get_class_teacher_map()
+			sel_tch = tch_map_sel.get(selected_class, "")
+			sel_tch_txt = f" · 👩‍🏫 Öğretmen: **{html.escape(sel_tch)}**" if sel_tch else ""
+			st.markdown(f"### 🏫 **{selected_class}** Sağlık Taraması Paneli{sel_tch_txt}")
 			st.caption(f"Sınıf Mevcudu: **{c_stats['total']}** · Taranan: **{c_stats['screened']}** · Bekleyen: **{c_stats['pending']}** · Başarı: **%{c_stats['percent']}**")
 		with hdr_c3:
 			rep_docx = build_class_screening_report_docx(selected_class)
@@ -15690,36 +16025,116 @@ def render_settings() -> None:
 		# 📥 Liste İçe Aktarma & Excel Şablonu
 		elif active_sec == "📥 Liste İçe Aktar (Excel / PDF)":
 			st.markdown("### 📥 Öğrenci, Servis / Adres Listesi İçe Aktarma ve Şablon")
-			st.caption("Excel, CSV veya e-Okul PDF öğrenci listesini sisteme yükleyebilir, yeni öğrencileri kaydedebilir veya var olan öğrencilerin bilgilerini güncelleyebilirsiniz.")
+			st.caption("Excel, CSV veya e-Okul PDF öğrenci listesini sisteme yükleyebilir, şube ve öğretmen bilgilerini otomatik aktarabilir veya hazır şablonları indirebilirsiniz.")
 
-			col_upload, col_template = st.columns([2, 1])
-			with col_upload:
-				uploaded = st.file_uploader(
-					"Öğrenci veya servis/adres listesini Excel/CSV/PDF olarak yükle (e-Okul PDF listesi, Öğrenci Adı, Sınıf, Okul No, Doğum Tarihi, Köy, Mahalle/Adres, Telefon)",
-					type=["xlsx", "xls", "csv", "pdf"],
-					key="settings_roster_upload",
+			tab_eokul_import, tab_std_import = st.tabs([
+				"📑 e-Okul Şube Doğum Tarihleri ve Yaşları (PDF / Excel)",
+				"📋 Standart Öğrenci & Servis/Adres Listesi (Excel / CSV)",
+			])
+
+			with tab_eokul_import:
+				st.markdown("#### 📑 e-Okul Şube Doğum Tarihleri ve Yaşları Listesi İçe Aktarma")
+				st.caption(
+					"e-Okul Yönetim Bilgi Sistemi üzerinden toplu olarak alınan **'Şube Doğum Tarihleri ve Yaşları Listesi'** PDF veya Excel dosyasını yükleyin. "
+					"Sistem; **şube isimlerini**, **sınıf öğretmenlerini**, **öğrenci numaralarını**, **ad-soyadlarını**, **cinsiyetlerini** ve **doğum tarihlerini** "
+									"otomatik olarak okur, şubeleri öğretmenleriyle birlikte sisteme kaydeder ve öğrencileri ilgili sınıflara atar."
 				)
-				if uploaded is not None and st.button("📥 Listeyi İçe Aktar", type="primary", key="settings_import_roster"):
+
+				e_c1, e_c2 = st.columns([2.3, 1.2])
+				with e_c1:
+					eokul_file = st.file_uploader(
+						"e-Okul Şube Doğum Tarihleri Listesi Dosyasını Seçin (.pdf / .xlsx / .xls)",
+						type=["pdf", "xlsx", "xls"],
+						key="uploader_eokul_dob_file"
+					)
+				with e_c2:
+					st.markdown("##### 📄 Örnek Şablon Evrak")
+					st.caption("Excel ile veri aktarmak veya istenen veri tipini görmek için hazır şablon evrakı indirin:")
+					tpl_bytes = make_eokul_dogum_ve_yas_template()
+					st.download_button(
+						"📄 e-Okul Şablonunu İndir (.xlsx)",
+						data=tpl_bytes,
+						file_name="e_okul_sube_dogum_ve_yas_sablonu.xlsx",
+						mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+						key="btn_download_eokul_dob_tpl",
+						use_container_width=True,
+					)
+
+				if eokul_file is not None:
 					try:
-						imported, skipped, issues = import_roster(uploaded)
-						sync_student_measurements()
-						st.success(f"{imported} öğrenci eklendi veya güncellendi. {skipped} satır atlandı.")
-						for issue in issues[:8]:
-							st.warning(issue)
-						st.rerun()
-					except Exception as error:
-						st.error(f"Dosya okunamadı: {error}")
-			with col_template:
-				st.markdown("##### 📄 Boş Excel Şablonu")
-				st.caption("Öğrenci ve servis listesini standart biçimde hazırlamak için hazır Excel şablonunu indirin:")
-				st.download_button(
-					"📄 Excel Şablonunu İndir",
-					make_roster_template(),
-					"ogrenci_ve_servis_listesi_sablonu.xlsx",
-					"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-					key="settings_download_roster_template",
-					use_container_width=True,
-				)
+						raw_bytes = eokul_file.getvalue()
+						parsed_data = parse_eokul_dob_and_age_data(raw_bytes, eokul_file.name)
+						total_stu_cnt = sum(len(c["students"]) for c in parsed_data)
+						total_tch_cnt = sum(1 for c in parsed_data if c.get("teacher_name"))
+
+						st.success(f"✅ **Dosya Başarıyla Çözümlendi:** Toplam **{len(parsed_data)} Şube**, **{total_tch_cnt} Sınıf Öğretmeni** ve **{total_stu_cnt} Öğrenci Kaydı** tespit edildi.")
+
+						# Summary metrics
+						m_c1, m_c2, m_c3 = st.columns(3)
+						m_c1.metric("Tespit Edilen Şube", len(parsed_data))
+						m_c2.metric("Sınıf Öğretmeni", total_tch_cnt)
+						m_c3.metric("Öğrenci Sayısı", total_stu_cnt)
+
+						st.markdown("##### 🔍 Çıkarılan Şube ve Öğrenci Önizlemesi")
+						for c_idx, c_obj in enumerate(parsed_data):
+							c_nm = c_obj["class_name"]
+							t_nm = c_obj.get("teacher_name") or "Belirtilmedi"
+							st_cnt = len(c_obj["students"])
+							with st.expander(f"🏫 **{c_nm}** · 👩‍🏫 Öğretmen: **{t_nm}** ({st_cnt} Öğrenci)", expanded=(c_idx == 0)):
+								if c_obj["students"]:
+									preview_df = pd.DataFrame([
+										{
+											"Okul No": s["student_no"],
+											"Adı Soyadı": s["full_name"],
+											"Cinsiyet": s["sex"],
+											"Doğum Tarihi": s["birth_date"],
+											"Yaş": s.get("age") or "—",
+										}
+										for s in c_obj["students"]
+									])
+									st.dataframe(preview_df, hide_index=True, width="stretch")
+
+						st.markdown("")
+						if st.button(f"🚀 {total_stu_cnt} Öğrenciyi ve {len(parsed_data)} Şubeyi Sisteme Aktar", type="primary", key="btn_commit_eokul_import", use_container_width=True):
+							with st.spinner("Şubeler, öğretmenler ve öğrenciler veritabanına işleniyor..."):
+								c_add, s_add, s_upd = import_eokul_classes_and_students(parsed_data)
+							st.balloons()
+							st.success(f"🎉 **Aktarım Başarıyla Tamamlandı!** {c_add} yeni şube/öğretmen kaydedildi. {s_add} yeni öğrenci eklendi, {s_upd} öğrenci bilgisi güncellendi.")
+							st.rerun()
+
+					except Exception as e_err:
+						st.error(f"Dosya ayrıştırma hatası: {e_err}")
+
+			with tab_std_import:
+				st.markdown("#### 📋 Standart Öğrenci & Servis/Adres Listesi İçe Aktarma")
+				col_upload, col_template = st.columns([2, 1])
+				with col_upload:
+					uploaded = st.file_uploader(
+						"Öğrenci veya servis/adres listesini Excel/CSV olarak yükle (Öğrenci Adı, Sınıf, Okul No, Doğum Tarihi, Köy, Mahalle/Adres, Telefon)",
+						type=["xlsx", "xls", "csv"],
+						key="settings_roster_upload",
+					)
+					if uploaded is not None and st.button("📥 Listeyi İçe Aktar", type="primary", key="settings_import_roster"):
+						try:
+							imported, skipped, issues = import_roster(uploaded)
+							sync_student_measurements()
+							st.success(f"{imported} öğrenci eklendi veya güncellendi. {skipped} satır atlandı.")
+							for issue in issues[:8]:
+								st.warning(issue)
+							st.rerun()
+						except Exception as error:
+							st.error(f"Dosya okunamadı: {error}")
+				with col_template:
+					st.markdown("##### 📄 Boş Excel Şablonu")
+					st.caption("Öğrenci ve servis listesini standart biçimde hazırlamak için hazır Excel şablonunu indirin:")
+					st.download_button(
+						"📄 Excel Şablonunu İndir",
+						make_roster_template(),
+						"ogrenci_ve_servis_listesi_sablonu.xlsx",
+						"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+						key="settings_download_roster_template",
+						use_container_width=True,
+					)
 
 
 		# 🎨 Görünüm, Yazı Tipi, Boyut ve Dil
@@ -16405,24 +16820,26 @@ def render_settings() -> None:
 
 			with connect_db() as connection:
 				grp_df = pd.read_sql_query(
-					"""SELECT c.id, c.name AS Sinif_Adi, COUNT(s.id) AS Ogrenci_Sayisi
+					"""SELECT c.id, c.name AS Sinif_Adi, COALESCE(c.teacher_name, '—') AS Ogretmen_Adi, COUNT(s.id) AS Ogrenci_Sayisi
 					   FROM classes c LEFT JOIN students s ON s.class_id = c.id
 					   WHERE c.name != 'Sivil / Diğer'
-					   GROUP BY c.id, c.name ORDER BY c.name""",
+					   GROUP BY c.id, c.name, c.teacher_name ORDER BY c.name""",
 					connection,
 				)
-			st.dataframe(grp_df.drop(columns=["id"], errors="ignore").rename(columns={"Sinif_Adi": "Sınıf / Şube", "Ogrenci_Sayisi": "Öğrenci Sayısı"}), width="stretch", hide_index=True)
+			st.dataframe(grp_df.drop(columns=["id"], errors="ignore").rename(columns={"Sinif_Adi": "Sınıf / Şube", "Ogretmen_Adi": "Sınıf Öğretmeni", "Ogrenci_Sayisi": "Öğrenci Sayısı"}), width="stretch", hide_index=True)
 
 			g_c1, g_c2 = st.columns(2)
 			with g_c1:
-				st.markdown("##### ➕ Yeni Sınıf / Şube Ekle")
-				new_grp_name = st.text_input("Yeni Sınıf Adı (Virgülle birden fazla yazabilirsiniz)", placeholder="Örn: 1-A, 2-A, 5-B, 1. Kademe A", key="cfg_new_grp_name")
+				st.markdown("##### ➕ Yeni Sınıf / Şube ve Öğretmen Ekle")
+				new_grp_name = st.text_input("Sınıf Adı", placeholder="Örn: 1-A veya A Şubesi", key="cfg_new_grp_name")
+				new_grp_teacher = st.text_input("Sınıf Öğretmeni", placeholder="Örn: Betül Cansu (İsteğe bağlı)", key="cfg_new_grp_teacher")
 				if st.button("➕ Sınıfı Oluştur", type="primary", key="btn_create_grp"):
 					parts = [p.strip() for p in new_grp_name.split(",") if p.strip()]
 					if parts:
 						with connect_db() as connection:
 							for p in parts:
-								connection.execute("INSERT OR IGNORE INTO classes(name) VALUES (?)", (p,))
+								connection.execute("INSERT OR IGNORE INTO classes(name, teacher_name) VALUES (?, ?)", (p, new_grp_teacher.strip() if new_grp_teacher.strip() else None))
+						clear_all_data_caches()
 						st.success(f"{len(parts)} sınıf eklendi.")
 						st.rerun()
 			with g_c2:
@@ -16430,23 +16847,30 @@ def render_settings() -> None:
 				editable_grps = [r["Sinif_Adi"] for _, r in grp_df.iterrows() if r["Sinif_Adi"] not in {"Sivil / Diğer", "Sınıf Belirtilmedi"}]
 				if editable_grps:
 					sel_old_grp = st.selectbox("İşlem Yapılacak Sınıf", editable_grps, key="cfg_old_grp")
-					new_rename_grp = st.text_input("Yeni Sınıf Adı", value=sel_old_grp, key="cfg_rename_grp")
+					tch_map_cfg = get_class_teacher_map()
+					new_rename_grp = st.text_input("Sınıf Adı", value=sel_old_grp, key="cfg_rename_grp")
+					new_teacher_grp = st.text_input("Sınıf Öğretmeni", value=tch_map_cfg.get(sel_old_grp, ""), key="cfg_rename_teacher")
 					b_ren, b_del = st.columns(2)
 					with b_ren:
-						if st.button("🔄 Adını Güncelle", type="secondary", key="btn_rename_grp", use_container_width=True):
-							target_name = new_rename_grp.strip()
-							if target_name and target_name != sel_old_grp:
-								with connect_db() as connection:
-									old_row = connection.execute("SELECT id FROM classes WHERE name=?", (sel_old_grp,)).fetchone()
-									target_row = connection.execute("SELECT id FROM classes WHERE name=?", (target_name,)).fetchone()
-									if old_row:
+						if st.button("🔄 Bilgileri Güncelle", type="secondary", key="btn_rename_grp", use_container_width=True):
+							target_name = new_rename_grp.strip() or sel_old_grp
+							target_teacher = new_teacher_grp.strip() if new_teacher_grp.strip() else None
+							with connect_db() as connection:
+								old_row = connection.execute("SELECT id FROM classes WHERE name=?", (sel_old_grp,)).fetchone()
+								if old_row:
+									if target_name != sel_old_grp:
+										target_row = connection.execute("SELECT id FROM classes WHERE name=?", (target_name,)).fetchone()
 										if target_row:
 											connection.execute("UPDATE OR IGNORE students SET class_id=? WHERE class_id=?", (target_row["id"], old_row["id"]))
 											connection.execute("DELETE FROM classes WHERE id=?", (old_row["id"],))
+											connection.execute("UPDATE classes SET teacher_name=? WHERE id=?", (target_teacher, target_row["id"]))
 										else:
-											connection.execute("UPDATE classes SET name=? WHERE id=?", (target_name, old_row["id"]))
-								st.success(f"'{sel_old_grp}' sınıfı '{target_name}' olarak güncellendi.")
-								st.rerun()
+											connection.execute("UPDATE classes SET name=?, teacher_name=? WHERE id=?", (target_name, target_teacher, old_row["id"]))
+									else:
+										connection.execute("UPDATE classes SET teacher_name=? WHERE id=?", (target_teacher, old_row["id"]))
+							clear_all_data_caches()
+							st.success(f"'{sel_old_grp}' bilgileri güncellendi.")
+							st.rerun()
 					with b_del:
 						if st.button("🗑️ Sınıfı Çıkar", type="secondary", key="btn_delete_grp_cfg", use_container_width=True):
 							with connect_db() as connection:

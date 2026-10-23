@@ -13,6 +13,10 @@ persantil veriler/ogrenci_*
 persantil veriler/öğrenci_*
 revir_evraklari/
 egitim_yillari/
+*.pdf
+*.PDF
+*.xlsx
+*.xls
 
 # Otomatik ve Manuel Yedek Dosyalari
 otomatik_guncelleme_yedekleri/
