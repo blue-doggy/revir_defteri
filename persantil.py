@@ -71,11 +71,32 @@ PAGES = [
 ]
 
 
+_DB_PATH_CACHE: dict[int | None, Path] = {}
+_ACTIVE_YEAR_CACHE: dict[int | None, dict] = {}
+_CACHED_ICON = None
+
+
+def get_app_icon():
+	global _CACHED_ICON
+	if _CACHED_ICON is None:
+		if APP_ICON_PATH.exists():
+			try:
+				from PIL import Image as _PILImg
+				_CACHED_ICON = _PILImg.open(APP_ICON_PATH)
+			except Exception:
+				_CACHED_ICON = "✚"
+		else:
+			_CACHED_ICON = "✚"
+	return _CACHED_ICON
+
+
 @contextmanager
 def connect_master_db() -> Iterator[sqlite3.Connection]:
 	connection = sqlite3.connect(DB_PATH, timeout=15)
 	connection.row_factory = sqlite3.Row
 	connection.execute("PRAGMA foreign_keys = ON")
+	connection.execute("PRAGMA journal_mode = WAL")
+	connection.execute("PRAGMA synchronous = NORMAL")
 	try:
 		yield connection
 		connection.commit()
@@ -88,6 +109,12 @@ def connect_master_db() -> Iterator[sqlite3.Connection]:
 
 def get_current_db_path() -> Path:
 	try:
+		sel_id = st.session_state.get("active_academic_year_id")
+	except Exception:
+		sel_id = None
+	if sel_id in _DB_PATH_CACHE:
+		return _DB_PATH_CACHE[sel_id]
+	try:
 		ay = get_active_academic_year()
 		folder = ay.get("folder_name", "")
 		if folder:
@@ -95,14 +122,18 @@ def get_current_db_path() -> Path:
 			year_dir.mkdir(parents=True, exist_ok=True)
 			year_db = year_dir / "revir_defteri.db"
 			if year_db.exists():
+				_DB_PATH_CACHE[sel_id] = year_db
 				return year_db
 			if DB_PATH.exists():
 				import shutil
 				shutil.copy2(DB_PATH, year_db)
+				_DB_PATH_CACHE[sel_id] = year_db
 				return year_db
+			_DB_PATH_CACHE[sel_id] = year_db
 			return year_db
 	except Exception:
 		pass
+	_DB_PATH_CACHE[sel_id] = DB_PATH
 	return DB_PATH
 
 
@@ -111,6 +142,8 @@ def connect_db() -> Iterator[sqlite3.Connection]:
 	connection = sqlite3.connect(get_current_db_path(), timeout=15)
 	connection.row_factory = sqlite3.Row
 	connection.execute("PRAGMA foreign_keys = ON")
+	connection.execute("PRAGMA journal_mode = WAL")
+	connection.execute("PRAGMA synchronous = NORMAL")
 	try:
 		yield connection
 		connection.commit()
@@ -684,8 +717,9 @@ def build_app_css(font_css: str, font_url: str, base_fsize: str, pad_top: str, t
 	}
 	"""
 
+	preconnect_tags = '<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
 	if is_forced_dark:
-		return f"<style>{base_rules}{dark_rules}</style>"
+		return f"{preconnect_tags}<style>{base_rules}{dark_rules}</style>"
 	elif is_forced_light:
 		light_lock = f"""
 		:root, .stApp {{
@@ -723,7 +757,7 @@ def build_app_css(font_css: str, font_url: str, base_fsize: str, pad_top: str, t
 			color: #0f172a !important;
 		}}
 		"""
-		return f"<style>{base_rules}{light_lock}</style>"
+		return f"{preconnect_tags}<style>{base_rules}{light_lock}</style>"
 	else:
 		# Otomatik (Sistem Temasına ve Dark Mode'a Uyarla)
 		auto_rules = f"""
@@ -734,17 +768,17 @@ def build_app_css(font_css: str, font_url: str, base_fsize: str, pad_top: str, t
 			{dark_rules}
 		}}
 		"""
-		return f"<style>{base_rules}{auto_rules}</style>"
+		return f"{preconnect_tags}<style>{base_rules}{auto_rules}</style>"
 
 
 FONT_OPTIONS: dict[str, tuple[str, str]] = {
-	"DM Sans": ("'DM Sans', sans-serif", "https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap"),
-	"Manrope": ("'Manrope', sans-serif", "https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap"),
-	"Inter": ("'Inter', sans-serif", "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"),
-	"Plus Jakarta Sans": ("'Plus Jakarta Sans', sans-serif", "https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"),
-	"Nunito": ("'Nunito', sans-serif", "https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap"),
-	"Roboto": ("'Roboto', sans-serif", "https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap"),
-	"Merriweather": ("'Merriweather', serif", "https://fonts.googleapis.com/css2?family=Merriweather:wght@400;700&display=swap"),
+	"DM Sans": ("'DM Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif", "https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap"),
+	"Manrope": ("'Manrope', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif", "https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap"),
+	"Inter": ("'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif", "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"),
+	"Plus Jakarta Sans": ("'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif", "https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"),
+	"Nunito": ("'Nunito', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif", "https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap"),
+	"Roboto": ("'Roboto', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif", "https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap"),
+	"Merriweather": ("'Merriweather', Georgia, Cambria, 'Times New Roman', serif", "https://fonts.googleapis.com/css2?family=Merriweather:wght@400;700&display=swap"),
 }
 
 THEME_PRESETS: dict[str, dict[str, str]] = {
@@ -1127,6 +1161,11 @@ def reset_care_plan_section_templates(section: str | None = None) -> None:
 
 
 def get_app_settings() -> dict[str, str]:
+	try:
+		if "_cached_app_settings" in st.session_state:
+			return st.session_state["_cached_app_settings"]
+	except Exception:
+		pass
 	settings = dict(DEFAULT_APP_SETTINGS)
 	try:
 		with connect_db() as connection:
@@ -1134,6 +1173,10 @@ def get_app_settings() -> dict[str, str]:
 			for r in rows:
 				if r["value"] is not None:
 					settings[r["key"]] = str(r["value"])
+	except Exception:
+		pass
+	try:
+		st.session_state["_cached_app_settings"] = settings
 	except Exception:
 		pass
 	return settings
@@ -1146,6 +1189,11 @@ def save_app_settings(updates: dict[str, str]) -> None:
 				"INSERT INTO app_settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
 				(k, str(v) if v is not None else ""),
 			)
+	try:
+		st.session_state.pop("_cached_app_settings", None)
+		st.session_state.pop("_cached_page_sections_visibility", None)
+	except Exception:
+		pass
 
 
 def import_tr_locations_to_db(force: bool = False) -> int:
@@ -1469,6 +1517,17 @@ def initialize_db() -> None:
 				created_at TEXT NOT NULL,
 				UNIQUE(medication_id, log_date, scheduled_time)
 			);
+			CREATE INDEX IF NOT EXISTS idx_students_class_id ON students(class_id);
+			CREATE INDEX IF NOT EXISTS idx_students_type ON students(person_type);
+			CREATE INDEX IF NOT EXISTS idx_visits_student_id ON visits(student_id);
+			CREATE INDEX IF NOT EXISTS idx_visits_date ON visits(visit_date);
+			CREATE INDEX IF NOT EXISTS idx_measurements_student_id ON measurements(student_id);
+			CREATE INDEX IF NOT EXISTS idx_measurements_date ON measurements(measured_on);
+			CREATE INDEX IF NOT EXISTS idx_health_profiles_student_id ON health_profiles(student_id);
+			CREATE INDEX IF NOT EXISTS idx_school_screenings_student_id ON school_screenings(student_id);
+			CREATE INDEX IF NOT EXISTS idx_student_medications_student_id ON student_medications(student_id);
+			CREATE INDEX IF NOT EXISTS idx_vital_readings_student_id ON vital_readings(student_id);
+			CREATE INDEX IF NOT EXISTS idx_care_plans_student_id ON care_plans(student_id);
 			"""
 		)
 		student_columns = {row["name"] for row in connection.execute("PRAGMA table_info(students)")}
@@ -1574,28 +1633,43 @@ def get_active_academic_year() -> dict:
 		"folder_name": "egitim_yillari/2026_2027",
 		"is_active": 1,
 	}
-	sel_id = st.session_state.get("active_academic_year_id")
+	try:
+		sel_id = st.session_state.get("active_academic_year_id")
+	except Exception:
+		sel_id = None
+	if sel_id in _ACTIVE_YEAR_CACHE:
+		return _ACTIVE_YEAR_CACHE[sel_id]
 	try:
 		with connect_master_db() as connection:
 			tbl_check = connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='academic_years'").fetchone()
 			if not tbl_check:
+				_ACTIVE_YEAR_CACHE[sel_id] = default_year
 				return default_year
 			if sel_id is not None:
 				row = connection.execute("SELECT * FROM academic_years WHERE id=?", (sel_id,)).fetchone()
 				if row:
-					return dict(row)
+					res = dict(row)
+					_ACTIVE_YEAR_CACHE[sel_id] = res
+					return res
 			row = connection.execute("SELECT * FROM academic_years WHERE is_active=1").fetchone()
 			if row:
-				return dict(row)
+				res = dict(row)
+				_ACTIVE_YEAR_CACHE[sel_id] = res
+				return res
 			row = connection.execute("SELECT * FROM academic_years ORDER BY start_date DESC LIMIT 1").fetchone()
 			if row:
-				return dict(row)
+				res = dict(row)
+				_ACTIVE_YEAR_CACHE[sel_id] = res
+				return res
 	except Exception:
 		pass
+	_ACTIVE_YEAR_CACHE[sel_id] = default_year
 	return default_year
 
 
 def set_active_academic_year(year_id: int) -> None:
+	_ACTIVE_YEAR_CACHE.clear()
+	_DB_PATH_CACHE.clear()
 	with connect_master_db() as connection:
 		connection.execute("UPDATE academic_years SET is_active=0")
 		connection.execute("UPDATE academic_years SET is_active=1 WHERE id=?", (year_id,))
@@ -2775,6 +2849,11 @@ PAGE_SECTIONS_REGISTRY: dict[str, dict[str, Any]] = {
 
 
 def get_page_sections_visibility() -> dict[str, bool]:
+	try:
+		if "_cached_page_sections_visibility" in st.session_state:
+			return st.session_state["_cached_page_sections_visibility"]
+	except Exception:
+		pass
 	cfg = get_app_settings()
 	raw_val = cfg.get("page_sections_visibility", "")
 	res = {}
@@ -2791,6 +2870,10 @@ def get_page_sections_visibility() -> dict[str, bool]:
 						res[k] = bool(v)
 		except Exception:
 			pass
+	try:
+		st.session_state["_cached_page_sections_visibility"] = res
+	except Exception:
+		pass
 	return res
 
 
@@ -4678,6 +4761,7 @@ def apply_class_template(classes_to_add: list[str], clear_empty: bool = False) -
 	return added, removed
 
 
+@st.cache_data(show_spinner=False, ttl=120)
 def get_classes() -> list[str]:
 	with connect_db() as connection:
 		return [row["name"] for row in connection.execute("SELECT name FROM classes ORDER BY name")]
@@ -5989,6 +6073,16 @@ def clear_all_data_caches() -> None:
 		get_students_enriched.clear()
 	except Exception:
 		pass
+	try:
+		get_classes.clear()
+	except Exception:
+		pass
+	try:
+		st.session_state.pop("_cached_app_settings", None)
+		st.session_state.pop("_cached_page_sections_visibility", None)
+		st.session_state.pop("_cached_persons", None)
+	except Exception:
+		pass
 	gc.collect()
 
 
@@ -6162,14 +6256,27 @@ def get_students_column_config() -> dict:
 def get_person_by_id(person_id: int | None) -> sqlite3.Row | None:
 	if person_id is None:
 		return None
+	try:
+		cached_map = st.session_state.get("_cached_persons", {})
+		if int(person_id) in cached_map:
+			return cached_map[int(person_id)]
+	except Exception:
+		cached_map = {}
 	with connect_db() as connection:
-		return connection.execute(
+		row = connection.execute(
 			"""SELECT s.id, s.person_type, s.full_name, c.name AS class_name, s.sex, s.birth_date,
 					  s.student_no, s.guardian_name, s.guardian_phone, s.notes,
 					  s.country, s.province, s.district, s.village
 			   FROM students s JOIN classes c ON c.id=s.class_id WHERE s.id=?""",
 			(int(person_id),),
 		).fetchone()
+	if row:
+		try:
+			cached_map[int(person_id)] = row
+			st.session_state["_cached_persons"] = cached_map
+		except Exception:
+			pass
+	return row
 
 
 def set_active_person(person_id: int | None) -> None:
@@ -16534,8 +16641,7 @@ def render_settings() -> None:
 
 
 def main() -> None:
-	from PIL import Image as _PILImg
-	fav_icon = _PILImg.open(APP_ICON_PATH) if APP_ICON_PATH.exists() else "✚"
+	fav_icon = get_app_icon()
 	st.set_page_config(page_title="Revir Defteri", page_icon=fav_icon, layout="wide", initial_sidebar_state="expanded")
 	ensure_db_initialized()
 	app_cfg = get_app_settings()
@@ -16569,6 +16675,9 @@ def main() -> None:
 		cur_page_val = PAGES[0]
 		st.session_state["main_menu_page"] = cur_page_val
 
+	active_id = st.session_state.get("active_person_id")
+	active_person = get_person_by_id(active_id) if active_id else None
+
 	def _on_nav_page_selected(target_page_name: str) -> None:
 		st.session_state["main_menu_page"] = target_page_name
 
@@ -16589,7 +16698,6 @@ def main() -> None:
 				args=(p,)
 			):
 				pass
-		active_person = get_person_by_id(st.session_state.get("active_person_id"))
 		if active_person:
 			st.markdown("<hr style='margin:8px 0 6px 0; border:none; border-top:1px solid var(--line);'>", unsafe_allow_html=True)
 			st.caption(f"📌 **Seçili Kişi:** {active_person['full_name']}")
@@ -16598,10 +16706,9 @@ def main() -> None:
 
 	with st.sidebar:
 		if APP_ICON_PATH.exists():
-			from PIL import Image as _PILImg
 			col_logo, col_ttl = st.columns([1, 2.7])
 			with col_logo:
-				st.image(_PILImg.open(APP_ICON_PATH), use_container_width=True)
+				st.image(get_app_icon(), use_container_width=True)
 			with col_ttl:
 				st.markdown("<h2 style='margin:0; padding-top:4px; font-weight:800; font-size:24px;'>Revir Defteri</h2>", unsafe_allow_html=True)
 		else:
@@ -16616,7 +16723,6 @@ def main() -> None:
 		cur_idx = PAGES.index(cur_page_val)
 		page = st.radio("Menü", PAGES, index=cur_idx, key="main_menu_page", label_visibility="collapsed")
 		st.divider()
-		active_person = get_person_by_id(st.session_state.get("active_person_id"))
 		if active_person:
 			with st.container(border=True):
 				st.caption("📌 **Aktif Seçili Kişi**")
