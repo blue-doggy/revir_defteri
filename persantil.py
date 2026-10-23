@@ -14080,108 +14080,110 @@ button {{ padding: 12px 20px; background: #176b68; color: white; border: none; b
 				"SELECT created_at AS Tarih, nursing_diagnosis AS Hemşirelik_Değerlendirmesi, observed_facts AS Olgular, goals AS Hedefler, interventions AS Girişimler, monitoring AS İzlem, escalation AS Yönlendirme, status AS Durum, reviewed_by AS Sorumlu FROM care_plans WHERE student_id=? ORDER BY created_at DESC",
 				connection, params=(student["id"],),
 			)
-		lab_results = assess_lab_history(lab_results)
-		report_growth_df = None
-		person_meas = get_person_latest_measurements(student["id"])
-		if person_meas["has_data"] and student["sex"]:
-			latest_m = None
-			if person_meas["latest_measured_on"] and student["birth_date"]:
-				try:
-					latest_m = age_in_months(student["birth_date"], date.fromisoformat(person_meas["latest_measured_on"]))
-				except Exception:
-					latest_m = None
-			if latest_m is not None:
-				report_growth_df = get_clinical_growth_summary_table(
-					person_meas["height_cm"], person_meas["weight_kg"], person_meas["bmi"],
-					student["sex"], latest_m, head_circ_cm=person_meas["head_circ_cm"]
+			lab_results = assess_lab_history(lab_results)
+			report_growth_df = None
+			person_meas = get_person_latest_measurements(student["id"])
+			if person_meas["has_data"] and student["sex"]:
+				latest_m = None
+				if person_meas["latest_measured_on"] and student["birth_date"]:
+					try:
+						latest_m = age_in_months(student["birth_date"], date.fromisoformat(person_meas["latest_measured_on"]))
+					except Exception:
+						latest_m = None
+				if latest_m is not None:
+					report_growth_df = get_clinical_growth_summary_table(
+						person_meas["height_cm"], person_meas["weight_kg"], person_meas["bmi"],
+						student["sex"], latest_m, head_circ_cm=person_meas["head_circ_cm"]
+					)
+			st.markdown(f"### {student['person_type']} · {student['full_name']} · {student['class_name']}")
+			st.write(f"Okul no: {student['student_no'] or '—'} · Cinsiyet: {student['sex'] or 'Belirtilmedi'} · Doğum tarihi: {student['birth_date'] or '—'}")
+			st.markdown("#### Sağlık profili")
+			if health_profile.empty:
+				st.caption("Sağlık profili kaydı bulunmuyor.")
+			else:
+				st.dataframe(health_profile, width="stretch", hide_index=True)
+			st.markdown("#### Bakım planı taslakları")
+			if care_plans.empty:
+				st.caption("Bakım planı kaydı bulunmuyor.")
+			else:
+				st.dataframe(care_plans, width="stretch", hide_index=True)
+			st.markdown("#### 🩺 Klinik Büyüme ve Persantil Değerlendirmesi (WHO / ÇEDD Standardı)")
+			if report_growth_df is not None and not report_growth_df.empty:
+				st.dataframe(
+					report_growth_df,
+					width="stretch",
+					hide_index=True,
+					column_config=get_clinical_growth_column_config(),
 				)
-		st.markdown(f"### {student['person_type']} · {student['full_name']} · {student['class_name']}")
-		st.write(f"Okul no: {student['student_no'] or '—'} · Cinsiyet: {student['sex'] or 'Belirtilmedi'} · Doğum tarihi: {student['birth_date'] or '—'}")
-		st.markdown("#### Sağlık profili")
-		if health_profile.empty:
-			st.caption("Sağlık profili kaydı bulunmuyor.")
-		else:
-			st.dataframe(health_profile, width="stretch", hide_index=True)
-		st.markdown("#### Bakım planı taslakları")
-		if care_plans.empty:
-			st.caption("Bakım planı kaydı bulunmuyor.")
-		else:
-			st.dataframe(care_plans, width="stretch", hide_index=True)
-		st.markdown("#### 🩺 Klinik Büyüme ve Persantil Değerlendirmesi (WHO / ÇEDD Standardı)")
-		if report_growth_df is not None and not report_growth_df.empty:
-			st.dataframe(
-				report_growth_df,
-				width="stretch",
-				hide_index=True,
-				column_config=get_clinical_growth_column_config(),
-			)
-			st.caption("Dünya Sağlık Örgütü (WHO) LMS büyüme referansına dayalı antropometrik tarama ve Z-skoru (SDS) raporu.")
-		else:
-			st.caption("Persantil ve Z-skoru raporu için öğrenci profilinde doğum tarihi, cinsiyet ve en az bir ölçüm kaydı bulunmalıdır.")
-		st.markdown("#### Vital geçmişi")
-		if vitals.empty:
-			st.caption("Vital kayıt bulunmuyor.")
-		else:
-			st.dataframe(vitals, width="stretch", hide_index=True)
-		st.markdown("#### Tahlil geçmişi")
-		if lab_results.empty:
-			st.caption("Tahlil kaydı bulunmuyor.")
-		else:
-			st.dataframe(lab_results, width="stretch", hide_index=True)
-		st.markdown("#### Ölçüm ve persantil geçmişi")
-		if measurements.empty:
-			st.caption("Ölçüm kaydı bulunmuyor.")
-		else:
-			rep_enriched = enrich_measurements_with_percentiles(measurements, stu_sex, stu_birth)
-			m_cols = [
-				"Tarih", "Yas_ay", "Boy_cm", "Boy_Z", "Boy_Persantil", "Boy_Dilimi", "Boy_Farki",
-				"Kilo_kg", "Kilo_Z", "Kilo_Persantil", "Kilo_Dilimi", "Kilo_Farki",
-				"Ideal_Kilo_Araligi",
-				"Bas_Cevresi_cm", "Bas_Cevresi_Z", "Bas_Cevresi_Persantil",
-				"BMI", "BMI_Z", "BMI_Persantil", "Gelisim_Degerlendirmesi"
-			]
-			avail_cols = [c for c in m_cols if c in rep_enriched.columns]
-			rep_disp = rep_enriched[avail_cols].rename(columns={
-				"Yas_ay": "Yaş (Ay)", "Boy_cm": "Boy (cm)", "Boy_Z": "Boy Z-Skor", "Boy_Persantil": "Boy %",
-				"Boy_Dilimi": "Boy Dilimi", "Boy_Farki": "Boy Değişimi", "Kilo_kg": "Kilo (kg)",
-				"Kilo_Z": "Kilo Z-Skor", "Kilo_Persantil": "Kilo %", "Kilo_Dilimi": "Kilo Dilimi",
-				"Kilo_Farki": "Kilo Değişimi", "Ideal_Kilo_kg": "İdeal Kilo (kg)", "Ideal_Kilo_Araligi": "İdeal Kilo Aralığı", "Bas_Cevresi_cm": "Baş Çevresi (cm)",
-				"Bas_Cevresi_Z": "Baş Çevresi Z-Skor", "Bas_Cevresi_Persantil": "Baş Çevresi %",
-				"BMI": "VKİ (BMI)", "BMI_Z": "VKİ Z-Skor", "BMI_Persantil": "VKİ %",
-				"Gelisim_Degerlendirmesi": "Gelişim Değerlendirmesi"
-			})
-			st.dataframe(
-				rep_disp,
-				width="stretch",
-				hide_index=True,
-				column_config=get_measurement_history_column_config(),
-			)
-			if len(measurements) > 1:
-				first, last = measurements.iloc[0], measurements.iloc[-1]
-				if pd.notna(last["Boy_cm"]) and pd.notna(first["Boy_cm"]) and pd.notna(last["Kilo_kg"]) and pd.notna(first["Kilo_kg"]):
-					st.info(f"İlk ölçümden son ölçüme değişim: boy {last['Boy_cm'] - first['Boy_cm']:+.1f} cm, kilo {last['Kilo_kg'] - first['Kilo_kg']:+.1f} kg.")
-		st.markdown("#### Revir geçmişi")
-		if visits.empty:
-			st.caption("Revir kaydı bulunmuyor.")
-		else:
-			st.dataframe(visits, width="stretch", hide_index=True)
+				st.caption("Dünya Sağlık Örgütü (WHO) LMS büyüme referansına dayalı antropometrik tarama ve Z-skoru (SDS) raporu.")
+			else:
+				st.caption("Persantil ve Z-skoru raporu için öğrenci profilinde doğum tarihi, cinsiyet ve en az bir ölçüm kaydı bulunmalıdır.")
+			st.markdown("#### Vital geçmişi")
+			if vitals.empty:
+				st.caption("Vital kayıt bulunmuyor.")
+			else:
+				st.dataframe(vitals, width="stretch", hide_index=True)
+			st.markdown("#### Tahlil geçmişi")
+			if lab_results.empty:
+				st.caption("Tahlil kaydı bulunmuyor.")
+			else:
+				st.dataframe(lab_results, width="stretch", hide_index=True)
+			st.markdown("#### Ölçüm ve persantil geçmişi")
+			if measurements.empty:
+				st.caption("Ölçüm kaydı bulunmuyor.")
+			else:
+				rep_enriched = enrich_measurements_with_percentiles(measurements, stu_sex, stu_birth)
+				m_cols = [
+					"Tarih", "Yas_ay", "Boy_cm", "Boy_Z", "Boy_Persantil", "Boy_Dilimi", "Boy_Farki",
+					"Kilo_kg", "Kilo_Z", "Kilo_Persantil", "Kilo_Dilimi", "Kilo_Farki",
+					"Ideal_Kilo_Araligi",
+					"Bas_Cevresi_cm", "Bas_Cevresi_Z", "Bas_Cevresi_Persantil",
+					"BMI", "BMI_Z", "BMI_Persantil", "Gelisim_Degerlendirmesi"
+				]
+				avail_cols = [c for c in m_cols if c in rep_enriched.columns]
+				rep_disp = rep_enriched[avail_cols].rename(columns={
+					"Yas_ay": "Yaş (Ay)", "Boy_cm": "Boy (cm)", "Boy_Z": "Boy Z-Skor", "Boy_Persantil": "Boy %",
+					"Boy_Dilimi": "Boy Dilimi", "Boy_Farki": "Boy Değişimi", "Kilo_kg": "Kilo (kg)",
+					"Kilo_Z": "Kilo Z-Skor", "Kilo_Persantil": "Kilo %", "Kilo_Dilimi": "Kilo Dilimi",
+					"Kilo_Farki": "Kilo Değişimi", "Ideal_Kilo_kg": "İdeal Kilo (kg)", "Ideal_Kilo_Araligi": "İdeal Kilo Aralığı", "Bas_Cevresi_cm": "Baş Çevresi (cm)",
+					"Bas_Cevresi_Z": "Baş Çevresi Z-Skor", "Bas_Cevresi_Persantil": "Baş Çevresi %",
+					"BMI": "VKİ (BMI)", "BMI_Z": "VKİ Z-Skor", "BMI_Persantil": "VKİ %",
+					"Gelisim_Degerlendirmesi": "Gelişim Değerlendirmesi"
+				})
+				st.dataframe(
+					rep_disp,
+					width="stretch",
+					hide_index=True,
+					column_config=get_measurement_history_column_config(),
+				)
+				if len(measurements) > 1:
+					first, last = measurements.iloc[0], measurements.iloc[-1]
+					if pd.notna(last["Boy_cm"]) and pd.notna(first["Boy_cm"]) and pd.notna(last["Kilo_kg"]) and pd.notna(first["Kilo_kg"]):
+						st.info(f"İlk ölçümden son ölçüme değişim: boy {last['Boy_cm'] - first['Boy_cm']:+.1f} cm, kilo {last['Kilo_kg'] - first['Kilo_kg']:+.1f} kg.")
+			st.markdown("#### Revir geçmişi")
+			if visits.empty:
+				st.caption("Revir kaydı bulunmuyor.")
+			else:
+				st.dataframe(visits, width="stretch", hide_index=True)
 
-		single_body = build_student_report_section_html(student, inst_top, inst_school, inst_nurse, inst_princ, is_multi=False, report_cfg=report_cfg)
-		print_html = css_header + single_body + "</body>\n</html>"
-		print_name = re.sub(r"[^A-Za-z0-9_-]+", "_", student["full_name"]).strip("_") or "kisi"
-		single_docx = build_student_report_docx(student, report_cfg=report_cfg)
-		st.download_button(
-			"📝 Kişi Sağlık Raporunu İndir (.docx)",
-			data=single_docx,
-			file_name=f"{print_name}_saglik_raporu.docx",
-			mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-			type="primary",
-			use_container_width=True,
-		)
-		st.caption("İndirilen Microsoft Word (.docx) dosyasını Microsoft Office Word uygulamasında açıp doğrudan düzenleyebilir veya yazdırabilirsiniz.")
+			single_body = build_student_report_section_html(student, inst_top, inst_school, inst_nurse, inst_princ, is_multi=False, report_cfg=report_cfg)
+			print_html = css_header + single_body + "</body>\n</html>"
+			print_name = re.sub(r"[^A-Za-z0-9_-]+", "_", student["full_name"]).strip("_") or "kisi"
+			single_docx = build_student_report_docx(student, report_cfg=report_cfg)
+			st.download_button(
+				"📝 Kişi Sağlık Raporunu İndir (.docx)",
+				data=single_docx,
+				file_name=f"{print_name}_saglik_raporu.docx",
+				mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+				type="primary",
+				use_container_width=True,
+			)
+			st.caption("İndirilen Microsoft Word (.docx) dosyasını Microsoft Office Word uygulamasında açıp doğrudan düzenleyebilir veya yazdırabilirsiniz.")
 
-		with st.expander("🖨️ Yazdırılabilir Kişi Raporu Önizleme (Tarayıcıdan Yazdır / PDF)", expanded=False):
-			st.components.v1.html(print_html, height=750, scrolling=True)
+			with st.expander("🖨️ Yazdırılabilir Kişi Raporu Önizleme (Tarayıcıdan Yazdır / PDF)", expanded=False):
+				st.components.v1.html(print_html, height=750, scrolling=True)
+		else:
+			st.info("💡 Raporunu görüntülemek ve Word (.docx) olarak indirmek istediğiniz kişiyi yukarıdaki kutudan seçin.")
 
 	with connect_db() as connection:
 		all_students = get_students_enriched().drop(columns=["id"], errors="ignore")
