@@ -8256,7 +8256,8 @@ def render_nanda_care_plan_editor(person_id: int, prefix: str = "cp") -> None:
 			(person_id,),
 		).fetchall()
 
-	st.markdown("##### 📑 Kayıtlı Bakım Planları")
+	if is_section_visible("care_active_plans"):
+		st.markdown("##### 📑 Kayıtlı Bakım Planları")
 	if not plans:
 		st.caption("Kişiye ait henüz kayıtlı bir bakım planı bulunmuyor.")
 		return
@@ -8269,8 +8270,9 @@ def render_nanda_care_plan_editor(person_id: int, prefix: str = "cp") -> None:
 		"İptal / İhtiyaç Kalmadı": ("#64748b", "#f8fafc"),
 	}
 
-	for p in plans:
-		p_id = p["id"]
+	if is_section_visible("care_active_plans"):
+		for p in plans:
+			p_id = p["id"]
 		p_stat = p["status"] or "Aktif - İzlemde"
 		fg_col, bg_col = status_badge_colors.get(p_stat, ("#475569", "#f1f5f9"))
 		first_line_diag = (p['nursing_diagnosis'] or '').split('\n')[0]
@@ -9465,12 +9467,17 @@ def render_students() -> None:
 	cls_opts = ["Tüm sınıflar", *classes]
 	cls_idx = cls_opts.index(saved_cls) if saved_cls in cls_opts else 0
 
-	filter_col, search_col, pick_col = st.columns([0.9, 1.1, 1.8])
-	with filter_col:
-		selected_class = st.selectbox("Sınıf filtresi", cls_opts, index=cls_idx, key="students_page_class_filter")
-		st.session_state["active_class_filter"] = selected_class
-	with search_col:
-		search_q = st.text_input("🔍 Hızlı Arama (Ad, Mahalle, Köy, Tel)", placeholder="Örn: Gevher Hatun, 0532, Recep...", key="students_page_search_q")
+	if is_section_visible("students_filters"):
+		filter_col, search_col, pick_col = st.columns([0.9, 1.1, 1.8])
+		with filter_col:
+			selected_class = st.selectbox("Sınıf filtresi", cls_opts, index=cls_idx, key="students_page_class_filter")
+			st.session_state["active_class_filter"] = selected_class
+		with search_col:
+			search_q = st.text_input("🔍 Hızlı Arama (Ad, Mahalle, Köy, Tel)", placeholder="Örn: Gevher Hatun, 0532, Recep...", key="students_page_search_q")
+	else:
+		selected_class = saved_cls
+		search_q = ""
+		pick_col = None
 
 	students = get_students_enriched(selected_class, person_type="Öğrenci").reset_index(drop=True)
 	if search_q.strip() and not students.empty:
@@ -9489,57 +9496,58 @@ def render_students() -> None:
 		display_students = display_students.copy()
 		if "📂 Dosya" not in display_students.columns:
 			display_students.insert(0, "📂 Dosya", "📂 Aç")
-	st.caption(f"Toplam {len(students)} öğrenci listeleniyor · Sol kutudan öğrenciyi seçebilir, **📂 Aç** sembolüne tıklayarak Kişi Dosyasını açabilirsiniz.")
 
-	app_cfg = get_app_settings()
-	tbl_h = int(app_cfg.get("default_table_height", "420") or 420)
+	if is_section_visible("students_table"):
+		st.caption(f"Toplam {len(students)} öğrenci listeleniyor · Sol kutudan öğrenciyi seçebilir, **📂 Aç** sembolüne tıklayarak Kişi Dosyasını açabilirsiniz.")
+		app_cfg = get_app_settings()
+		tbl_h = int(app_cfg.get("default_table_height", "420") or 420)
 
-	roster_seed = st.session_state.get("roster_table_seed", 0)
-	table_event = st.dataframe(
-		display_students,
-		width="stretch",
-		height=tbl_h,
-		hide_index=True,
-		on_select="rerun",
-		selection_mode=["single-row", "single-cell"],
-		key=f"profile_roster_table_{roster_seed}",
-		column_config=get_students_column_config(),
-	)
-	selected_cells = getattr(table_event.selection, "cells", []) or []
-	selected_rows = getattr(table_event.selection, "rows", []) or []
+		roster_seed = st.session_state.get("roster_table_seed", 0)
+		table_event = st.dataframe(
+			display_students,
+			width="stretch",
+			height=tbl_h,
+			hide_index=True,
+			on_select="rerun",
+			selection_mode=["single-row", "single-cell"],
+			key=f"profile_roster_table_{roster_seed}",
+			column_config=get_students_column_config(),
+		)
+		selected_cells = getattr(table_event.selection, "cells", []) or []
+		selected_rows = getattr(table_event.selection, "rows", []) or []
 
-	dosya_clicked_row = None
-	for c in selected_cells:
-		c_row = c[0] if isinstance(c, (tuple, list)) else (c.get("row") if isinstance(c, dict) else None)
-		c_col = c[1] if isinstance(c, (tuple, list)) else (c.get("column") if isinstance(c, dict) else None)
-		if c_col in ("📂 Dosya", "Dosya", "📂") and c_row is not None and 0 <= int(c_row) < len(students):
-			dosya_clicked_row = int(c_row)
-			break
+		dosya_clicked_row = None
+		for c in selected_cells:
+			c_row = c[0] if isinstance(c, (tuple, list)) else (c.get("row") if isinstance(c, dict) else None)
+			c_col = c[1] if isinstance(c, (tuple, list)) else (c.get("column") if isinstance(c, dict) else None)
+			if c_col in ("📂 Dosya", "Dosya", "📂") and c_row is not None and 0 <= int(c_row) < len(students):
+				dosya_clicked_row = int(c_row)
+				break
 
-	if dosya_clicked_row is not None:
-		row_person_id = int(students.iloc[dosya_clicked_row]["id"])
-		set_active_person(row_person_id)
-		cell_token = (roster_seed, dosya_clicked_row)
-		if st.session_state.get("last_opened_cell_token") != cell_token:
-			st.session_state["last_opened_cell_token"] = cell_token
-			open_person_dossier_dialog(row_person_id)
-		else:
-			st.session_state["last_opened_cell_token"] = None
-			st.session_state["roster_table_seed"] = roster_seed + 1
-			st.rerun()
-	elif selected_rows and 0 <= selected_rows[0] < len(students):
-		row_person_id = int(students.iloc[selected_rows[0]]["id"])
-		if row_person_id != st.session_state.get("active_person_id"):
+		if dosya_clicked_row is not None:
+			row_person_id = int(students.iloc[dosya_clicked_row]["id"])
 			set_active_person(row_person_id)
-			st.rerun()
-	elif selected_cells:
-		c = selected_cells[0]
-		c_row = c[0] if isinstance(c, (tuple, list)) else (c.get("row") if isinstance(c, dict) else None)
-		if c_row is not None and 0 <= int(c_row) < len(students):
-			row_person_id = int(students.iloc[int(c_row)]["id"])
+			cell_token = (roster_seed, dosya_clicked_row)
+			if st.session_state.get("last_opened_cell_token") != cell_token:
+				st.session_state["last_opened_cell_token"] = cell_token
+				open_person_dossier_dialog(row_person_id)
+			else:
+				st.session_state["last_opened_cell_token"] = None
+				st.session_state["roster_table_seed"] = roster_seed + 1
+				st.rerun()
+		elif selected_rows and 0 <= selected_rows[0] < len(students):
+			row_person_id = int(students.iloc[selected_rows[0]]["id"])
 			if row_person_id != st.session_state.get("active_person_id"):
 				set_active_person(row_person_id)
 				st.rerun()
+		elif selected_cells:
+			c = selected_cells[0]
+			c_row = c[0] if isinstance(c, (tuple, list)) else (c.get("row") if isinstance(c, dict) else None)
+			if c_row is not None and 0 <= int(c_row) < len(students):
+				row_person_id = int(students.iloc[int(c_row)]["id"])
+				if row_person_id != st.session_state.get("active_person_id"):
+					set_active_person(row_person_id)
+					st.rerun()
 
 	active_id = st.session_state.get("active_person_id")
 	person_map = {
@@ -9547,38 +9555,40 @@ def render_students() -> None:
 		for _, r in students.iterrows()
 	} if not students.empty else {}
 	id_to_label = {v: k for k, v in person_map.items()}
-	with pick_col:
-		if person_map:
-			labels_list = list(person_map.keys())
-			cur_lbl = id_to_label.get(active_id)
-			def_idx = labels_list.index(cur_lbl) if cur_lbl in labels_list else None
-			picked_lbl = st.selectbox(
-				"Aktif Öğrenci (Tüm Pencerelerde Ortak Seçili)",
-				labels_list,
-				index=def_idx,
-				placeholder="Tablodan tıklayın veya buradan öğrenci arayın...",
-				key="students_page_active_picker",
-			)
-			if picked_lbl and person_map[picked_lbl] != active_id:
-				set_active_person(person_map[picked_lbl])
-				active_id = person_map[picked_lbl]
+	if pick_col is not None:
+		with pick_col:
+			if person_map:
+				labels_list = list(person_map.keys())
+				cur_lbl = id_to_label.get(active_id)
+				def_idx = labels_list.index(cur_lbl) if cur_lbl in labels_list else None
+				picked_lbl = st.selectbox(
+					"Aktif Öğrenci (Tüm Pencerelerde Ortak Seçili)",
+					labels_list,
+					index=def_idx,
+					placeholder="Tablodan tıklayın veya buradan öğrenci arayın...",
+					key="students_page_active_picker",
+				)
+				if picked_lbl and person_map[picked_lbl] != active_id:
+					set_active_person(person_map[picked_lbl])
+					active_id = person_map[picked_lbl]
 
-	selected_person_id = st.session_state.get("active_person_id")
-	active_person_obj = get_person_by_id(selected_person_id)
-	if active_person_obj is not None and active_person_obj["class_name"] != "Sivil / Diğer":
-		render_shared_person_summary(active_person_obj, "students_page")
-		act_c1, act_c2, act_c3 = st.columns([2.2, 1.2, 1.4])
-		with act_c1:
-			if st.button(f"📂 {active_person_obj['full_name']} Dosyasını Aç (Açılır Pencere) ↗️", type="primary", key="open_selected_profile_dossier", use_container_width=True):
-				open_person_dossier_dialog(active_person_obj["id"])
-		with act_c2:
-			if st.button("✏️ Hızlı Düzenle", type="secondary", key="edit_selected_profile", use_container_width=True):
-				st.session_state["edit_profile_loaded_id"] = None
-				open_edit_profile_dialog(active_person_obj["id"], "stu")
-		with act_c3:
-			p_fpath = get_person_data_file_path(active_person_obj["id"], active_person_obj["full_name"])
-			with st.expander("📁 JSON Dosyası"):
-				render_person_data_file_editor(active_person_obj["id"], section_key="stu_page")
+	if is_section_visible("students_selected_card"):
+		selected_person_id = st.session_state.get("active_person_id")
+		active_person_obj = get_person_by_id(selected_person_id)
+		if active_person_obj is not None and active_person_obj["class_name"] != "Sivil / Diğer":
+			render_shared_person_summary(active_person_obj, "students_page")
+			act_c1, act_c2, act_c3 = st.columns([2.2, 1.2, 1.4])
+			with act_c1:
+				if st.button(f"📂 {active_person_obj['full_name']} Dosyasını Aç (Açılır Pencere) ↗️", type="primary", key="open_selected_profile_dossier", use_container_width=True):
+					open_person_dossier_dialog(active_person_obj["id"])
+			with act_c2:
+				if st.button("✏️ Hızlı Düzenle", type="secondary", key="edit_selected_profile", use_container_width=True):
+					st.session_state["edit_profile_loaded_id"] = None
+					open_edit_profile_dialog(active_person_obj["id"], "stu")
+			with act_c3:
+				p_fpath = get_person_data_file_path(active_person_obj["id"], active_person_obj["full_name"])
+				with st.expander("📁 JSON Dosyası"):
+					render_person_data_file_editor(active_person_obj["id"], section_key="stu_page")
 
 
 def render_civilians() -> None:
@@ -9595,12 +9605,18 @@ def render_civilians() -> None:
 	civilians = get_students_enriched("Sivil / Diğer", person_type="Sivil").reset_index(drop=True)
 	display_civilians = civilians.drop(columns=["Kayıt Türü", "Sınıf", "Okul No", "Baş Çevresi (cm)", "Adres / Mahalle"], errors="ignore") if not civilians.empty else civilians
 
-	role_col, civ_search_col, pick_col = st.columns([0.9, 1.1, 1.8])
-	with role_col:
-		roles = sorted({str(r) for r in civilians["Görev / Statü"].dropna().unique() if str(r) != "—"}) if not civilians.empty and "Görev / Statü" in civilians.columns else []
-		selected_role = st.selectbox("Görev / Statü filtresi", ["Tüm görevler", *roles], key="civilians_role_filter")
-	with civ_search_col:
-		civ_search_q = st.text_input("🔍 Hızlı Arama (Ad, Görev, Tel)", placeholder="İsim veya telefon ara...", key="civilians_page_search_q")
+	if is_section_visible("civilians_search"):
+		role_col, civ_search_col, pick_col = st.columns([0.9, 1.1, 1.8])
+		with role_col:
+			roles = sorted({str(r) for r in civilians["Görev / Statü"].dropna().unique() if str(r) != "—"}) if not civilians.empty and "Görev / Statü" in civilians.columns else []
+			selected_role = st.selectbox("Görev / Statü filtresi", ["Tüm görevler", *roles], key="civilians_role_filter")
+		with civ_search_col:
+			civ_search_q = st.text_input("🔍 Hızlı Arama (Ad, Görev, Tel)", placeholder="İsim veya telefon ara...", key="civilians_page_search_q")
+	else:
+		selected_role = "Tüm görevler"
+		civ_search_q = ""
+		pick_col = None
+
 	if selected_role != "Tüm görevler" and not civilians.empty:
 		civilians = civilians[civilians["Görev / Statü"] == selected_role].reset_index(drop=True)
 	if civ_search_q.strip() and not civilians.empty:
@@ -9617,56 +9633,56 @@ def render_civilians() -> None:
 		if "📂 Dosya" not in display_civilians.columns:
 			display_civilians.insert(0, "📂 Dosya", "📂 Aç")
 
-	st.caption(f"Toplam {len(civilians)} yetişkin / personel listeleniyor · Sol kutudan kişiyi seçebilir, **📂 Aç** sembolüne tıklayarak Kişi Dosyasını açabilirsiniz.")
+	if is_section_visible("civilians_table"):
+		st.caption(f"Toplam {len(civilians)} yetişkin / personel listeleniyor · Sol kutudan kişiyi seçebilir, **📂 Aç** sembolüne tıklayarak Kişi Dosyasını açabilirsiniz.")
+		if civilians.empty:
+			st.info("Henüz kayıtlı yetişkin kişi veya personel bulunmuyor. Sağ üstteki '➕ Yeni Kayıt' butonuna tıklayarak ekleyebilirsiniz.")
+		else:
+			civ_roster_seed = st.session_state.get("civ_roster_table_seed", 0)
+			civ_table_event = st.dataframe(
+				display_civilians,
+				width="stretch",
+				hide_index=True,
+				on_select="rerun",
+				selection_mode=["single-row", "single-cell"],
+				key=f"civilian_roster_table_{civ_roster_seed}",
+				column_config=get_students_column_config(),
+			)
+			selected_civ_cells = getattr(civ_table_event.selection, "cells", []) or []
+			selected_civ_rows = getattr(civ_table_event.selection, "rows", []) or []
 
-	if civilians.empty:
-		st.info("Henüz kayıtlı yetişkin kişi veya personel bulunmuyor. Sağ üstteki '➕ Yeni Kayıt' butonuna tıklayarak ekleyebilirsiniz.")
-	else:
-		civ_roster_seed = st.session_state.get("civ_roster_table_seed", 0)
-		civ_table_event = st.dataframe(
-			display_civilians,
-			width="stretch",
-			hide_index=True,
-			on_select="rerun",
-			selection_mode=["single-row", "single-cell"],
-			key=f"civilian_roster_table_{civ_roster_seed}",
-			column_config=get_students_column_config(),
-		)
-		selected_civ_cells = getattr(civ_table_event.selection, "cells", []) or []
-		selected_civ_rows = getattr(civ_table_event.selection, "rows", []) or []
+			dosya_clicked_row = None
+			for c in selected_civ_cells:
+				c_row = c[0] if isinstance(c, (tuple, list)) else (c.get("row") if isinstance(c, dict) else None)
+				c_col = c[1] if isinstance(c, (tuple, list)) else (c.get("column") if isinstance(c, dict) else None)
+				if c_col in ("📂 Dosya", "Dosya", "📂") and c_row is not None and 0 <= int(c_row) < len(civilians):
+					dosya_clicked_row = int(c_row)
+					break
 
-		dosya_clicked_civ_row = None
-		for c in selected_civ_cells:
-			c_row = c[0] if isinstance(c, (tuple, list)) else (c.get("row") if isinstance(c, dict) else None)
-			c_col = c[1] if isinstance(c, (tuple, list)) else (c.get("column") if isinstance(c, dict) else None)
-			if c_col in ("📂 Dosya", "Dosya", "📂") and c_row is not None and 0 <= int(c_row) < len(civilians):
-				dosya_clicked_civ_row = int(c_row)
-				break
-
-		if dosya_clicked_civ_row is not None:
-			row_civ_id = int(civilians.iloc[dosya_clicked_civ_row]["id"])
-			set_active_person(row_civ_id)
-			cell_token = (civ_roster_seed, dosya_clicked_civ_row)
-			if st.session_state.get("last_opened_civ_cell_token") != cell_token:
-				st.session_state["last_opened_civ_cell_token"] = cell_token
-				open_person_dossier_dialog(row_civ_id)
-			else:
-				st.session_state["last_opened_civ_cell_token"] = None
-				st.session_state["civ_roster_table_seed"] = civ_roster_seed + 1
-				st.rerun()
-		elif selected_civ_rows and 0 <= selected_civ_rows[0] < len(civilians):
-			row_civ_id = int(civilians.iloc[selected_civ_rows[0]]["id"])
-			if row_civ_id != st.session_state.get("active_person_id"):
+			if dosya_clicked_row is not None:
+				row_civ_id = int(civilians.iloc[dosya_clicked_row]["id"])
 				set_active_person(row_civ_id)
-				st.rerun()
-		elif selected_civ_cells:
-			c = selected_civ_cells[0]
-			c_row = c[0] if isinstance(c, (tuple, list)) else (c.get("row") if isinstance(c, dict) else None)
-			if c_row is not None and 0 <= int(c_row) < len(civilians):
-				row_civ_id = int(civilians.iloc[int(c_row)]["id"])
+				cell_token = (civ_roster_seed, dosya_clicked_row)
+				if st.session_state.get("last_opened_civ_cell_token") != cell_token:
+					st.session_state["last_opened_civ_cell_token"] = cell_token
+					open_person_dossier_dialog(row_civ_id)
+				else:
+					st.session_state["last_opened_civ_cell_token"] = None
+					st.session_state["civ_roster_table_seed"] = civ_roster_seed + 1
+					st.rerun()
+			elif selected_civ_rows and 0 <= selected_civ_rows[0] < len(civilians):
+				row_civ_id = int(civilians.iloc[selected_civ_rows[0]]["id"])
 				if row_civ_id != st.session_state.get("active_person_id"):
 					set_active_person(row_civ_id)
 					st.rerun()
+			elif selected_civ_cells:
+				c = selected_civ_cells[0]
+				c_row = c[0] if isinstance(c, (tuple, list)) else (c.get("row") if isinstance(c, dict) else None)
+				if c_row is not None and 0 <= int(c_row) < len(civilians):
+					row_civ_id = int(civilians.iloc[int(c_row)]["id"])
+					if row_civ_id != st.session_state.get("active_person_id"):
+						set_active_person(row_civ_id)
+						st.rerun()
 
 	active_id = st.session_state.get("active_person_id")
 	civ_map = {
@@ -9674,38 +9690,40 @@ def render_civilians() -> None:
 		for _, r in civilians.iterrows()
 	} if not civilians.empty else {}
 	id_to_civ_label = {v: k for k, v in civ_map.items()}
-	with pick_col:
-		if civ_map:
-			civ_labels = list(civ_map.keys())
-			cur_civ_lbl = id_to_civ_label.get(active_id)
-			def_civ_idx = civ_labels.index(cur_civ_lbl) if cur_civ_lbl in civ_labels else None
-			picked_civ_lbl = st.selectbox(
-				"Aktif Sivil / Personel (Tüm Pencerelerde Ortak Seçili)",
+	if pick_col is not None:
+		with pick_col:
+			if civ_map:
+				civ_labels = list(civ_map.keys())
+				cur_civ_lbl = id_to_civ_label.get(active_id)
+				def_civ_idx = civ_labels.index(cur_civ_lbl) if cur_civ_lbl in civ_labels else None
+				picked_civ_lbl = st.selectbox(
+					"Aktif Sivil / Personel (Tüm Pencerelerde Ortak Seçili)",
 				civ_labels,
-				index=def_civ_idx,
-				placeholder="Tablodan tıklayın veya buradan kişi arayın...",
-				key="civilians_page_active_picker",
-			)
-			if picked_civ_lbl and civ_map[picked_civ_lbl] != active_id:
-				set_active_person(civ_map[picked_civ_lbl])
-				active_id = civ_map[picked_civ_lbl]
+					index=def_civ_idx,
+					placeholder="Tablodan tıklayın veya buradan kişi arayın...",
+					key="civilians_page_active_picker",
+				)
+				if picked_civ_lbl and civ_map[picked_civ_lbl] != active_id:
+					set_active_person(civ_map[picked_civ_lbl])
+					active_id = civ_map[picked_civ_lbl]
 
-	selected_person_id = st.session_state.get("active_person_id")
-	active_person_obj = get_person_by_id(selected_person_id)
-	if active_person_obj is not None and (active_person_obj["class_name"] == "Sivil / Diğer" or "Sivil" in (active_person_obj["person_type"] or "")):
-		render_shared_person_summary(active_person_obj, "civilians_page")
-		act_c1, act_c2, act_c3 = st.columns([2.2, 1.2, 1.4])
-		with act_c1:
-			if st.button(f"📂 {active_person_obj['full_name']} Dosyasını Aç (Açılır Pencere) ↗️", type="primary", key="open_selected_civ_dossier", use_container_width=True):
-				open_person_dossier_dialog(active_person_obj["id"])
-		with act_c2:
-			if st.button("✏️ Hızlı Düzenle", type="secondary", key="edit_selected_civ_profile", use_container_width=True):
-				st.session_state["edit_profile_loaded_id"] = None
-				open_edit_profile_dialog(active_person_obj["id"], "civ")
-		with act_c3:
-			c_fpath = get_person_data_file_path(active_person_obj["id"], active_person_obj["full_name"])
-			with st.expander("📁 JSON Dosyası"):
-				render_person_data_file_editor(active_person_obj["id"], section_key="civ_page")
+	if is_section_visible("civilians_selected_card"):
+		selected_person_id = st.session_state.get("active_person_id")
+		active_person_obj = get_person_by_id(selected_person_id)
+		if active_person_obj is not None and (active_person_obj["class_name"] == "Sivil / Diğer" or "Sivil" in (active_person_obj["person_type"] or "")):
+			render_shared_person_summary(active_person_obj, "civilians_page")
+			act_c1, act_c2, act_c3 = st.columns([2.2, 1.2, 1.4])
+			with act_c1:
+				if st.button(f"📂 {active_person_obj['full_name']} Dosyasını Aç (Açılır Pencere) ↗️", type="primary", key="open_selected_civ_dossier", use_container_width=True):
+					open_person_dossier_dialog(active_person_obj["id"])
+			with act_c2:
+				if st.button("✏️ Hızlı Düzenle", type="secondary", key="edit_selected_civ_profile", use_container_width=True):
+					st.session_state["edit_profile_loaded_id"] = None
+					open_edit_profile_dialog(active_person_obj["id"], "civ")
+			with act_c3:
+				c_fpath = get_person_data_file_path(active_person_obj["id"], active_person_obj["full_name"])
+				with st.expander("📁 JSON Dosyası"):
+					render_person_data_file_editor(active_person_obj["id"], section_key="civ_page")
 
 	st.divider()
 	st.markdown("### 🩺 Sivil / Personel Revir Başvurusu ve Sağlık İzlemi")
@@ -11060,7 +11078,10 @@ def render_medication_tracker() -> None:
 
 	# TAB 1: GÜNLÜK SAATLİK ÇİZELGE
 	with tab_timetable:
-		tb_top_c1, tb_top_c2, tb_top_c3 = st.columns([3, 1.5, 1.5])
+		if not is_section_visible("med_schedule"):
+			st.info("🕒 Saatlik İlaç Dağıtım ve Uygulama Çizelgesi bölümü Sayfa Ayarları'ndan gizlendi.")
+		else:
+			tb_top_c1, tb_top_c2, tb_top_c3 = st.columns([3, 1.5, 1.5])
 		with tb_top_c1:
 			st.markdown(f"#### 🕒 {day_label} — Saatlik İlaç Uygulama Çizelgesi")
 		with tb_top_c2:
@@ -11239,7 +11260,10 @@ def render_medication_tracker() -> None:
 
 	# TAB 2: İLAÇ DOLABI & AKTİF TEDAVİ PLANLARI
 	with tab_cabinet:
-		st.markdown("#### 📦 Okul Reviri İlaç Dolabı & Kayıtlı Tedavi Planları")
+		if not is_section_visible("med_inventory"):
+			st.info("📦 İlaç Dolabı & Aktif Tedavi Planları bölümü Sayfa Ayarlarından gizlendi.")
+		else:
+			st.markdown("#### 📦 Okul Reviri İlaç Dolabı & Kayıtlı Tedavi Planları")
 		st.caption("Revire velisi tarafından teslim edilen ilaçları, aktif tedavi kürlerini, saklama yerlerini ve kalan stokları buradan yönetebilirsiniz.")
 
 		c_f1, c_f2, c_f3 = st.columns([2, 1.5, 1.5])
@@ -11437,51 +11461,52 @@ def render_vital_tracking() -> None:
 
 	vital_tab, lab_tab = st.tabs(["💓 Vital Ölçümleri & Antropometri", "🧪 Tahlil Sonuçları"])
 	with vital_tab:
-		st.caption("Kayıtlar kişinin sağlık geçmişine eklenir. Aynı anda boy, kilo veya baş çevresi girerseniz Persantil/Z-Skor tablosuna da otomatik işlenir.")
-		with st.form("vital_form", clear_on_submit=True):
-			when, context = st.columns(2)
-			reading_date = when.date_input("Ölçüm tarihi", value=date.today(), key="vital_date")
-			reading_time = context.time_input("Saat", value=datetime.now().replace(second=0, microsecond=0).time(), key="vital_time")
-			bp_cols = st.columns(3)
-			systolic = bp_cols[0].number_input("Büyük tansiyon (mmHg)", min_value=40.0, max_value=260.0, value=None, step=1.0)
-			diastolic = bp_cols[1].number_input("Küçük tansiyon (mmHg)", min_value=20.0, max_value=180.0, value=None, step=1.0)
-			spo2 = bp_cols[2].number_input("Saturasyon - SpO2 (%)", min_value=30.0, max_value=100.0, value=None, step=1.0, format="%.0f")
-			other_cols = st.columns(3)
-			pulse = other_cols[0].number_input("Nabız (atım/dk)", min_value=20.0, max_value=240.0, value=None, step=1.0)
-			temperature = other_cols[1].number_input("Ateş (°C)", min_value=30.0, max_value=45.0, value=None, step=0.1)
-			glucose = other_cols[2].number_input("Kan şekeri (mg/dL)", min_value=1.0, max_value=1500.0, value=None, step=1.0)
-			hw_cols = st.columns(4)
-			glucose_context = hw_cols[0].selectbox("Kan şekeri ölçüm koşulu", ["Belirtilmedi", "Açlık", "Yemek sonrası", "Rastgele", "Hekim istemiyle"])
-			v_height = hw_cols[1].number_input("Boy (cm) [Persantile işlenir]", min_value=30.0, max_value=250.0, value=None, step=0.1, format="%.1f")
-			v_weight = hw_cols[2].number_input("Kilo (kg) [Persantile işlenir]", min_value=1.0, max_value=300.0, value=None, step=0.1, format="%.1f")
-			v_head_circ = hw_cols[3].number_input("Baş Çevresi (cm) [Persantile işlenir]", min_value=20.0, max_value=100.0, value=None, step=0.1, format="%.1f")
-			notes = st.text_area("Belirti / ölçüm koşulu / not", key="vital_notes")
-			save = st.form_submit_button("Ölçümleri kaydet", type="primary")
-		if save:
-			values = {"systolic": systolic, "diastolic": diastolic, "pulse": pulse,
-					  "temperature": temperature, "spo2": spo2, "glucose": glucose}
-			has_vital = any(value is not None for value in values.values())
-			has_hw = (v_height is not None and v_weight is not None and v_height > 0 and v_weight > 0) or (v_head_circ is not None and v_head_circ > 0)
-			if not has_vital and not has_hw:
-				st.error("Kaydetmeden önce en az bir vital ölçüm veya boy-kilo / baş çevresi girin.")
-			elif (systolic is None) != (diastolic is None):
-				st.error("Tansiyon kaydı için büyük ve küçük tansiyonu birlikte girin.")
-			elif (v_height is None) != (v_weight is None):
-				st.error("Boy-kilo kaydı için hem boy hem kiloyu birlikte girin.")
-			else:
-				extra_note = notes.strip()
-				if has_hw:
-					hw_summary = record_linked_measurement(student["id"], reading_date, v_height, v_weight, student["birth_date"], student["sex"], head_circ_cm=v_head_circ)
-					if hw_summary:
-						extra_note = " · ".join(filter(None, [extra_note, f"[{hw_summary}]"]))
-				if has_vital:
-					measured_at = datetime.combine(reading_date, reading_time).isoformat(timespec="minutes")
-					record_linked_vital(
-						student["id"], measured_at, systolic, diastolic, pulse, temperature, glucose,
-						None if glucose_context == "Belirtilmedi" else glucose_context, extra_note or None, spo2=spo2
-					)
-				st.success("Ölçümler öğrenci geçmişine ve bağlantılı modüllere kaydedildi.")
-				st.rerun()
+		if is_section_visible("vital_form"):
+			st.caption("Kayıtlar kişinin sağlık geçmişine eklenir. Aynı anda boy, kilo veya baş çevresi girerseniz Persantil/Z-Skor tablosuna da otomatik işlenir.")
+			with st.form("vital_form", clear_on_submit=True):
+				when, context = st.columns(2)
+				reading_date = when.date_input("Ölçüm tarihi", value=date.today(), key="vital_date")
+				reading_time = context.time_input("Saat", value=datetime.now().replace(second=0, microsecond=0).time(), key="vital_time")
+				bp_cols = st.columns(3)
+				systolic = bp_cols[0].number_input("Büyük tansiyon (mmHg)", min_value=40.0, max_value=260.0, value=None, step=1.0)
+				diastolic = bp_cols[1].number_input("Küçük tansiyon (mmHg)", min_value=20.0, max_value=180.0, value=None, step=1.0)
+				spo2 = bp_cols[2].number_input("Saturasyon - SpO2 (%)", min_value=30.0, max_value=100.0, value=None, step=1.0, format="%.0f")
+				other_cols = st.columns(3)
+				pulse = other_cols[0].number_input("Nabız (atım/dk)", min_value=20.0, max_value=240.0, value=None, step=1.0)
+				temperature = other_cols[1].number_input("Ateş (°C)", min_value=30.0, max_value=45.0, value=None, step=0.1)
+				glucose = other_cols[2].number_input("Kan şekeri (mg/dL)", min_value=1.0, max_value=1500.0, value=None, step=1.0)
+				hw_cols = st.columns(4)
+				glucose_context = hw_cols[0].selectbox("Kan şekeri ölçüm koşulu", ["Belirtilmedi", "Açlık", "Yemek sonrası", "Rastgele", "Hekim istemiyle"])
+				v_height = hw_cols[1].number_input("Boy (cm) [Persantile işlenir]", min_value=30.0, max_value=250.0, value=None, step=0.1, format="%.1f")
+				v_weight = hw_cols[2].number_input("Kilo (kg) [Persantile işlenir]", min_value=1.0, max_value=300.0, value=None, step=0.1, format="%.1f")
+				v_head_circ = hw_cols[3].number_input("Baş Çevresi (cm) [Persantile işlenir]", min_value=20.0, max_value=100.0, value=None, step=0.1, format="%.1f")
+				notes = st.text_area("Belirti / ölçüm koşulu / not", key="vital_notes")
+				save = st.form_submit_button("Ölçümleri kaydet", type="primary")
+			if save:
+				values = {"systolic": systolic, "diastolic": diastolic, "pulse": pulse,
+						  "temperature": temperature, "spo2": spo2, "glucose": glucose}
+				has_vital = any(value is not None for value in values.values())
+				has_hw = (v_height is not None and v_weight is not None and v_height > 0 and v_weight > 0) or (v_head_circ is not None and v_head_circ > 0)
+				if not has_vital and not has_hw:
+					st.error("Kaydetmeden önce en az bir vital ölçüm veya boy-kilo / baş çevresi girin.")
+				elif (systolic is None) != (diastolic is None):
+					st.error("Tansiyon kaydı için büyük ve küçük tansiyonu birlikte girin.")
+				elif (v_height is None) != (v_weight is None):
+					st.error("Boy-kilo kaydı için hem boy hem kiloyu birlikte girin.")
+				else:
+					extra_note = notes.strip()
+					if has_hw:
+						hw_summary = record_linked_measurement(student["id"], reading_date, v_height, v_weight, student["birth_date"], student["sex"], head_circ_cm=v_head_circ)
+						if hw_summary:
+							extra_note = " · ".join(filter(None, [extra_note, f"[{hw_summary}]"]))
+					if has_vital:
+						measured_at = datetime.combine(reading_date, reading_time).isoformat(timespec="minutes")
+						record_linked_vital(
+							student["id"], measured_at, systolic, diastolic, pulse, temperature, glucose,
+							None if glucose_context == "Belirtilmedi" else glucose_context, extra_note or None, spo2=spo2
+						)
+					st.success("Ölçümler öğrenci geçmişine ve bağlantılı modüllere kaydedildi.")
+					st.rerun()
 		with connect_db() as connection:
 			vitals = pd.read_sql_query(
 				"""SELECT id, measured_at AS Tarih_Saat, systolic_mmhg AS Buyuk_Tansiyon,
@@ -11532,20 +11557,21 @@ def render_vital_tracking() -> None:
 					st.warning("Bir veya daha fazla ölçüm referans aralığının dışında. Uygun yöntemle tekrar ölçün ve sağlık personeliyle paylaşın.")
 				elif any("sınıra yakın" in status for status in statuses):
 					st.info("Bir ölçüm referans sınırına yakın. Değişimi takip edin.")
-			st.markdown("### Ölçüm geçmişi")
-			st.dataframe(
-				vitals.drop(columns=["id"]),
-				width="stretch",
-				hide_index=True,
-				column_config={
-					"Buyuk_Tansiyon": st.column_config.NumberColumn("Büyük Tansiyon (mmHg)", format="%.0f"),
-					"Kucuk_Tansiyon": st.column_config.NumberColumn("Küçük Tansiyon (mmHg)", format="%.0f"),
-					"Nabiz": st.column_config.NumberColumn("Nabız (/dk)", format="%.0f"),
-					"Ates_C": st.column_config.NumberColumn("Ateş (°C)", format="%.1f"),
-					"Saturasyon_SpO2": st.column_config.NumberColumn("Saturasyon - SpO2 (%)", format="%%%.0f"),
-					"Kan_Sekeri": st.column_config.NumberColumn("Kan Şekeri (mg/dL)", format="%.0f"),
-				},
-			)
+			if is_section_visible("vital_history"):
+				st.markdown("### Ölçüm geçmişi")
+				st.dataframe(
+					vitals.drop(columns=["id"]),
+					width="stretch",
+					hide_index=True,
+					column_config={
+						"Buyuk_Tansiyon": st.column_config.NumberColumn("Büyük Tansiyon (mmHg)", format="%.0f"),
+						"Kucuk_Tansiyon": st.column_config.NumberColumn("Küçük Tansiyon (mmHg)", format="%.0f"),
+						"Nabiz": st.column_config.NumberColumn("Nabız (/dk)", format="%.0f"),
+						"Ates_C": st.column_config.NumberColumn("Ateş (°C)", format="%.1f"),
+						"Saturasyon_SpO2": st.column_config.NumberColumn("Saturasyon - SpO2 (%)", format="%%%.0f"),
+						"Kan_Sekeri": st.column_config.NumberColumn("Kan Şekeri (mg/dL)", format="%.0f"),
+					},
+				)
 
 			with st.expander("🗑️ Hatalı Vital Kaydını Sil"):
 				vital_choices = {
@@ -11689,60 +11715,61 @@ def render_measurements() -> None:
 
 	render_shared_person_summary(student, section_key="meas")
 
-	columns = st.columns(4)
-	measured_on = columns[0].date_input("Ölçüm tarihi", value=date.today(), key=f"new_measurement_date_{student['id']}")
-	height = columns[1].number_input("Boy (cm)", min_value=0.0, max_value=250.0, value=None, step=0.1, format="%.1f", key=f"new_measurement_height_{student['id']}")
-	weight = columns[2].number_input("Kilo (kg)", min_value=0.0, max_value=300.0, value=None, step=0.1, format="%.1f", key=f"new_measurement_weight_{student['id']}")
-	head_circ = columns[3].number_input("Baş Çevresi (cm, opsiyonel)", min_value=0.0, max_value=100.0, value=None, step=0.1, format="%.1f", key=f"new_measurement_hc_{student['id']}")
+	if is_section_visible("growth_calc"):
+		columns = st.columns(4)
+		measured_on = columns[0].date_input("Ölçüm tarihi", value=date.today(), key=f"new_measurement_date_{student['id']}")
+		height = columns[1].number_input("Boy (cm)", min_value=0.0, max_value=250.0, value=None, step=0.1, format="%.1f", key=f"new_measurement_height_{student['id']}")
+		weight = columns[2].number_input("Kilo (kg)", min_value=0.0, max_value=300.0, value=None, step=0.1, format="%.1f", key=f"new_measurement_weight_{student['id']}")
+		head_circ = columns[3].number_input("Baş Çevresi (cm, opsiyonel)", min_value=0.0, max_value=100.0, value=None, step=0.1, format="%.1f", key=f"new_measurement_hc_{student['id']}")
 
-	# Instant live calculation preview before saving
-	if (height is not None and weight is not None and height > 0 and weight > 0) or (head_circ is not None and head_circ > 0):
-		preview_months = age_in_months(student["birth_date"], measured_on) if student["birth_date"] else None
-		p_items = []
-		if preview_months is not None:
-			p_items.append(f"**Ölçüm Yaşı:** {preview_months // 12} yaş {preview_months % 12} ay ({preview_months} ay)")
-		if height is not None and weight is not None and height > 0 and weight > 0:
-			preview_bmi = weight / ((height / 100.0) ** 2)
-			p_items.append(f"**VKİ (BMI):** {preview_bmi:.1f} kg/m²")
-			prev_ideal = calculate_ideal_weight(height, student["sex"], preview_months, current_weight_kg=weight)
-			if prev_ideal:
-				p_items.append(f"**🎯 İdeal Kilo Aralığı:** {prev_ideal['min_kg']:.1f} – {prev_ideal['max_kg']:.1f} kg (İdeal En Az: {prev_ideal['min_kg']:.1f} kg · İdeal En Çok: {prev_ideal['max_kg']:.1f} kg · {prev_ideal['status_text']})")
-			if student["sex"] and preview_months is not None:
-				ph_ev = evaluate_measurement(height, "height", student["sex"], preview_months)
-				pw_ev = evaluate_measurement(weight, "weight", student["sex"], preview_months)
-				pb_ev = evaluate_measurement(preview_bmi, "bmi", student["sex"], preview_months)
-				if ph_ev:
-					p_items.append(f"**Boy:** {ph_ev['z']:+.2f} SDS (%{ph_ev['percentile']:.1f}p · {ph_ev['status']})")
-				if pw_ev:
-					p_items.append(f"**Kilo:** {pw_ev['z']:+.2f} SDS (%{pw_ev['percentile']:.1f}p · {pw_ev['status']})")
-				if pb_ev:
-					p_items.append(f"**VKİ:** {pb_ev['z']:+.2f} SDS (%{pb_ev['percentile']:.1f}p · {pb_ev['status']})")
-		if head_circ is not None and head_circ > 0:
-			phc_ev = evaluate_measurement(head_circ, "head_circ", student["sex"], preview_months) if (student["sex"] and preview_months is not None) else None
-			if phc_ev:
-				p_items.append(f"**Baş Çevresi:** {head_circ:.1f} cm · {phc_ev['z']:+.2f} SDS (%{phc_ev['percentile']:.1f}p · {phc_ev['status']})")
+		# Instant live calculation preview before saving
+		if (height is not None and weight is not None and height > 0 and weight > 0) or (head_circ is not None and head_circ > 0):
+			preview_months = age_in_months(student["birth_date"], measured_on) if student["birth_date"] else None
+			p_items = []
+			if preview_months is not None:
+				p_items.append(f"**Ölçüm Yaşı:** {preview_months // 12} yaş {preview_months % 12} ay ({preview_months} ay)")
+			if height is not None and weight is not None and height > 0 and weight > 0:
+				preview_bmi = weight / ((height / 100.0) ** 2)
+				p_items.append(f"**VKİ (BMI):** {preview_bmi:.1f} kg/m²")
+				prev_ideal = calculate_ideal_weight(height, student["sex"], preview_months, current_weight_kg=weight)
+				if prev_ideal:
+					p_items.append(f"**🎯 İdeal Kilo Aralığı:** {prev_ideal['min_kg']:.1f} – {prev_ideal['max_kg']:.1f} kg (İdeal En Az: {prev_ideal['min_kg']:.1f} kg · İdeal En Çok: {prev_ideal['max_kg']:.1f} kg · {prev_ideal['status_text']})")
+				if student["sex"] and preview_months is not None:
+					ph_ev = evaluate_measurement(height, "height", student["sex"], preview_months)
+					pw_ev = evaluate_measurement(weight, "weight", student["sex"], preview_months)
+					pb_ev = evaluate_measurement(preview_bmi, "bmi", student["sex"], preview_months)
+					if ph_ev:
+						p_items.append(f"**Boy:** {ph_ev['z']:+.2f} SDS (%{ph_ev['percentile']:.1f}p · {ph_ev['status']})")
+					if pw_ev:
+						p_items.append(f"**Kilo:** {pw_ev['z']:+.2f} SDS (%{pw_ev['percentile']:.1f}p · {pw_ev['status']})")
+					if pb_ev:
+						p_items.append(f"**VKİ:** {pb_ev['z']:+.2f} SDS (%{pb_ev['percentile']:.1f}p · {pb_ev['status']})")
+			if head_circ is not None and head_circ > 0:
+				phc_ev = evaluate_measurement(head_circ, "head_circ", student["sex"], preview_months) if (student["sex"] and preview_months is not None) else None
+				if phc_ev:
+					p_items.append(f"**Baş Çevresi:** {head_circ:.1f} cm · {phc_ev['z']:+.2f} SDS (%{phc_ev['percentile']:.1f}p · {phc_ev['status']})")
+				else:
+					p_items.append(f"**Baş Çevresi:** {head_circ:.1f} cm")
+			st.info("⚡ **Anlık Persantil & Z-Skor Önizlemesi:** " + "  |  ".join(p_items))
+
+		save = st.button("Ölçümü kaydet", type="primary", key=f"save_measurement_{student['id']}")
+		if save:
+			has_hw_in = height is not None and weight is not None and height > 0 and weight > 0
+			has_hc_in = head_circ is not None and head_circ > 0
+			if (height is not None and height > 0) != (weight is not None and weight > 0):
+				st.error("Boy ve kilo ölçümünü birlikte girin.")
+			elif not has_hw_in and not has_hc_in:
+				st.error("Kaydetmek için boy-kilo veya baş çevresi ölçümü girin.")
 			else:
-				p_items.append(f"**Baş Çevresi:** {head_circ:.1f} cm")
-		st.info("⚡ **Anlık Persantil & Z-Skor Önizlemesi:** " + "  |  ".join(p_items))
-
-	save = st.button("Ölçümü kaydet", type="primary", key=f"save_measurement_{student['id']}")
-	if save:
-		has_hw_in = height is not None and weight is not None and height > 0 and weight > 0
-		has_hc_in = head_circ is not None and head_circ > 0
-		if (height is not None and height > 0) != (weight is not None and weight > 0):
-			st.error("Boy ve kilo ölçümünü birlikte girin.")
-		elif not has_hw_in and not has_hc_in:
-			st.error("Kaydetmek için boy-kilo veya baş çevresi ölçümü girin.")
-		else:
-			summary_txt = record_linked_measurement(
-				student["id"], measured_on,
-				height if has_hw_in else None,
-				weight if has_hw_in else None,
-				student["birth_date"], student["sex"],
-				head_circ_cm=head_circ if has_hc_in else None,
-			)
-			st.success(f"Ölçüm öğrenci profiline eklendi: {summary_txt}")
-			st.rerun()
+				summary_txt = record_linked_measurement(
+					student["id"], measured_on,
+					height if has_hw_in else None,
+					weight if has_hw_in else None,
+					student["birth_date"], student["sex"],
+					head_circ_cm=head_circ if has_hc_in else None,
+				)
+				st.success(f"Ölçüm öğrenci profiline eklendi: {summary_txt}")
+				st.rerun()
 
 	with connect_db() as connection:
 		records = pd.read_sql_query(
@@ -11992,7 +12019,10 @@ def render_measurements() -> None:
 	enriched_records = enrich_measurements_with_percentiles(records, student["sex"], student["birth_date"])
 
 	with tab_history:
-		st.markdown("##### 📅 Kronolojik Ölçüm Geçmişi ve Gelişim Hızı Çizelgesi")
+		if not is_section_visible("growth_history"):
+			st.info("📅 Kronolojik Ölçüm Geçmişi bölümü Sayfa Ayarları'ndan gizlendi.")
+		else:
+			st.markdown("##### 📅 Kronolojik Ölçüm Geçmişi ve Gelişim Hızı Çizelgesi")
 		display_df = enriched_records[[
 			"id", "Tarih", "Yas_ay", "Boy_cm", "Boy_Z", "Boy_Persantil", "Boy_Dilimi", "Boy_Farki",
 			"Kilo_kg", "Kilo_Z", "Kilo_Persantil", "Kilo_Dilimi", "Kilo_Farki",
@@ -12088,7 +12118,10 @@ def render_measurements() -> None:
 			st.rerun()
 
 	with tab_charts:
-		st.markdown("##### 📈 Klinik WHO Büyüme Eğrileri ve Persantil Gelişim Takip Grafiği")
+		if not is_section_visible("growth_curves"):
+			st.info("📈 Büyüme Eğrileri ve Takip Grafiği bölümü Sayfa Ayarları'ndan gizlendi.")
+		else:
+			st.markdown("##### 📈 Klinik WHO Büyüme Eğrileri ve Persantil Gelişim Takip Grafiği")
 		st.caption("🩺 **Klinik Büyüme Eğrileri Mantığı:** Büyüme eğrisi, çocuğun boy, kilo veya VKİ ölçümünü doğrudan yaşa göre Dünya Sağlık Örgütü (WHO) persantil kanalları (**3p, 15p, 50p, 85p, 97p**) üzerinde gösterir. Böylece çocuğun kendi genetik persantil kanalında kalıp kalmadığı net olarak değerlendirilir.")
 
 		if not can_eval_age_m:
@@ -12856,18 +12889,20 @@ def render_school_screening() -> None:
 	pct_overall = round((all_screened_cnt / all_students_cnt * 100), 1) if all_students_cnt > 0 else 0
 
 	# Top action & summary banner
-	ban_c1, ban_c2, ban_c3, ban_c4 = st.columns([2.5, 1, 1, 1])
-	with ban_c1:
+	if is_section_visible("screening_stats"):
+		ban_c1, ban_c2, ban_c3, ban_c4 = st.columns([2.5, 1, 1, 1])
+		with ban_c1:
+			st.markdown("### 🏫 Okul Sağlık Taraması Paneli")
+			st.caption("Sınıf kutucuklarına tıklayarak sınıf içi taramaları yürütün; boy, kilo, vital, görme, işitme ve hijyen bulgularını tek ekranda güncelleyin.")
+		with ban_c2:
+			st.metric("Toplam Sınıf", len(all_classes))
+		with ban_c3:
+			st.metric("Taranan / Toplam", f"{all_screened_cnt} / {all_students_cnt}")
+		with ban_c4:
+			st.metric("Tarama Oranı", f"%{pct_overall}")
+		st.markdown("---")
+	else:
 		st.markdown("### 🏫 Okul Sağlık Taraması Paneli")
-		st.caption("Sınıf kutucuklarına tıklayarak sınıf içi taramaları yürütün; boy, kilo, vital, görme, işitme ve hijyen bulgularını tek ekranda güncelleyin.")
-	with ban_c2:
-		st.metric("Toplam Sınıf", len(all_classes))
-	with ban_c3:
-		st.metric("Taranan / Toplam", f"{all_screened_cnt} / {all_students_cnt}")
-	with ban_c4:
-		st.metric("Tarama Oranı", f"%{pct_overall}")
-
-	st.markdown("---")
 
 	# VIEW 1: Sınıf Kutucukları Listesi (Grid of Class Boxes)
 	if not selected_class or selected_class not in all_classes:
@@ -14873,11 +14908,15 @@ def render_documents_depot() -> None:
 		st.markdown("## 📁 Revir Evrak & Dosya Deposu")
 		st.caption("Okul reviri ile ilgili tüm resmi evrakları, Word/Excel formlarını, PDF yönergeleri, sağlık raporlarını ve fotoğrafları güvenle depolayın, düzenleyin ve indirin.")
 	with btn_c:
-		if st.button("📤 Yeni Evrak Yükle", type="primary", use_container_width=True, key="btn_trigger_upload_doc"):
-			open_upload_document_dialog()
+		if is_section_visible("docs_upload"):
+			if st.button("📤 Yeni Evrak Yükle", type="primary", use_container_width=True, key="btn_trigger_upload_doc"):
+				open_upload_document_dialog()
 
 	st.markdown("---")
-	st.markdown("#### 🗃️ Depodaki Belgeler ve Pencere Yöneticisi")
+	if not is_section_visible("docs_list"):
+		st.info("🗃️ Depodaki Belgeler Listesi Sayfa Ayarları'ndan gizlendi.")
+	else:
+		st.markdown("#### 🗃️ Depodaki Belgeler ve Pencere Yöneticisi")
 
 	toolbar_c1, toolbar_c2, toolbar_c3, toolbar_c4 = st.columns([1.5, 1.8, 1.4, 2.0])
 	with toolbar_c1:
