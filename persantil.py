@@ -278,16 +278,64 @@ def build_app_css(font_css: str, font_url: str, base_fsize: str, pad_top: str, t
 		background: transparent !important;
 	}}
 
-	/* Sol Alt Köşe - Menüyü Aç Düğmesi Tasarımı */
-	#fab-menu-toggle,
+	/* 1. Streamlit Orijinal Menü Açma Düğmesi (Sol Üst) - Asla Gizlenemez */
 	div[data-testid="collapsedControl"],
 	[data-testid="collapsedControl"],
 	[data-testid="stSidebarCollapsedControl"] {{
+		display: flex !important;
+		visibility: visible !important;
+		opacity: 1 !important;
+		pointer-events: auto !important;
+		position: fixed !important;
+		top: 12px !important;
+		left: 12px !important;
+		bottom: auto !important;
+		z-index: 999999 !important;
+		background: #0d9488 !important;
+		color: #ffffff !important;
+		padding: 8px 14px !important;
+		border-radius: 8px !important;
+		box-shadow: 0 2px 10px rgba(0,0,0,0.2) !important;
+		border: 1px solid rgba(255,255,255,0.3) !important;
+		cursor: pointer !important;
+	}}
+	div[data-testid="collapsedControl"] button,
+	[data-testid="collapsedControl"] button,
+	[data-testid="stSidebarCollapsedControl"] button {{
+		background: transparent !important;
+		border: none !important;
+		color: #ffffff !important;
+		padding: 0 !important;
+		margin: 0 !important;
+		display: flex !important;
+		align-items: center !important;
+		gap: 6px !important;
+		font-size: 13.5px !important;
+		font-weight: 700 !important;
+		cursor: pointer !important;
+	}}
+	div[data-testid="collapsedControl"] svg,
+	[data-testid="collapsedControl"] svg,
+	[data-testid="stSidebarCollapsedControl"] svg {{
+		color: #ffffff !important;
+		fill: #ffffff !important;
+		stroke: #ffffff !important;
+		width: 18px !important;
+		height: 18px !important;
+	}}
+	div[data-testid="collapsedControl"] button::after,
+	[data-testid="collapsedControl"] button::after {{
+		content: " Menü";
+		color: #ffffff !important;
+		font-weight: 700 !important;
+	}}
+
+	/* 2. Sol Alt Köşe - Bağımsız Kayan Menü Aç/Kapat Düğmesi */
+	#fab-menu-toggle {{
 		position: fixed !important;
 		bottom: 24px !important;
 		left: 24px !important;
-		top: auto !important;
-		z-index: 999999 !important;
+		z-index: 9999999 !important;
 		display: flex !important;
 		align-items: center !important;
 		justify-content: center !important;
@@ -296,8 +344,8 @@ def build_app_css(font_css: str, font_url: str, base_fsize: str, pad_top: str, t
 		color: #ffffff !important;
 		padding: 10px 20px !important;
 		border-radius: 50px !important;
-		box-shadow: 0 4px 18px rgba(13, 148, 136, 0.45) !important;
-		border: 2px solid rgba(255, 255, 255, 0.35) !important;
+		box-shadow: 0 4px 20px rgba(13, 148, 136, 0.5) !important;
+		border: 2px solid rgba(255, 255, 255, 0.4) !important;
 		cursor: pointer !important;
 		font-family: inherit !important;
 		font-size: 14.5px !important;
@@ -309,71 +357,13 @@ def build_app_css(font_css: str, font_url: str, base_fsize: str, pad_top: str, t
 		user-select: none !important;
 		text-decoration: none !important;
 	}}
-
-	#fab-menu-toggle:hover,
-	div[data-testid="collapsedControl"]:hover,
-	[data-testid="collapsedControl"]:hover,
-	[data-testid="stSidebarCollapsedControl"]:hover {{
+	#fab-menu-toggle:hover {{
 		background: #0f766e !important;
 		transform: translateY(-2px) scale(1.05) !important;
-		box-shadow: 0 6px 24px rgba(13, 148, 136, 0.6) !important;
+		box-shadow: 0 6px 26px rgba(13, 148, 136, 0.7) !important;
 	}}
-
-	#fab-menu-toggle:active,
-	div[data-testid="collapsedControl"]:active,
-	[data-testid="collapsedControl"]:active {{
+	#fab-menu-toggle:active {{
 		transform: translateY(0) scale(0.98) !important;
-	}}
-
-	div[data-testid="collapsedControl"] button,
-	[data-testid="collapsedControl"] button,
-	[data-testid="stSidebarCollapsedControl"] button {{
-		background: transparent !important;
-		border: none !important;
-		color: #ffffff !important;
-		padding: 0 !important;
-		margin: 0 !important;
-		display: flex !important;
-		align-items: center !important;
-		gap: 8px !important;
-		font-size: 14.5px !important;
-		font-weight: 700 !important;
-		cursor: pointer !important;
-		box-shadow: none !important;
-	}}
-
-	div[data-testid="collapsedControl"] button:hover,
-	[data-testid="collapsedControl"] button:hover,
-	[data-testid="stSidebarCollapsedControl"] button:hover {{
-		background: transparent !important;
-		border: none !important;
-	}}
-
-	div[data-testid="collapsedControl"] svg,
-	[data-testid="collapsedControl"] svg,
-	[data-testid="stSidebarCollapsedControl"] svg {{
-		color: #ffffff !important;
-		fill: #ffffff !important;
-		stroke: #ffffff !important;
-		width: 18px !important;
-		height: 18px !important;
-	}}
-
-	div[data-testid="collapsedControl"] button::after,
-	[data-testid="collapsedControl"] button::after,
-	[data-testid="stSidebarCollapsedControl"] button::after {{
-		content: "Menüyü Aç";
-		color: #ffffff !important;
-		font-weight: 700 !important;
-		font-size: 14.5px !important;
-		letter-spacing: 0.3px !important;
-		white-space: nowrap !important;
-	}}
-
-	/* Sidebar açıkken floating menü açma butonunun gizlenmesi */
-	section[data-testid="stSidebar"]:not([aria-expanded="false"]) ~ * #fab-menu-toggle,
-	.stApp:has(section[data-testid="stSidebar"]:not([aria-expanded="false"]):not([style*="display: none"])) #fab-menu-toggle {{
-		display: none !important;
 	}}
 	"""
 
@@ -15676,7 +15666,7 @@ def render_settings() -> None:
 def main() -> None:
 	from PIL import Image as _PILImg
 	fav_icon = _PILImg.open(APP_ICON_PATH) if APP_ICON_PATH.exists() else "✚"
-	st.set_page_config(page_title="Revir Defteri", page_icon=fav_icon, layout="wide")
+	st.set_page_config(page_title="Revir Defteri", page_icon=fav_icon, layout="wide", initial_sidebar_state="expanded")
 	ensure_db_initialized()
 	app_cfg = get_app_settings()
 	font_name = app_cfg.get("font_family", "DM Sans")
@@ -15695,32 +15685,44 @@ def main() -> None:
 	app_style_tag = build_app_css(font_css, font_url, base_fsize, pad_top, theme, theme_name, dark_mode_mode)
 	st.markdown(app_style_tag, unsafe_allow_html=True)
 
-	# Sol Alt Köşe - Menüyü Aç Butonu
+	# Sol Alt Köşe - Menüyü Aç Butonu (Doğrudan ve Hatasız Çalışır)
 	floating_menu_html = """
 	<div id="fab-menu-toggle" onclick="(function(){
-		var targets = [
-			'[data-testid=\'collapsedControl\'] button',
-			'[data-testid=\'collapsedControl\']',
-			'[data-testid=\'stSidebarCollapsedControl\'] button',
-			'[data-testid=\'stSidebarCollapsedControl\']',
-			'button[data-testid=\'stSidebarToggle\']',
-			'button[aria-label*=\'sidebar\' i]'
-		];
-		for (var i = 0; i < targets.length; i++) {
-			var el = document.querySelector(targets[i]);
-			if (el && el.offsetParent !== null) { el.click(); return; }
+		var doc = window.document;
+		var sb = doc.querySelector('section[data-testid=\'stSidebar\']');
+		var btns = Array.from(doc.querySelectorAll('button[data-testid=\'stSidebarCollapseButton\'], [data-testid=\'collapsedControl\'] button, [data-testid=\'collapsedControl\'], button[data-testid=\'stSidebarToggle\'], button[aria-label*=\'sidebar\' i], button[aria-label*=\'Expand\' i], button[aria-label*=\'Collapse\' i]'));
+		for (var i = 0; i < btns.length; i++) {
+			if (btns[i] && btns[i].offsetParent !== null) {
+				btns[i].click();
+				return;
+			}
 		}
-		for (var i = 0; i < targets.length; i++) {
-			var el = document.querySelector(targets[i]);
-			if (el) { el.click(); return; }
+		for (var i = 0; i < btns.length; i++) {
+			if (btns[i]) {
+				btns[i].click();
+				return;
+			}
 		}
-	})()" title="Menüyü Aç">
+		if (sb) {
+			var isCollapsed = (sb.offsetWidth === 0 || sb.style.display === 'none' || window.getComputedStyle(sb).display === 'none' || window.getComputedStyle(sb).transform.includes('-') || window.getComputedStyle(sb).marginLeft.includes('-'));
+			if (isCollapsed) {
+				sb.style.setProperty('display', 'block', 'important');
+				sb.style.setProperty('transform', 'none', 'important');
+				sb.style.setProperty('margin-left', '0px', 'important');
+				sb.style.setProperty('width', '21rem', 'important');
+				sb.style.setProperty('min-width', '21rem', 'important');
+				sb.style.setProperty('visibility', 'visible', 'important');
+			} else {
+				sb.style.setProperty('display', 'none', 'important');
+			}
+		}
+	})()" title="Menüyü Aç / Kapat">
 		<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
 			<line x1="3" y1="12" x2="21" y2="12"></line>
 			<line x1="3" y1="6" x2="21" y2="6"></line>
 			<line x1="3" y1="18" x2="21" y2="18"></line>
 		</svg>
-		<span>Menüyü Aç</span>
+		<span>Menü</span>
 	</div>
 	"""
 	st.markdown(floating_menu_html, unsafe_allow_html=True)
