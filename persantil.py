@@ -1880,6 +1880,100 @@ def reset_current_year_students_and_records() -> None:
 				pass
 
 
+def perform_factory_reset() -> tuple[bool, str]:
+	"""Tüm veritabanı kayıtlarını, kişi JSON dosyalarını ve evrakları sıfırlar, ayarları fabrika varsayılanına döndürür."""
+	try:
+		target_dbs = set()
+		if DB_PATH.exists():
+			target_dbs.add(DB_PATH)
+		curr_db = get_current_db_path()
+		if curr_db.exists():
+			target_dbs.add(curr_db)
+		if EGITIM_YILLARI_DIR.exists():
+			for ydb in EGITIM_YILLARI_DIR.glob("**/revir_defteri.db"):
+				target_dbs.add(ydb)
+
+		tables_to_clear = [
+			"medication_logs", "student_medications", "student_vaccinations",
+			"school_screenings", "care_plans", "health_forms", "health_profiles",
+			"lab_results", "lab_reports", "vital_readings", "vital_reference",
+			"measurements", "visits", "students", "classes"
+		]
+
+		for db_file in target_dbs:
+			try:
+				conn = sqlite3.connect(db_file, timeout=15)
+				conn.execute("PRAGMA foreign_keys = OFF")
+				for tbl in tables_to_clear:
+					tbl_exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (tbl,)).fetchone()
+					if tbl_exists:
+						conn.execute(f"DELETE FROM {tbl}")
+
+				seq_exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'").fetchone()
+				if seq_exists:
+					for tbl in tables_to_clear:
+						conn.execute("DELETE FROM sqlite_sequence WHERE name=?", (tbl,))
+
+				app_st_exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_settings'").fetchone()
+				if app_st_exists:
+					conn.execute("DELETE FROM app_settings")
+					for def_k, def_v in DEFAULT_APP_SETTINGS.items():
+						conn.execute("INSERT OR IGNORE INTO app_settings(key, value) VALUES (?, ?)", (def_k, def_v))
+
+				ay_exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='academic_years'").fetchone()
+				if ay_exists:
+					conn.execute("DELETE FROM academic_years")
+					conn.execute(
+						"INSERT INTO academic_years(id, name, start_date, end_date, folder_name, is_active) VALUES (1, '2026-2027', '2026-09-01', '2027-06-20', 'egitim_yillari/2026_2027', 1)"
+					)
+
+				conn.execute("PRAGMA foreign_keys = ON")
+				conn.commit()
+				conn.execute("VACUUM")
+				conn.close()
+			except Exception:
+				pass
+
+		if PERSON_DATA_DIR.exists():
+			for pf in PERSON_DATA_DIR.glob("*.json"):
+				try:
+					pf.unlink(missing_ok=True)
+				except Exception:
+					pass
+
+		if EGITIM_YILLARI_DIR.exists():
+			for pf in EGITIM_YILLARI_DIR.glob("**/kisi_verileri/*.json"):
+				try:
+					pf.unlink(missing_ok=True)
+				except Exception:
+					pass
+
+		if EVRAKLAR_DIR.exists():
+			for ef in EVRAKLAR_DIR.iterdir():
+				if ef.is_file() and not ef.name.startswith("."):
+					try:
+						ef.unlink(missing_ok=True)
+					except Exception:
+						pass
+
+		_DB_PATH_CACHE.clear()
+		_ACTIVE_YEAR_CACHE.clear()
+		clear_all_data_caches()
+
+		keys_to_clear = [
+			"active_person_id", "active_class_filter", "_cached_app_settings",
+			"_cached_page_sections_visibility", "_cached_persons", "active_academic_year_id",
+			"target_page", "main_menu_page", "active_person", "last_update_check_result"
+		]
+		for k in keys_to_clear:
+			st.session_state.pop(k, None)
+
+		initialize_db()
+		return True, "Tüm sistem kayıtları, kişi dosyaları ve evraklar silindi; tüm ayarlar fabrika varsayılanına döndürüldü."
+	except Exception as err:
+		return False, f"Fabrika ayarlarına dönülürken hata oluştu: {err}"
+
+
 def transfer_students_from_year(src_year_id: int, student_ids: list[int], target_class_id: int | None = None) -> int:
 	"""Transfers selected students from another academic year into the current academic year."""
 	all_years = get_all_academic_years()
@@ -16551,6 +16645,43 @@ def render_settings() -> None:
 								st.rerun()
 							else:
 								st.error("Geçersiz yedek dosyası. Lütfen geçerli bir .db veya .zip dosyası yükleyin.")
+
+			st.markdown("")
+			# 3. FABRİKA AYARLARINA DÖNDÜR
+			with st.container(border=True):
+				st.markdown("<h4 style='color: #ef4444; margin-bottom: 4px;'>🧨 Fabrika Ayarlarına Döndür (Tüm Verileri ve Ayarları Sıfırla)</h4>", unsafe_allow_html=True)
+				st.caption(
+					"Bu işlem tüm öğrenci ve personel kayıtlarını, revir başvurularını, vital ölçümlerini, taramaları, aşıları, "
+					"tahlilleri ve evrak deposundaki tüm belgeleri kalıcı olarak siler; tüm uygulama ayarlarını ve tema seçimlerini ilk kurulumdaki varsayılan haline döndürür."
+				)
+				st.warning(
+					"⚠️ **DİKKAT:** Bu işlem **geri alınamaz**! Sıfırlama yapmadan önce yukarıdaki **'Tüm Sistemi Tek Tıkla Yedekle (.ZIP İndir)'** "
+					"butonunu kullanarak mevcut verilerinizin yedeğini almanız önemle tavsiye edilir.\n\n"
+					"*Not: Resmi WHO büyüme persantilleri ve Türkiye il-ilçe-köy adres referansları silinmez ve korunur.*"
+				)
+
+				with st.expander("🚨 Fabrika Ayarlarına Sıfırlama Panelini Aç", expanded=False):
+					st.markdown("##### Sıfırlama Onayı")
+					confirm_chk = st.checkbox(
+						"Tüm kayıtların, dosyaların ve sistem ayarlarının kalıcı olarak silineceğini ve geri getirilemeyeceğini biliyor ve onaylıyorum.",
+						key="chk_confirm_factory_reset"
+					)
+					confirm_word = st.text_input(
+						"İşlemi başlatmak için onay kutusunu işaretleyin ve aşağıdaki alana büyük harflerle **SIFIRLA** yazın:",
+						placeholder="SIFIRLA",
+						key="txt_confirm_factory_reset"
+					)
+
+					reset_btn_disabled = not (confirm_chk and confirm_word.strip() == "SIFIRLA")
+					if st.button("🔥 Fabrika Ayarlarına Döndür ve Tüm Sistemi Sıfırla", type="primary", disabled=reset_btn_disabled, key="btn_exec_factory_reset", use_container_width=True):
+						with st.spinner("Tüm veritabanı tabloları, kişi dosyaları ve belgeler temizleniyor, ayarlar fabrika varsayılanına döndürülüyor..."):
+							ok, msg = perform_factory_reset()
+						if ok:
+							st.balloons()
+							st.success("✅ " + msg)
+							st.rerun()
+						else:
+							st.error("❌ " + msg)
 
 
 		# 🚀 Sürüm & Güncelleme Yönetimi
