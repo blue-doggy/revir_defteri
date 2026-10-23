@@ -9030,19 +9030,19 @@ def render_overview() -> None:
 			q_c1, q_c2, q_c3, q_c4 = st.columns(4)
 			with q_c1:
 				if st.button("🩺 Yeni Revir Kaydı Aç", use_container_width=True, key="ov_quick_visit"):
-					st.session_state["main_menu_page"] = "🩺 Revir Kaydı"
+					st.session_state["target_page"] = "🩺 Revir Kaydı"
 					st.rerun()
 			with q_c2:
 				if st.button("👥 Öğrenci Listesine Git", use_container_width=True, key="ov_quick_stu"):
-					st.session_state["main_menu_page"] = "👥 Öğrenciler"
+					st.session_state["target_page"] = "👥 Öğrenciler"
 					st.rerun()
 			with q_c3:
 				if st.button("🏫 Okul Taraması Başlat", use_container_width=True, key="ov_quick_scr"):
-					st.session_state["main_menu_page"] = "🏫 Okul Taraması"
+					st.session_state["target_page"] = "🏫 Okul Taraması"
 					st.rerun()
 			with q_c4:
 				if st.button("💊 İlaç Takip Sistemine Git", use_container_width=True, key="ov_quick_med"):
-					st.session_state["main_menu_page"] = "💊 İlaç Takip Sistemi"
+					st.session_state["target_page"] = "💊 İlaç Takip Sistemi"
 					st.rerun()
 
 	if is_section_visible("overview_charts"):
@@ -16679,7 +16679,7 @@ def main() -> None:
 	active_person = get_person_by_id(active_id) if active_id else None
 
 	def _on_nav_page_selected(target_page_name: str) -> None:
-		st.session_state["main_menu_page"] = target_page_name
+		st.session_state["target_page"] = target_page_name
 
 	# Sol Alt Köşe - PAGES Menü Butonu (Açılır Popover Menü)
 	with st.popover("🧭 Menü", key="fab_menu_popover"):
