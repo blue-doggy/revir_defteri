@@ -13065,7 +13065,199 @@ def render_school_screening() -> None:
 						open_person_dossier_dialog(s_id)
 
 
-def append_student_report_docx_section(doc: docx.Document, student_id: int, is_multi: bool = False) -> None:
+# ==============================================================================
+# RAPOR ÇIKTI VE YAZDIRMA AYARLARI (POP-UP MODAL & ÖZELLEŞTİRME)
+# ==============================================================================
+
+DEFAULT_REPORT_SETTINGS: dict[str, Any] = {
+	# Bölüm Görünürlükleri
+	"include_id_box": True,                # 👤 Kimlik & Temel Bilgiler
+	"include_alert_box": True,             # ⚠️ Kritik Sağlık & Alerji Uyarı Kutusu
+	"include_health_profile": True,        # 📋 Sağlık Profili & Aile Bilgisi
+	"include_growth_summary": True,        # 📏 DSÖ Klinik Büyüme & Persantil Değerlendirmesi
+	"include_vitals": True,                # 💓 Vital Bulgular (Tansiyon, Ateş, Nabız, SpO2)
+	"include_lab_results": True,           # 🧪 Laboratuvar Tahlil Sonuçları
+	"include_measurements_history": True,  # ⚖️ Boy, Kilo ve Baş Çevresi Ölçüm Geçmişi
+	"include_visits": True,                # 🩺 Revir Başvuru ve Muayene Kayıtları
+	"include_care_plans": True,            # 📝 Hemşirelik Bakım Planları (NANDA-I)
+	"include_vaccinations": True,          # 💉 Aşı ve Bağışıklama Kayıtları
+	"include_signatures": True,            # ✍️ Yetkili ve Veli İmza Bölümü
+	"include_footer_disclaimer": True,     # ℹ️ Yasal Bilgilendirme Dipnotu
+
+	# Detay Alan Tercihleri
+	"show_guardian_contact": True,         # Veli adı ve telefon bilgisi
+	"show_blood_group": True,              # Kan grubu
+	"show_visit_complaint": True,          # Vizit şikayet / başvuru nedeni
+	"show_visit_action": True,             # Yapılan işlem / müdahale
+	"show_visit_observation": True,        # Fizik muayene ve klinik gözlem
+	"show_visit_referral": True,           # Sevk / hastane durumu
+	"show_meas_zscores": True,             # Persantil Z-skorları (SDS)
+	"show_meas_percentiles": True,         # Yüzdelik persantil dilimleri (%p)
+	"visits_limit": 0,                     # 0 = Tümü, veya 5, 10, 15, 20, 30
+}
+
+
+def get_report_settings() -> dict[str, Any]:
+	cfg = get_app_settings()
+	raw = cfg.get("report_custom_settings", "")
+	res = dict(DEFAULT_REPORT_SETTINGS)
+	if raw and str(raw).strip():
+		try:
+			import json as _json
+			parsed = _json.loads(raw)
+			if isinstance(parsed, dict):
+				for k, v in parsed.items():
+					if k in res:
+						res[k] = v
+		except Exception:
+			pass
+	return res
+
+
+def save_report_settings(new_settings: dict[str, Any]) -> None:
+	import json as _json
+	cur = get_report_settings()
+	cur.update(new_settings)
+	save_app_settings({"report_custom_settings": _json.dumps(cur, ensure_ascii=False)})
+
+
+@st.dialog("⚙️ Rapor Çıktı ve Yazdırma Ayarları", width="large")
+def open_report_settings_dialog() -> None:
+	st.caption("Kişi ve sınıf raporu çıktılarında (Word .docx ve yazdırma) hangi bölümlerin ve alt bilgilerin yer alacağını buradan özelleştirebilirsiniz.")
+	cur_cfg = get_report_settings()
+
+	tab_sections, tab_fields, tab_presets = st.tabs([
+		"📑 Rapora Eklenecek Bölümler",
+		"🔍 Detay Alan Tercihleri",
+		"⚡ Hızlı Şablonlar"
+	])
+
+	with tab_presets:
+		st.markdown("##### ⚡ Hazır Rapor Şablonları")
+		st.caption("Tek tıkla ihtiyacınıza uygun bir rapor şablonu seçebilirsiniz:")
+		pr_c1, pr_c2 = st.columns(2)
+		with pr_c1:
+			if st.button("✅ Tam Kapsamlı Resmi Sağlık Raporu", use_container_width=True, help="Tüm bölümler ve geçmiş kayıtlar eksiksiz dahil edilir.", key="rep_preset_full"):
+				save_report_settings(dict(DEFAULT_REPORT_SETTINGS))
+				st.success("Tam kapsamlı resmi rapor şablonu uygulandı!")
+				st.rerun()
+			if st.button("🩺 Yalnızca Revir & Muayene Raporu", use_container_width=True, help="Sadece kimlik, uyarılar ve revir vizit geçmişi dahil edilir.", key="rep_preset_visits"):
+				custom_s = dict(DEFAULT_REPORT_SETTINGS)
+				custom_s.update({
+					"include_health_profile": False,
+					"include_growth_summary": False,
+					"include_lab_results": False,
+					"include_measurements_history": False,
+					"include_care_plans": False,
+					"include_vaccinations": False,
+				})
+				save_report_settings(custom_s)
+				st.success("Yalnızca revir muayene raporu şablonu uygulandı!")
+				st.rerun()
+		with pr_c2:
+			if st.button("📏 Yalnızca Büyüme & Persantil Raporu", use_container_width=True, help="DSÖ büyüme eğrileri, boy-kilo geçmişi ve persantil değerlendirmesi.", key="rep_preset_growth"):
+				custom_s = dict(DEFAULT_REPORT_SETTINGS)
+				custom_s.update({
+					"include_visits": False,
+					"include_care_plans": False,
+					"include_lab_results": False,
+					"include_vaccinations": False,
+				})
+				save_report_settings(custom_s)
+				st.success("Büyüme ve persantil raporu şablonu uygulandı!")
+				st.rerun()
+			if st.button("📋 Özet Sağlık Künyesi (Vizitsiz Form)", use_container_width=True, help="Alerji, kronik durum, acil notu ve vital özetinden oluşan tek sayfalık form.", key="rep_preset_summary"):
+				custom_s = dict(DEFAULT_REPORT_SETTINGS)
+				custom_s.update({
+					"include_visits": False,
+					"include_care_plans": False,
+					"include_measurements_history": False,
+					"include_lab_results": False,
+				})
+				save_report_settings(custom_s)
+				st.success("Özet sağlık künyesi şablonu uygulandı!")
+				st.rerun()
+
+	with tab_sections:
+		st.markdown("##### 📑 Rapora Dahil Edilecek Ana Bölümler")
+		st.caption("Rapor çıktısında yer almasını istemediğiniz bölümlerin işaretini kaldırabilirsiniz:")
+		sec_c1, sec_c2 = st.columns(2)
+		with sec_c1:
+			chk_id = st.checkbox("👤 Öğrenci Kimlik ve Temel Bilgileri", value=cur_cfg.get("include_id_box", True), key="rep_chk_id")
+			chk_alert = st.checkbox("⚠️ Kritik Sağlık & Alerji Uyarı Kutusu", value=cur_cfg.get("include_alert_box", True), key="rep_chk_alert")
+			chk_hp = st.checkbox("📋 Sağlık Profili & Tarama Bilgileri", value=cur_cfg.get("include_health_profile", True), key="rep_chk_hp")
+			chk_growth = st.checkbox("📏 DSÖ Klinik Büyüme & Persantil Taraması", value=cur_cfg.get("include_growth_summary", True), key="rep_chk_growth")
+			chk_vitals = st.checkbox("💓 Vital Bulgular Ölçüm Geçmişi", value=cur_cfg.get("include_vitals", True), key="rep_chk_vitals")
+			chk_labs = st.checkbox("🧪 Laboratuvar Tahlil Sonuçları", value=cur_cfg.get("include_lab_results", True), key="rep_chk_labs")
+		with sec_c2:
+			chk_meas = st.checkbox("⚖️ Boy, Kilo ve Baş Çevresi Ölçüm Geçmişi", value=cur_cfg.get("include_measurements_history", True), key="rep_chk_meas")
+			chk_visits = st.checkbox("🩺 Revir Başvuru ve Muayene Kayıtları", value=cur_cfg.get("include_visits", True), key="rep_chk_visits")
+			chk_cp = st.checkbox("📝 Hemşirelik Bakım Planları (NANDA-I)", value=cur_cfg.get("include_care_plans", True), key="rep_chk_cp")
+			chk_vac = st.checkbox("💉 Aşı ve Bağışıklama Kayıtları", value=cur_cfg.get("include_vaccinations", True), key="rep_chk_vac")
+			chk_sig = st.checkbox("✍️ Yetkili ve Veli İmza / Kaşe Bölümü", value=cur_cfg.get("include_signatures", True), key="rep_chk_sig")
+			chk_foot = st.checkbox("ℹ️ Yasal Sorumluluk Reddi / Dipnot", value=cur_cfg.get("include_footer_disclaimer", True), key="rep_chk_foot")
+
+	with tab_fields:
+		st.markdown("##### 🔍 Detay Bilgi ve Filtre Tercihleri")
+		fld_c1, fld_c2 = st.columns(2)
+		with fld_c1:
+			chk_guard = st.checkbox("📞 Veli Adı ve Telefon Bilgisini Göster", value=cur_cfg.get("show_guardian_contact", True), key="rep_chk_guard")
+			chk_bg = st.checkbox("🩸 Kan Grubu Bilgisini Göster", value=cur_cfg.get("show_blood_group", True), key="rep_chk_bg")
+			chk_sym = st.checkbox("🩺 Vizit Kayıtlarında Şikayet / Belirtileri Göster", value=cur_cfg.get("show_visit_complaint", True), key="rep_chk_sym")
+			chk_act = st.checkbox("🛠️ Vizit Kayıtlarında Yapılan İşlemi Göster", value=cur_cfg.get("show_visit_action", True), key="rep_chk_act")
+		with fld_c2:
+			chk_obs = st.checkbox("🔍 Vizit Kayıtlarında Fizik Muayene / Gözlemi Göster", value=cur_cfg.get("show_visit_observation", True), key="rep_chk_obs")
+			chk_ref = st.checkbox("🚑 Sevk ve Yönlendirme Durumunu Göster", value=cur_cfg.get("show_visit_referral", True), key="rep_chk_ref")
+			chk_z = st.checkbox("📊 Ölçümlerde DSÖ Z-Skorlarını (SDS) Göster", value=cur_cfg.get("show_meas_zscores", True), key="rep_chk_z")
+			chk_p = st.checkbox("📈 Ölçümlerde Persantil Dilimlerini (%p) Göster", value=cur_cfg.get("show_meas_percentiles", True), key="rep_chk_p")
+
+		st.markdown("---")
+		st.markdown("###### 🕒 Vizit Kayıt Limiti")
+		limit_opts = [0, 5, 10, 15, 20, 30]
+		cur_lim = cur_cfg.get("visits_limit", 0)
+		lim_idx = limit_opts.index(cur_lim) if cur_lim in limit_opts else 0
+		sel_limit = st.selectbox(
+			"Raporda listelenecek maksimum vizit sayısı",
+			limit_opts,
+			index=lim_idx,
+			format_func=lambda x: "Tüm Geçmiş Vizitler (Limitsiz)" if x == 0 else f"Son {x} Vizit Kaydı",
+			key="rep_sel_visits_limit"
+		)
+
+	st.markdown("---")
+	if st.button("💾 Rapor Çıktı Ayarlarını Kaydet", type="primary", use_container_width=True, key="btn_save_report_settings_modal"):
+		new_saved = {
+			"include_id_box": chk_id,
+			"include_alert_box": chk_alert,
+			"include_health_profile": chk_hp,
+			"include_growth_summary": chk_growth,
+			"include_vitals": chk_vitals,
+			"include_lab_results": chk_labs,
+			"include_measurements_history": chk_meas,
+			"include_visits": chk_visits,
+			"include_care_plans": chk_cp,
+			"include_vaccinations": chk_vac,
+			"include_signatures": chk_sig,
+			"include_footer_disclaimer": chk_foot,
+			"show_guardian_contact": chk_guard,
+			"show_blood_group": chk_bg,
+			"show_visit_complaint": chk_sym,
+			"show_visit_action": chk_act,
+			"show_visit_observation": chk_obs,
+			"show_visit_referral": chk_ref,
+			"show_meas_zscores": chk_z,
+			"show_meas_percentiles": chk_p,
+			"visits_limit": sel_limit,
+		}
+		save_report_settings(new_saved)
+		st.success("Rapor çıktı ayarları başarıyla kaydedildi!")
+		st.rerun()
+
+
+def append_student_report_docx_section(doc: docx.Document, student_id: int, is_multi: bool = False, report_cfg: dict | None = None) -> None:
+	if report_cfg is None:
+		report_cfg = get_report_settings()
+
 	app_cfg = get_app_settings()
 	inst_top = app_cfg.get("institution_top_header") or "T.C. MİLLÎ EĞİTİM BAKANLIĞI"
 	inst_school = app_cfg.get("school_name") or ""
@@ -13119,28 +13311,29 @@ def append_student_report_docx_section(doc: docx.Document, student_id: int, is_m
 	r_dt.font.color.rgb = RGBColor(100, 116, 139)
 
 	# Student Info Box (table)
-	info_tbl = doc.add_table(rows=2, cols=3)
-	info_tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
-	set_table_borders(info_tbl, color="CBD5E1", sz="4", val="single")
-	info_data = [
-		[("Adı Soyadı", stu_name), ("Sınıf / Şube", stu_class or "—"), ("Okul No", str(stu_no or "—"))],
-		[("Kayıt Türü", stu_type), ("Cinsiyet", s_sex_str), ("Doğum Tarihi / Yaş", f"{stu_birth or '—'} ({s_age_str})")],
-	]
-	for r_i, r_data in enumerate(info_data):
-		for c_i, (lbl, val) in enumerate(r_data):
-			cell = info_tbl.cell(r_i, c_i)
-			set_cell_background(cell, "F8FAFC")
-			set_cell_margins(cell, top=50, bottom=50, left=80, right=80)
-			cp = cell.paragraphs[0]
-			r1 = cp.add_run(f"{lbl}: ")
-			r1.font.name = "Calibri"
-			r1.font.size = Pt(9)
-			r1.font.color.rgb = RGBColor(100, 116, 139)
-			r2 = cp.add_run(str(val))
-			r2.font.name = "Calibri"
-			r2.font.size = Pt(9)
-			r2.bold = True
-			r2.font.color.rgb = RGBColor(30, 41, 59)
+	if report_cfg.get("include_id_box", True):
+		info_tbl = doc.add_table(rows=2, cols=3)
+		info_tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+		set_table_borders(info_tbl, color="CBD5E1", sz="4", val="single")
+		info_data = [
+			[("Adı Soyadı", stu_name), ("Sınıf / Şube", stu_class or "—"), ("Okul No", str(stu_no or "—"))],
+			[("Kayıt Türü", stu_type), ("Cinsiyet", s_sex_str), ("Doğum Tarihi / Yaş", f"{stu_birth or '—'} ({s_age_str})")],
+		]
+		for r_i, r_data in enumerate(info_data):
+			for c_i, (lbl, val) in enumerate(r_data):
+				cell = info_tbl.cell(r_i, c_i)
+				set_cell_background(cell, "F8FAFC")
+				set_cell_margins(cell, top=50, bottom=50, left=80, right=80)
+				cp = cell.paragraphs[0]
+				r1 = cp.add_run(f"{lbl}: ")
+				r1.font.name = "Calibri"
+				r1.font.size = Pt(9)
+				r1.font.color.rgb = RGBColor(100, 116, 139)
+				r2 = cp.add_run(str(val))
+				r2.font.name = "Calibri"
+				r2.font.size = Pt(9)
+				r2.bold = True
+				r2.font.color.rgb = RGBColor(30, 41, 59)
 
 	# Fetch all data from DB
 	with connect_db() as connection:
@@ -13187,13 +13380,13 @@ def append_student_report_docx_section(doc: docx.Document, student_id: int, is_m
 		).fetchall()
 
 	# Alert Box if allergies, chronic conditions, etc.
-	if not health_profile.empty:
+	if report_cfg.get("include_alert_box", True) and not health_profile.empty:
 		p_row = health_profile.iloc[0]
 		alerji = clean_text(p_row.get("Alerjiler"))
 		kronik = clean_text(p_row.get("Kronik_Hastalıklar"))
 		gecmis = clean_text(p_row.get("Sağlık_Geçmişi"))
 		ilac = clean_text(p_row.get("İlaçlar"))
-		kan = clean_text(p_row.get("Kan_Grubu"))
+		kan = clean_text(p_row.get("Kan_Grubu")) if report_cfg.get("show_blood_group", True) else ""
 		acil = clean_text(p_row.get("Acil_Notlar"))
 
 		if alerji or kronik or gecmis or ilac or kan or acil:
@@ -13224,124 +13417,171 @@ def append_student_report_docx_section(doc: docx.Document, student_id: int, is_m
 			r_al.font.color.rgb = RGBColor(51, 65, 85)
 
 	# 1. Sağlık Profili Tablosu
-	add_styled_df_table(doc, health_profile, title="📋 Sağlık Profili ve Acil Bilgiler", empty_msg="Sağlık profili kaydı bulunmuyor.")
+	if report_cfg.get("include_health_profile", True):
+		hp_disp = health_profile.copy()
+		if not report_cfg.get("show_guardian_contact", True):
+			hp_disp = hp_disp.drop(columns=["Veli", "Telefon"], errors="ignore")
+		if not report_cfg.get("show_blood_group", True):
+			hp_disp = hp_disp.drop(columns=["Kan_Grubu"], errors="ignore")
+		add_styled_df_table(doc, hp_disp, title="📋 Sağlık Profili ve Acil Bilgiler", empty_msg="Sağlık profili kaydı bulunmuyor.")
 
 	# 2. Büyüme ve Persantil Özeti
-	person_meas = get_person_latest_measurements(student_id)
-	report_growth_df = None
-	can_eval_rep_age = False
-	can_eval_rep_hc = False
-	if person_meas["has_data"] and stu_sex:
-		latest_m = None
-		if person_meas["latest_measured_on"] and stu_birth:
-			try:
-				latest_m = age_in_months(stu_birth, date.fromisoformat(person_meas["latest_measured_on"]))
-			except Exception:
-				latest_m = None
-		if latest_m is not None and 0 <= latest_m <= 228:
-			can_eval_rep_age = True
-			can_eval_rep_hc = (latest_m <= 60)
-			report_growth_df = get_clinical_growth_summary_table(
-				person_meas["height_cm"], person_meas["weight_kg"], person_meas["bmi"],
-				stu_sex, latest_m,
-				head_circ_cm=person_meas["head_circ_cm"] if can_eval_rep_hc else None,
-				always_include_head_circ=can_eval_rep_hc
-			)
+	if report_cfg.get("include_growth_summary", True):
+		person_meas = get_person_latest_measurements(student_id)
+		report_growth_df = None
+		can_eval_rep_age = False
+		can_eval_rep_hc = False
+		if person_meas["has_data"] and stu_sex:
+			latest_m = None
+			if person_meas["latest_measured_on"] and stu_birth:
+				try:
+					latest_m = age_in_months(stu_birth, date.fromisoformat(person_meas["latest_measured_on"]))
+				except Exception:
+					latest_m = None
+			if latest_m is not None and 0 <= latest_m <= 228:
+				can_eval_rep_age = True
+				can_eval_rep_hc = (latest_m <= 60)
+				report_growth_df = get_clinical_growth_summary_table(
+					person_meas["height_cm"], person_meas["weight_kg"], person_meas["bmi"],
+					stu_sex, latest_m,
+					head_circ_cm=person_meas["head_circ_cm"] if can_eval_rep_hc else None,
+					always_include_head_circ=can_eval_rep_hc
+				)
 
-	if report_growth_df is not None and not report_growth_df.empty:
-		growth_disp = report_growth_df.copy()
-		growth_disp["Z-Skoru (SDS)"] = growth_disp["Z-Skoru (SDS)"].map(lambda x: f"{x:+.2f} SDS" if pd.notna(x) else "—")
-		if "Persentil (%)" in growth_disp.columns:
-			growth_disp["Persentil (%)"] = growth_disp["Persentil (%)"].map(lambda x: f"%{x:.1f}p" if pd.notna(x) else "—")
-		add_styled_df_table(doc, growth_disp, title="📏 Büyüme ve Persantil Taraması (DSÖ)")
-	else:
-		p_gr_e = doc.add_paragraph()
-		p_gr_e.paragraph_format.space_before = Pt(8)
-		p_gr_e.paragraph_format.space_after = Pt(2)
-		r_t = p_gr_e.add_run("📏 Büyüme ve Persantil Taraması\n")
-		r_t.font.name = "Calibri"
-		r_t.font.size = Pt(10.5)
-		r_t.bold = True
-		r_t.font.color.rgb = RGBColor(15, 118, 110)
-		r_m = p_gr_e.add_run("Ölçüm kaydı veya doğum tarihi bulunmadığından persantil tablosu oluşturulmadı.")
-		r_m.font.size = Pt(8.5)
-		r_m.font.italic = True
-		r_m.font.color.rgb = RGBColor(148, 163, 184)
+		if report_growth_df is not None and not report_growth_df.empty:
+			growth_disp = report_growth_df.copy()
+			if not report_cfg.get("show_meas_zscores", True):
+				growth_disp = growth_disp.drop(columns=["Z-Skoru (SDS)"], errors="ignore")
+			else:
+				growth_disp["Z-Skoru (SDS)"] = growth_disp["Z-Skoru (SDS)"].map(lambda x: f"{x:+.2f} SDS" if pd.notna(x) else "—")
+			if not report_cfg.get("show_meas_percentiles", True):
+				growth_disp = growth_disp.drop(columns=["Persentil (%)"], errors="ignore")
+			elif "Persentil (%)" in growth_disp.columns:
+				growth_disp["Persentil (%)"] = growth_disp["Persentil (%)"].map(lambda x: f"%{x:.1f}p" if pd.notna(x) else "—")
+			add_styled_df_table(doc, growth_disp, title="📏 Büyüme ve Persantil Taraması (DSÖ)")
+		else:
+			p_gr_e = doc.add_paragraph()
+			p_gr_e.paragraph_format.space_before = Pt(8)
+			p_gr_e.paragraph_format.space_after = Pt(2)
+			r_t = p_gr_e.add_run("📏 Büyüme ve Persantil Taraması\n")
+			r_t.font.name = "Calibri"
+			r_t.font.size = Pt(10.5)
+			r_t.bold = True
+			r_t.font.color.rgb = RGBColor(15, 118, 110)
+			r_m = p_gr_e.add_run("Ölçüm kaydı veya doğum tarihi bulunmadığından persantil tablosu oluşturulmadı.")
+			r_m.font.size = Pt(8.5)
+			r_m.font.italic = True
+			r_m.font.color.rgb = RGBColor(148, 163, 184)
 
 	# 3. Vital Bulgular
-	add_styled_df_table(doc, vitals, title="💓 Vital Ölçüm Geçmişi", empty_msg="Vital bulgu kaydı bulunmuyor.")
+	if report_cfg.get("include_vitals", True):
+		add_styled_df_table(doc, vitals, title="💓 Vital Ölçüm Geçmişi", empty_msg="Vital bulgu kaydı bulunmuyor.")
 
 	# 4. Laboratuvar Tahlil Sonuçları
-	lab_results_assessed = assess_lab_history(lab_results)
-	add_styled_df_table(doc, lab_results_assessed, title="🧪 Laboratuvar Tahlil Sonuçları", empty_msg="Tahlil kaydı bulunmuyor.")
+	if report_cfg.get("include_lab_results", True):
+		lab_results_assessed = assess_lab_history(lab_results)
+		add_styled_df_table(doc, lab_results_assessed, title="🧪 Laboratuvar Tahlil Sonuçları", empty_msg="Tahlil kaydı bulunmuyor.")
 
 	# 5. Boy, Kilo ve Baş Çevresi Ölçüm Geçmişi
-	if not measurements.empty:
-		rep_enriched = enrich_measurements_with_percentiles(measurements, stu_sex, stu_birth)
-		rep_cols = [
-			"Tarih", "Yas_ay", "Boy_cm", "Boy_Z", "Boy_Persantil", "Boy_Dilimi",
-			"Kilo_kg", "Kilo_Z", "Kilo_Persantil", "Kilo_Dilimi",
-			"Ideal_Kilo_Araligi", "BMI", "BMI_Z", "BMI_Persantil", "Gelisim_Degerlendirmesi"
-		]
-		has_hc_meas = (rep_enriched["Bas_Cevresi_cm"].notna() & (rep_enriched["Bas_Cevresi_cm"] > 0)).any()
-		if can_eval_rep_hc or has_hc_meas:
-			rep_cols.insert(10, "Bas_Cevresi_cm")
-		rep_disp = rep_enriched[[c for c in rep_cols if c in rep_enriched.columns]].rename(columns={
-			"Yas_ay": "Yaş (Ay)", "Boy_cm": "Boy (cm)", "Boy_Z": "Boy Z", "Boy_Persantil": "Boy %",
-			"Boy_Dilimi": "Boy Dilimi", "Kilo_kg": "Kilo (kg)", "Kilo_Z": "Kilo Z", "Kilo_Persantil": "Kilo %",
-			"Kilo_Dilimi": "Kilo Dilimi", "Ideal_Kilo_Araligi": "İdeal Kilo Aralığı",
-			"Bas_Cevresi_cm": "Baş Çev (cm)", "BMI": "VKİ", "BMI_Z": "VKİ Z", "BMI_Persantil": "VKİ %",
-			"Gelisim_Degerlendirmesi": "Gelişim Değerlendirmesi"
-		})
-		formatted_m = format_measurements_for_html(rep_disp)
-		add_styled_df_table(doc, formatted_m, title="⚖️ Boy, Kilo ve Baş Çevresi Ölçüm Geçmişi")
-	else:
-		add_styled_df_table(doc, None, title="⚖️ Boy, Kilo ve Baş Çevresi Ölçüm Geçmişi", empty_msg="Ölçüm kaydı bulunmuyor.")
+	if report_cfg.get("include_measurements_history", True):
+		if not measurements.empty:
+			person_meas = get_person_latest_measurements(student_id)
+			can_eval_rep_hc = False
+			can_eval_rep_age = False
+			if person_meas["has_data"] and stu_sex and stu_birth and person_meas["latest_measured_on"]:
+				try:
+					latest_m = age_in_months(stu_birth, date.fromisoformat(person_meas["latest_measured_on"]))
+					if latest_m is not None and 0 <= latest_m <= 228:
+						can_eval_rep_age = True
+						can_eval_rep_hc = (latest_m <= 60)
+				except Exception:
+					pass
+			rep_enriched = enrich_measurements_with_percentiles(measurements, stu_sex, stu_birth)
+			rep_cols = [
+				"Tarih", "Yas_ay", "Boy_cm", "Boy_Z", "Boy_Persantil", "Boy_Dilimi",
+				"Kilo_kg", "Kilo_Z", "Kilo_Persantil", "Kilo_Dilimi",
+				"Ideal_Kilo_Araligi", "BMI", "BMI_Z", "BMI_Persantil", "Gelisim_Degerlendirmesi"
+			]
+			has_hc_meas = (rep_enriched["Bas_Cevresi_cm"].notna() & (rep_enriched["Bas_Cevresi_cm"] > 0)).any()
+			if can_eval_rep_hc or has_hc_meas:
+				rep_cols.insert(10, "Bas_Cevresi_cm")
+			if not report_cfg.get("show_meas_zscores", True):
+				rep_cols = [c for c in rep_cols if "_Z" not in c]
+			if not report_cfg.get("show_meas_percentiles", True):
+				rep_cols = [c for c in rep_cols if "Persantil" not in c and "Dilimi" not in c]
+			rep_disp = rep_enriched[[c for c in rep_cols if c in rep_enriched.columns]].rename(columns={
+				"Yas_ay": "Yaş (Ay)", "Boy_cm": "Boy (cm)", "Boy_Z": "Boy Z", "Boy_Persantil": "Boy %",
+				"Boy_Dilimi": "Boy Dilimi", "Kilo_kg": "Kilo (kg)", "Kilo_Z": "Kilo Z", "Kilo_Persantil": "Kilo %",
+				"Kilo_Dilimi": "Kilo Dilimi", "Ideal_Kilo_Araligi": "İdeal Kilo Aralığı",
+				"Bas_Cevresi_cm": "Baş Çev (cm)", "BMI": "VKİ", "BMI_Z": "VKİ Z", "BMI_Persantil": "VKİ %",
+				"Gelisim_Degerlendirmesi": "Gelişim Değerlendirmesi"
+			})
+			formatted_m = format_measurements_for_html(rep_disp)
+			add_styled_df_table(doc, formatted_m, title="⚖️ Boy, Kilo ve Baş Çevresi Ölçüm Geçmişi")
+		else:
+			add_styled_df_table(doc, None, title="⚖️ Boy, Kilo ve Baş Çevresi Ölçüm Geçmişi", empty_msg="Ölçüm kaydı bulunmuyor.")
 
 	# 6. Revir Başvuru ve Müdahale Kayıtları
-	add_styled_df_table(doc, visits, title="🩺 Revir Başvuru ve Müdahale Kayıtları", empty_msg="Revir ziyareti kaydı bulunmuyor.")
+	if report_cfg.get("include_visits", True):
+		v_disp = visits.copy()
+		v_lim = int(report_cfg.get("visits_limit", 0) or 0)
+		if v_lim > 0 and len(v_disp) > v_lim:
+			v_disp = v_disp.head(v_lim)
+		drop_cols = []
+		if not report_cfg.get("show_visit_complaint", True): drop_cols.append("Başvuru")
+		if not report_cfg.get("show_visit_action", True): drop_cols.append("İşlem")
+		if not report_cfg.get("show_visit_observation", True): drop_cols.append("Gözlem")
+		if not report_cfg.get("show_visit_referral", True): drop_cols.append("Yönlendirme")
+		if drop_cols: v_disp = v_disp.drop(columns=drop_cols, errors="ignore")
+		add_styled_df_table(doc, v_disp, title="🩺 Revir Başvuru ve Müdahale Kayıtları", empty_msg="Revir ziyareti kaydı bulunmuyor.")
 
 	# 7. Bakım Planı Kayıtları
-	add_styled_df_table(doc, care_plans, title="📝 Bakım Planı Kayıtları", empty_msg="Bakım planı kaydı bulunmuyor.")
+	if report_cfg.get("include_care_plans", True):
+		add_styled_df_table(doc, care_plans, title="📝 Bakım Planı Kayıtları", empty_msg="Bakım planı kaydı bulunmuyor.")
 
 	# 8. Aşı ve Bağışıklama Kayıtları
-	if vac_rows:
-		vac_df = pd.DataFrame([dict(r) for r in vac_rows])
-		add_styled_df_table(doc, vac_df, title="💉 Aşı ve Bağışıklama Kayıtları (T.C. Sağlık Bakanlığı)")
-	else:
-		add_styled_df_table(doc, None, title="💉 Aşı ve Bağışıklama Kayıtları (T.C. Sağlık Bakanlığı)", empty_msg="Kayıtlı aşı bilgisi bulunmuyor.")
+	if report_cfg.get("include_vaccinations", True):
+		if vac_rows:
+			vac_df = pd.DataFrame([dict(r) for r in vac_rows])
+			add_styled_df_table(doc, vac_df, title="💉 Aşı ve Bağışıklama Kayıtları (T.C. Sağlık Bakanlığı)")
+		else:
+			add_styled_df_table(doc, None, title="💉 Aşı ve Bağışıklama Kayıtları (T.C. Sağlık Bakanlığı)", empty_msg="Kayıtlı aşı bilgisi bulunmuyor.")
 
 	# Signature section table
-	doc.add_paragraph().paragraph_format.space_after = Pt(10)
-	sig_table = doc.add_table(rows=1, cols=3)
-	sig_table.alignment = WD_TABLE_ALIGNMENT.CENTER
-	sig_data = [
-		(f"{inst_nurse}\nOkul Revir Sorumlusu\n\n(İmza / Kaşe)"),
-		("Veli Bilgilendirme Onayı\n\n\n(Tarih / İmza)"),
-		(f"{inst_princ}\nOkul Müdürü\n\n(Mühür / İmza)"),
-	]
-	for idx, text in enumerate(sig_data):
-		c = sig_table.cell(0, idx)
-		set_cell_margins(c, top=80, bottom=80, left=120, right=120)
-		cp = c.paragraphs[0]
-		cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-		r = cp.add_run(text)
-		r.font.name = "Calibri"
-		r.font.size = Pt(9)
+	if report_cfg.get("include_signatures", True):
+		doc.add_paragraph().paragraph_format.space_after = Pt(10)
+		sig_table = doc.add_table(rows=1, cols=3)
+		sig_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+		sig_data = [
+			(f"{inst_nurse}\nOkul Revir Sorumlusu\n\n(İmza / Kaşe)"),
+			("Veli Bilgilendirme Onayı\n\n\n(Tarih / İmza)"),
+			(f"{inst_princ}\nOkul Müdürü\n\n(Mühür / İmza)"),
+		]
+		for idx, text in enumerate(sig_data):
+			c = sig_table.cell(0, idx)
+			set_cell_margins(c, top=80, bottom=80, left=120, right=120)
+			cp = c.paragraphs[0]
+			cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+			r = cp.add_run(text)
+			r.font.name = "Calibri"
+			r.font.size = Pt(9)
 
 	# Footer disclaimer
-	p_foot = doc.add_paragraph()
-	p_foot.alignment = WD_ALIGN_PARAGRAPH.CENTER
-	p_foot.paragraph_format.space_before = Pt(8)
-	p_foot.paragraph_format.space_after = Pt(4)
-	r_foot = p_foot.add_run("Bu belge okul reviri dahili izlem ve sağlık bilgilendirme tutanağıdır; tek başına resmi sağlık kurulu raporu veya tıbbi tanı yerine geçmez.")
-	r_foot.font.name = "Calibri"
-	r_foot.font.size = Pt(7.5)
-	r_foot.font.color.rgb = RGBColor(148, 163, 184)
+	if report_cfg.get("include_footer_disclaimer", True):
+		p_foot = doc.add_paragraph()
+		p_foot.alignment = WD_ALIGN_PARAGRAPH.CENTER
+		p_foot.paragraph_format.space_before = Pt(8)
+		p_foot.paragraph_format.space_after = Pt(4)
+		r_foot = p_foot.add_run("Bu belge okul reviri dahili izlem ve sağlık bilgilendirme tutanağıdır; tek başına resmi sağlık kurulu raporu veya tıbbi tanı yerine geçmez.")
+		r_foot.font.name = "Calibri"
+		r_foot.font.size = Pt(7.5)
+		r_foot.font.color.rgb = RGBColor(148, 163, 184)
 
 
-def build_student_report_docx(student_or_id: int | sqlite3.Row | dict) -> bytes:
+def build_student_report_docx(student_or_id: int | sqlite3.Row | dict, report_cfg: dict | None = None) -> bytes:
 	stu_id = student_or_id["id"] if isinstance(student_or_id, (sqlite3.Row, dict)) else int(student_or_id)
+	if report_cfg is None:
+		report_cfg = get_report_settings()
 	doc = docx.Document()
 	section = doc.sections[0]
 	section.orientation = WD_ORIENT.PORTRAIT
@@ -13352,15 +13592,17 @@ def build_student_report_docx(student_or_id: int | sqlite3.Row | dict) -> bytes:
 	section.left_margin = Cm(1.5)
 	section.right_margin = Cm(1.5)
 
-	append_student_report_docx_section(doc, stu_id, is_multi=False)
+	append_student_report_docx_section(doc, stu_id, is_multi=False, report_cfg=report_cfg)
 
 	buf = BytesIO()
 	doc.save(buf)
 	return buf.getvalue()
 
 
-def build_class_batch_report_docx(class_name: str) -> bytes:
+def build_class_batch_report_docx(class_name: str, report_cfg: dict | None = None) -> bytes:
 	class_students = student_options(class_name, person_type="Öğrenci")
+	if report_cfg is None:
+		report_cfg = get_report_settings()
 	doc = docx.Document()
 	section = doc.sections[0]
 	section.orientation = WD_ORIENT.PORTRAIT
@@ -13372,7 +13614,7 @@ def build_class_batch_report_docx(class_name: str) -> bytes:
 	section.right_margin = Cm(1.5)
 
 	for idx, st_row in enumerate(class_students):
-		append_student_report_docx_section(doc, int(st_row["id"]), is_multi=True)
+		append_student_report_docx_section(doc, int(st_row["id"]), is_multi=True, report_cfg=report_cfg)
 		if idx < len(class_students) - 1:
 			doc.add_page_break()
 
@@ -13381,7 +13623,10 @@ def build_class_batch_report_docx(class_name: str) -> bytes:
 	return buf.getvalue()
 
 
-def build_student_report_section_html(student: sqlite3.Row, inst_top: str, inst_school: str, inst_nurse: str, inst_princ: str, is_multi: bool = False) -> str:
+def build_student_report_section_html(student: sqlite3.Row, inst_top: str, inst_school: str, inst_nurse: str, inst_princ: str, is_multi: bool = False, report_cfg: dict | None = None) -> str:
+	if report_cfg is None:
+		report_cfg = get_report_settings()
+
 	stu_dict = dict(student) if hasattr(student, "keys") else (student if isinstance(student, dict) else {})
 	stu_id = stu_dict.get("id")
 	stu_name = stu_dict.get("full_name", "")
@@ -13466,10 +13711,31 @@ def build_student_report_section_html(student: sqlite3.Row, inst_top: str, inst_
 
 	safe_name = html.escape(str(stu_name or ""))
 	safe_class = html.escape(str(stu_class or "—"))
-	visits_html = visits.to_html(index=False, border=0, na_rep="—") if not visits.empty else "<p>Revir kaydı yok.</p>"
+
+	# Filter visits based on preferences
+	v_disp = visits.copy()
+	v_lim = int(report_cfg.get("visits_limit", 0) or 0)
+	if v_lim > 0 and len(v_disp) > v_lim:
+		v_disp = v_disp.head(v_lim)
+	drop_v_cols = []
+	if not report_cfg.get("show_visit_complaint", True): drop_v_cols.append("Başvuru")
+	if not report_cfg.get("show_visit_action", True): drop_v_cols.append("İşlem")
+	if not report_cfg.get("show_visit_observation", True): drop_v_cols.append("Gözlem")
+	if not report_cfg.get("show_visit_referral", True): drop_v_cols.append("Yönlendirme")
+	if drop_v_cols: v_disp = v_disp.drop(columns=drop_v_cols, errors="ignore")
+	visits_html = v_disp.to_html(index=False, border=0, na_rep="—") if not v_disp.empty else "<p>Revir kaydı yok.</p>"
+
 	vitals_html = vitals.to_html(index=False, border=0, na_rep="—") if not vitals.empty else "<p>Vital kaydı yok.</p>"
 	labs_html = lab_results.to_html(index=False, border=0, na_rep="—") if not lab_results.empty else "<p>Tahlil kaydı yok.</p>"
-	profile_html = health_profile.to_html(index=False, border=0, na_rep="—") if not health_profile.empty else "<p>Sağlık profili yok.</p>"
+
+	# Filter health profile based on preferences
+	hp_disp = health_profile.copy()
+	if not report_cfg.get("show_guardian_contact", True):
+		hp_disp = hp_disp.drop(columns=["Veli", "Telefon"], errors="ignore")
+	if not report_cfg.get("show_blood_group", True):
+		hp_disp = hp_disp.drop(columns=["Kan_Grubu"], errors="ignore")
+	profile_html = hp_disp.to_html(index=False, border=0, na_rep="—") if not hp_disp.empty else "<p>Sağlık profili yok.</p>"
+
 	care_plans_html = care_plans.to_html(index=False, border=0, na_rep="—") if not care_plans.empty else "<p>Bakım planı kaydı yok.</p>"
 	if vac_rows:
 		vac_df = pd.DataFrame([dict(r) for r in vac_rows])
@@ -13491,6 +13757,11 @@ def build_student_report_section_html(student: sqlite3.Row, inst_top: str, inst_
 		if not can_eval_rep_age:
 			rep_cols = [c for c in rep_cols if "_Z" not in c and "Persantil" not in c and "Dilimi" not in c and c != "Gelisim_Degerlendirmesi"]
 
+		if not report_cfg.get("show_meas_zscores", True):
+			rep_cols = [c for c in rep_cols if "_Z" not in c and "Z-Skor" not in c]
+		if not report_cfg.get("show_meas_percentiles", True):
+			rep_cols = [c for c in rep_cols if "Persantil" not in c and "Dilimi" not in c]
+
 		rep_disp = rep_enriched[[c for c in rep_cols if c in rep_enriched.columns]].rename(columns={
 			"Yas_ay": "Yaş (Ay)", "Boy_cm": "Boy (cm)", "Boy_Z": "Boy Z-Skor", "Boy_Persantil": "Boy %",
 			"Boy_Dilimi": "Boy Dilimi", "Boy_Farki": "Boy Değişimi", "Kilo_kg": "Kilo (kg)",
@@ -13506,8 +13777,13 @@ def build_student_report_section_html(student: sqlite3.Row, inst_top: str, inst_
 
 	if report_growth_df is not None and not report_growth_df.empty and can_eval_rep_age:
 		growth_html_df = report_growth_df.copy()
-		growth_html_df["Z-Skoru (SDS)"] = growth_html_df["Z-Skoru (SDS)"].map(lambda x: f"{x:+.2f} SDS" if pd.notna(x) else "—")
-		if "Persentil (%)" in growth_html_df.columns:
+		if not report_cfg.get("show_meas_zscores", True):
+			growth_html_df = growth_html_df.drop(columns=["Z-Skoru (SDS)"], errors="ignore")
+		else:
+			growth_html_df["Z-Skoru (SDS)"] = growth_html_df["Z-Skoru (SDS)"].map(lambda x: f"{x:+.2f} SDS" if pd.notna(x) else "—")
+		if not report_cfg.get("show_meas_percentiles", True):
+			growth_html_df = growth_html_df.drop(columns=["Persentil (%)"], errors="ignore")
+		elif "Persentil (%)" in growth_html_df.columns:
 			growth_html_df["Persentil (%)"] = growth_html_df["Persentil (%)"].map(lambda x: f"%{x:.1f}p" if pd.notna(x) else "—")
 		growth_html = growth_html_df.to_html(index=False, border=0, na_rep="—")
 	else:
@@ -13519,13 +13795,13 @@ def build_student_report_section_html(student: sqlite3.Row, inst_top: str, inst_
 			growth_html = "<p style='color:#64748b;font-style:italic;'>Ölçüm kaydı bulunmadığından persantil özeti oluşturulmadı.</p>"
 
 	alert_box = ""
-	if not health_profile.empty:
+	if report_cfg.get("include_alert_box", True) and not health_profile.empty:
 		p_row = health_profile.iloc[0]
 		alerji = clean_text(p_row.get("Alerjiler"))
 		kronik = clean_text(p_row.get("Kronik_Hastalıklar"))
 		gecmis = clean_text(p_row.get("Sağlık_Geçmişi"))
 		ilac = clean_text(p_row.get("İlaçlar"))
-		kan = clean_text(p_row.get("Kan_Grubu"))
+		kan = clean_text(p_row.get("Kan_Grubu")) if report_cfg.get("show_blood_group", True) else ""
 		if alerji or kronik or gecmis or ilac or kan:
 			alert_box = f"""
 			<div style='background:#fef2f2;border:2px solid #ef4444;border-radius:6px;padding:12px;margin:14px 0;'>
@@ -13539,14 +13815,8 @@ def build_student_report_section_html(student: sqlite3.Row, inst_top: str, inst_
 			"""
 
 	page_break_style = "page-break-after: always; break-after: page;" if is_multi else ""
-	return f"""
-<div class='student-report-page' style='{page_break_style}'>
-	<div class='header-box'>
-		<h3>{inst_top}{f" · {inst_school}" if inst_school else ""}</h3>
-		<h1>ÖĞRENCİ REVİR & SAĞLIK GELİŞİM RAPORU</h1>
-		<h3>Rapor Tarihi: {date.today().strftime('%d.%m.%Y')}</h3>
-	</div>
 
+	card_html = f"""
 	<div class='student-card'>
 		<div class='card-row'>
 			<div class='card-item'><b>Adı Soyadı:</b> {safe_name}</div>
@@ -13557,33 +13827,18 @@ def build_student_report_section_html(student: sqlite3.Row, inst_top: str, inst_
 			<div class='card-item'><b>Doğum Tarihi:</b> {html.escape(str(stu_birth or '—'))}</div>
 		</div>
 	</div>
+""" if report_cfg.get("include_id_box", True) else ""
 
-	{alert_box}
+	profile_section_html = f"<h2>📋 Sağlık Profili ve Acil Bilgiler</h2>\n{profile_html}" if report_cfg.get("include_health_profile", True) else ""
+	growth_section_html = f"<h2>📏 Büyüme ve Persantil Taraması</h2>\n{growth_html}" if report_cfg.get("include_growth_summary", True) else ""
+	vitals_section_html = f"<h2>💓 Vital Ölçüm Geçmişi</h2>\n{vitals_html}" if report_cfg.get("include_vitals", True) else ""
+	labs_section_html = f"<h2>🧪 Laboratuvar Tahlil Sonuçları</h2>\n{labs_html}" if report_cfg.get("include_lab_results", True) else ""
+	meas_section_html = f"<h2>⚖️ Boy, Kilo ve Baş Çevresi Ölçüm Geçmişi</h2>\n{measurements_html}" if report_cfg.get("include_measurements_history", True) else ""
+	visits_section_html = f"<h2>🩺 Revir Başvuru ve Müdahale Kayıtları</h2>\n{visits_html}" if report_cfg.get("include_visits", True) else ""
+	cp_section_html = f"<h2>📝 Bakım Planı Kayıtları</h2>\n{care_plans_html}" if report_cfg.get("include_care_plans", True) else ""
+	vac_section_html = f"<h2>💉 Aşı ve Bağışıklama Kayıtları (T.C. Sağlık Bakanlığı)</h2>\n{vaccinations_html}" if report_cfg.get("include_vaccinations", True) else ""
 
-	<h2>📋 Sağlık Profili ve Acil Bilgiler</h2>
-	{profile_html}
-
-	<h2>📏 Büyüme ve Persantil Taraması</h2>
-	{growth_html}
-
-	<h2>💓 Vital Ölçüm Geçmişi</h2>
-	{vitals_html}
-
-	<h2>🧪 Laboratuvar Tahlil Sonuçları</h2>
-	{labs_html}
-
-	<h2>⚖️ Boy, Kilo ve Baş Çevresi Ölçüm Geçmişi</h2>
-	{measurements_html}
-
-	<h2>🩺 Revir Başvuru ve Müdahale Kayıtları</h2>
-	{visits_html}
-
-	<h2>📝 Bakım Planı Kayıtları</h2>
-	{care_plans_html}
-
-	<h2>💉 Aşı ve Bağışıklama Kayıtları (T.C. Sağlık Bakanlığı)</h2>
-	{vaccinations_html}
-
+	sig_section_html = f"""
 	<div class='signature-section'>
 		<div class='sig-box'>
 			<b>{inst_nurse}</b><br><br><br>
@@ -13598,16 +13853,49 @@ def build_student_report_section_html(student: sqlite3.Row, inst_top: str, inst_
 			(Mühür / İmza)
 		</div>
 	</div>
+""" if report_cfg.get("include_signatures", True) else ""
 
+	disclaimer_html = """
 	<p style='margin-top: 30px; font-size: 11px; color: #94a3b8; text-align: center;'>
 		Bu belge okul reviri dahili izlem ve sağlık bilgilendirme tutanağıdır; tek başına resmi sağlık kurulu raporu veya tıbbi tanı yerine geçmez.
 	</p>
+""" if report_cfg.get("include_footer_disclaimer", True) else ""
+
+	return f"""
+<div class='student-report-page' style='{page_break_style}'>
+	<div class='header-box'>
+		<h3>{inst_top}{f" · {inst_school}" if inst_school else ""}</h3>
+		<h1>ÖĞRENCİ REVİR & SAĞLIK GELİŞİM RAPORU</h1>
+		<h3>Rapor Tarihi: {date.today().strftime('%d.%m.%Y')}</h3>
+	</div>
+
+	{card_html}
+	{alert_box}
+	{profile_section_html}
+	{growth_section_html}
+	{vitals_section_html}
+	{labs_section_html}
+	{meas_section_html}
+	{visits_section_html}
+	{cp_section_html}
+	{vac_section_html}
+	{sig_section_html}
+	{disclaimer_html}
 </div>
 """
 
 
 def render_reports() -> None:
-	st.markdown("## Kişi ve Sınıf Raporları (Yazdırma & İndirme)")
+	hdr_col1, hdr_col2 = st.columns([3.8, 1.4])
+	with hdr_col1:
+		st.markdown("## 🖨️ Kişi ve Sınıf Raporları (Yazdırma & İndirme)")
+		st.caption("Resmi kurum antetli, Word (.docx) veya yazdırılabilir formatta bireysel öğrenci ve tüm sınıf sağlık raporları oluşturun.")
+	with hdr_col2:
+		st.markdown("<div style='height: 4px'></div>", unsafe_allow_html=True)
+		if st.button("⚙️ Rapor Çıktı Ayarları", key="btn_open_report_settings_modal", type="secondary", use_container_width=True, help="Raporda hangi bölümlerin ve alanların yer alacağını özelleştirin"):
+			open_report_settings_dialog()
+
+	report_cfg = get_report_settings()
 	all_classes = [c for c in get_classes() if c != "Sivil / Diğer"]
 
 	# Report mode selection: Single Person or Whole Class
@@ -13665,7 +13953,7 @@ button {{ padding: 12px 20px; background: #176b68; color: white; border: none; b
 		with col_m2:
 			sel_cls_for_report = st.selectbox(
 				"Raporu Yazdırılacak Sınıfı Seçin",
-				all_classes,
+			all_classes,
 				key="report_chosen_class",
 			)
 
@@ -13693,7 +13981,7 @@ button {{ padding: 12px 20px; background: #176b68; color: white; border: none; b
 				is_last = (idx == len(class_students) - 1)
 				sections.append(
 					build_student_report_section_html(
-						st_row, inst_top, inst_school, inst_nurse, inst_princ, is_multi=not is_last
+						st_row, inst_top, inst_school, inst_nurse, inst_princ, is_multi=not is_last, report_cfg=report_cfg
 					)
 				)
 
@@ -13702,7 +13990,7 @@ button {{ padding: 12px 20px; background: #176b68; color: white; border: none; b
 
 			down_c1, down_c2 = st.columns([2, 1])
 			with down_c1:
-				batch_docx = build_class_batch_report_docx(sel_cls_for_report)
+				batch_docx = build_class_batch_report_docx(sel_cls_for_report, report_cfg=report_cfg)
 				st.download_button(
 					f"📝 {sel_cls_for_report} - Tüm Sınıfın Word Raporunu İndir ({len(class_students)} Öğrenci, .docx)",
 					data=batch_docx,
@@ -13713,6 +14001,9 @@ button {{ padding: 12px 20px; background: #176b68; color: white; border: none; b
 				)
 			with down_c2:
 				st.caption("İndirilen Microsoft Word (.docx) dosyasında her öğrencinin sağlık ve revir dosyası ayrı bir sayfa olarak başlar; doğrudan Word'de düzenleyebilir ve yazdırabilirsiniz.")
+
+			with st.expander("🖨️ Yazdırılabilir Sınıf Raporu Önizleme (Tarayıcıdan Yazdır / PDF)", expanded=False):
+				st.components.v1.html(class_print_html, height=750, scrolling=True)
 
 	else:
 		# Single person report
@@ -13740,119 +14031,122 @@ button {{ padding: 12px 20px; background: #176b68; color: white; border: none; b
 					"SELECT r.report_date AS Tarih, r.file_name AS Dosya, x.test_name AS Test, x.value AS Sonuç, x.unit AS Birim, x.ref_low AS Referans_Alt, x.ref_high AS Referans_Üst, x.lab_flag AS Rapor_İşareti FROM lab_results x JOIN lab_reports r ON r.id=x.report_id WHERE r.student_id=? ORDER BY r.report_date DESC, x.id",
 					connection, params=(student["id"],),
 				)
-				health_profile = pd.read_sql_query(
-					"""SELECT COALESCE(h.guardian_name, s.guardian_name) AS Veli,
-					   COALESCE(h.guardian_phone, s.guardian_phone) AS Telefon, h.allergies AS Alerjiler,
-					   h.chronic_conditions AS Kronik_Hastalıklar, h.medical_history AS Sağlık_Geçmişi,
-					   h.medications AS İlaçlar, h.blood_group AS Kan_Grubu,
-					   h.emergency_notes AS Acil_Notlar, h.updated_at AS Güncelleme, h.reviewed_by AS Doğrulayan
-				   FROM students s LEFT JOIN health_profiles h ON h.student_id=s.id
-				   WHERE s.id=? AND (h.student_id IS NOT NULL OR s.guardian_name IS NOT NULL OR s.guardian_phone IS NOT NULL)""",
-					connection, params=(student["id"],),
-				)
-				care_plans = pd.read_sql_query(
-					"SELECT created_at AS Tarih, nursing_diagnosis AS Hemşirelik_Değerlendirmesi, observed_facts AS Olgular, goals AS Hedefler, interventions AS Girişimler, monitoring AS İzlem, escalation AS Yönlendirme, status AS Durum, reviewed_by AS Sorumlu FROM care_plans WHERE student_id=? ORDER BY created_at DESC",
-					connection, params=(student["id"],),
-				)
-			lab_results = assess_lab_history(lab_results)
-			report_growth_df = None
-			person_meas = get_person_latest_measurements(student["id"])
-			if person_meas["has_data"] and student["sex"]:
-				latest_m = None
-				if person_meas["latest_measured_on"] and student["birth_date"]:
-					try:
-						latest_m = age_in_months(student["birth_date"], date.fromisoformat(person_meas["latest_measured_on"]))
-					except Exception:
-						latest_m = None
-				if latest_m is not None:
-					report_growth_df = get_clinical_growth_summary_table(
-						person_meas["height_cm"], person_meas["weight_kg"], person_meas["bmi"],
-						student["sex"], latest_m, head_circ_cm=person_meas["head_circ_cm"]
-					)
-			st.markdown(f"### {student['person_type']} · {student['full_name']} · {student['class_name']}")
-			st.write(f"Okul no: {student['student_no'] or '—'} · Cinsiyet: {student['sex'] or 'Belirtilmedi'} · Doğum tarihi: {student['birth_date'] or '—'}")
-			st.markdown("#### Sağlık profili")
-			if health_profile.empty:
-				st.caption("Sağlık profili kaydı bulunmuyor.")
-			else:
-				st.dataframe(health_profile, width="stretch", hide_index=True)
-			st.markdown("#### Bakım planı taslakları")
-			if care_plans.empty:
-				st.caption("Bakım planı kaydı bulunmuyor.")
-			else:
-				st.dataframe(care_plans, width="stretch", hide_index=True)
-			st.markdown("#### 🩺 Klinik Büyüme ve Persantil Değerlendirmesi (WHO / ÇEDD Standardı)")
-			if report_growth_df is not None and not report_growth_df.empty:
-				st.dataframe(
-					report_growth_df,
-					width="stretch",
-					hide_index=True,
-					column_config=get_clinical_growth_column_config(),
-				)
-				st.caption("Dünya Sağlık Örgütü (WHO) LMS büyüme referansına dayalı antropometrik tarama ve Z-skoru (SDS) raporu.")
-			else:
-				st.caption("Persantil ve Z-skoru raporu için öğrenci profilinde doğum tarihi, cinsiyet ve en az bir ölçüm kaydı bulunmalıdır.")
-			st.markdown("#### Vital geçmişi")
-			if vitals.empty:
-				st.caption("Vital kayıt bulunmuyor.")
-			else:
-				st.dataframe(vitals, width="stretch", hide_index=True)
-			st.markdown("#### Tahlil geçmişi")
-			if lab_results.empty:
-				st.caption("Tahlil kaydı bulunmuyor.")
-			else:
-				st.dataframe(lab_results, width="stretch", hide_index=True)
-			st.markdown("#### Ölçüm ve persantil geçmişi")
-			if measurements.empty:
-				st.caption("Ölçüm kaydı bulunmuyor.")
-			else:
-				rep_enriched = enrich_measurements_with_percentiles(measurements, stu_sex, stu_birth)
-				m_cols = [
-					"Tarih", "Yas_ay", "Boy_cm", "Boy_Z", "Boy_Persantil", "Boy_Dilimi", "Boy_Farki",
-					"Kilo_kg", "Kilo_Z", "Kilo_Persantil", "Kilo_Dilimi", "Kilo_Farki",
-					"Ideal_Kilo_Araligi",
-					"Bas_Cevresi_cm", "Bas_Cevresi_Z", "Bas_Cevresi_Persantil",
-					"BMI", "BMI_Z", "BMI_Persantil", "Gelisim_Degerlendirmesi"
-				]
-				avail_cols = [c for c in m_cols if c in rep_enriched.columns]
-				rep_disp = rep_enriched[avail_cols].rename(columns={
-					"Yas_ay": "Yaş (Ay)", "Boy_cm": "Boy (cm)", "Boy_Z": "Boy Z-Skor", "Boy_Persantil": "Boy %",
-					"Boy_Dilimi": "Boy Dilimi", "Boy_Farki": "Boy Değişimi", "Kilo_kg": "Kilo (kg)",
-					"Kilo_Z": "Kilo Z-Skor", "Kilo_Persantil": "Kilo %", "Kilo_Dilimi": "Kilo Dilimi",
-					"Kilo_Farki": "Kilo Değişimi", "Ideal_Kilo_kg": "İdeal Kilo (kg)", "Ideal_Kilo_Araligi": "İdeal Kilo Aralığı", "Bas_Cevresi_cm": "Baş Çevresi (cm)",
-					"Bas_Cevresi_Z": "Baş Çevresi Z-Skor", "Bas_Cevresi_Persantil": "Baş Çevresi %",
-					"BMI": "VKİ (BMI)", "BMI_Z": "VKİ Z-Skor", "BMI_Persantil": "VKİ %",
-					"Gelisim_Degerlendirmesi": "Gelişim Değerlendirmesi"
-				})
-				st.dataframe(
-					rep_disp,
-					width="stretch",
-					hide_index=True,
-					column_config=get_measurement_history_column_config(),
-				)
-				if len(measurements) > 1:
-					first, last = measurements.iloc[0], measurements.iloc[-1]
-					if pd.notna(last["Boy_cm"]) and pd.notna(first["Boy_cm"]) and pd.notna(last["Kilo_kg"]) and pd.notna(first["Kilo_kg"]):
-						st.info(f"İlk ölçümden son ölçüme değişim: boy {last['Boy_cm'] - first['Boy_cm']:+.1f} cm, kilo {last['Kilo_kg'] - first['Kilo_kg']:+.1f} kg.")
-			st.markdown("#### Revir geçmişi")
-			if visits.empty:
-				st.caption("Revir kaydı bulunmuyor.")
-			else:
-				st.dataframe(visits, width="stretch", hide_index=True)
-
-			single_body = build_student_report_section_html(student, inst_top, inst_school, inst_nurse, inst_princ, is_multi=False)
-			print_html = css_header + single_body + "</body>\n</html>"
-			print_name = re.sub(r"[^A-Za-z0-9_-]+", "_", student["full_name"]).strip("_") or "kisi"
-			single_docx = build_student_report_docx(student)
-			st.download_button(
-				"📝 Kişi Sağlık Raporunu İndir (.docx)",
-				data=single_docx,
-				file_name=f"{print_name}_saglik_raporu.docx",
-				mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-				type="primary",
-				use_container_width=True,
+			health_profile = pd.read_sql_query(
+				"""SELECT COALESCE(h.guardian_name, s.guardian_name) AS Veli,
+				   COALESCE(h.guardian_phone, s.guardian_phone) AS Telefon, h.allergies AS Alerjiler,
+				   h.chronic_conditions AS Kronik_Hastalıklar, h.medical_history AS Sağlık_Geçmişi,
+				   h.medications AS İlaçlar, h.blood_group AS Kan_Grubu,
+				   h.emergency_notes AS Acil_Notlar, h.updated_at AS Güncelleme, h.reviewed_by AS Doğrulayan
+			   FROM students s LEFT JOIN health_profiles h ON h.student_id=s.id
+			   WHERE s.id=? AND (h.student_id IS NOT NULL OR s.guardian_name IS NOT NULL OR s.guardian_phone IS NOT NULL)""",
+				connection, params=(student["id"],),
 			)
-			st.caption("İndirilen Microsoft Word (.docx) dosyasını Microsoft Office Word uygulamasında açıp doğrudan düzenleyebilir veya yazdırabilirsiniz.")
+			care_plans = pd.read_sql_query(
+				"SELECT created_at AS Tarih, nursing_diagnosis AS Hemşirelik_Değerlendirmesi, observed_facts AS Olgular, goals AS Hedefler, interventions AS Girişimler, monitoring AS İzlem, escalation AS Yönlendirme, status AS Durum, reviewed_by AS Sorumlu FROM care_plans WHERE student_id=? ORDER BY created_at DESC",
+				connection, params=(student["id"],),
+			)
+		lab_results = assess_lab_history(lab_results)
+		report_growth_df = None
+		person_meas = get_person_latest_measurements(student["id"])
+		if person_meas["has_data"] and student["sex"]:
+			latest_m = None
+			if person_meas["latest_measured_on"] and student["birth_date"]:
+				try:
+					latest_m = age_in_months(student["birth_date"], date.fromisoformat(person_meas["latest_measured_on"]))
+				except Exception:
+					latest_m = None
+			if latest_m is not None:
+				report_growth_df = get_clinical_growth_summary_table(
+					person_meas["height_cm"], person_meas["weight_kg"], person_meas["bmi"],
+					student["sex"], latest_m, head_circ_cm=person_meas["head_circ_cm"]
+				)
+		st.markdown(f"### {student['person_type']} · {student['full_name']} · {student['class_name']}")
+		st.write(f"Okul no: {student['student_no'] or '—'} · Cinsiyet: {student['sex'] or 'Belirtilmedi'} · Doğum tarihi: {student['birth_date'] or '—'}")
+		st.markdown("#### Sağlık profili")
+		if health_profile.empty:
+			st.caption("Sağlık profili kaydı bulunmuyor.")
+		else:
+			st.dataframe(health_profile, width="stretch", hide_index=True)
+		st.markdown("#### Bakım planı taslakları")
+		if care_plans.empty:
+			st.caption("Bakım planı kaydı bulunmuyor.")
+		else:
+			st.dataframe(care_plans, width="stretch", hide_index=True)
+		st.markdown("#### 🩺 Klinik Büyüme ve Persantil Değerlendirmesi (WHO / ÇEDD Standardı)")
+		if report_growth_df is not None and not report_growth_df.empty:
+			st.dataframe(
+				report_growth_df,
+				width="stretch",
+				hide_index=True,
+				column_config=get_clinical_growth_column_config(),
+			)
+			st.caption("Dünya Sağlık Örgütü (WHO) LMS büyüme referansına dayalı antropometrik tarama ve Z-skoru (SDS) raporu.")
+		else:
+			st.caption("Persantil ve Z-skoru raporu için öğrenci profilinde doğum tarihi, cinsiyet ve en az bir ölçüm kaydı bulunmalıdır.")
+		st.markdown("#### Vital geçmişi")
+		if vitals.empty:
+			st.caption("Vital kayıt bulunmuyor.")
+		else:
+			st.dataframe(vitals, width="stretch", hide_index=True)
+		st.markdown("#### Tahlil geçmişi")
+		if lab_results.empty:
+			st.caption("Tahlil kaydı bulunmuyor.")
+		else:
+			st.dataframe(lab_results, width="stretch", hide_index=True)
+		st.markdown("#### Ölçüm ve persantil geçmişi")
+		if measurements.empty:
+			st.caption("Ölçüm kaydı bulunmuyor.")
+		else:
+			rep_enriched = enrich_measurements_with_percentiles(measurements, stu_sex, stu_birth)
+			m_cols = [
+				"Tarih", "Yas_ay", "Boy_cm", "Boy_Z", "Boy_Persantil", "Boy_Dilimi", "Boy_Farki",
+				"Kilo_kg", "Kilo_Z", "Kilo_Persantil", "Kilo_Dilimi", "Kilo_Farki",
+				"Ideal_Kilo_Araligi",
+				"Bas_Cevresi_cm", "Bas_Cevresi_Z", "Bas_Cevresi_Persantil",
+				"BMI", "BMI_Z", "BMI_Persantil", "Gelisim_Degerlendirmesi"
+			]
+			avail_cols = [c for c in m_cols if c in rep_enriched.columns]
+			rep_disp = rep_enriched[avail_cols].rename(columns={
+				"Yas_ay": "Yaş (Ay)", "Boy_cm": "Boy (cm)", "Boy_Z": "Boy Z-Skor", "Boy_Persantil": "Boy %",
+				"Boy_Dilimi": "Boy Dilimi", "Boy_Farki": "Boy Değişimi", "Kilo_kg": "Kilo (kg)",
+				"Kilo_Z": "Kilo Z-Skor", "Kilo_Persantil": "Kilo %", "Kilo_Dilimi": "Kilo Dilimi",
+				"Kilo_Farki": "Kilo Değişimi", "Ideal_Kilo_kg": "İdeal Kilo (kg)", "Ideal_Kilo_Araligi": "İdeal Kilo Aralığı", "Bas_Cevresi_cm": "Baş Çevresi (cm)",
+				"Bas_Cevresi_Z": "Baş Çevresi Z-Skor", "Bas_Cevresi_Persantil": "Baş Çevresi %",
+				"BMI": "VKİ (BMI)", "BMI_Z": "VKİ Z-Skor", "BMI_Persantil": "VKİ %",
+				"Gelisim_Degerlendirmesi": "Gelişim Değerlendirmesi"
+			})
+			st.dataframe(
+				rep_disp,
+				width="stretch",
+				hide_index=True,
+				column_config=get_measurement_history_column_config(),
+			)
+			if len(measurements) > 1:
+				first, last = measurements.iloc[0], measurements.iloc[-1]
+				if pd.notna(last["Boy_cm"]) and pd.notna(first["Boy_cm"]) and pd.notna(last["Kilo_kg"]) and pd.notna(first["Kilo_kg"]):
+					st.info(f"İlk ölçümden son ölçüme değişim: boy {last['Boy_cm'] - first['Boy_cm']:+.1f} cm, kilo {last['Kilo_kg'] - first['Kilo_kg']:+.1f} kg.")
+		st.markdown("#### Revir geçmişi")
+		if visits.empty:
+			st.caption("Revir kaydı bulunmuyor.")
+		else:
+			st.dataframe(visits, width="stretch", hide_index=True)
+
+		single_body = build_student_report_section_html(student, inst_top, inst_school, inst_nurse, inst_princ, is_multi=False, report_cfg=report_cfg)
+		print_html = css_header + single_body + "</body>\n</html>"
+		print_name = re.sub(r"[^A-Za-z0-9_-]+", "_", student["full_name"]).strip("_") or "kisi"
+		single_docx = build_student_report_docx(student, report_cfg=report_cfg)
+		st.download_button(
+			"📝 Kişi Sağlık Raporunu İndir (.docx)",
+			data=single_docx,
+			file_name=f"{print_name}_saglik_raporu.docx",
+			mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+			type="primary",
+			use_container_width=True,
+		)
+		st.caption("İndirilen Microsoft Word (.docx) dosyasını Microsoft Office Word uygulamasında açıp doğrudan düzenleyebilir veya yazdırabilirsiniz.")
+
+		with st.expander("🖨️ Yazdırılabilir Kişi Raporu Önizleme (Tarayıcıdan Yazdır / PDF)", expanded=False):
+			st.components.v1.html(print_html, height=750, scrolling=True)
 
 	with connect_db() as connection:
 		all_students = get_students_enriched().drop(columns=["id"], errors="ignore")
@@ -13915,6 +14209,7 @@ button {{ padding: 12px 20px; background: #176b68; color: white; border: none; b
 
 	st.download_button("Tüm kişi, persantil, revir, vital, tahlil ve bakım planlarını Excel indir", workbook_download(all_students, all_visits, all_measurements, all_vitals, all_labs, all_profiles, all_plans),
 					   "revir_raporu.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
 def render_academic_year_settings() -> None:
