@@ -14173,20 +14173,20 @@ button {{ padding: 12px 20px; background: #176b68; color: white; border: none; b
 					"SELECT r.report_date AS Tarih, r.file_name AS Dosya, x.test_name AS Test, x.value AS Sonuç, x.unit AS Birim, x.ref_low AS Referans_Alt, x.ref_high AS Referans_Üst, x.lab_flag AS Rapor_İşareti FROM lab_results x JOIN lab_reports r ON r.id=x.report_id WHERE r.student_id=? ORDER BY r.report_date DESC, x.id",
 					connection, params=(student["id"],),
 				)
-			health_profile = pd.read_sql_query(
-				"""SELECT COALESCE(h.guardian_name, s.guardian_name) AS Veli,
-				   COALESCE(h.guardian_phone, s.guardian_phone) AS Telefon, h.allergies AS Alerjiler,
-				   h.chronic_conditions AS Kronik_Hastalıklar, h.medical_history AS Sağlık_Geçmişi,
-				   h.medications AS İlaçlar, h.blood_group AS Kan_Grubu,
-				   h.emergency_notes AS Acil_Notlar, h.updated_at AS Güncelleme, h.reviewed_by AS Doğrulayan
-			   FROM students s LEFT JOIN health_profiles h ON h.student_id=s.id
-			   WHERE s.id=? AND (h.student_id IS NOT NULL OR s.guardian_name IS NOT NULL OR s.guardian_phone IS NOT NULL)""",
-				connection, params=(student["id"],),
-			)
-			care_plans = pd.read_sql_query(
-				"SELECT created_at AS Tarih, nursing_diagnosis AS Hemşirelik_Değerlendirmesi, observed_facts AS Olgular, goals AS Hedefler, interventions AS Girişimler, monitoring AS İzlem, escalation AS Yönlendirme, status AS Durum, reviewed_by AS Sorumlu FROM care_plans WHERE student_id=? ORDER BY created_at DESC",
-				connection, params=(student["id"],),
-			)
+				health_profile = pd.read_sql_query(
+					"""SELECT COALESCE(h.guardian_name, s.guardian_name) AS Veli,
+					   COALESCE(h.guardian_phone, s.guardian_phone) AS Telefon, h.allergies AS Alerjiler,
+					   h.chronic_conditions AS Kronik_Hastalıklar, h.medical_history AS Sağlık_Geçmişi,
+					   h.medications AS İlaçlar, h.blood_group AS Kan_Grubu,
+					   h.emergency_notes AS Acil_Notlar, h.updated_at AS Güncelleme, h.reviewed_by AS Doğrulayan
+				   FROM students s LEFT JOIN health_profiles h ON h.student_id=s.id
+				   WHERE s.id=? AND (h.student_id IS NOT NULL OR s.guardian_name IS NOT NULL OR s.guardian_phone IS NOT NULL)""",
+					connection, params=(student["id"],),
+				)
+				care_plans = pd.read_sql_query(
+					"SELECT created_at AS Tarih, nursing_diagnosis AS Hemşirelik_Değerlendirmesi, observed_facts AS Olgular, goals AS Hedefler, interventions AS Girişimler, monitoring AS İzlem, escalation AS Yönlendirme, status AS Durum, reviewed_by AS Sorumlu FROM care_plans WHERE student_id=? ORDER BY created_at DESC",
+					connection, params=(student["id"],),
+				)
 			lab_results = assess_lab_history(lab_results)
 			report_growth_df = None
 			person_meas = get_person_latest_measurements(student["id"])
