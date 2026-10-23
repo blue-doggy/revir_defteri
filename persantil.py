@@ -277,6 +277,104 @@ def build_app_css(font_css: str, font_url: str, base_fsize: str, pad_top: str, t
 	header[data-testid="stHeader"] {{
 		background: transparent !important;
 	}}
+
+	/* Sol Alt Köşe - Menüyü Aç Düğmesi Tasarımı */
+	#fab-menu-toggle,
+	div[data-testid="collapsedControl"],
+	[data-testid="collapsedControl"],
+	[data-testid="stSidebarCollapsedControl"] {{
+		position: fixed !important;
+		bottom: 24px !important;
+		left: 24px !important;
+		top: auto !important;
+		z-index: 999999 !important;
+		display: flex !important;
+		align-items: center !important;
+		justify-content: center !important;
+		gap: 8px !important;
+		background: #0d9488 !important;
+		color: #ffffff !important;
+		padding: 10px 20px !important;
+		border-radius: 50px !important;
+		box-shadow: 0 4px 18px rgba(13, 148, 136, 0.45) !important;
+		border: 2px solid rgba(255, 255, 255, 0.35) !important;
+		cursor: pointer !important;
+		font-family: inherit !important;
+		font-size: 14.5px !important;
+		font-weight: 700 !important;
+		letter-spacing: 0.3px !important;
+		transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
+		visibility: visible !important;
+		opacity: 1 !important;
+		user-select: none !important;
+		text-decoration: none !important;
+	}}
+
+	#fab-menu-toggle:hover,
+	div[data-testid="collapsedControl"]:hover,
+	[data-testid="collapsedControl"]:hover,
+	[data-testid="stSidebarCollapsedControl"]:hover {{
+		background: #0f766e !important;
+		transform: translateY(-2px) scale(1.05) !important;
+		box-shadow: 0 6px 24px rgba(13, 148, 136, 0.6) !important;
+	}}
+
+	#fab-menu-toggle:active,
+	div[data-testid="collapsedControl"]:active,
+	[data-testid="collapsedControl"]:active {{
+		transform: translateY(0) scale(0.98) !important;
+	}}
+
+	div[data-testid="collapsedControl"] button,
+	[data-testid="collapsedControl"] button,
+	[data-testid="stSidebarCollapsedControl"] button {{
+		background: transparent !important;
+		border: none !important;
+		color: #ffffff !important;
+		padding: 0 !important;
+		margin: 0 !important;
+		display: flex !important;
+		align-items: center !important;
+		gap: 8px !important;
+		font-size: 14.5px !important;
+		font-weight: 700 !important;
+		cursor: pointer !important;
+		box-shadow: none !important;
+	}}
+
+	div[data-testid="collapsedControl"] button:hover,
+	[data-testid="collapsedControl"] button:hover,
+	[data-testid="stSidebarCollapsedControl"] button:hover {{
+		background: transparent !important;
+		border: none !important;
+	}}
+
+	div[data-testid="collapsedControl"] svg,
+	[data-testid="collapsedControl"] svg,
+	[data-testid="stSidebarCollapsedControl"] svg {{
+		color: #ffffff !important;
+		fill: #ffffff !important;
+		stroke: #ffffff !important;
+		width: 18px !important;
+		height: 18px !important;
+	}}
+
+	div[data-testid="collapsedControl"] button::after,
+	[data-testid="collapsedControl"] button::after,
+	[data-testid="stSidebarCollapsedControl"] button::after {{
+		content: "Menüyü Aç";
+		color: #ffffff !important;
+		font-weight: 700 !important;
+		font-size: 14.5px !important;
+		letter-spacing: 0.3px !important;
+		white-space: nowrap !important;
+	}}
+
+	/* Sidebar açıkken floating menü açma butonunun gizlenmesi */
+	section[data-testid="stSidebar"]:not([aria-expanded="false"]) ~ * #fab-menu-toggle,
+	.stApp:has(section[data-testid="stSidebar"]:not([aria-expanded="false"]):not([style*="display: none"])) #fab-menu-toggle {{
+		display: none !important;
+	}}
 	"""
 
 	dark_rules = """
@@ -15596,6 +15694,37 @@ def main() -> None:
 
 	app_style_tag = build_app_css(font_css, font_url, base_fsize, pad_top, theme, theme_name, dark_mode_mode)
 	st.markdown(app_style_tag, unsafe_allow_html=True)
+
+	# Sol Alt Köşe - Menüyü Aç Butonu
+	floating_menu_html = """
+	<div id="fab-menu-toggle" onclick="(function(){
+		var targets = [
+			'[data-testid=\'collapsedControl\'] button',
+			'[data-testid=\'collapsedControl\']',
+			'[data-testid=\'stSidebarCollapsedControl\'] button',
+			'[data-testid=\'stSidebarCollapsedControl\']',
+			'button[data-testid=\'stSidebarToggle\']',
+			'button[aria-label*=\'sidebar\' i]'
+		];
+		for (var i = 0; i < targets.length; i++) {
+			var el = document.querySelector(targets[i]);
+			if (el && el.offsetParent !== null) { el.click(); return; }
+		}
+		for (var i = 0; i < targets.length; i++) {
+			var el = document.querySelector(targets[i]);
+			if (el) { el.click(); return; }
+		}
+	})()" title="Menüyü Aç">
+		<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+			<line x1="3" y1="12" x2="21" y2="12"></line>
+			<line x1="3" y1="6" x2="21" y2="6"></line>
+			<line x1="3" y1="18" x2="21" y2="18"></line>
+		</svg>
+		<span>Menüyü Aç</span>
+	</div>
+	"""
+	st.markdown(floating_menu_html, unsafe_allow_html=True)
+
 	with st.sidebar:
 		if APP_ICON_PATH.exists():
 			from PIL import Image as _PILImg
@@ -15645,6 +15774,34 @@ def main() -> None:
 					st.rerun()
 		st.caption("🔒 Veriler bu cihazda saklanır.")
 		st.caption(f"🚀 **Sürüm:** v{APP_VERSION}")
+
+		# Sidebar Kapatma Butonu
+		st.markdown("""
+		<div onclick="(function(){
+			var closeBtn = document.querySelector('[data-testid=\'stSidebarCollapseButton\'] button')
+						|| document.querySelector('[data-testid=\'stSidebarCollapseButton\']')
+						|| document.querySelector('section[data-testid=\'stSidebar\'] button[aria-label*=\'close\' i]')
+						|| document.querySelector('section[data-testid=\'stSidebar\'] button[aria-label*=\'collapse\' i]');
+			if (closeBtn) closeBtn.click();
+		})()" style="
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			gap: 6px;
+			padding: 6px 10px;
+			margin-top: 8px;
+			border-radius: 6px;
+			border: 1px solid var(--line);
+			background: var(--card-bg);
+			color: var(--text-muted);
+			font-size: 12.5px;
+			font-weight: 600;
+			cursor: pointer;
+			transition: all 0.2s ease;
+		" onmouseover="this.style.background='var(--mint)'; this.style.color='var(--teal)';" onmouseout="this.style.background='var(--card-bg)'; this.style.color='var(--text-muted)';">
+			<span>◀</span> <span>Menüyü Kapat</span>
+		</div>
+		""", unsafe_allow_html=True)
 
 	# Extract clean page name regardless of emoji prefix
 	page_clean = page.split(" ", 1)[-1] if " " in page else page
