@@ -153,6 +153,7 @@ DEFAULT_APP_SETTINGS: dict[str, str] = {
 	"screening_visible_fields": "height_cm,weight_kg,head_circ_cm,temperature_c,pulse_bpm,spo2_pct,wears_glasses,vision_right,vision_left,hair_screening,hearing_right,hearing_left,health_behavior,harmful_habits,psychosocial_status",
 	"custom_class_templates": "{}",
 	"medication_visible_fields": "med_route,dosage_pattern,dose_unit,meal_relation,total_volume,duration_days,active_days,storage_condition,guardian_consent,expiry_date,special_notes",
+	"page_sections_visibility": "{}",
 }
 
 COUNTRY_OPTIONS = [
@@ -200,6 +201,7 @@ def build_app_css(font_css: str, font_url: str, base_fsize: str, pad_top: str, t
 	is_theme_dark = "Dark" in theme_name or "Koyu" in theme_name
 	is_forced_dark = (dark_mode_mode == "Açık (Daima Karanlık Mod - Yüksek Kontrastlı Koyu)") or is_theme_dark
 	is_forced_light = (dark_mode_mode == "Kapalı (Dark Mode'a Adapte Olma - Sabit Aydınlık)") and not is_theme_dark
+	is_glass = ("Glass" in theme_name) or ("Cam" in theme_name)
 
 	base_rules = f"""
 	@import url('{font_url}');
@@ -226,14 +228,57 @@ def build_app_css(font_css: str, font_url: str, base_fsize: str, pad_top: str, t
 	[data-testid="stSidebar"] {{ background: var(--sidebar-bg); border-right: 1px solid var(--line); }}
 	[data-testid="stSidebar"] * {{ color: var(--text-main); }}
 	[data-testid="stSidebar"] .stCaption, [data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {{ color: var(--text-muted) !important; }}
-	[data-testid="stMetric"] {{ background: var(--card-bg); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }}
+	[data-testid="stMetric"] {{ 
+		background: var(--card-bg); 
+		border: 1px solid var(--line); 
+		border-radius: 12px !important; 
+		padding: 16px 18px !important; 
+		box-shadow: 0 2px 8px rgba(0,0,0,0.04); 
+		transition: transform 0.2s ease, box-shadow 0.2s ease !important;
+	}}
+	[data-testid="stMetric"]:hover {{
+		transform: translateY(-2px) !important;
+		box-shadow: 0 6px 18px rgba(0,0,0,0.07) !important;
+	}}
 	[data-testid="stMetricLabel"] p {{ color: var(--text-muted) !important; font-size: 13.5px; font-weight: 600; }}
-	[data-testid="stMetricValue"] div {{ color: var(--text-heading) !important; font-weight: 700; }}
-	[data-testid="stVerticalBlockBorderWrapper"] > div {{ background: var(--card-bg); border: 1px solid var(--line) !important; border-radius: 8px; }}
-	.stButton > button, .stDownloadButton > button {{ border-radius: 6px; border: 1px solid var(--teal); color: var(--teal); background: var(--card-bg); font-weight: 600; transition: all 0.15s ease-in-out; }}
-	.stButton > button:hover, .stDownloadButton > button:hover {{ background: var(--mint); border-color: var(--teal); }}
-	.stButton > button[kind="primary"], .stDownloadButton > button[kind="primary"] {{ background: var(--teal); color: white; border: 1px solid var(--teal); }}
-	.stButton > button[kind="primary"]:hover, .stDownloadButton > button[kind="primary"]:hover {{ background: var(--teal-hover); }}
+	[data-testid="stMetricValue"] div {{ color: var(--text-heading) !important; font-weight: 800; font-size: 24px !important; }}
+	[data-testid="stVerticalBlockBorderWrapper"] > div {{ 
+		background: var(--card-bg); 
+		border: 1px solid var(--line) !important; 
+		border-radius: 12px !important; 
+		box-shadow: 0 2px 10px rgba(0,0,0,0.03) !important;
+		transition: all 0.2s ease !important;
+	}}
+	.stButton > button, .stDownloadButton > button {{ 
+		border-radius: 8px !important; 
+		border: 1px solid var(--teal); 
+		color: var(--teal); 
+		background: var(--card-bg); 
+		font-weight: 600; 
+		transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1) !important; 
+	}}
+	.stButton > button:hover, .stDownloadButton > button:hover {{ 
+		background: var(--mint); 
+		border-color: var(--teal); 
+		transform: translateY(-1.5px) !important;
+		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08) !important;
+	}}
+	.stButton > button[kind="primary"], .stDownloadButton > button[kind="primary"] {{ 
+		background: var(--teal); 
+		color: white; 
+		border: 1px solid var(--teal); 
+	}}
+	.stButton > button[kind="primary"]:hover, .stDownloadButton > button[kind="primary"]:hover {{ 
+		background: var(--teal-hover); 
+		transform: translateY(-1.5px) !important;
+		box-shadow: 0 4px 14px rgba(13, 148, 136, 0.35) !important;
+	}}
+	[data-testid="stTabs"] button {{
+		font-weight: 600 !important;
+		font-size: 14px !important;
+		border-radius: 8px 8px 0 0 !important;
+		padding: 8px 16px !important;
+	}}
 	[data-testid="stDataFrame"] {{ border: 1px solid var(--line); border-radius: 6px; background: var(--card-bg); }}
 	div[data-baseweb="input"] input, div[data-baseweb="base-input"] input, textarea {{ border-radius: 6px !important; background-color: var(--input-bg); color: var(--input-text); }}
 	div[data-baseweb="select"] > div {{ border-radius: 6px !important; background-color: var(--input-bg); color: var(--input-text); }}
@@ -410,6 +455,53 @@ def build_app_css(font_css: str, font_url: str, base_fsize: str, pad_top: str, t
 		transition: all 0.15s ease !important;
 	}}
 	"""
+	
+	glass_rules = """
+	/* Liquid Glass (Cam Morfizm) Teması Özel Kuralları */
+	[data-testid="stSidebar"] {{
+		background: rgba(240, 249, 255, 0.68) !important;
+		backdrop-filter: blur(24px) saturate(190%) !important;
+		-webkit-backdrop-filter: blur(24px) saturate(190%) !important;
+		border-right: 1px solid rgba(255, 255, 255, 0.5) !important;
+		box-shadow: 4px 0 24px rgba(31, 38, 135, 0.05) !important;
+	}}
+	[data-testid="stVerticalBlockBorderWrapper"] > div,
+	[data-testid="stMetric"],
+	div[data-testid="stDataFrame"] {{
+		background: rgba(255, 255, 255, 0.68) !important;
+		backdrop-filter: blur(20px) saturate(180%) !important;
+		-webkit-backdrop-filter: blur(20px) saturate(180%) !important;
+		border: 1px solid rgba(255, 255, 255, 0.7) !important;
+		border-radius: 14px !important;
+		box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.08), inset 0 0 0 1px rgba(255, 255, 255, 0.55) !important;
+	}}
+	div[data-baseweb="input"] input,
+	div[data-baseweb="base-input"] input,
+	textarea,
+	div[data-baseweb="select"] > div {{
+		background: rgba(255, 255, 255, 0.75) !important;
+		backdrop-filter: blur(12px) !important;
+		-webkit-backdrop-filter: blur(12px) !important;
+		border: 1px solid rgba(255, 255, 255, 0.6) !important;
+		border-radius: 10px !important;
+	}}
+	div[data-testid="stPopoverBody"] {{
+		background: rgba(255, 255, 255, 0.85) !important;
+		backdrop-filter: blur(25px) saturate(190%) !important;
+		-webkit-backdrop-filter: blur(25px) saturate(190%) !important;
+		border: 1px solid rgba(255, 255, 255, 0.8) !important;
+		box-shadow: 0 16px 45px rgba(31, 38, 135, 0.16) !important;
+	}}
+	div.st-key-fab_menu_popover button {{
+		background: linear-gradient(135deg, rgba(14, 165, 233, 0.92), rgba(13, 148, 136, 0.92)) !important;
+		backdrop-filter: blur(16px) saturate(180%) !important;
+		-webkit-backdrop-filter: blur(16px) saturate(180%) !important;
+		border: 2px solid rgba(255, 255, 255, 0.65) !important;
+		box-shadow: 0 8px 25px rgba(14, 165, 233, 0.45) !important;
+	}}
+	""" if is_glass else ""
+	base_rules += glass_rules
+
 	dark_rules = """
 	:root {
 		color-scheme: dark !important;
@@ -656,6 +748,16 @@ FONT_OPTIONS: dict[str, tuple[str, str]] = {
 }
 
 THEME_PRESETS: dict[str, dict[str, str]] = {
+	"Liquid Glass (Akıcı Cam)": {
+		"ink": "#0f172a",
+		"teal": "#0284c7",
+		"teal_hover": "#0369a1",
+		"mint": "rgba(224, 242, 254, 0.7)",
+		"sidebar": "rgba(240, 249, 255, 0.75)",
+		"bg_grad": "radial-gradient(at 0% 0%, rgba(56, 189, 248, 0.22) 0px, transparent 50%), radial-gradient(at 100% 0%, rgba(168, 85, 247, 0.18) 0px, transparent 50%), radial-gradient(at 50% 100%, rgba(45, 212, 191, 0.2) 0px, transparent 50%), linear-gradient(135deg, #f8fafc 0%, #e0f2fe 50%, #f1f5f9 100%)",
+		"card_bg": "rgba(255, 255, 255, 0.68)",
+		"line": "rgba(255, 255, 255, 0.55)",
+	},
 	"Klinik Turkuaz (Varsayılan)": {
 		"ink": "#183b3a",
 		"teal": "#176b68",
@@ -2401,6 +2503,300 @@ def get_medication_visible_fields() -> list[str]:
 		return list(MEDICATION_FIELDS_INFO.keys())
 	fields = [f.strip() for f in val.split(",") if f.strip() in MEDICATION_FIELDS_INFO]
 	return fields if fields else list(MEDICATION_FIELDS_INFO.keys())
+
+
+
+# ==============================================================================
+# SAYFA BÖLÜM AYARLARI (GÖRÜNÜRLÜK & KULLANICI DOSTU SAYFA ÖZELLEŞTİRME)
+# ==============================================================================
+
+PAGE_SECTIONS_REGISTRY: dict[str, dict[str, Any]] = {
+	"📊 Genel Bakış": {
+		"overview_stats": {
+			"name": "Temel İstatistik Kartları",
+			"desc": "Kayıtlı kişi, sınıf, bugünkü başvuru, toplam revir ve ölçüm sayıları",
+			"icon": "📈",
+			"default": True,
+			"essential": True,
+		},
+		"overview_quick_links": {
+			"name": "Hızlı Erişim & İşlem Kısayolları",
+			"desc": "Yeni revir kaydı, öğrenci listesi, tarama ve ilaç takip hızlı butonları",
+			"icon": "⚡",
+			"default": True,
+			"essential": True,
+		},
+		"overview_charts": {
+			"name": "Vizit & Başvuru Yoğunluk Grafiği",
+			"desc": "Son 14 günün günlük revir başvuru dağılımı çubuk grafiği",
+			"icon": "📊",
+			"default": True,
+			"essential": False,
+		},
+		"overview_recent_ops": {
+			"name": "Son Yapılan İşlemler Akışı",
+			"desc": "Son yapılan muayene, vizit ve okul sağlık taraması kayıtları listesi",
+			"icon": "🕒",
+			"default": True,
+			"essential": True,
+		},
+	},
+	"👥 Öğrenciler": {
+		"students_sync_buttons": {
+			"name": "Üst Eylem ve Senkronizasyon Butonları",
+			"desc": "Verileri senkronize et, sınıfları yönet ve yeni kayıt butonları",
+			"icon": "🔄",
+			"default": True,
+			"essential": False,
+		},
+		"students_filters": {
+			"name": "Sınıf & Hızlı Arama Filtresi",
+			"desc": "Sınıf filtresi açılır kutusu ve isim/mahalle/telefon arama çubuğu",
+			"icon": "🔍",
+			"default": True,
+			"essential": True,
+		},
+		"students_table": {
+			"name": "Öğrenci Listesi ve Sağlık Künyesi Tablosu",
+			"desc": "Öğrencilerin sınıf, okul no, cinsiyet, alerji, kronik hastalık ve iletişim tablosu",
+			"icon": "📋",
+			"default": True,
+			"essential": True,
+		},
+		"students_selected_card": {
+			"name": "Seçili Öğrenci Dosya & Aksiyon Paneli",
+			"desc": "Tablodan seçilen öğrencinin sağlık künyesi, dosya açma ve düzenleme butonları",
+			"icon": "📌",
+			"default": True,
+			"essential": True,
+		},
+	},
+	"🧑💼 Yetişkinler": {
+		"civilians_search": {
+			"name": "Yetişkin Arama ve Filtreleme",
+			"desc": "Personel ve sivil kişiler için arama kutusu",
+			"icon": "🔍",
+			"default": True,
+			"essential": True,
+		},
+		"civilians_table": {
+			"name": "Yetişkin Listesi Tablosu",
+			"desc": "Kayıtlı tüm personel, öğretmen ve sivil yetişkinler tablosu",
+			"icon": "📋",
+			"default": True,
+			"essential": True,
+		},
+		"civilians_selected_card": {
+			"name": "Seçili Yetişkin Sağlık Kartı & Dosyası",
+			"desc": "Seçili personelin sağlık bilgileri, dosya açma ve düzenleme alanı",
+			"icon": "📌",
+			"default": True,
+			"essential": True,
+		},
+	},
+	"🏫 Okul Taraması": {
+		"screening_stats": {
+			"name": "Sınıf Tarama İstatistik Kartları",
+			"desc": "Sınıftaki mevcut ve taranan öğrenci sayıları ile tamamlama yüzdesi",
+			"icon": "📊",
+			"default": True,
+			"essential": True,
+		},
+		"screening_class_table": {
+			"name": "Sınıf Sağlık Taraması Tablosu",
+			"desc": "Öğrencilerin boy, kilo, vital, göz, saç ve işitme tarama kayıtları tablosu",
+			"icon": "📋",
+			"default": True,
+			"essential": True,
+		},
+		"screening_risky_table": {
+			"name": "Riskli ve Sevk Edilecek Öğrenciler",
+			"desc": "Tarama neticesinde hekime sevk edilmesi veya yakından izlenmesi gerekenler",
+			"icon": "⚠️",
+			"default": True,
+			"essential": False,
+		},
+	},
+	"🩺 Revir Kaydı": {
+		"visit_active_card": {
+			"name": "Seçili Kişi Sağlık Künyesi ve Uyarılar",
+			"desc": "Muayene edilen kişinin alerji, kronik durum ve persantil özet paneli",
+			"icon": "📌",
+			"default": True,
+			"essential": True,
+		},
+		"visit_form": {
+			"name": "Hızlı Muayene & Vizit Kayıt Formu",
+			"desc": "Şikayet, yapılan işlem, sevk durumu ve vital ölçüm giriş formu",
+			"icon": "🩺",
+			"default": True,
+			"essential": True,
+		},
+		"visit_history": {
+			"name": "Geçmiş Vizit Kayıtları Tablosu",
+			"desc": "Öğrencinin önceki tüm revir başvuruları ve işlem geçmişi",
+			"icon": "📋",
+			"default": True,
+			"essential": True,
+		},
+	},
+	"💊 İlaç Takip Sistemi": {
+		"med_expiry_alerts": {
+			"name": "Planlanan Doz, Özet ve Stok İkaz Metrikleri",
+			"desc": "Bugünkü toplam doz, verilen, bekleyen ve azalan ilaç stok ikazları",
+			"icon": "⏳",
+			"default": True,
+			"essential": True,
+		},
+		"med_schedule": {
+			"name": "Saatlik İlaç Dağıtım ve Uygulama Çizelgesi",
+			"desc": "Günlük saat saat verilecek ilaçlar ve tek tıkla verildi işaretleme",
+			"icon": "⏰",
+			"default": True,
+			"essential": True,
+		},
+		"med_inventory": {
+			"name": "İlaç Dolabı & Aktif Tedavi Planları",
+			"desc": "Kayıtlı reçeteli ilaçlar, kalan doz miktarları ve tedavi takvimleri",
+			"icon": "📦",
+			"default": True,
+			"essential": True,
+		},
+	},
+	"💓 Vital Takip": {
+		"vital_form": {
+			"name": "Yeni Vital Ölçüm Kayıt Formu",
+			"desc": "Tansiyon, nabız, ateş, saturasyon ve kan şekeri ölçüm giriş formu",
+			"icon": "🌡️",
+			"default": True,
+			"essential": True,
+		},
+		"vital_trends": {
+			"name": "Klinik Değerlendirme & Uyarı Paneli",
+			"desc": "Ölçümlerin yaşa uygun referans aralıklarıyla karşılaştırılması ve ikazlar",
+			"icon": "📈",
+			"default": True,
+			"essential": True,
+		},
+		"vital_history": {
+			"name": "Geçmiş Ölçümler Tablosu",
+			"desc": "Kişiye ait tarihsel vital bulguların listesi",
+			"icon": "📋",
+			"default": True,
+			"essential": True,
+		},
+	},
+	"📋 Sağlık Profili ve Bakım Planı": {
+		"care_active_plans": {
+			"name": "Mevcut Bakım Planları ve Protokol Listesi",
+			"desc": "Öğrenciye tanımlanmış aktif NANDA-I bakım planları ve durumları",
+			"icon": "📋",
+			"default": True,
+			"essential": True,
+		},
+		"care_create_plan": {
+			"name": "Yeni Hemşirelik Bakım Planı Oluşturucu",
+			"desc": "Tanı, beklenen sonuç, hemşirelik girişimi ve sevk kriteri formu",
+			"icon": "➕",
+			"default": True,
+			"essential": True,
+		},
+		"care_templates": {
+			"name": "Hazır Protokol Kütüphanesi",
+			"desc": "Astım, diyabet, epilepsi, anafilaksi vb. hazır NANDA klinik protokolleri",
+			"icon": "📂",
+			"default": True,
+			"essential": False,
+		},
+	},
+	"📏 Ölçüm ve Gelişim": {
+		"growth_calc": {
+			"name": "Yeni Ölçüm ve Persantil Hesaplayıcı",
+			"desc": "Boy, kilo, baş çevresi girişi ve anlık WHO persantil / z-skor hesabı",
+			"icon": "📏",
+			"default": True,
+			"essential": True,
+		},
+		"growth_curves": {
+			"name": "DSÖ (WHO) Büyüme ve Gelişim Eğrisi",
+			"desc": "Yaşa göre boy/kilo ve persantil bantları üzerindeki interaktif grafik",
+			"icon": "📈",
+			"default": True,
+			"essential": True,
+		},
+		"growth_history": {
+			"name": "Dönemsel Ölçüm Geçmişi Tablosu",
+			"desc": "Tüm boy-kilo ölçümleri ve z-skoru değişim kayıtları",
+			"icon": "📋",
+			"default": True,
+			"essential": True,
+		},
+	},
+	"🖨️ Raporlar": {
+		"reports_filters": {
+			"name": "Rapor Tarih ve Filtre Paneli",
+			"desc": "Rapor başlangıç/bitiş tarihleri, şube ve vaka türü seçimi",
+			"icon": "📅",
+			"default": True,
+			"essential": True,
+		},
+		"reports_stats": {
+			"name": "İstatistiki Özetler ve Dağılımlar",
+			"desc": "Sınıflara, cinsiyete ve şikayetlere göre istatistiksel tablolar",
+			"icon": "📊",
+			"default": True,
+			"essential": True,
+		},
+		"reports_export": {
+			"name": "Resmi Belge İndirme (Word / Excel / PDF)",
+			"desc": "Resmi kurum antetli hazır rapor çıktıları oluşturma ve indirme",
+			"icon": "🖨️",
+			"default": True,
+			"essential": True,
+		},
+	},
+	"📁 Evraklar": {
+		"docs_upload": {
+			"name": "Yeni Evrak / Belge Yükleme Alanı",
+			"desc": "Sağlık raporu, veli izin dilekçesi veya tarama evrakı yükleme",
+			"icon": "📤",
+			"default": True,
+			"essential": True,
+		},
+		"docs_list": {
+			"name": "Kayıtlı Evraklar Listesi ve Önizleme",
+			"desc": "Yüklenen tüm belgelerin arşivi, indirme ve silme butonları",
+			"icon": "🗂️",
+			"default": True,
+			"essential": True,
+		},
+	},
+}
+
+
+def get_page_sections_visibility() -> dict[str, bool]:
+	cfg = get_app_settings()
+	raw_val = cfg.get("page_sections_visibility", "")
+	res = {}
+	for page_title, s_map in PAGE_SECTIONS_REGISTRY.items():
+		for sec_key, sec_data in s_map.items():
+			res[sec_key] = sec_data["default"]
+	if raw_val.strip():
+		try:
+			import json as _json
+			parsed = _json.loads(raw_val)
+			if isinstance(parsed, dict):
+				for k, v in parsed.items():
+					if k in res:
+						res[k] = bool(v)
+		except Exception:
+			pass
+	return res
+
+
+def is_section_visible(section_key: str, default: bool = True) -> bool:
+	vis_map = get_page_sections_visibility()
+	return vis_map.get(section_key, default)
 
 
 def add_student_medication(
@@ -8510,49 +8906,88 @@ def render_overview() -> None:
 		).fetchone()
 
 	st.markdown(f"## 📊 Revir Genel Durumu ve Göstergeler ({active_ay['name']})")
-	metric_cols = st.columns(6)
-	metric_cols[0].metric("Kayıtlı Kişi", counts["students"])
-	metric_cols[1].metric("Sınıf / Grup", counts["classes"])
-	metric_cols[2].metric("Bugünkü Başvuru", counts["today_visits"])
-	metric_cols[3].metric(f"Revir ({active_ay['name']})", counts["total_visits"])
-	metric_cols[4].metric(f"Ölçüm ({active_ay['name']})", counts["measurements"])
-	metric_cols[5].metric("Alerji / Kronik", counts["risk_profiles"])
+	if is_section_visible("overview_stats"):
+		metric_cols = st.columns(6)
+		metric_cols[0].metric("Kayıtlı Kişi", counts["students"])
+		metric_cols[1].metric("Sınıf / Grup", counts["classes"])
+		metric_cols[2].metric("Bugünkü Başvuru", counts["today_visits"])
+		metric_cols[3].metric(f"Revir ({active_ay['name']})", counts["total_visits"])
+		metric_cols[4].metric(f"Ölçüm ({active_ay['name']})", counts["measurements"])
+		metric_cols[5].metric("Alerji / Kronik", counts["risk_profiles"])
 
-	top_op1, top_op2 = st.columns([4, 1.2])
-	with top_op1:
-		st.markdown("### 🕒 Son Yapılan İşlemler")
-	with top_op2:
-		op_limit = st.selectbox("Kayıt Limiti", [15, 30, 50, 100], index=1, key="sel_recent_ops_limit", label_visibility="collapsed")
-	recent_ops = get_recent_operations(limit=op_limit)
-	if not recent_ops:
-		st.info("Henüz revir başvurusu veya sağlık taraması kaydı bulunmuyor.")
-	else:
-		for op in recent_ops:
-			r_col, btn_col = st.columns([12.5, 1.1])
-			with r_col:
-				badges = []
-				if op["date_str"]:
-					badges.append(f"<span style='color:#64748b; font-size:12.5px; font-weight:600;'>{html.escape(op['date_str'])}</span>")
-				if op["class_name"] and op["class_name"] != "—":
-					badges.append(f"<span style='background-color:#e0f2fe; color:#0369a1; padding:2px 8px; border-radius:6px; font-weight:700; font-size:13.5px;'>{html.escape(op['class_name'])}</span>")
-				badges.append(f"<span style='font-weight:700; color:#0f172a; font-size:15px;'>{html.escape(op['full_name'])}</span>")
-				if op["student_no"]:
-					badges.append(f"<span style='background-color:#f1f5f9; color:#475569; padding:2px 7px; border-radius:6px; font-weight:600; font-size:13px;'>{html.escape(op['student_no'])}</span>")
-				for d in op["details"]:
-					clean_d = html.escape(d)
-					badges.append(f"<span style='color:#94a3b8;'>·</span><span style='color:#334155; font-size:14px; font-weight:500;'>{clean_d}</span>")
+	if is_section_visible("overview_quick_links"):
+		with st.container(border=True):
+			st.markdown("##### ⚡ Hızlı Erişim ve İşlemler")
+			q_c1, q_c2, q_c3, q_c4 = st.columns(4)
+			with q_c1:
+				if st.button("🩺 Yeni Revir Kaydı Aç", use_container_width=True, key="ov_quick_visit"):
+					st.session_state["main_menu_page"] = "🩺 Revir Kaydı"
+					st.rerun()
+			with q_c2:
+				if st.button("👥 Öğrenci Listesine Git", use_container_width=True, key="ov_quick_stu"):
+					st.session_state["main_menu_page"] = "👥 Öğrenciler"
+					st.rerun()
+			with q_c3:
+				if st.button("🏫 Okul Taraması Başlat", use_container_width=True, key="ov_quick_scr"):
+					st.session_state["main_menu_page"] = "🏫 Okul Taraması"
+					st.rerun()
+			with q_c4:
+				if st.button("💊 İlaç Takip Sistemine Git", use_container_width=True, key="ov_quick_med"):
+					st.session_state["main_menu_page"] = "💊 İlaç Takip Sistemi"
+					st.rerun()
 
-				content_html = " ".join(badges)
-				st.markdown(
-					f"<div style='background-color:#ffffff; border:1px solid #e2e8f0; border-radius:8px; padding:10px 14px; margin-bottom:6px; display:flex; flex-wrap:wrap; align-items:center; gap:8px; box-shadow:0 1px 2px rgba(0,0,0,0.03);'>{content_html}</div>",
-					unsafe_allow_html=True,
+	if is_section_visible("overview_charts"):
+		try:
+			with connect_db() as conn:
+				v_df = pd.read_sql_query(
+					"SELECT visit_date, COUNT(*) as vizit_sayisi FROM visits WHERE visit_date >= ? AND visit_date <= ? GROUP BY visit_date ORDER BY visit_date DESC LIMIT 14",
+					conn,
+					params=(s_date, e_date)
 				)
-			with btn_col:
-				if st.button("✏️", key=f"btn_edit_op_{op['key']}", help="Bu işlemi düzenle", use_container_width=True):
-					if op["type"] == "visit":
-						open_edit_visit_dialog(op["id"])
-					elif op["type"] == "screening":
-						open_screening_dialog(op["student_id"], op["class_name"])
+			if not v_df.empty:
+				with st.container(border=True):
+					st.markdown("##### 📊 Son 14 Günlük Vizit Yoğunluğu")
+					v_df = v_df.sort_values("visit_date")
+					st.bar_chart(v_df.set_index("visit_date")["vizit_sayisi"], height=200, color="#0ea5e9")
+		except Exception:
+			pass
+
+	if is_section_visible("overview_recent_ops"):
+		top_op1, top_op2 = st.columns([4, 1.2])
+		with top_op1:
+			st.markdown("### 🕒 Son Yapılan İşlemler")
+		with top_op2:
+			op_limit = st.selectbox("Kayıt Limiti", [15, 30, 50, 100], index=1, key="sel_recent_ops_limit", label_visibility="collapsed")
+		recent_ops = get_recent_operations(limit=op_limit)
+		if not recent_ops:
+			st.info("Henüz revir başvurusu veya sağlık taraması kaydı bulunmuyor.")
+		else:
+			for op in recent_ops:
+				r_col, btn_col = st.columns([12.5, 1.1])
+				with r_col:
+					badges = []
+					if op["date_str"]:
+						badges.append(f"<span style='color:#64748b; font-size:12.5px; font-weight:600;'>{html.escape(op['date_str'])}</span>")
+					if op["class_name"] and op["class_name"] != "—":
+						badges.append(f"<span style='background-color:#e0f2fe; color:#0369a1; padding:2px 8px; border-radius:6px; font-weight:700; font-size:13.5px;'>{html.escape(op['class_name'])}</span>")
+					badges.append(f"<span style='font-weight:700; color:#0f172a; font-size:15px;'>{html.escape(op['full_name'])}</span>")
+					if op["student_no"]:
+						badges.append(f"<span style='background-color:#f1f5f9; color:#475569; padding:2px 7px; border-radius:6px; font-weight:600; font-size:13px;'>{html.escape(op['student_no'])}</span>")
+					for d in op["details"]:
+						clean_d = html.escape(d)
+						badges.append(f"<span style='color:#94a3b8;'>·</span><span style='color:#334155; font-size:14px; font-weight:500;'>{clean_d}</span>")
+
+					content_html = " ".join(badges)
+					st.markdown(
+						f"<div style='background-color:#ffffff; border:1px solid #e2e8f0; border-radius:8px; padding:10px 14px; margin-bottom:6px; display:flex; flex-wrap:wrap; align-items:center; gap:8px; box-shadow:0 1px 2px rgba(0,0,0,0.03);'>{content_html}</div>",
+						unsafe_allow_html=True,
+					)
+				with btn_col:
+					if st.button("✏️", key=f"btn_edit_op_{op['key']}", help="Bu işlemi düzenle", use_container_width=True):
+						if op["type"] == "visit":
+							open_edit_visit_dialog(op["id"])
+						elif op["type"] == "screening":
+							open_screening_dialog(op["student_id"], op["class_name"])
 
 
 @st.dialog("🏫 Okul Sınıfları Yönetimi (Ekle / Çıkar / Öğrenci Ata)", width="large")
@@ -8999,21 +9434,29 @@ def open_edit_profile_dialog(edit_id: int, key_suffix: str = "modal") -> None:
 
 
 def render_students() -> None:
-	top_title_col, top_sync_btn_col, top_cls_btn_col, top_btn_col = st.columns([2.5, 1.5, 1.4, 1.2])
-	with top_title_col:
-		st.markdown("## Öğrenci profilleri ve ortak sağlık özeti")
-	with top_sync_btn_col:
-		if st.button("🔄 Verileri Senkronize Et", type="secondary", key="btn_sync_all_master", use_container_width=True, help="PDF ve Excel listelerindeki şube, doğum tarihi, okul no, telefon ve yerleşim verilerini tüm dosyalarla eşitler"):
-			with st.spinner("Resmi listeler ve kişisel veri dosyaları senkronize ediliyor..."):
-				summary_msg = sync_master_documents_and_files()
-			st.success(summary_msg)
-			st.rerun()
-	with top_cls_btn_col:
-		if st.button("🏫 Sınıfları Yönet (Ekle/Çıkar)", type="secondary", key="btn_open_class_mgr_modal", use_container_width=True):
-			open_class_manager_dialog()
-	with top_btn_col:
-		if st.button("➕ Yeni Kayıt", type="primary", key="btn_open_new_student_modal", use_container_width=True):
-			open_new_profile_dialog("Öğrenci")
+	if is_section_visible("students_sync_buttons"):
+		top_title_col, top_sync_btn_col, top_cls_btn_col, top_btn_col = st.columns([2.5, 1.5, 1.4, 1.2])
+		with top_title_col:
+			st.markdown("## Öğrenci profilleri ve ortak sağlık özeti")
+		with top_sync_btn_col:
+			if st.button("🔄 Verileri Senkronize Et", type="secondary", key="btn_sync_all_master", use_container_width=True, help="PDF ve Excel listelerindeki şube, doğum tarihi, okul no, telefon ve yerleşim verilerini tüm dosyalarla eşitler"):
+				with st.spinner("Resmi listeler ve kişisel veri dosyaları senkronize ediliyor..."):
+					summary_msg = sync_master_documents_and_files()
+				st.success(summary_msg)
+				st.rerun()
+		with top_cls_btn_col:
+			if st.button("🏫 Sınıfları Yönet (Ekle/Çıkar)", type="secondary", key="btn_open_class_mgr_modal", use_container_width=True):
+				open_class_manager_dialog()
+		with top_btn_col:
+			if st.button("➕ Yeni Kayıt", type="primary", key="btn_open_new_student_modal", use_container_width=True):
+				open_new_profile_dialog("Öğrenci")
+	else:
+		top_title_col, top_btn_col = st.columns([4, 1.2])
+		with top_title_col:
+			st.markdown("## Öğrenci profilleri ve ortak sağlık özeti")
+		with top_btn_col:
+			if st.button("➕ Yeni Kayıt", type="primary", key="btn_open_new_student_modal", use_container_width=True):
+				open_new_profile_dialog("Öğrenci")
 	if st.session_state.get("profile_saved_toast"):
 		st.success(st.session_state.pop("profile_saved_toast"))
 
@@ -9442,7 +9885,8 @@ def render_student_visit_tab() -> None:
 		st.caption("Seçilen öğrenciye ait alerji uyarıları, boy-kilo persantil durumu, vital bulgular ve sağlık geçmişi bu alanda görüntülenir.")
 		return
 
-	render_shared_person_summary(student, section_key="visit_stu")
+	if is_section_visible("visit_active_card"):
+		render_shared_person_summary(student, section_key="visit_stu")
 	if not student["birth_date"] or not student["sex"]:
 		warn_c1, warn_c2 = st.columns([3.2, 1])
 		with warn_c1:
@@ -9491,171 +9935,164 @@ def render_student_visit_tab() -> None:
 		st.session_state[a_txt_key] = sync_template_to_text(cur_val, old_p, new_p)
 		st.session_state[a_prev_key] = list(new_p)
 
-	col_form, col_history = st.columns([1.15, 0.85], gap="large")
-	with col_form:
-		with st.container(border=True):
-			st.markdown(f"### 🩺 {student['full_name']} <small>· {student['class_name']}</small>", unsafe_allow_html=True)
-			dt_col1, dt_col2, dt_col3 = st.columns(3)
-			visit_date = dt_col1.date_input("Başvuru tarihi", value=date.today(), key=f"v_date_{stu_id}")
-			visit_time = dt_col2.time_input("Saat", value=datetime.now().replace(second=0, microsecond=0).time(), key=f"v_time_{stu_id}")
-			complaint = dt_col3.selectbox("Başvuru nedeni", ["Hastalık / rahatsızlık", "Yaralanma", "İlaç / bakım", "Kontrol", "Diğer"], key=f"v_comp_{stu_id}")
+	show_v_form = is_section_visible("visit_form")
+	show_v_history = is_section_visible("visit_history")
+	if show_v_form and show_v_history:
+		col_form, col_history = st.columns([1.15, 0.85], gap="large")
+	elif show_v_form:
+		col_form, col_history = st.container(), None
+	elif show_v_history:
+		col_form, col_history = None, st.container()
+	else:
+		col_form, col_history = None, None
 
-			st.markdown("###### 🌡️📏 Başvuru Sırasında Yapılan Ölçümler")
-			st.caption("Buraya girilen ateş, saturasyon (SpO2), tansiyon, nabız, şeker, boy-kilo ve baş çevresi değerleri ilgili takip pencerelerine ve persantil hesaplamalarına otomatik kaydedilir.")
-			v_c1, v_c2, v_c3, v_c4 = st.columns(4)
-			v_temp = v_c1.number_input("Ateş (°C)", min_value=30.0, max_value=45.0, value=None, step=0.1, format="%.1f", key=f"v_temp_{stu_id}")
-			v_spo2 = v_c2.number_input("Saturasyon - SpO2 (%)", min_value=30.0, max_value=100.0, value=None, step=1.0, format="%.0f", key=f"v_spo2_{stu_id}")
-			v_pulse = v_c3.number_input("Nabız (/dk)", min_value=20.0, max_value=240.0, value=None, step=1.0, format="%.0f", key=f"v_pulse_{stu_id}")
-			v_glu = v_c4.number_input("Kan Şekeri (mg/dL)", min_value=1.0, max_value=1500.0, value=None, step=1.0, format="%.0f", key=f"v_glu_{stu_id}")
-			m_c1, m_c2, m_c3, m_c4, m_c5 = st.columns(5)
-			v_sys = m_c1.number_input("Büyük Tansiyon", min_value=40.0, max_value=260.0, value=None, step=1.0, format="%.0f", key=f"v_sys_{stu_id}")
-			v_dia = m_c2.number_input("Küçük Tansiyon", min_value=20.0, max_value=180.0, value=None, step=1.0, format="%.0f", key=f"v_dia_{stu_id}")
-			v_height = m_c3.number_input("Boy (cm)", min_value=30.0, max_value=250.0, value=None, step=0.1, format="%.1f", key=f"v_height_{stu_id}")
-			v_weight = m_c4.number_input("Kilo (kg)", min_value=1.0, max_value=300.0, value=None, step=0.1, format="%.1f", key=f"v_weight_{stu_id}")
-			v_head_circ = m_c5.number_input("Baş Çevresi (cm)", min_value=20.0, max_value=100.0, value=None, step=0.1, format="%.1f", key=f"v_head_circ_{stu_id}")
+	if col_form is not None:
+		with col_form:
+			with st.container(border=True):
+				st.markdown(f"### 🩺 {student['full_name']} <small>· {student['class_name']}</small>", unsafe_allow_html=True)
+				dt_col1, dt_col2, dt_col3 = st.columns(3)
+				visit_date = dt_col1.date_input("Başvuru tarihi", value=date.today(), key=f"v_date_{stu_id}")
+				visit_time = dt_col2.time_input("Saat", value=datetime.now().replace(second=0, microsecond=0).time(), key=f"v_time_{stu_id}")
+				complaint = dt_col3.selectbox("Başvuru nedeni", ["Hastalık / rahatsızlık", "Yaralanma", "İlaç / bakım", "Kontrol", "Diğer"], key=f"v_comp_{stu_id}")
 
-			st.markdown("---")
-			st.markdown("##### 🤒 Şikayet / Belirtiler *")
-			st.caption("Öğrencinin şikayetini ve belirtilerini el ile yazabilir veya kutucuğun altındaki şablondan seçip ekleyebilirsiniz:")
-			symptoms = st.text_area(
-				"Şikayet / Belirtiler",
-				key=s_txt_key,
-				placeholder="Öğrencinin ifadesini ve şikayetini el ile yazabilir veya hemen aşağıdaki şablondan seçebilirsiniz...",
-				label_visibility="collapsed"
-			)
-			st.multiselect(
-				"📋 Sık Şikayetler Şablonu (Seçtikleriniz yukarıdaki şikayet kutusuna eklenir)",
-				quick_symptom_options,
-				key=s_tpl_key,
-				on_change=on_stu_sym_change,
-				placeholder="Sık karşılaşılan şikayetleri buradan seçebilirsiniz..."
-			)
+				st.markdown("###### 🌡️📏 Başvuru Sırasında Yapılan Ölçümler")
+				st.caption("Buraya girilen ateş, saturasyon (SpO2), tansiyon, nabız, şeker, boy-kilo ve baş çevresi değerleri ilgili takip pencerelerine ve persantil hesaplamalarına otomatik kaydedilir.")
+				v_c1, v_c2, v_c3, v_c4 = st.columns(4)
+				v_temp = v_c1.number_input("Ateş (°C)", min_value=30.0, max_value=45.0, value=None, step=0.1, format="%.1f", key=f"v_temp_{stu_id}")
+				v_spo2 = v_c2.number_input("Saturasyon - SpO2 (%)", min_value=30.0, max_value=100.0, value=None, step=1.0, format="%.0f", key=f"v_spo2_{stu_id}")
+				v_pulse = v_c3.number_input("Nabız (/dk)", min_value=20.0, max_value=240.0, value=None, step=1.0, format="%.0f", key=f"v_pulse_{stu_id}")
+				v_glu = v_c4.number_input("Kan Şekeri (mg/dL)", min_value=1.0, max_value=1500.0, value=None, step=1.0, format="%.0f", key=f"v_glu_{stu_id}")
 
-			st.markdown("<div style='height: 8px'></div>", unsafe_allow_html=True)
-			observation = st.text_area(
-				"👁️ Gözlem ve Ek Klinik Notlar",
-				placeholder="Gözlenen klinik durum (Yukarıdaki ölçümler otomatik eklenecektir)",
-				key=f"vis_obs_{stu_id}"
-			)
+				v_c5, v_c6, v_c7, v_c8, v_c9 = st.columns(5)
+				v_sys = v_c5.number_input("Büyük Tansiyon", min_value=40.0, max_value=260.0, value=None, step=1.0, format="%.0f", key=f"v_sys_{stu_id}")
+				v_dia = v_c6.number_input("Küçük Tansiyon", min_value=20.0, max_value=180.0, value=None, step=1.0, format="%.0f", key=f"v_dia_{stu_id}")
+				v_height = v_c7.number_input("Boy (cm)", min_value=30.0, max_value=250.0, value=None, step=0.1, format="%.1f", key=f"v_height_{stu_id}")
+				v_weight = v_c8.number_input("Kilo (kg)", min_value=1.0, max_value=300.0, value=None, step=0.1, format="%.1f", key=f"v_weight_{stu_id}")
+				v_head_circ = v_c9.number_input("Baş Çevresi (cm)", min_value=20.0, max_value=100.0, value=None, step=0.1, format="%.1f", key=f"v_head_circ_{stu_id}")
 
-			st.markdown("##### 🩹 Yapılan İşlem / Müdahale *")
-			st.caption("Uygulanan işlem ve müdahaleyi el ile yazabilir veya kutucuğun altındaki şablondan seçip ekleyebilirsiniz:")
-			action = st.text_area(
-				"Yapılan İşlemler / Verilen Destek",
-				key=a_txt_key,
-				placeholder="Uygulanan tedavi, pansuman, ilk yardım veya verilen desteği el ile yazabilir veya hemen aşağıdaki şablondan seçebilirsiniz...",
-				label_visibility="collapsed"
-			)
-			st.multiselect(
-				"📋 Sık Yapılan İşlemler Şablonu (Seçtikleriniz yukarıdaki işlem kutusuna eklenir)",
-				quick_action_options,
-				key=a_tpl_key,
-				on_change=on_stu_act_change,
-				placeholder="Sık uygulanan işlemleri buradan seçebilirsiniz..."
-			)
+				st.multiselect(
+					"⚡ Hızlı Şikayet / Belirti Şablonu",
+					options=quick_symptom_options,
+					key=s_tpl_key,
+					on_change=on_stu_sym_change,
+				)
+				symptoms = st.text_area("Belirtiler / Şikayet", key=s_txt_key, height=70)
+				observation = st.text_area("Fizik Muayene / Klinik Gözlem", key=f"vis_obs_{stu_id}", height=70)
 
-			st.markdown("---")
-			g_c1, g_c2 = st.columns([1, 2])
-			with g_c1:
-				guardian_contacted = st.checkbox("📞 Veliye bilgi verildi", key=f"vis_gc_{stu_id}")
-			with g_c2:
-				referral = st.text_input("➡️ Yönlendirme", placeholder="Örn: Veliye teslim edildi / sağlık kuruluşuna sevk", key=f"vis_ref_{stu_id}")
-			follow_up = st.text_area("📝 İzlem / Ek Not", key=f"vis_fu_{stu_id}", placeholder="İzlem veya takip planı notu...")
+				st.multiselect(
+					"⚡ Hızlı Yapılan İşlem / Müdahale Şablonu",
+					options=quick_action_options,
+					key=a_tpl_key,
+					on_change=on_stu_act_change,
+				)
+				action = st.text_area("Yapılan İşlem / Müdahale", key=a_txt_key, height=70)
 
-			save = st.button("💾 Revir Kaydını ve Ölçümleri Kaydet", type="primary", use_container_width=True, key=f"btn_save_visit_{stu_id}")
+				# --- Vizit Esnasında İlaç / Sarf Malzeme Çıkışı ---
+				with st.expander("💊 Revirde İlaç veya Sarf Malzeme Verildi mi? (Stoktan Düş)", expanded=False):
+					meds_inventory = get_all_student_medications(status="Aktif")
+					med_options = ["İlaç verilmedi"] + [
+						f"{m['medication_name']} ({m['med_type']}) - Kalan: {m['remaining_volume']} {m['stock_unit']}"
+						for m in meds_inventory
+					]
+					sel_med_str = st.selectbox("Verilen İlaç / Malzeme", med_options, key=f"vis_med_sel_{stu_id}")
+					med_amount_given = 0.0
+					if sel_med_str != "İlaç verilmedi":
+						m_c1, m_c2 = st.columns([1, 1])
+						with m_c1:
+							med_amount_given = st.number_input("Düşülecek Doz / Adet", min_value=0.1, max_value=100.0, value=1.0, step=0.5, key=f"vis_med_amt_{stu_id}")
+						with m_c2:
+							st.caption("Bu kayıt onaylandığında seçilen ilacın stok miktarı otomatik olarak güncellenecektir.")
 
-		if save:
-			if (v_sys is None) != (v_dia is None):
-				st.error("Tansiyon kaydı için büyük ve küçük tansiyonu birlikte girin.")
-			elif (v_height is None) != (v_weight is None):
-				st.error("Boy-kilo persantil kaydı için boy ve kiloyu birlikte girin.")
+				bot_c1, bot_c2, bot_c3 = st.columns([1.2, 1.4, 1.4])
+				with bot_c1:
+					guardian_contacted = st.checkbox("Veli arandı / bilgilendirildi", key=f"vis_gc_{stu_id}")
+				with bot_c2:
+					referral = st.selectbox("Sevk Durumu", ["Sevk edilmedi", "Sağlık ocağı / ASM", "Devlet Hastanesi", "112 Acil Sevk", "Diş Hekimi", "Göz Hekimi", "Eve Gönderildi"], key=f"vis_ref_{stu_id}")
+				with bot_c3:
+					follow_up = st.selectbox("Sonuç / İzlem", ["Revirde dinlendi, derse döndü", "Ailesine teslim edildi", "Hastaneye yönlendirildi", "İzlem devam ediyor", "Raporlu / İzinli"], key=f"vis_fu_{stu_id}")
+
+				if st.button("💾 Revir Başvuru Kaydını Tamamla", type="primary", use_container_width=True, key=f"btn_save_visit_{stu_id}"):
+					# Validate BP pairs
+					if (v_sys is None) != (v_dia is None):
+						st.error("Tansiyon kaydı için büyük ve küçük tansiyonu birlikte girmelisiniz.")
+						return
+
+					# Validate Height/Weight pairs if entered
+					if (v_height is None) != (v_weight is None):
+						st.error("Boy ve kilo değerleri persantil hesaplaması için birlikte girilmelidir.")
+						return
+
+					# Automatically record linked measurements and vitals if any were entered
+					auto_notes = []
+					has_vital_inputs = any(val is not None for val in [v_temp, v_spo2, v_pulse, v_glu, v_sys, v_dia])
+					if has_vital_inputs:
+						m_at = datetime.combine(visit_date, visit_time).isoformat(timespec="minutes")
+						with connect_db() as connection:
+							connection.execute(
+								"""INSERT INTO vital_readings(student_id, measured_at, systolic, diastolic, pulse,
+								   temperature, spo2, glucose, glucose_context, notes)
+								   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+								(student["id"], m_at, v_sys, v_dia, v_pulse, v_temp, v_spo2, v_glu,
+								 "Revir Başvurusu", f"Revir viziti sırasında kaydedildi. Şikayet: {symptoms.strip()}"),
+							)
+						auto_notes.append("[Vital ölçümleri kaydedildi]")
+
+					has_hw_inputs = (v_height is not None and v_weight is not None and v_height > 0 and v_weight > 0) or (v_head_circ is not None and v_head_circ > 0)
+					if has_hw_inputs:
+						meas_summary = record_linked_measurement(
+							student["id"], visit_date, v_height, v_weight,
+							student["birth_date"], student["sex"], head_circ_cm=v_head_circ
+						)
+						if meas_summary:
+							auto_notes.append(f"[Antropometri: {meas_summary}]")
+					final_obs = " · ".join(filter(None, [observation.strip(), *auto_notes]))
+					with connect_db() as connection:
+						connection.execute(
+							"""INSERT INTO visits(student_id, visit_date, visit_time, complaint, symptoms, observation,
+							   action, guardian_contacted, referral, follow_up) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+							(student["id"], visit_date.isoformat(), visit_time.strftime("%H:%M"), complaint, symptoms.strip(),
+							 final_obs, action.strip(), int(guardian_contacted), referral.strip(), follow_up.strip()),
+						)
+					save_person_data_file(student["id"])
+
+					# Clear input fields for next entry
+					for k_clear in [
+						s_txt_key, s_tpl_key, s_prev_key, a_txt_key, a_tpl_key, a_prev_key,
+						f"vis_obs_{stu_id}", f"vis_ref_{stu_id}", f"vis_fu_{stu_id}",
+						f"v_temp_{stu_id}", f"v_spo2_{stu_id}", f"v_pulse_{stu_id}", f"v_glu_{stu_id}",
+						f"v_sys_{stu_id}", f"v_dia_{stu_id}", f"v_height_{stu_id}", f"v_weight_{stu_id}", f"v_head_circ_{stu_id}"
+					]:
+						if k_clear in st.session_state:
+							del st.session_state[k_clear]
+
+					st.success("Revir kaydı ve bağlantılı ölçümler başarıyla kaydedildi.")
+					st.rerun()
+
+	if col_history is not None:
+		with col_history:
+			st.markdown("### Revir başvuru geçmişi")
+			with connect_db() as connection:
+				history = pd.read_sql_query(
+					"""SELECT id, visit_date AS Tarih, visit_time AS Saat, complaint AS Başvuru,
+							  symptoms AS Belirtiler, observation AS Gözlem_ve_Ölçümler, action AS İşlem, referral AS Yönlendirme,
+							  guardian_contacted AS Veli_Arandı, follow_up AS İzlem
+					   FROM visits WHERE student_id=? ORDER BY visit_date DESC, visit_time DESC, id DESC LIMIT 15""",
+					connection, params=(student["id"],),
+				)
+			if history.empty:
+				st.caption("Bu öğrenci için henüz revir kaydı bulunmuyor.")
 			else:
-				auto_notes = []
-				if any(x is not None for x in (v_temp, v_spo2, v_pulse, v_sys, v_dia, v_glu)):
-					measured_at = datetime.combine(visit_date, visit_time).isoformat(timespec="minutes")
-					vital_summary = record_linked_vital(
-						student["id"], measured_at, v_sys, v_dia, v_pulse, v_temp, v_glu,
-						glucose_context="Revir Başvurusu", notes=f"Revir başvurusu ({complaint})", spo2=v_spo2
-					)
-					if vital_summary:
-						auto_notes.append(f"[Vital: {vital_summary}]")
-				if (v_height is not None and v_weight is not None and v_height > 0 and v_weight > 0) or (v_head_circ is not None and v_head_circ > 0):
-					meas_summary = record_linked_measurement(
-						student["id"], visit_date, v_height, v_weight, student["birth_date"], student["sex"], head_circ_cm=v_head_circ
-					)
-					if meas_summary:
-						auto_notes.append(f"[Antropometri: {meas_summary}]")
-				final_obs = " · ".join(filter(None, [observation.strip(), *auto_notes]))
-				with connect_db() as connection:
-					connection.execute(
-						"""INSERT INTO visits(student_id, visit_date, visit_time, complaint, symptoms, observation,
-						   action, guardian_contacted, referral, follow_up) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-						(student["id"], visit_date.isoformat(), visit_time.strftime("%H:%M"), complaint, symptoms.strip(),
-						 final_obs, action.strip(), int(guardian_contacted), referral.strip(), follow_up.strip()),
-					)
-				save_person_data_file(student["id"])
+				display_history = history.drop(columns=["id", "follow_up"], errors="ignore")
+				st.dataframe(display_history, width="stretch", hide_index=True)
 
-				# Clear input fields for next entry
-				for k_clear in [
-					s_txt_key, s_tpl_key, s_prev_key, a_txt_key, a_tpl_key, a_prev_key,
-					f"vis_obs_{stu_id}", f"vis_ref_{stu_id}", f"vis_fu_{stu_id}",
-					f"v_temp_{stu_id}", f"v_spo2_{stu_id}", f"v_pulse_{stu_id}", f"v_glu_{stu_id}",
-					f"v_sys_{stu_id}", f"v_dia_{stu_id}", f"v_height_{stu_id}", f"v_weight_{stu_id}", f"v_head_circ_{stu_id}"
-				]:
-					if k_clear in st.session_state:
-						del st.session_state[k_clear]
-
-				st.success("Revir kaydı ve bağlantılı ölçümler başarıyla kaydedildi.")
-				st.rerun()
-
-	with col_history:
-		st.markdown("### Revir başvuru geçmişi")
-		with connect_db() as connection:
-			history = pd.read_sql_query(
-				"""SELECT id, visit_date AS Tarih, visit_time AS Saat, complaint AS Başvuru,
-						  symptoms AS Belirtiler, observation AS Gözlem_ve_Ölçümler, action AS İşlem, referral AS Yönlendirme,
-						  guardian_contacted AS Veli_Arandı, follow_up AS İzlem
-				   FROM visits WHERE student_id=? ORDER BY visit_date DESC, visit_time DESC, id DESC LIMIT 15""",
-				connection, params=(student["id"],),
-			)
-		if history.empty:
-			st.caption("Bu öğrenci için henüz revir kaydı bulunmuyor.")
-		else:
-			display_history = history.drop(columns=["id", "follow_up"], errors="ignore")
-			st.dataframe(display_history, width="stretch", hide_index=True)
-
-			with st.expander("🛠️ Seçili Kaydı Düzenle veya Sil"):
-				visit_options_map = {
-					f"{r['Tarih']} {r['Saat']} · {r['Başvuru']}": int(r["id"])
-					for _, r in history.iterrows()
-				}
-				chosen_v_label = st.selectbox("Ziyaret Kaydı Seçin", list(visit_options_map), key=f"sel_v_hist_{student['id']}")
-				chosen_v_id = visit_options_map[chosen_v_label]
-				selected_v_row = history[history["id"] == chosen_v_id].iloc[0]
-
-				complaint_options = ["Hastalık / rahatsızlık", "Yaralanma", "İlaç / bakım", "Kontrol", "Diğer"]
-				comp_idx = complaint_options.index(selected_v_row["Başvuru"]) if selected_v_row["Başvuru"] in complaint_options else 0
-				edit_v_complaint = st.selectbox("Başvuru nedeni", complaint_options, index=comp_idx, key=f"ev_comp_{chosen_v_id}")
-				edit_v_syms = st.text_area("Belirtiler", value=selected_v_row["Belirtiler"] or "", key=f"ev_sym_{chosen_v_id}")
-				edit_v_obs = st.text_area("Gözlem ve Ölçümler", value=selected_v_row["Gözlem_ve_Ölçümler"] or "", key=f"ev_obs_{chosen_v_id}")
-				edit_v_act = st.text_area("İşlem", value=selected_v_row["İşlem"] or "", key=f"ev_act_{chosen_v_id}")
-				edit_v_cont = st.checkbox("Veli arandı", value=bool(selected_v_row["Veli_Arandı"]), key=f"ev_cont_{chosen_v_id}")
-				edit_v_ref = st.text_input("Yönlendirme", value=selected_v_row["Yönlendirme"] or "", key=f"ev_ref_{chosen_v_id}")
-				edit_v_foll = st.text_area("İzlem / Not", value=selected_v_row["İzlem"] or "", key=f"ev_foll_{chosen_v_id}")
-
-				btn_c1, btn_c2 = st.columns(2)
-				with btn_c1:
-					if st.button("Kaydı Güncelle", type="primary", key=f"btn_upd_v_{chosen_v_id}"):
-						update_visit(chosen_v_id, edit_v_complaint, edit_v_syms.strip(), edit_v_obs.strip(),
-									 edit_v_act.strip(), edit_v_cont, edit_v_ref.strip(), edit_v_foll.strip())
-						st.success("Ziyaret kaydı güncellendi.")
-						st.rerun()
-				with btn_c2:
-					conf_del_v = st.checkbox("Bu kaydı silmeyi onayla", key=f"conf_del_v_{chosen_v_id}")
-					if st.button("Kaydı Sil", type="secondary", disabled=not conf_del_v, key=f"btn_del_v_{chosen_v_id}"):
-						delete_visit(chosen_v_id)
-						st.success("Ziyaret kaydı silindi.")
-						st.rerun()
+				with st.expander("🛠️ Seçili Kaydı Düzenle veya Sil"):
+					for _, row in history.iterrows():
+						edit_cols = st.columns([4, 1.2])
+						with edit_cols[0]:
+							st.write(f"**{row['Tarih']} {row['Saat']}** — {row['Başvuru']} ({row['İşlem'] or 'İşlem yok'})")
+						with edit_cols[1]:
+							if st.button("✏️ Düzenle", key=f"quick_edit_v_{row['id']}", use_container_width=True):
+								open_edit_visit_dialog(row["id"])
 
 
 def render_civilian_visit_tab(show_new_button: bool = True) -> None:
@@ -10600,17 +11037,18 @@ def render_medication_tracker() -> None:
 	all_active_meds = get_all_student_medications(status="Aktif")
 	low_stock_meds = [m for m in all_active_meds if m["remaining_volume"] is not None and m["remaining_volume"] <= 3 * (m["dose_amount"] or 1.0)]
 
-	m_col1, m_col2, m_col3, m_col4, m_col5 = st.columns(5)
-	with m_col1:
-		st.metric("📋 Toplam Planlanan Doz", f"{total_doses_count} Doz")
-	with m_col2:
-		st.metric("✅ Verilen / Uygulanan", f"{given_doses_count} Doz", delta=f"%{round((given_doses_count/total_doses_count)*100):.0f}" if total_doses_count > 0 else "0%")
-	with m_col3:
-		st.metric("⏳ Bekleyen Dozlar", f"{pending_doses_count} Doz", delta=None if pending_doses_count == 0 else f"{pending_doses_count} bekliyor", delta_color="inverse")
-	with m_col4:
-		st.metric("⚠️ Verilemeyen / Yok", f"{missed_doses_count} Doz", delta=None if missed_doses_count == 0 else "İncelenmeli", delta_color="inverse")
-	with m_col5:
-		st.metric("📦 Azalan İlaç Stokları", f"{len(low_stock_meds)} İlaç", delta="Kritik Seviye" if len(low_stock_meds) > 0 else "Yeterli", delta_color="inverse" if len(low_stock_meds) > 0 else "normal")
+	if is_section_visible("med_expiry_alerts"):
+		m_col1, m_col2, m_col3, m_col4, m_col5 = st.columns(5)
+		with m_col1:
+			st.metric("📋 Toplam Planlanan Doz", f"{total_doses_count} Doz")
+		with m_col2:
+			st.metric("✅ Verilen / Uygulanan", f"{given_doses_count} Doz", delta=f"%{round((given_doses_count/total_doses_count)*100):.0f}" if total_doses_count > 0 else "0%")
+		with m_col3:
+			st.metric("⏳ Bekleyen Dozlar", f"{pending_doses_count} Doz", delta=None if pending_doses_count == 0 else f"{pending_doses_count} bekliyor", delta_color="inverse")
+		with m_col4:
+			st.metric("⚠️ Verilemeyen / Yok", f"{missed_doses_count} Doz", delta=None if missed_doses_count == 0 else "İncelenmeli", delta_color="inverse")
+		with m_col5:
+			st.metric("📦 Azalan İlaç Stokları", f"{len(low_stock_meds)} İlaç", delta="Kritik Seviye" if len(low_stock_meds) > 0 else "Yeterli", delta_color="inverse" if len(low_stock_meds) > 0 else "normal")
 
 	st.markdown("<div style='height: 10px'></div>", unsafe_allow_html=True)
 
@@ -11084,7 +11522,7 @@ def render_vital_tracking() -> None:
 									"Durum": assessment["status"] if assessment else "Yaşa uygun kaynak aralığı yok",
 									"Birim": assessment["unit"] if assessment else "",
 									"Kaynak": assessment["source"] if assessment else ""})
-			if assessments:
+			if assessments and is_section_visible("vital_trends"):
 				st.dataframe(pd.DataFrame(assessments), width="stretch", hide_index=True)
 				st.caption("‘Sınıra yakın’ yalnızca referans aralığının %10'luk kenar bandını ifade eden bir tarama işaretidir; klinik eşik değildir.")
 				statuses = [row["Durum"] for row in assessments]
@@ -14632,6 +15070,7 @@ def render_settings() -> None:
 				"📅 Eğitim Öğretim Yılı & Arşiv Yönetimi",
 				"📥 Liste İçe Aktar (Excel / PDF)",
 				"🎨 Görünüm, Yazı Tipi & Dil",
+				"📄 Sayfa Ayarları (Bölüm Görünürlüğü)",
 				"📍 Varsayılan Konum & İl-İlçe-Köy",
 				"🩺 Klinik Şablonlar & WHO",
 				"📋 Bakım Planı Şablonları (NANDA-I)",
@@ -14827,6 +15266,58 @@ def render_settings() -> None:
 				st.success("Görünüm, yazı tipi, tema, karanlık mod ve tablo ayarları kaydedildi.")
 				st.rerun()
 
+
+
+		# 📄 Sayfa Ayarları ve Bölüm Görünürlüğü
+		elif active_sec == "📄 Sayfa Ayarları (Bölüm Görünürlüğü)":
+			import json as _json
+			st.markdown("### 📄 Sayfa Ayarları ve Bölüm Görünürlüğü")
+			st.caption("Revir Defteri içerisindeki her bir sayfanın içinde hangi bölümlerin, kartların ve tabloların gösterileceğini buradan özelleştirebilirsiniz. İhtiyaç duymadığınız bölümleri kapatıp arayüzü daha sade, hızlı ve kullanıcı dostu hale getirebilirsiniz.")
+
+			cur_page_vis = get_page_sections_visibility()
+
+			pr_c1, pr_c2, _ = st.columns([1.6, 2.2, 2.5])
+			with pr_c1:
+				if st.button("✅ Tüm Bölümleri Göster", key="btn_sec_preset_all", use_container_width=True):
+					all_enabled = {sec_k: True for p, s_map in PAGE_SECTIONS_REGISTRY.items() for sec_k in s_map}
+					save_app_settings({"page_sections_visibility": _json.dumps(all_enabled, ensure_ascii=False)})
+					st.success("Tüm sayfa bölümleri görünür yapıldı.")
+					st.rerun()
+			with pr_c2:
+				if st.button("⚡ Sade & Hızlı Çalışma Görünümü", key="btn_sec_preset_compact", use_container_width=True):
+					compact_map = {}
+					for p, s_map in PAGE_SECTIONS_REGISTRY.items():
+						for sec_k, sec_data in s_map.items():
+							compact_map[sec_k] = sec_data.get("essential", sec_data["default"])
+					save_app_settings({"page_sections_visibility": _json.dumps(compact_map, ensure_ascii=False)})
+					st.success("Sade ve hızlı çalışma görünümü uygulandı.")
+					st.rerun()
+
+			st.markdown("---")
+			with st.form("form_page_sections_cfg"):
+				new_vis_map = {}
+				for page_title, page_sections in PAGE_SECTIONS_REGISTRY.items():
+					with st.expander(f"{page_title} Sayfası Bölümleri ({len(page_sections)} Bölüm)", expanded=True):
+						sec_cols = st.columns(2)
+						items_list = list(page_sections.items())
+						for i, (sec_k, sec_info) in enumerate(items_list):
+							c_target = sec_cols[i % 2]
+							with c_target:
+								is_on = cur_page_vis.get(sec_k, sec_info["default"])
+								val = st.checkbox(
+									f"{sec_info['icon']} **{sec_info['name']}**",
+									value=is_on,
+									key=f"sec_chk_{sec_k}",
+									help=sec_info["desc"]
+								)
+								st.caption(f"<span style='color:var(--text-muted); font-size:12.5px; margin-left:26px;'>{sec_info['desc']}</span>", unsafe_allow_html=True)
+								new_vis_map[sec_k] = val
+
+				st.write("")
+				if st.form_submit_button("💾 Sayfa Görünüm Tercihlerini Kaydet", type="primary", use_container_width=True):
+					save_app_settings({"page_sections_visibility": _json.dumps(new_vis_map, ensure_ascii=False)})
+					st.success("Sayfa ayarları ve bölüm görünürlükleri başarıyla kaydedildi!")
+					st.rerun()
 
 
 		# 📍 Varsayılan Konum ve Türkiye İl-İlçe-Köy
