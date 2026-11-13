@@ -11,13 +11,14 @@ import json
 import math
 import re
 import sqlite3
+from urllib.parse import quote as url_quote
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, time
 from hashlib import sha256
 import io
 from io import BytesIO
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 import altair as alt
 import pandas as pd
@@ -52,8 +53,10 @@ PERSANTIL_DATA_DIR = APP_DIR / "persantil veriler"
 TR_LOCATIONS_PATH = APP_DIR / "turkiye-il-ilce-mahalle-koy.json"
 EVRAKLAR_DIR = APP_DIR / "revir_evraklari"
 EGITIM_YILLARI_DIR = APP_DIR / "egitim_yillari"
+AUTO_BACKUP_DIR = APP_DIR / "oto_yedekler"
 EVRAKLAR_DIR.mkdir(parents=True, exist_ok=True)
 EGITIM_YILLARI_DIR.mkdir(parents=True, exist_ok=True)
+AUTO_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 
 PAGES = [
 	"📊 Genel Bakış",
@@ -188,6 +191,22 @@ DEFAULT_APP_SETTINGS: dict[str, str] = {
 	"medication_visible_fields": "med_route,dosage_pattern,dose_unit,meal_relation,total_volume,duration_days,active_days,storage_condition,guardian_consent,expiry_date,special_notes",
 	"page_sections_visibility": "{}",
 }
+
+INCIDENT_LOCATIONS = [
+	"Belirtilmedi",
+	"Sınıf İçi",
+	"Okul Bahçesi",
+	"Koridor / Merdiven",
+	"Spor Salonu",
+	"Yemekhane",
+	"Servis / Okul Dışı",
+]
+
+FOLLOW_UP_STATUS_OPTIONS = [
+	"Açık",
+	"Tamamlandı",
+	"İzlem Gerekmiyor",
+]
 
 COUNTRY_OPTIONS = [
 	"Türkiye",
@@ -1324,7 +1343,12 @@ def initialize_db() -> None:
 				action TEXT,
 				guardian_contacted INTEGER NOT NULL DEFAULT 0,
 				referral TEXT,
-				follow_up TEXT
+				follow_up TEXT,
+				follow_up_status TEXT DEFAULT 'Açık',
+				follow_up_result TEXT,
+				follow_up_closed_at TEXT,
+				incident_location TEXT,
+				witness_teacher TEXT
 			);
 			CREATE TABLE IF NOT EXISTS measurements (
 				id INTEGER PRIMARY KEY,
@@ -1411,6 +1435,10 @@ def initialize_db() -> None:
 				medications TEXT,
 				blood_group TEXT,
 				emergency_notes TEXT,
+				special_needs_codes TEXT,
+				medical_devices TEXT,
+				dietary_swallowing_notes TEXT,
+				seizure_emergency_protocol TEXT,
 				updated_at TEXT NOT NULL,
 				reviewed_by TEXT
 			);
@@ -1517,6 +1545,57 @@ def initialize_db() -> None:
 				created_at TEXT NOT NULL,
 				UNIQUE(medication_id, log_date, scheduled_time)
 			);
+			CREATE TABLE IF NOT EXISTS seizure_logs (
+				id INTEGER PRIMARY KEY,
+				student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+				seizure_date TEXT NOT NULL,
+				seizure_time TEXT NOT NULL,
+				duration_seconds INTEGER,
+				seizure_type TEXT NOT NULL,
+				triggers TEXT,
+				observations TEXT,
+				emergency_med_given TEXT,
+				ambulance_called INTEGER NOT NULL DEFAULT 0,
+				guardian_notified INTEGER NOT NULL DEFAULT 0,
+				recorded_by TEXT,
+				created_at TEXT NOT NULL
+			);
+			CREATE TABLE IF NOT EXISTS isolation_records (
+				id INTEGER PRIMARY KEY,
+				student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+				disease_name TEXT NOT NULL,
+				detected_date TEXT NOT NULL,
+				expected_return_date TEXT,
+				actual_return_date TEXT,
+				doctor_clearance_required INTEGER NOT NULL DEFAULT 1,
+				clearance_received INTEGER NOT NULL DEFAULT 0,
+				status TEXT NOT NULL DEFAULT 'İzolasyonda / İstirahatte',
+				notes TEXT,
+				created_at TEXT NOT NULL
+			);
+			CREATE TABLE IF NOT EXISTS infirmary_inventory (
+				id INTEGER PRIMARY KEY,
+				item_name TEXT NOT NULL,
+				category TEXT,
+				quantity REAL NOT NULL DEFAULT 0,
+				unit TEXT,
+				min_threshold REAL NOT NULL DEFAULT 5,
+				expiry_date TEXT,
+				storage_location TEXT,
+				notes TEXT,
+				updated_at TEXT NOT NULL
+			);
+			CREATE TABLE IF NOT EXISTS fridge_temp_logs (
+				id INTEGER PRIMARY KEY,
+				log_date TEXT NOT NULL,
+				log_time TEXT NOT NULL,
+				fridge_temp_c REAL,
+				room_temp_c REAL,
+				humidity_pct REAL,
+				checked_by TEXT,
+				notes TEXT,
+				created_at TEXT NOT NULL
+			);
 			CREATE INDEX IF NOT EXISTS idx_students_class_id ON students(class_id);
 			CREATE INDEX IF NOT EXISTS idx_students_type ON students(person_type);
 			CREATE INDEX IF NOT EXISTS idx_visits_student_id ON visits(student_id);
@@ -1528,6 +1607,12 @@ def initialize_db() -> None:
 			CREATE INDEX IF NOT EXISTS idx_student_medications_student_id ON student_medications(student_id);
 			CREATE INDEX IF NOT EXISTS idx_vital_readings_student_id ON vital_readings(student_id);
 			CREATE INDEX IF NOT EXISTS idx_care_plans_student_id ON care_plans(student_id);
+			CREATE INDEX IF NOT EXISTS idx_seizure_logs_student_id ON seizure_logs(student_id);
+			CREATE INDEX IF NOT EXISTS idx_seizure_logs_date ON seizure_logs(seizure_date);
+			CREATE INDEX IF NOT EXISTS idx_isolation_records_student_id ON isolation_records(student_id);
+			CREATE INDEX IF NOT EXISTS idx_isolation_records_status ON isolation_records(status);
+			CREATE INDEX IF NOT EXISTS idx_infirmary_inventory_expiry ON infirmary_inventory(expiry_date);
+			CREATE INDEX IF NOT EXISTS idx_fridge_temp_logs_date ON fridge_temp_logs(log_date);
 			"""
 		)
 		cls_cols = {row["name"] for row in connection.execute("PRAGMA table_info(classes)")}
@@ -1576,6 +1661,10 @@ def initialize_db() -> None:
 			"harmful_habits",
 			"psychosocial_status",
 			"last_screened_at",
+			"special_needs_codes",
+			"medical_devices",
+			"dietary_swallowing_notes",
+			"seizure_emergency_protocol",
 		):
 			if scr_col not in hp_columns:
 				connection.execute(f"ALTER TABLE health_profiles ADD COLUMN {scr_col} TEXT")
@@ -1596,6 +1685,18 @@ def initialize_db() -> None:
 		if "stock_unit" not in med_columns:
 			connection.execute("ALTER TABLE student_medications ADD COLUMN stock_unit TEXT DEFAULT 'adet'")
 
+		visit_columns = {row["name"] for row in connection.execute("PRAGMA table_info(visits)")}
+		visit_migrations = {
+			"follow_up_status": "TEXT DEFAULT 'Açık'",
+			"follow_up_result": "TEXT",
+			"follow_up_closed_at": "TEXT",
+			"incident_location": "TEXT",
+			"witness_teacher": "TEXT",
+		}
+		for v_col_name, v_col_def in visit_migrations.items():
+			if v_col_name not in visit_columns:
+				connection.execute(f"ALTER TABLE visits ADD COLUMN {v_col_name} {v_col_def}")
+
 		# Resilient person_type normalization
 		connection.execute("UPDATE students SET person_type='Öğrenci' WHERE person_type LIKE '%renci%'")
 
@@ -1603,6 +1704,10 @@ def initialize_db() -> None:
 def ensure_db_initialized() -> bool:
 	"""Tek seferlik veritabanı şema ve başlangıç kontrolü (Uygulama açılışında 1 kere çalışır, rerun'larda atlanır)."""
 	initialize_db()
+	try:
+		run_daily_auto_backup()
+	except Exception:
+		pass
 	return True
 
 
@@ -1695,6 +1800,7 @@ def set_active_academic_year(year_id: int) -> None:
 			if not year_db.exists() and DB_PATH.exists():
 				import shutil
 				shutil.copy2(DB_PATH, year_db)
+	clear_all_data_caches()
 
 
 def create_academic_year(
@@ -2067,6 +2173,138 @@ def format_file_size(num_bytes: int) -> str:
 		return f"{num_bytes / (1024 * 1024):.1f} MB"
 
 
+def _prune_auto_backups(backup_dir: Path, max_backups: int = 15) -> int:
+	"""Klasördeki otomatik yedek sayısı max_backups sınırını aşarsa en eski dosyaları siler."""
+	limit = max(1, int(max_backups))
+	db_files = [p for p in backup_dir.glob("*.db") if p.is_file()]
+	if len(db_files) <= limit:
+		return 0
+	db_files.sort(key=lambda p: (p.stat().st_mtime, p.name), reverse=True)
+	removed = 0
+	for old_f in db_files[limit:]:
+		try:
+			old_f.unlink()
+			removed += 1
+		except Exception:
+			pass
+	return removed
+
+
+def run_daily_auto_backup(
+	max_backups: int = 15,
+	force: bool = False,
+	backup_date: date | None = None,
+) -> Path | None:
+	"""Aktif eğitim yılı veritabanının sqlite3 online backup() API'si ile günlük yedeğini alır ve eski yedekleri temizler."""
+	db_path = get_current_db_path()
+	if not db_path or not db_path.exists():
+		return None
+
+	bdir = AUTO_BACKUP_DIR
+	bdir.mkdir(parents=True, exist_ok=True)
+
+	active_ay = get_active_academic_year()
+	yil_raw = str(active_ay.get("name") or "aktif")
+	yil_adi = re.sub(r"[^0-9A-Za-z]+", "_", yil_raw).strip("_") or "aktif"
+	day_tag = (backup_date or date.today()).strftime("%Y_%m_%d")
+	daily_path = bdir / f"revir_yedek_{yil_adi}_{day_tag}.db"
+
+	if daily_path.exists() and daily_path.stat().st_size > 0 and not force:
+		_prune_auto_backups(bdir, max_backups=max_backups)
+		return None
+
+	if force and daily_path.exists() and daily_path.stat().st_size > 0:
+		time_tag = datetime.now().strftime("%H%M%S")
+		target_path = bdir / f"revir_yedek_{yil_adi}_{day_tag}_{time_tag}.db"
+	else:
+		target_path = daily_path
+
+	tmp_path = bdir / f".tmp_{target_path.name}_{datetime.now().strftime('%f')}"
+	src_conn = None
+	dst_conn = None
+	try:
+		src_conn = sqlite3.connect(str(db_path), timeout=30)
+		dst_conn = sqlite3.connect(str(tmp_path), timeout=30)
+		with dst_conn:
+			src_conn.backup(dst_conn)
+	finally:
+		if dst_conn is not None:
+			try:
+				dst_conn.close()
+			except Exception:
+				pass
+		if src_conn is not None:
+			try:
+				src_conn.close()
+			except Exception:
+				pass
+
+	if tmp_path.exists():
+		tmp_path.replace(target_path)
+
+	_prune_auto_backups(bdir, max_backups=max_backups)
+	return target_path
+
+
+def list_auto_backups() -> list[dict[str, Any]]:
+	"""oto_yedekler klasöründeki veritabanı yedeklerini tarih ve boyut bilgisiyle yeni-önce sıralı döndürür."""
+	bdir = AUTO_BACKUP_DIR
+	bdir.mkdir(parents=True, exist_ok=True)
+	files = [p for p in bdir.glob("*.db") if p.is_file()]
+	files.sort(key=lambda p: (p.stat().st_mtime, p.name), reverse=True)
+	out: list[dict[str, Any]] = []
+	for p in files:
+		st_res = p.stat()
+		dt_str = datetime.fromtimestamp(st_res.st_mtime).strftime("%d.%m.%Y %H:%M:%S")
+		out.append({
+			"name": p.name,
+			"path": p,
+			"size_bytes": int(st_res.st_size),
+			"size_str": format_file_size(int(st_res.st_size)),
+			"modified_at": dt_str,
+		})
+	return out
+
+
+def restore_auto_backup_file(backup_path: Path) -> bool:
+	"""Seçilen yedek .db dosyasını doğrular ve sqlite3 online backup() ile aktif veritabanına geri yükler."""
+	bpath = Path(backup_path)
+	if not bpath.exists() or not bpath.is_file():
+		return False
+	raw_hdr = bpath.read_bytes()[:16]
+	if raw_hdr[:15] != b"SQLite format 3":
+		raise ValueError("Seçilen dosya geçerli bir SQLite veritabanı değil.")
+
+	chk_conn = sqlite3.connect(str(bpath))
+	try:
+		integrity = chk_conn.execute("PRAGMA integrity_check").fetchone()
+		if not integrity or str(integrity[0]).lower() != "ok":
+			raise ValueError("Yedek dosyası bütünlük testinden (integrity_check) geçemedi.")
+	finally:
+		chk_conn.close()
+
+	curr_db = get_current_db_path()
+	curr_db.parent.mkdir(parents=True, exist_ok=True)
+	src_conn = sqlite3.connect(str(bpath), timeout=30)
+	dst_conn = sqlite3.connect(str(curr_db), timeout=30)
+	try:
+		with dst_conn:
+			src_conn.backup(dst_conn)
+	finally:
+		try:
+			dst_conn.close()
+		except Exception:
+			pass
+		try:
+			src_conn.close()
+		except Exception:
+			pass
+
+	clear_all_data_caches()
+	initialize_db()
+	return True
+
+
 def get_person_data_file_path(person_id: int, full_name: str | None = None) -> Path:
 	pdir = get_current_person_data_dir()
 	pdir.mkdir(parents=True, exist_ok=True)
@@ -2119,7 +2357,10 @@ def save_person_data_file(person_id: int) -> Path | None:
 			dict(r)
 			for r in connection.execute(
 				"""SELECT id, visit_date, visit_time, complaint, symptoms, observation,
-						  action, guardian_contacted, referral, follow_up
+						  action, guardian_contacted, referral, follow_up,
+						  COALESCE(follow_up_status, 'Açık') AS follow_up_status,
+						  follow_up_result, follow_up_closed_at,
+						  incident_location, witness_teacher
 				   FROM visits WHERE student_id = ?
 				   ORDER BY visit_date DESC, visit_time DESC, id DESC""",
 				(int(person_id),),
@@ -2203,6 +2444,29 @@ def save_person_data_file(person_id: int) -> Path | None:
 			).fetchall()
 		]
 
+		seizure_logs = [
+			dict(r)
+			for r in connection.execute(
+				"""SELECT id, seizure_date, seizure_time, duration_seconds, seizure_type,
+						  triggers, observations, emergency_med_given, ambulance_called,
+						  guardian_notified, recorded_by, created_at
+				   FROM seizure_logs WHERE student_id = ?
+				   ORDER BY seizure_date DESC, seizure_time DESC, id DESC""",
+				(int(person_id),),
+			).fetchall()
+		]
+
+		isolation_records = [
+			dict(r)
+			for r in connection.execute(
+				"""SELECT id, disease_name, detected_date, expected_return_date, actual_return_date,
+						  doctor_clearance_required, clearance_received, status, notes, created_at
+				   FROM isolation_records WHERE student_id = ?
+				   ORDER BY detected_date DESC, id DESC""",
+				(int(person_id),),
+			).fetchall()
+		]
+
 	target_path = get_person_data_file_path(int(person_id), stu["full_name"])
 	for old_file in pdir.glob(f"kisi_{int(person_id):04d}_*.json"):
 		if old_file != target_path:
@@ -2225,6 +2489,8 @@ def save_person_data_file(person_id: int) -> Path | None:
 		"lab_results": lab_results,
 		"care_plans": care_plans,
 		"medications": medications,
+		"seizure_logs": seizure_logs,
+		"isolation_records": isolation_records,
 	}
 	target_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 	return target_path
@@ -2253,215 +2519,626 @@ def load_person_data_file(person_id: int) -> dict:
 
 
 def apply_person_data_file_to_db(person_id: int, data: dict) -> None:
-	if not data or int(data.get("person_id", person_id)) != int(person_id):
+	try:
+		pid = int(person_id)
+		data_pid = int(data.get("person_id", pid)) if isinstance(data, dict) else None
+	except (TypeError, ValueError):
+		raise ValueError("Kişi kimliği (person_id) geçerli bir tam sayı olmalıdır.")
+	if not isinstance(data, dict) or data_pid != pid:
 		raise ValueError("Veri dosyasındaki kişi kimliği (person_id) seçili kişiyle uyuşmuyor.")
-	prof = data.get("profile") or {}
-	hp = data.get("health_profile") or {}
+
+	def _safe_str(val: object) -> str | None:
+		if val is None or isinstance(val, (list, tuple, dict, set)):
+			return None
+		try:
+			if pd.isna(val):
+				return None
+		except (TypeError, ValueError):
+			pass
+		txt = str(val).strip()
+		if not txt or txt.lower() in {"nan", "none", "null", "na", "n/a", "<na>"}:
+			return None
+		return txt
+
+	def _safe_float(val: object, field_label: str = "Sayısal alan", positive_only: bool = False) -> float | None:
+		if val is None or isinstance(val, bool) or isinstance(val, (list, tuple, dict, set)):
+			return None
+		try:
+			if pd.isna(val):
+				return None
+		except (TypeError, ValueError):
+			pass
+		if isinstance(val, (int, float)):
+			f_val = float(val)
+			if not math.isfinite(f_val):
+				return None
+			return f_val if (not positive_only or f_val > 0) else None
+		txt = str(val).strip()
+		if not txt or txt.lower() in {"nan", "none", "null", "na", "n/a", "<na>", "-", "—"}:
+			return None
+		try:
+			parsed = numeric_value(txt)
+		except (TypeError, ValueError) as exc:
+			raise ValueError(f"{field_label} sayısal değere dönüştürülemedi: '{txt}'") from exc
+		if parsed is None:
+			raise ValueError(f"{field_label} geçersiz sayısal değer içeriyor: '{txt}'")
+		if positive_only and parsed <= 0:
+			return None
+		return parsed
+
+	def _safe_int(val: object, default: int | None = None) -> int | None:
+		if val is None or isinstance(val, bool) or isinstance(val, (list, tuple, dict, set)):
+			return default
+		try:
+			if pd.isna(val):
+				return default
+		except (TypeError, ValueError):
+			pass
+		txt = str(val).strip()
+		if not txt or txt.lower() in {"nan", "none", "null", "na", "n/a", "<na>", "-", "—"}:
+			return default
+		try:
+			f_val = float(txt.replace(",", "."))
+			return int(round(f_val)) if math.isfinite(f_val) else default
+		except (TypeError, ValueError):
+			return default
+
+	def _safe_iso_date(val: object, default_iso: str, field_label: str) -> str:
+		txt = _safe_str(val)
+		if not txt:
+			return default_iso
+		candidate = txt[:10]
+		try:
+			return date.fromisoformat(candidate).isoformat()
+		except (TypeError, ValueError):
+			parsed = parse_birth_date(txt)
+			if parsed:
+				return parsed
+			raise ValueError(f"{field_label} için geçersiz tarih formatı: '{txt}' (YYYY-AA-GG bekleniyor)")
+
+	def _safe_time(val: object, default_time: str = "09:00") -> str:
+		txt = _safe_str(val)
+		if not txt:
+			return default_time
+		m_time = re.match(r"^(\d{1,2})[:.](\d{2})", txt)
+		if m_time:
+			hh, mm = int(m_time.group(1)), int(m_time.group(2))
+			if 0 <= hh <= 23 and 0 <= mm <= 59:
+				return f"{hh:02d}:{mm:02d}"
+		raise ValueError(f"Geçersiz saat formatı: '{txt}' (SS:DD bekleniyor)")
+
+	def _safe_iso_datetime(val: object, default_dt: str, field_label: str) -> str:
+		txt = _safe_str(val)
+		if not txt:
+			return default_dt
+		norm = txt.replace(" ", "T")
+		try:
+			return datetime.fromisoformat(norm[:19]).isoformat(timespec="minutes")
+		except (TypeError, ValueError):
+			try:
+				d_only = _safe_iso_date(txt, default_dt[:10], field_label)
+				return f"{d_only}T09:00"
+			except ValueError as exc:
+				raise ValueError(f"{field_label} için geçersiz tarih/saat formatı: '{txt}'") from exc
+
+	raw_prof = data.get("profile")
+	if raw_prof is not None and not isinstance(raw_prof, dict):
+		raise ValueError("Kişi veri dosyasındaki 'profile' alanı nesne (dict) olmalıdır.")
+	prof = raw_prof or {}
+
+	raw_hp = data.get("health_profile")
+	if raw_hp is not None and not isinstance(raw_hp, dict):
+		raise ValueError("Kişi veri dosyasındaki 'health_profile' alanı nesne (dict) olmalıdır.")
+	hp = raw_hp or {}
+
 	now_iso = datetime.now().isoformat(timespec="minutes")
+	today_iso = date.today().isoformat()
+
+	# Determine whether person is adult for child-vs-adult weight heuristics
+	is_adult_person = False
+	prof_pt = _safe_str(prof.get("person_type")) if prof else None
+	if prof_pt:
+		is_adult_person = (prof_pt != "Öğrenci")
+	elif "measurements" in data or "vital_readings" in data:
+		with connect_db() as _pt_conn:
+			_pt_row = _pt_conn.execute("SELECT person_type FROM students WHERE id=?", (pid,)).fetchone()
+			if _pt_row and _pt_row["person_type"]:
+				is_adult_person = (str(_pt_row["person_type"]).strip() != "Öğrenci")
+
+	def _safe_smart_num(val: object, field_type: str, field_label: str, is_adult: bool = False) -> float | None:
+		raw_num = _safe_float(val, field_label, positive_only=True)
+		if raw_num is None:
+			return None
+		smart = parse_smart_clinical_value(field_type, val, is_adult=is_adult)
+		return float(smart) if smart is not None else float(raw_num)
+
+	# Pre-validate & construct all records BEFORE executing any DELETE/UPDATE statements
+	prof_birth_date: str | None = None
+	if prof and _safe_str(prof.get("birth_date")) is not None:
+		prof_birth_date = _safe_iso_date(prof.get("birth_date"), "", "Doğum tarihi")
+
+	prof_sex = normalize_sex(_safe_str(prof.get("sex"))) if prof else None
+
+	prepared_visits: list[tuple] | None = None
+	if "visits" in data and data["visits"] is not None:
+		if not isinstance(data["visits"], list):
+			raise ValueError("'visits' alanı liste biçiminde olmalıdır.")
+		prepared_visits = []
+		for idx, v in enumerate(data["visits"], start=1):
+			if not isinstance(v, dict):
+				raise ValueError(f"Revir kaydı #{idx} geçerli biçimde değil.")
+			v_complaint = _safe_str(v.get("complaint"))
+			v_symp = _safe_str(v.get("symptoms"))
+			v_obs = _safe_str(v.get("observation"))
+			v_act = _safe_str(v.get("action"))
+			v_ref = _safe_str(v.get("referral"))
+			v_fup = _safe_str(v.get("follow_up"))
+			v_fup_status = _safe_str(v.get("follow_up_status"))
+			v_fup_result = _safe_str(v.get("follow_up_result"))
+			v_closed_raw = _safe_str(v.get("follow_up_closed_at"))
+			v_inc_loc = _safe_str(v.get("incident_location"))
+			v_witness = _safe_str(v.get("witness_teacher"))
+			v_date_raw = _safe_str(v.get("visit_date"))
+			if not any([v_date_raw, v_complaint, v_symp, v_obs, v_act, v_ref, v_fup, v_fup_result, v_inc_loc, v_witness]):
+				continue
+			v_date = _safe_iso_date(v_date_raw, today_iso, f"Revir kaydı #{idx} tarihi")
+			v_time = _safe_time(v.get("visit_time"), "09:00")
+			g_cont_raw = v.get("guardian_contacted")
+			try:
+				g_cont = 0 if (g_cont_raw is None or pd.isna(g_cont_raw)) else int(bool(g_cont_raw))
+			except (TypeError, ValueError):
+				g_cont = 1 if str(g_cont_raw).strip().lower() in {"1", "true", "evet"} else 0
+			resolved_fup_status = (
+				v_fup_status if v_fup_status in FOLLOW_UP_STATUS_OPTIONS
+				else _infer_visit_follow_up_status(v_ref, v_fup)
+			)
+			v_closed_at = _safe_iso_datetime(v_closed_raw, now_iso, f"Revir kaydı #{idx} izlem kapanış tarihi") if v_closed_raw else None
+			prepared_visits.append((
+				pid,
+				v_date,
+				v_time,
+				v_complaint or "Kontrol",
+				v_symp,
+				v_obs,
+				v_act,
+				g_cont,
+				v_ref,
+				v_fup,
+				resolved_fup_status,
+				v_fup_result,
+				v_closed_at,
+				v_inc_loc,
+				v_witness,
+			))
+
+	prepared_measurements: list[tuple] | None = None
+	if "measurements" in data and data["measurements"] is not None:
+		if not isinstance(data["measurements"], list):
+			raise ValueError("'measurements' alanı liste biçiminde olmalıdır.")
+		prepared_measurements = []
+		for idx, m in enumerate(data["measurements"], start=1):
+			if not isinstance(m, dict):
+				raise ValueError(f"Ölçüm kaydı #{idx} geçerli biçimde değil.")
+			h_v = _safe_smart_num(m.get("height_cm"), "height", f"Ölçüm #{idx} boy (cm)", is_adult=is_adult_person)
+			w_v = _safe_smart_num(m.get("weight_kg"), "weight", f"Ölçüm #{idx} kilo (kg)", is_adult=is_adult_person)
+			hc_v = _safe_smart_num(m.get("head_circ_cm"), "head_circ", f"Ölçüm #{idx} baş çevresi (cm)", is_adult=is_adult_person)
+			m_date_raw = _safe_str(m.get("measured_on"))
+			if h_v is None and w_v is None and hc_v is None and not m_date_raw:
+				continue
+			if h_v is None and w_v is None and hc_v is None:
+				continue
+			m_date = _safe_iso_date(m_date_raw, today_iso, f"Ölçüm #{idx} tarihi")
+			b_v = (w_v / ((h_v / 100.0) ** 2)) if (h_v and w_v) else _safe_float(m.get("bmi"), f"Ölçüm #{idx} VKİ", positive_only=True)
+			m_age = _safe_int(m.get("age_months"), None)
+			prepared_measurements.append((pid, m_date, h_v, w_v, hc_v, m_age, b_v))
+
+	prepared_vitals: list[tuple] | None = None
+	if "vital_readings" in data and data["vital_readings"] is not None:
+		if not isinstance(data["vital_readings"], list):
+			raise ValueError("'vital_readings' alanı liste biçiminde olmalıdır.")
+		prepared_vitals = []
+		for idx, vr in enumerate(data["vital_readings"], start=1):
+			if not isinstance(vr, dict):
+				raise ValueError(f"Vital kaydı #{idx} geçerli biçimde değil.")
+			raw_sys_v = vr.get("systolic_mmhg")
+			raw_dia_v = vr.get("diastolic_mmhg")
+			bp_sys_s, bp_dia_s = normalize_bp(raw_sys_v, raw_dia_v)
+			if bp_sys_s is not None:
+				sys_v = float(bp_sys_s)
+			else:
+				sys_v = _safe_float(raw_sys_v, f"Vital #{idx} sistolik", positive_only=True)
+			if bp_dia_s is not None:
+				dia_v = float(bp_dia_s)
+			else:
+				dia_v = _safe_float(raw_dia_v, f"Vital #{idx} diyastolik", positive_only=True)
+			pls_v = _safe_smart_num(vr.get("pulse_bpm"), "pulse", f"Vital #{idx} nabız")
+			tmp_v = _safe_smart_num(vr.get("temperature_c"), "temperature", f"Vital #{idx} ateş")
+			spo_v = _safe_smart_num(vr.get("spo2_pct"), "spo2", f"Vital #{idx} SpO2")
+			glu_v = _safe_smart_num(vr.get("glucose_mg_dl"), "glucose", f"Vital #{idx} glukoz")
+			g_ctx = _safe_str(vr.get("glucose_context"))
+			v_notes = _safe_str(vr.get("notes"))
+			m_at_raw = _safe_str(vr.get("measured_at"))
+			if all(x is None for x in (sys_v, dia_v, pls_v, tmp_v, spo_v, glu_v)) and not v_notes:
+				continue
+			m_at = _safe_iso_datetime(m_at_raw, now_iso, f"Vital #{idx} tarih/saat")
+			prepared_vitals.append((pid, m_at, sys_v, dia_v, pls_v, tmp_v, spo_v, glu_v, g_ctx, v_notes))
+
+	prepared_screenings: list[tuple] | None = None
+	if "screenings" in data and data["screenings"] is not None:
+		if not isinstance(data["screenings"], list):
+			raise ValueError("'screenings' alanı liste biçiminde olmalıdır.")
+		prepared_screenings = []
+		for idx, sc in enumerate(data["screenings"], start=1):
+			if not isinstance(sc, dict):
+				raise ValueError(f"Tarama kaydı #{idx} geçerli biçimde değil.")
+			sc_date_raw = _safe_str(sc.get("screening_date"))
+			sc_h = _safe_smart_num(sc.get("height_cm"), "height", f"Tarama #{idx} boy")
+			sc_w = _safe_smart_num(sc.get("weight_kg"), "weight", f"Tarama #{idx} kilo", is_adult=False)
+			sc_hc = _safe_smart_num(sc.get("head_circ_cm"), "head_circ", f"Tarama #{idx} baş çevresi")
+			sc_t = _safe_smart_num(sc.get("temperature_c"), "temperature", f"Tarama #{idx} ateş")
+			sc_p = _safe_smart_num(sc.get("pulse_bpm"), "pulse", f"Tarama #{idx} nabız")
+			sc_s = _safe_smart_num(sc.get("spo2_pct"), "spo2", f"Tarama #{idx} SpO2")
+			if not sc_date_raw and all(x is None for x in (sc_h, sc_w, sc_hc, sc_t, sc_p, sc_s)) and not _safe_str(sc.get("notes")):
+				continue
+			sc_date = _safe_iso_date(sc_date_raw, today_iso, f"Tarama #{idx} tarihi")
+			sc_created = _safe_iso_datetime(sc.get("created_at"), now_iso, f"Tarama #{idx} oluşturulma")
+			prepared_screenings.append((
+				pid,
+				sc_date,
+				sc_h,
+				sc_w,
+				sc_hc,
+				sc_t,
+				sc_p,
+				sc_s,
+				_safe_str(sc.get("wears_glasses")),
+				_safe_str(sc.get("vision_right")),
+				_safe_str(sc.get("vision_left")),
+				_safe_str(sc.get("hair_screening")),
+				_safe_str(sc.get("hearing_right")),
+				_safe_str(sc.get("hearing_left")),
+				_safe_str(sc.get("health_behavior")),
+				_safe_str(sc.get("harmful_habits")),
+				_safe_str(sc.get("psychosocial_status")),
+				_safe_str(sc.get("notes")),
+				_safe_str(sc.get("screened_by")),
+				sc_created,
+			))
+
+	prepared_vaccinations: list[tuple] | None = None
+	if "vaccinations" in data and data["vaccinations"] is not None:
+		if not isinstance(data["vaccinations"], list):
+			raise ValueError("'vaccinations' alanı liste biçiminde olmalıdır.")
+		prepared_vaccinations = []
+		for idx, v in enumerate(data["vaccinations"], start=1):
+			if not isinstance(v, dict):
+				raise ValueError(f"Aşı kaydı #{idx} geçerli biçimde değil.")
+			v_code = _safe_str(v.get("vaccine_code"))
+			if not v_code:
+				continue
+			adm_raw = _safe_str(v.get("administered_date"))
+			adm_date = _safe_iso_date(adm_raw, "", f"Aşı #{idx} uygulama tarihi") if adm_raw else None
+			prepared_vaccinations.append((
+				pid,
+				v_code,
+				_safe_str(v.get("vaccine_name")) or "",
+				_safe_str(v.get("dose_name")) or "",
+				_safe_str(v.get("period_label")) or "",
+				_safe_int(v.get("period_months"), 0) or 0,
+				1 if v.get("is_done") else 0,
+				adm_date,
+				_safe_str(v.get("facility")),
+				_safe_str(v.get("lot_number")),
+				_safe_str(v.get("notes")),
+				_safe_str(v.get("updated_at")) or now_iso,
+			))
+
+	def _safe_flag_int(val: object, default: int = 0) -> int:
+		if val is None:
+			return default
+		try:
+			if pd.isna(val):
+				return default
+		except (TypeError, ValueError):
+			pass
+		if isinstance(val, (bool, int)):
+			return 1 if bool(val) else 0
+		s = str(val).strip().lower()
+		if not s:
+			return default
+		return 1 if s in {"1", "true", "evet", "yes", "var"} else 0
+
+	prepared_seizure_logs: list[tuple] | None = None
+	if "seizure_logs" in data and data["seizure_logs"] is not None:
+		if not isinstance(data["seizure_logs"], list):
+			raise ValueError("'seizure_logs' alanı liste biçiminde olmalıdır.")
+		prepared_seizure_logs = []
+		for idx, sz in enumerate(data["seizure_logs"], start=1):
+			if not isinstance(sz, dict):
+				raise ValueError(f"Nöbet kaydı #{idx} geçerli biçimde değil.")
+			sz_date_raw = _safe_str(sz.get("seizure_date"))
+			sz_type = _safe_str(sz.get("seizure_type"))
+			sz_obs = _safe_str(sz.get("observations"))
+			if not sz_date_raw and not sz_type and not sz_obs:
+				continue
+			sz_date = _safe_iso_date(sz_date_raw, today_iso, f"Nöbet #{idx} tarihi")
+			sz_time = _safe_time(sz.get("seizure_time"), "09:00")
+			sz_dur = _safe_int(sz.get("duration_seconds"), None)
+			if sz_dur is not None and sz_dur < 0:
+				sz_dur = None
+			sz_created = _safe_iso_datetime(sz.get("created_at"), now_iso, f"Nöbet #{idx} oluşturulma")
+			prepared_seizure_logs.append((
+				pid,
+				sz_date,
+				sz_time,
+				sz_dur,
+				sz_type or "Diğer / Sınıflandırılmamış",
+				_safe_str(sz.get("triggers")),
+				sz_obs,
+				_safe_str(sz.get("emergency_med_given")),
+				_safe_flag_int(sz.get("ambulance_called"), 0),
+				_safe_flag_int(sz.get("guardian_notified"), 0),
+				_safe_str(sz.get("recorded_by")),
+				sz_created,
+			))
+
+	prepared_isolation_records: list[tuple] | None = None
+	if "isolation_records" in data and data["isolation_records"] is not None:
+		if not isinstance(data["isolation_records"], list):
+			raise ValueError("'isolation_records' alanı liste biçiminde olmalıdır.")
+		prepared_isolation_records = []
+		for idx, iso_rec in enumerate(data["isolation_records"], start=1):
+			if not isinstance(iso_rec, dict):
+				raise ValueError(f"İzolasyon kaydı #{idx} geçerli biçimde değil.")
+			dis_name = _safe_str(iso_rec.get("disease_name"))
+			det_raw = _safe_str(iso_rec.get("detected_date"))
+			if not dis_name and not det_raw:
+				continue
+			det_date = _safe_iso_date(det_raw, today_iso, f"İzolasyon #{idx} tespit tarihi")
+			exp_raw = _safe_str(iso_rec.get("expected_return_date"))
+			act_raw = _safe_str(iso_rec.get("actual_return_date"))
+			exp_date = _safe_iso_date(exp_raw, "", f"İzolasyon #{idx} beklenen dönüş") if exp_raw else None
+			act_date = _safe_iso_date(act_raw, "", f"İzolasyon #{idx} fiili dönüş") if act_raw else None
+			iso_created = _safe_iso_datetime(iso_rec.get("created_at"), now_iso, f"İzolasyon #{idx} oluşturulma")
+			prepared_isolation_records.append((
+				pid,
+				dis_name or "Bulaşıcı Hastalık",
+				det_date,
+				exp_date,
+				act_date,
+				_safe_flag_int(iso_rec.get("doctor_clearance_required"), 1),
+				_safe_flag_int(iso_rec.get("clearance_received"), 0),
+				_safe_str(iso_rec.get("status")) or "İzolasyonda / İstirahatte",
+				_safe_str(iso_rec.get("notes")),
+				iso_created,
+			))
+
+	# Atomic DB update with explicit rollback protection
 	with connect_db() as connection:
-		if prof.get("class_name"):
-			connection.execute("INSERT OR IGNORE INTO classes(name) VALUES (?)", (str(prof["class_name"]).strip(),))
-			cid_row = connection.execute("SELECT id FROM classes WHERE name=?", (str(prof["class_name"]).strip(),)).fetchone()
-			if cid_row:
-				connection.execute("UPDATE students SET class_id=? WHERE id=?", (cid_row["id"], int(person_id)))
-		if prof:
-			connection.execute(
-				"""UPDATE students SET
-					 student_no=COALESCE(?, student_no),
-					 sex=?,
-					 birth_date=?,
-					 guardian_name=?,
-					 guardian_phone=?,
-					 notes=?,
-					 country=COALESCE(?, country),
-					 province=COALESCE(?, province),
-					 district=COALESCE(?, district),
-					 village=?
-				   WHERE id=?""",
-				(
-					prof.get("student_no"),
-					prof.get("sex"),
-					prof.get("birth_date"),
-					prof.get("guardian_name"),
-					prof.get("guardian_phone"),
-					prof.get("notes"),
-					prof.get("country"),
-					prof.get("province"),
-					prof.get("district"),
-					prof.get("village"),
-					int(person_id),
-				),
-			)
-		if hp is not None:
-			connection.execute(
-				"""INSERT INTO health_profiles(
-					 student_id, guardian_name, guardian_phone, allergies, chronic_conditions,
-					 medical_history, medications, blood_group, emergency_notes, updated_at, reviewed_by,
-					 wears_glasses, vision_right, vision_left, hair_screening, hearing_right, hearing_left,
-					 health_behavior, harmful_habits, psychosocial_status, last_screened_at
-				   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-				   ON CONFLICT(student_id) DO UPDATE SET
-					 guardian_name=excluded.guardian_name,
-					 guardian_phone=excluded.guardian_phone,
-					 allergies=excluded.allergies,
-					 chronic_conditions=excluded.chronic_conditions,
-					 medical_history=excluded.medical_history,
-					 medications=excluded.medications,
-					 blood_group=excluded.blood_group,
-					 emergency_notes=excluded.emergency_notes,
-					 updated_at=excluded.updated_at,
-					 reviewed_by=excluded.reviewed_by,
-					 wears_glasses=excluded.wears_glasses,
-					 vision_right=excluded.vision_right,
-					 vision_left=excluded.vision_left,
-					 hair_screening=excluded.hair_screening,
-					 hearing_right=excluded.hearing_right,
-					 hearing_left=excluded.hearing_left,
-					 health_behavior=excluded.health_behavior,
-					 harmful_habits=excluded.harmful_habits,
-					 psychosocial_status=excluded.psychosocial_status,
-					 last_screened_at=excluded.last_screened_at""",
-				(
-					int(person_id),
-					hp.get("guardian_name") or prof.get("guardian_name"),
-					hp.get("guardian_phone") or prof.get("guardian_phone"),
-					hp.get("allergies"),
-					hp.get("chronic_conditions"),
-					hp.get("medical_history"),
-					hp.get("medications"),
-					hp.get("blood_group"),
-					hp.get("emergency_notes"),
-					now_iso,
-					hp.get("reviewed_by"),
-					hp.get("wears_glasses"),
-					hp.get("vision_right"),
-					hp.get("vision_left"),
-					hp.get("hair_screening"),
-					hp.get("hearing_right"),
-					hp.get("hearing_left"),
-					hp.get("health_behavior"),
-					hp.get("harmful_habits"),
-					hp.get("psychosocial_status"),
-					hp.get("last_screened_at"),
-				),
-			)
-		if "visits" in data and isinstance(data["visits"], list):
-			connection.execute("DELETE FROM visits WHERE student_id=?", (int(person_id),))
-			for v in data["visits"]:
+		try:
+			cur_stu = connection.execute(
+				"SELECT guardian_name, guardian_phone FROM students WHERE id=?", (pid,)
+			).fetchone()
+			cur_hp = connection.execute(
+				"SELECT guardian_name, guardian_phone FROM health_profiles WHERE student_id=?", (pid,)
+			).fetchone()
+			cur_s_gname = _safe_str(cur_stu["guardian_name"]) if cur_stu else None
+			cur_s_gphone = _safe_str(cur_stu["guardian_phone"]) if cur_stu else None
+			cur_hp_gname = _safe_str(cur_hp["guardian_name"]) if cur_hp else None
+			cur_hp_gphone = _safe_str(cur_hp["guardian_phone"]) if cur_hp else None
+
+			prof_gname = _safe_str(prof.get("guardian_name")) if prof else None
+			prof_gphone = normalize_phone(prof.get("guardian_phone")) if prof else None
+			hp_gname = _safe_str(hp.get("guardian_name")) if hp else None
+			hp_gphone = normalize_phone(hp.get("guardian_phone")) if hp else None
+
+			# Resolve bidirectional guardian sync between profile (students) and health_profile
+			if hp and hp_gname != cur_hp_gname and (hp_gname is not None or prof_gname == cur_s_gname):
+				resolved_gname = hp_gname
+			elif prof:
+				resolved_gname = prof_gname if prof_gname is not None else hp_gname
+			else:
+				resolved_gname = hp_gname if hp_gname is not None else cur_s_gname
+
+			if hp and hp_gphone != cur_hp_gphone and (hp_gphone is not None or prof_gphone == cur_s_gphone):
+				resolved_gphone = hp_gphone
+			elif prof:
+				resolved_gphone = prof_gphone if prof_gphone is not None else hp_gphone
+			else:
+				resolved_gphone = hp_gphone if hp_gphone is not None else cur_s_gphone
+
+			if prof.get("class_name"):
+				cls_name = str(prof["class_name"]).strip()
+				if cls_name:
+					connection.execute("INSERT OR IGNORE INTO classes(name) VALUES (?)", (cls_name,))
+					cid_row = connection.execute("SELECT id FROM classes WHERE name=?", (cls_name,)).fetchone()
+					if cid_row:
+						connection.execute("UPDATE students SET class_id=? WHERE id=?", (cid_row["id"], pid))
+			if prof:
 				connection.execute(
-					"""INSERT INTO visits(student_id, visit_date, visit_time, complaint, symptoms,
-					   observation, action, guardian_contacted, referral, follow_up)
-					   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+					"""UPDATE students SET
+						 student_no=COALESCE(?, student_no),
+						 sex=?,
+						 birth_date=?,
+						 guardian_name=?,
+						 guardian_phone=?,
+						 notes=?,
+						 country=COALESCE(?, country),
+						 province=COALESCE(?, province),
+						 district=COALESCE(?, district),
+						 village=?
+					   WHERE id=?""",
 					(
-						int(person_id),
-						str(v.get("visit_date") or date.today().isoformat()),
-						str(v.get("visit_time") or "09:00"),
-						str(v.get("complaint") or "Kontrol"),
-						v.get("symptoms"),
-						v.get("observation"),
-						v.get("action"),
-						int(bool(v.get("guardian_contacted"))),
-						v.get("referral"),
-						v.get("follow_up"),
+						_safe_str(prof.get("student_no")),
+						prof_sex or _safe_str(prof.get("sex")),
+						prof_birth_date,
+						resolved_gname,
+						resolved_gphone,
+						_safe_str(prof.get("notes")),
+						_safe_str(prof.get("country")),
+						_safe_str(prof.get("province")),
+						_safe_str(prof.get("district")),
+						_safe_str(prof.get("village")),
+						pid,
 					),
 				)
-		if "measurements" in data and isinstance(data["measurements"], list):
-			connection.execute("DELETE FROM measurements WHERE student_id=?", (int(person_id),))
-			for m in data["measurements"]:
-				h_v = numeric_value(m.get("height_cm"))
-				w_v = numeric_value(m.get("weight_kg"))
-				hc_v = numeric_value(m.get("head_circ_cm"))
-				b_v = (w_v / ((h_v / 100.0) ** 2)) if (h_v and w_v and h_v > 0 and w_v > 0) else numeric_value(m.get("bmi"))
+			elif hp:
 				connection.execute(
-					"""INSERT INTO measurements(student_id, measured_on, height_cm, weight_kg, head_circ_cm, age_months, bmi)
-					   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+					"UPDATE students SET guardian_name=?, guardian_phone=? WHERE id=?",
+					(resolved_gname, resolved_gphone, pid),
+				)
+
+			if raw_hp is not None:
+				hp_last_scr_raw = _safe_str(hp.get("last_screened_at"))
+				hp_last_scr = _safe_iso_date(hp_last_scr_raw, "", "Son tarama tarihi") if hp_last_scr_raw else None
+				connection.execute(
+					"""INSERT INTO health_profiles(
+						 student_id, guardian_name, guardian_phone, allergies, chronic_conditions,
+						 medical_history, medications, blood_group, emergency_notes, updated_at, reviewed_by,
+						 wears_glasses, vision_right, vision_left, hair_screening, hearing_right, hearing_left,
+						 health_behavior, harmful_habits, psychosocial_status, last_screened_at,
+						 special_needs_codes, medical_devices, dietary_swallowing_notes, seizure_emergency_protocol
+					   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+					   ON CONFLICT(student_id) DO UPDATE SET
+						 guardian_name=excluded.guardian_name,
+						 guardian_phone=excluded.guardian_phone,
+						 allergies=excluded.allergies,
+						 chronic_conditions=excluded.chronic_conditions,
+						 medical_history=excluded.medical_history,
+						 medications=excluded.medications,
+						 blood_group=excluded.blood_group,
+						 emergency_notes=excluded.emergency_notes,
+						 updated_at=excluded.updated_at,
+						 reviewed_by=excluded.reviewed_by,
+						 wears_glasses=excluded.wears_glasses,
+						 vision_right=excluded.vision_right,
+						 vision_left=excluded.vision_left,
+						 hair_screening=excluded.hair_screening,
+						 hearing_right=excluded.hearing_right,
+						 hearing_left=excluded.hearing_left,
+						 health_behavior=excluded.health_behavior,
+						 harmful_habits=excluded.harmful_habits,
+						 psychosocial_status=excluded.psychosocial_status,
+						 last_screened_at=excluded.last_screened_at,
+						 special_needs_codes=excluded.special_needs_codes,
+						 medical_devices=excluded.medical_devices,
+						 dietary_swallowing_notes=excluded.dietary_swallowing_notes,
+						 seizure_emergency_protocol=excluded.seizure_emergency_protocol""",
 					(
-						int(person_id),
-						str(m.get("measured_on") or date.today().isoformat()),
-						h_v,
-						w_v,
-						hc_v,
-						m.get("age_months"),
-						b_v,
+						pid,
+						resolved_gname,
+						resolved_gphone,
+						_safe_str(hp.get("allergies")),
+						_safe_str(hp.get("chronic_conditions")),
+						_safe_str(hp.get("medical_history")),
+						_safe_str(hp.get("medications")),
+						_safe_str(hp.get("blood_group")),
+						_safe_str(hp.get("emergency_notes")),
+						now_iso,
+						_safe_str(hp.get("reviewed_by")),
+						_safe_str(hp.get("wears_glasses")),
+						_safe_str(hp.get("vision_right")),
+						_safe_str(hp.get("vision_left")),
+						_safe_str(hp.get("hair_screening")),
+						_safe_str(hp.get("hearing_right")),
+						_safe_str(hp.get("hearing_left")),
+						_safe_str(hp.get("health_behavior")),
+						_safe_str(hp.get("harmful_habits")),
+						_safe_str(hp.get("psychosocial_status")),
+						hp_last_scr,
+						_safe_str(hp.get("special_needs_codes")),
+						_safe_str(hp.get("medical_devices")),
+						_safe_str(hp.get("dietary_swallowing_notes")),
+						_safe_str(hp.get("seizure_emergency_protocol")),
 					),
 				)
-		if "vital_readings" in data and isinstance(data["vital_readings"], list):
-			connection.execute("DELETE FROM vital_readings WHERE student_id=?", (int(person_id),))
-			for vr in data["vital_readings"]:
+			elif prof and (resolved_gname is not None or resolved_gphone is not None):
 				connection.execute(
-					"""INSERT INTO vital_readings(student_id, measured_at, systolic_mmhg, diastolic_mmhg,
-					   pulse_bpm, temperature_c, spo2_pct, glucose_mg_dl, glucose_context, notes)
-					   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-					(
-						int(person_id),
-						str(vr.get("measured_at") or datetime.now().isoformat(timespec="minutes")),
-						numeric_value(vr.get("systolic_mmhg")),
-						numeric_value(vr.get("diastolic_mmhg")),
-						numeric_value(vr.get("pulse_bpm")),
-						numeric_value(vr.get("temperature_c")),
-						numeric_value(vr.get("spo2_pct")),
-						numeric_value(vr.get("glucose_mg_dl")),
-						vr.get("glucose_context"),
-						vr.get("notes"),
-					),
+					"""INSERT INTO health_profiles(student_id, guardian_name, guardian_phone, updated_at)
+					   VALUES (?, ?, ?, ?)
+					   ON CONFLICT(student_id) DO UPDATE SET
+						 guardian_name=excluded.guardian_name,
+						 guardian_phone=excluded.guardian_phone,
+						 updated_at=excluded.updated_at""",
+					(pid, resolved_gname, resolved_gphone, now_iso),
 				)
-		if "screenings" in data and isinstance(data["screenings"], list):
-			connection.execute("DELETE FROM school_screenings WHERE student_id=?", (int(person_id),))
-			for sc in data["screenings"]:
-				connection.execute(
-					"""INSERT INTO school_screenings(student_id, screening_date, height_cm, weight_kg,
-					   head_circ_cm, temperature_c, pulse_bpm, spo2_pct, wears_glasses, vision_right,
-					   vision_left, hair_screening, hearing_right, hearing_left, health_behavior,
-					   harmful_habits, psychosocial_status, notes, screened_by, created_at)
-					   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-					(
-						int(person_id),
-						str(sc.get("screening_date") or date.today().isoformat()),
-						numeric_value(sc.get("height_cm")),
-						numeric_value(sc.get("weight_kg")),
-						numeric_value(sc.get("head_circ_cm")),
-						numeric_value(sc.get("temperature_c")),
-						numeric_value(sc.get("pulse_bpm")),
-						numeric_value(sc.get("spo2_pct")),
-						sc.get("wears_glasses"),
-						sc.get("vision_right"),
-						sc.get("vision_left"),
-						sc.get("hair_screening"),
-						sc.get("hearing_right"),
-						sc.get("hearing_left"),
-						sc.get("health_behavior"),
-						sc.get("harmful_habits"),
-						sc.get("psychosocial_status"),
-						sc.get("notes"),
-						sc.get("screened_by"),
-						str(sc.get("created_at") or now_iso),
-					),
-				)
-		if "vaccinations" in data and isinstance(data["vaccinations"], list):
-			connection.execute("DELETE FROM student_vaccinations WHERE student_id=?", (int(person_id),))
-			for v in data["vaccinations"]:
-				connection.execute(
-					"""INSERT INTO student_vaccinations(
-						student_id, vaccine_code, vaccine_name, dose_name, period_label,
-						period_months, is_done, administered_date, facility, lot_number, notes, updated_at
-					) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-					(
-						int(person_id),
-						v.get("vaccine_code"),
-						v.get("vaccine_name") or "",
-						v.get("dose_name") or "",
-						v.get("period_label") or "",
-						int(v.get("period_months") or 0),
-						1 if v.get("is_done") else 0,
-						v.get("administered_date"),
-						v.get("facility"),
-						v.get("lot_number"),
-						v.get("notes"),
-						v.get("updated_at") or now_iso,
-					),
-				)
-	sync_student_measurements(int(person_id))
-	save_person_data_file(int(person_id))
+
+			if prepared_visits is not None:
+				connection.execute("DELETE FROM visits WHERE student_id=?", (pid,))
+				if prepared_visits:
+					connection.executemany(
+						"""INSERT INTO visits(student_id, visit_date, visit_time, complaint, symptoms,
+						   observation, action, guardian_contacted, referral, follow_up,
+						   follow_up_status, follow_up_result, follow_up_closed_at,
+						   incident_location, witness_teacher)
+						   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+						prepared_visits,
+					)
+			if prepared_measurements is not None:
+				connection.execute("DELETE FROM measurements WHERE student_id=?", (pid,))
+				if prepared_measurements:
+					connection.executemany(
+						"""INSERT INTO measurements(student_id, measured_on, height_cm, weight_kg, head_circ_cm, age_months, bmi)
+						   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+						prepared_measurements,
+					)
+			if prepared_vitals is not None:
+				connection.execute("DELETE FROM vital_readings WHERE student_id=?", (pid,))
+				if prepared_vitals:
+					connection.executemany(
+						"""INSERT INTO vital_readings(student_id, measured_at, systolic_mmhg, diastolic_mmhg,
+						   pulse_bpm, temperature_c, spo2_pct, glucose_mg_dl, glucose_context, notes)
+						   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+						prepared_vitals,
+					)
+			if prepared_screenings is not None:
+				connection.execute("DELETE FROM school_screenings WHERE student_id=?", (pid,))
+				if prepared_screenings:
+					connection.executemany(
+						"""INSERT INTO school_screenings(student_id, screening_date, height_cm, weight_kg,
+						   head_circ_cm, temperature_c, pulse_bpm, spo2_pct, wears_glasses, vision_right,
+						   vision_left, hair_screening, hearing_right, hearing_left, health_behavior,
+						   harmful_habits, psychosocial_status, notes, screened_by, created_at)
+						   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+						prepared_screenings,
+					)
+			if prepared_vaccinations is not None:
+				connection.execute("DELETE FROM student_vaccinations WHERE student_id=?", (pid,))
+				if prepared_vaccinations:
+					connection.executemany(
+						"""INSERT INTO student_vaccinations(
+							student_id, vaccine_code, vaccine_name, dose_name, period_label,
+							period_months, is_done, administered_date, facility, lot_number, notes, updated_at
+						) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+						prepared_vaccinations,
+					)
+			if prepared_seizure_logs is not None:
+				connection.execute("DELETE FROM seizure_logs WHERE student_id=?", (pid,))
+				if prepared_seizure_logs:
+					connection.executemany(
+						"""INSERT INTO seizure_logs(
+							student_id, seizure_date, seizure_time, duration_seconds, seizure_type,
+							triggers, observations, emergency_med_given, ambulance_called,
+							guardian_notified, recorded_by, created_at
+						) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+						prepared_seizure_logs,
+					)
+			if prepared_isolation_records is not None:
+				connection.execute("DELETE FROM isolation_records WHERE student_id=?", (pid,))
+				if prepared_isolation_records:
+					connection.executemany(
+						"""INSERT INTO isolation_records(
+							student_id, disease_name, detected_date, expected_return_date, actual_return_date,
+							doctor_clearance_required, clearance_received, status, notes, created_at
+						) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+						prepared_isolation_records,
+					)
+		except Exception:
+			connection.rollback()
+			raise
+
+	sync_student_measurements(pid, _sync=False)
+	sync_after_person_mutation(pid)
 
 
 def sync_all_person_data_files() -> int:
@@ -2479,6 +3156,7 @@ def sync_all_person_data_files() -> int:
 				pass
 	for pid in valid_ids:
 		save_person_data_file(pid)
+	clear_all_data_caches()
 	return len(valid_ids)
 
 
@@ -2546,6 +3224,105 @@ HAIR_SCREENING_OPTIONS: list[str] = [
 	"Cilt Hassasiyeti / Kaşıntı",
 	"Saç Kıran / Alopesi Şüphesi",
 	"Kişisel Hijyen Eğitimi Verildi",
+]
+
+SPECIAL_NEEDS_CODE_OPTIONS: list[str] = [
+	"Özel Gereksinim Yok",
+	"ÇÖZGER / Özel Eğitim Raporlu",
+	"Epilepsi / Nöbet Öyküsü",
+	"Otizm Spektrum (OSB)",
+	"Down Sendromu / Genetik",
+	"Serebral Palsi / Fiziksel",
+	"İşitme Yetersizliği",
+	"Görme Yetersizliği",
+	"Dil ve Konuşma Güçlüğü",
+	"Tip 1 Diyabet",
+	"Şiddetli Anafilaksi / Alerji",
+]
+
+MEDICAL_DEVICE_OPTIONS: list[str] = [
+	"Tıbbi Cihaz / Protez Yok",
+	"İşitme Cihazı",
+	"Koklear İmplant (Biyonik Kulak)",
+	"AFO / Ortez / Atel",
+	"Tekerlekli Sandalye / Yürüteç",
+	"VP Şant",
+	"PEG / NG Beslenme Sondası",
+	"İnsülin Pompası / CGM Sensör",
+	"Trakeostomi Kanülü",
+	"Nebülizatör / Aspiratör Cihazı",
+]
+
+DIETARY_SWALLOWING_OPTIONS: list[str] = [
+	"Normal Beslenme / Risk Yok",
+	"Disfaji / Aspirasyon Riski (Dik Oturarak & Yavaş Besleme)",
+	"Püre / Yumuşak Kıvam Diyeti",
+	"Sıvı Kıvam Arttırıcı Kullanıyor",
+	"Çölyak / Glutensiz Diyet",
+	"Ketojenik Diyet (Epilepsi)",
+	"Laktozsuz / Kazeinsiz Diyet",
+	"Fındık / Fıstık / Yumurta / Süt Alerjen Kısıtlı",
+]
+
+SEIZURE_TYPE_OPTIONS: list[str] = [
+	"Tonik-Klonik",
+	"Absans / Dalma",
+	"Miyoklonik",
+	"Fokal",
+	"Atonik",
+	"Diğer / Sınıflandırılmamış",
+]
+
+SEIZURE_EMERGENCY_MED_OPTIONS: list[str] = [
+	"Uygulanmadı",
+	"Rektal Diazepam",
+	"Bukkal Midazolam",
+	"Nazal Midazolam",
+	"Oksijen Desteği",
+	"Diğer (Açıklamada Belirtildi)",
+]
+
+ISOLATION_DISEASE_OPTIONS: list[str] = [
+	"İnfluenza / Grip / Ateşli ÜSYE",
+	"Akut Gastroenterit (Bulantı / Kusma / İshal)",
+	"Pediküloz (Bit / Sirke)",
+	"Suçiçeği",
+	"El-Ayak-Ağız Hastalığı",
+	"Konjonktivit (Göz Enfeksiyonu)",
+	"Kızıl / Beta (GAS) Farenjiti",
+	"COVID-19",
+	"Diğer Bulaşıcı Hastalık",
+]
+
+INFIRMARY_INVENTORY_CATEGORIES: list[str] = [
+	"Solüsyon & Antiseptik",
+	"Pansuman & Sarf",
+	"İlk Yardım & Ortopedi",
+	"İlk Yardım & Soğuk Uygulama",
+	"Koruyucu Ekipman",
+	"Cihaz Sarfı",
+	"Acil Müdahale",
+	"Topikal İlaç / İlk Yardım",
+	"Tanı & Ölçüm Sarfı",
+	"Diğer",
+]
+
+DEFAULT_INFIRMARY_SUPPLY_ITEMS: list[dict[str, Any]] = [
+	{"item_name": "Serum Fizyolojik (%0.9 NaCl İzotonik)", "category": "Solüsyon & Antiseptik", "quantity": 20.0, "unit": "Flakon / Şişe", "min_threshold": 5.0, "storage_location": "İlk Yardım Dolabı Raf-1"},
+	{"item_name": "Batikon (Povidon İyot Antiseptik)", "category": "Solüsyon & Antiseptik", "quantity": 3.0, "unit": "Şişe", "min_threshold": 2.0, "storage_location": "İlk Yardım Dolabı Raf-1"},
+	{"item_name": "Steril Gazlı Bez (Spanç)", "category": "Pansuman & Sarf", "quantity": 25.0, "unit": "Paket", "min_threshold": 10.0, "storage_location": "Pansuman Çekmecesi"},
+	{"item_name": "Sargı Bezi (10 cm)", "category": "Pansuman & Sarf", "quantity": 15.0, "unit": "Rulo", "min_threshold": 5.0, "storage_location": "Pansuman Çekmecesi"},
+	{"item_name": "Elastik Bandaj", "category": "İlk Yardım & Ortopedi", "quantity": 8.0, "unit": "Rulo", "min_threshold": 3.0, "storage_location": "İlk Yardım Dolabı Raf-2"},
+	{"item_name": "Flaster (Tıbbi Yapışkan Bant)", "category": "Pansuman & Sarf", "quantity": 10.0, "unit": "Rulo", "min_threshold": 4.0, "storage_location": "Pansuman Çekmecesi"},
+	{"item_name": "Yara Bandı", "category": "Pansuman & Sarf", "quantity": 5.0, "unit": "Kutu", "min_threshold": 2.0, "storage_location": "Muayene Masası Üstü"},
+	{"item_name": "Buz Aküsü (Soğuk Kompres)", "category": "İlk Yardım & Soğuk Uygulama", "quantity": 6.0, "unit": "Adet", "min_threshold": 3.0, "storage_location": "Revir Buzdolabı Buzluk"},
+	{"item_name": "Muayene Eldiveni (Pudrasız)", "category": "Koruyucu Ekipman", "quantity": 4.0, "unit": "Kutu", "min_threshold": 2.0, "storage_location": "Muayene Masası Yanı"},
+	{"item_name": "Ateş Ölçer Probu / Tek Kullanımlık Kılıf", "category": "Cihaz Sarfı", "quantity": 3.0, "unit": "Kutu", "min_threshold": 1.0, "storage_location": "Muayene Masası Çekmecesi"},
+	{"item_name": "Oksijen Maskesi (Pediatrik)", "category": "Acil Müdahale", "quantity": 4.0, "unit": "Adet", "min_threshold": 2.0, "storage_location": "Acil Çantası"},
+	{"item_name": "Turnike (Acil Müdahale)", "category": "Acil Müdahale", "quantity": 3.0, "unit": "Adet", "min_threshold": 1.0, "storage_location": "Acil Çantası"},
+	{"item_name": "Yanık Kremi / Jeli", "category": "Topikal İlaç / İlk Yardım", "quantity": 3.0, "unit": "Tüp", "min_threshold": 2.0, "storage_location": "İlk Yardım Dolabı Raf-1"},
+	{"item_name": "Glukometre Stribi (Kan Şekeri Çubuğu)", "category": "Tanı & Ölçüm Sarfı", "quantity": 2.0, "unit": "Kutu", "min_threshold": 1.0, "storage_location": "Diyabet / Acil Rafı"},
+	{"item_name": "Lanset (Parmak Delme İğnesi)", "category": "Tanı & Ölçüm Sarfı", "quantity": 2.0, "unit": "Kutu", "min_threshold": 1.0, "storage_location": "Diyabet / Acil Rafı"},
 ]
 
 HEARING_SCREENING_OPTIONS: list[str] = [
@@ -2704,6 +3481,20 @@ PAGE_SECTIONS_REGISTRY: dict[str, dict[str, Any]] = {
 			"icon": "📊",
 			"default": True,
 			"essential": False,
+		},
+		"overview_pending_followups": {
+			"name": "Bekleyen İzlemler ve Sevk Sonuçları",
+			"desc": "Açık izlem veya sevk durumu bulunan öğrencilerin takip ve sonuçlandırma kuyruğu",
+			"icon": "⏳",
+			"default": True,
+			"essential": True,
+		},
+		"overview_outbreak_radar": {
+			"name": "🦠 Salgın Erken Uyarı Radarı & Bulaşıcı İzolasyon Takibi",
+			"desc": "Sınıf bazlı bulaşıcı hastalık kümelenme uyarıları ve aktif izolasyon/okula dönüş takibi",
+			"icon": "🦠",
+			"default": True,
+			"essential": True,
 		},
 		"overview_recent_ops": {
 			"name": "Son Yapılan İşlemler Akışı",
@@ -3017,6 +3808,8 @@ def add_student_medication(
 			end_date = None
 
 	rem_vol = total_volume
+	clean_pattern = normalize_dosage_pattern(dosage_pattern) or dosage_pattern
+	clean_times = normalize_schedule_times(scheduled_times)
 	with connect_db() as connection:
 		cursor = connection.execute(
 			"""INSERT INTO student_medications(
@@ -3027,15 +3820,15 @@ def add_student_medication(
 				special_notes, status, created_at
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
 			(
-				int(student_id), medication_name.strip(), med_type, route, dosage_pattern, float(dose_amount),
-				dose_unit, stock_unit.strip(), meal_relation, scheduled_times.strip(), total_volume, rem_vol,
+				int(student_id), medication_name.strip(), med_type, route, clean_pattern, float(dose_amount),
+				dose_unit, stock_unit.strip(), meal_relation, clean_times, total_volume, rem_vol,
 				start_date, int(duration_days), end_date, active_days, storage_condition,
 				int(guardian_consent), delivered_by_guardian.strip(), delivery_date, expiry_date,
 				special_notes.strip(), status, now_iso
 			),
 		)
 		med_id = cursor.lastrowid
-	save_person_data_file(int(student_id))
+	sync_after_person_mutation(int(student_id))
 	return med_id
 
 
@@ -3078,12 +3871,12 @@ def update_student_medication(
 		up_name = medication_name.strip() if medication_name is not None else row["medication_name"]
 		up_type = med_type if med_type is not None else row["med_type"]
 		up_route = route if route is not None else row["route"]
-		up_pattern = dosage_pattern if dosage_pattern is not None else row["dosage_pattern"]
+		up_pattern = normalize_dosage_pattern(dosage_pattern) if dosage_pattern is not None else row["dosage_pattern"]
 		up_dose = float(dose_amount) if dose_amount is not None else row["dose_amount"]
 		up_dunit = dose_unit if dose_unit is not None else row["dose_unit"]
 		up_sunit = stock_unit.strip() if stock_unit is not None else (row["stock_unit"] or "adet")
 		up_meal = meal_relation if meal_relation is not None else row["meal_relation"]
-		up_times = scheduled_times.strip() if scheduled_times is not None else row["scheduled_times"]
+		up_times = normalize_schedule_times(scheduled_times) if scheduled_times is not None else row["scheduled_times"]
 		up_tot = total_volume if total_volume is not None else row["total_volume"]
 		up_rem = remaining_volume if remaining_volume is not None else row["remaining_volume"]
 		up_start = start_date if start_date is not None else row["start_date"]
@@ -3115,7 +3908,7 @@ def update_student_medication(
 			),
 		)
 	if stu_id:
-		save_person_data_file(stu_id)
+		sync_after_person_mutation(stu_id)
 
 
 def delete_student_medication(med_id: int) -> None:
@@ -3127,7 +3920,7 @@ def delete_student_medication(med_id: int) -> None:
 		connection.execute("DELETE FROM student_medications WHERE id = ?", (med_id,))
 		connection.execute("DELETE FROM medication_logs WHERE medication_id = ?", (med_id,))
 	if stu_id:
-		save_person_data_file(stu_id)
+		sync_after_person_mutation(stu_id)
 
 
 def log_medication_dose(
@@ -3172,7 +3965,7 @@ def log_medication_dose(
 			if med_row and med_row["remaining_volume"] is not None:
 				new_rem = max(0.0, float(med_row["remaining_volume"]) - float(dose_given))
 				connection.execute("UPDATE student_medications SET remaining_volume=? WHERE id=?", (new_rem, medication_id))
-	save_person_data_file(student_id)
+	sync_after_person_mutation(student_id)
 
 
 def undo_medication_dose(log_id_or_med_id: int, log_date: str | None = None, scheduled_time: str | None = None) -> None:
@@ -3199,7 +3992,7 @@ def undo_medication_dose(log_id_or_med_id: int, log_date: str | None = None, sch
 					restored = min(max_v, float(med_row["remaining_volume"]) + dose)
 					connection.execute("UPDATE student_medications SET remaining_volume=? WHERE id=?", (restored, med_id))
 	if stu_id:
-		save_person_data_file(stu_id)
+		sync_after_person_mutation(stu_id)
 
 
 def get_scheduled_doses_for_date(target_date: date) -> list[dict]:
@@ -3320,18 +4113,49 @@ def save_school_screening(
 	notes: str | None = None,
 	screened_by: str | None = None,
 ) -> int:
+	sid = int(student_id)
 	now_iso = datetime.now().isoformat(timespec="seconds")
-	scr_date = str(screening_date or date.today().isoformat())[:10]
+	scr_date = parse_birth_date(screening_date) or str(screening_date or date.today().isoformat())[:10]
+	try:
+		scr_date_obj = date.fromisoformat(scr_date)
+	except (TypeError, ValueError):
+		scr_date_obj = date.today()
+		scr_date = scr_date_obj.isoformat()
+
 	app_cfg = get_app_settings()
 	scr_by = (screened_by or app_cfg.get("nurse_name", "")).strip() or None
 
-	clean_hair = format_multiselect_save_str(hair_screening) if isinstance(hair_screening, (list, tuple, set)) else (hair_screening.strip() if hair_screening else None)
-	clean_hr = format_multiselect_save_str(hearing_right) if isinstance(hearing_right, (list, tuple, set)) else (hearing_right.strip() if hearing_right else None)
-	clean_hl = format_multiselect_save_str(hearing_left) if isinstance(hearing_left, (list, tuple, set)) else (hearing_left.strip() if hearing_left else None)
-	clean_beh = format_multiselect_save_str(health_behavior) if isinstance(health_behavior, (list, tuple, set)) else (health_behavior.strip() if health_behavior else None)
-	clean_harm = format_multiselect_save_str(harmful_habits) if isinstance(harmful_habits, (list, tuple, set)) else (harmful_habits.strip() if harmful_habits else None)
+	def _clean_opt(val: str | None) -> str | None:
+		s = str(val).strip() if val is not None else ""
+		return s or None
 
+	clean_wears = _clean_opt(wears_glasses)
+	clean_vr = _clean_opt(vision_right)
+	clean_vl = _clean_opt(vision_left)
+	clean_psy = _clean_opt(psychosocial_status)
+	clean_notes = _clean_opt(notes)
+	clean_hair = format_multiselect_save_str(hair_screening) if isinstance(hair_screening, (list, tuple, set)) else _clean_opt(hair_screening)
+	clean_hr = format_multiselect_save_str(hearing_right) if isinstance(hearing_right, (list, tuple, set)) else _clean_opt(hearing_right)
+	clean_hl = format_multiselect_save_str(hearing_left) if isinstance(hearing_left, (list, tuple, set)) else _clean_opt(hearing_left)
+	clean_beh = format_multiselect_save_str(health_behavior) if isinstance(health_behavior, (list, tuple, set)) else _clean_opt(health_behavior)
+	clean_harm = format_multiselect_save_str(harmful_habits) if isinstance(harmful_habits, (list, tuple, set)) else _clean_opt(harmful_habits)
+
+	h_clean = normalize_height(height_cm)
+	w_clean = normalize_weight(weight_kg, is_adult=False)
+	hc_clean = normalize_head_circ(head_circ_cm)
+	t_clean = normalize_temperature(temperature_c)
+	p_clean_int = normalize_pulse(pulse_bpm)
+	p_clean = float(p_clean_int) if p_clean_int is not None else None
+	s_clean_int = normalize_spo2(spo2_pct)
+	s_clean = float(s_clean_int) if s_clean_int is not None else None
+
+	upserted_meas_id: int | None = None
 	with connect_db() as connection:
+		stu_row = connection.execute(
+			"SELECT sex, birth_date, guardian_name, guardian_phone FROM students WHERE id = ?",
+			(sid,),
+		).fetchone()
+
 		# 1. Insert into school_screenings
 		cursor = connection.execute(
 			"""INSERT INTO school_screenings(
@@ -3341,22 +4165,26 @@ def save_school_screening(
 				health_behavior, harmful_habits, psychosocial_status, notes, screened_by, created_at
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
 			(
-				int(student_id), scr_date, height_cm, weight_kg, head_circ_cm,
-				temperature_c, pulse_bpm, spo2_pct, wears_glasses, vision_right,
-				vision_left, clean_hair, clean_hr, clean_hl,
-				clean_beh, clean_harm, psychosocial_status, notes, scr_by, now_iso
+				sid, scr_date, h_clean, w_clean, hc_clean,
+				t_clean, p_clean, s_clean, clean_wears, clean_vr,
+				clean_vl, clean_hair, clean_hr, clean_hl,
+				clean_beh, clean_harm, clean_psy, clean_notes, scr_by, now_iso
 			),
 		)
 		screening_id = cursor.lastrowid
 
-		# 2. Update health_profiles with latest screening status
+		# 2. Update health_profiles with latest screening & guardian status
+		g_name = stu_row["guardian_name"] if stu_row else None
+		g_phone = stu_row["guardian_phone"] if stu_row else None
 		connection.execute(
 			"""INSERT INTO health_profiles(
-				student_id, updated_at, wears_glasses, vision_right, vision_left,
+				student_id, guardian_name, guardian_phone, updated_at, wears_glasses, vision_right, vision_left,
 				hair_screening, hearing_right, hearing_left, health_behavior,
 				harmful_habits, psychosocial_status, last_screened_at, reviewed_by
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(student_id) DO UPDATE SET
+				guardian_name=COALESCE(health_profiles.guardian_name, excluded.guardian_name),
+				guardian_phone=COALESCE(health_profiles.guardian_phone, excluded.guardian_phone),
 				updated_at=excluded.updated_at,
 				wears_glasses=COALESCE(excluded.wears_glasses, health_profiles.wears_glasses),
 				vision_right=COALESCE(excluded.vision_right, health_profiles.vision_right),
@@ -3368,38 +4196,47 @@ def save_school_screening(
 				harmful_habits=COALESCE(excluded.harmful_habits, health_profiles.harmful_habits),
 				psychosocial_status=COALESCE(excluded.psychosocial_status, health_profiles.psychosocial_status),
 				last_screened_at=excluded.last_screened_at,
-				reviewed_by=COALESCE(health_profiles.reviewed_by, excluded.reviewed_by)""",
+				reviewed_by=COALESCE(excluded.reviewed_by, health_profiles.reviewed_by)""",
 			(
-				int(student_id), now_iso, wears_glasses, vision_right, vision_left,
+				sid, g_name, g_phone, now_iso, clean_wears, clean_vr, clean_vl,
 				clean_hair, clean_hr, clean_hl, clean_beh, clean_harm,
-				psychosocial_status, scr_date, scr_by
+				clean_psy, scr_date, scr_by
 			),
 		)
+		_sync_guardian_bidirectional_conn(connection, sid)
 
-		# 3. Synchronize measurements if height, weight or head circumference provided
-		stu_row = connection.execute("SELECT sex, birth_date FROM students WHERE id = ?", (int(student_id),)).fetchone()
-		if height_cm is not None or weight_kg is not None or head_circ_cm is not None:
-			h_clean = float(height_cm) if (height_cm is not None and height_cm > 0) else None
-			w_clean = float(weight_kg) if (weight_kg is not None and weight_kg > 0) else None
-			hc_clean = float(head_circ_cm) if (head_circ_cm is not None and head_circ_cm > 0) else None
-			bmi_val = (w_clean / ((h_clean / 100.0) ** 2)) if (h_clean and w_clean) else None
-			m_age = age_in_months(stu_row["birth_date"], date.fromisoformat(scr_date)) if (stu_row and stu_row["birth_date"]) else None
-
-			connection.execute(
-				"""INSERT INTO measurements(student_id, measured_on, height_cm, weight_kg, head_circ_cm, age_months, bmi)
-				   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-				(int(student_id), scr_date, h_clean, w_clean, hc_clean, m_age, bmi_val),
+		# 3. Synchronize measurements atomically via shared upsert logic (updates same-date record, computes age_months & BMI)
+		if h_clean is not None or w_clean is not None or hc_clean is not None:
+			upserted_meas_id, _ = _upsert_measurement_conn(
+				connection,
+				sid,
+				scr_date_obj,
+				h_clean,
+				w_clean,
+				stu_row["birth_date"] if stu_row else None,
+				stu_row["sex"] if stu_row else None,
+				head_circ_cm=hc_clean,
 			)
 
-		# 4. Synchronize vitals if temperature, pulse or spo2 provided
-		if temperature_c is not None or pulse_bpm is not None or spo2_pct is not None:
-			connection.execute(
-				"""INSERT INTO vital_readings(student_id, measured_at, temperature_c, pulse_bpm, spo2_pct, notes)
-				   VALUES (?, ?, ?, ?, ?, ?)""",
-				(int(student_id), f"{scr_date}T09:30", temperature_c, pulse_bpm, spo2_pct, "Okul Taraması"),
+		# 4. Synchronize vitals atomically without creating same-day/time duplicates
+		if t_clean is not None or p_clean is not None or s_clean is not None:
+			_upsert_vital_conn(
+				connection,
+				sid,
+				f"{scr_date}T09:30",
+				None,
+				None,
+				p_clean,
+				t_clean,
+				None,
+				glucose_context=None,
+				notes="Okul Taraması",
+				spo2=s_clean,
+				upsert_same_slot=True,
+				upsert_screening_day=True,
 			)
 
-	save_person_data_file(int(student_id))
+	sync_after_person_mutation(sid, active_measurement_id=upserted_meas_id)
 	return int(screening_id)
 
 
@@ -3543,7 +4380,7 @@ def save_student_vaccination(
 				now_iso,
 			),
 		)
-	save_person_data_file(int(student_id))
+	sync_after_person_mutation(int(student_id))
 
 
 def save_bulk_student_vaccinations(student_id: int, records: list[dict[str, Any]]) -> None:
@@ -3581,7 +4418,7 @@ def save_bulk_student_vaccinations(student_id: int, records: list[dict[str, Any]
 					now_iso,
 				),
 			)
-	save_person_data_file(int(student_id))
+	sync_after_person_mutation(int(student_id))
 
 
 def quick_fill_routine_vaccinations_for_student(student_id: int, birth_date: str | None = None, up_to_age: bool = True) -> int:
@@ -3640,14 +4477,14 @@ def quick_fill_routine_vaccinations_for_student(student_id: int, birth_date: str
 				),
 			)
 			count += 1
-	save_person_data_file(int(student_id))
+	sync_after_person_mutation(int(student_id))
 	return count
 
 
 def clear_student_vaccinations(student_id: int) -> None:
 	with connect_db() as connection:
 		connection.execute("DELETE FROM student_vaccinations WHERE student_id = ?", (int(student_id),))
-	save_person_data_file(int(student_id))
+	sync_after_person_mutation(int(student_id))
 
 
 def get_student_vaccination_summary(student_id: int, birth_date: str | None = None) -> dict[str, Any]:
@@ -4342,15 +5179,16 @@ def sync_master_documents_and_files() -> str:
 			)
 			updated_cnt += 1
 
-	sync_student_measurements()
+	sync_student_measurements(_sync=False)
 	with connect_db() as connection:
-		for st in connection.execute("SELECT id FROM students").fetchall():
-			save_person_data_file(st["id"])
+		for st_row in connection.execute("SELECT id FROM students").fetchall():
+			save_person_data_file(st_row["id"])
+	sync_after_person_mutation(None)
 
 	return f"Senkronizasyon Başarılı: {updated_cnt} öğrenci kaydı PDF ({len(pdf_lookup)} kişi) ve Excel ({len(xl_lookup)} kişi) listeleriyle, veritabanı ve kişisel JSON dosyalarıyla eşitlendi."
 
 
-def sync_student_measurements(student_id: int | None = None) -> None:
+def sync_student_measurements(student_id: int | None = None, _sync: bool = True) -> None:
 	with connect_db() as connection:
 		if student_id is not None:
 			rows = connection.execute(
@@ -4380,21 +5218,29 @@ def sync_student_measurements(student_id: int | None = None) -> None:
 				"UPDATE measurements SET age_months = ?, bmi = ? WHERE id = ?",
 				updates,
 			)
-	if student_id is not None:
-		save_person_data_file(student_id)
+	if _sync:
+		sync_after_person_mutation(int(student_id) if student_id is not None else None)
 
 
 def delete_student(student_id: int) -> None:
+	sid = int(student_id)
 	with connect_db() as connection:
-		connection.execute("DELETE FROM visits WHERE student_id = ?", (student_id,))
-		connection.execute("DELETE FROM measurements WHERE student_id = ?", (student_id,))
-		connection.execute("DELETE FROM vital_readings WHERE student_id = ?", (student_id,))
-		connection.execute("DELETE FROM health_profiles WHERE student_id = ?", (student_id,))
-		connection.execute("DELETE FROM health_forms WHERE student_id = ?", (student_id,))
-		connection.execute("DELETE FROM care_plans WHERE student_id = ?", (student_id,))
-		connection.execute("DELETE FROM lab_reports WHERE student_id = ?", (student_id,))
-		connection.execute("DELETE FROM students WHERE id = ?", (student_id,))
-	delete_person_data_file(student_id)
+		connection.execute("DELETE FROM visits WHERE student_id = ?", (sid,))
+		connection.execute("DELETE FROM measurements WHERE student_id = ?", (sid,))
+		connection.execute("DELETE FROM vital_readings WHERE student_id = ?", (sid,))
+		connection.execute("DELETE FROM school_screenings WHERE student_id = ?", (sid,))
+		connection.execute("DELETE FROM student_vaccinations WHERE student_id = ?", (sid,))
+		connection.execute("DELETE FROM medication_logs WHERE student_id = ?", (sid,))
+		connection.execute("DELETE FROM student_medications WHERE student_id = ?", (sid,))
+		connection.execute("DELETE FROM health_profiles WHERE student_id = ?", (sid,))
+		connection.execute("DELETE FROM health_forms WHERE student_id = ?", (sid,))
+		connection.execute("DELETE FROM care_plans WHERE student_id = ?", (sid,))
+		connection.execute("DELETE FROM lab_reports WHERE student_id = ?", (sid,))
+		connection.execute("DELETE FROM seizure_logs WHERE student_id = ?", (sid,))
+		connection.execute("DELETE FROM isolation_records WHERE student_id = ?", (sid,))
+		connection.execute("DELETE FROM students WHERE id = ?", (sid,))
+	delete_person_data_file(sid)
+	sync_after_person_mutation(None)
 
 
 def delete_visit(visit_id: int) -> None:
@@ -4405,23 +5251,146 @@ def delete_visit(visit_id: int) -> None:
 			person_id = int(row["student_id"])
 		connection.execute("DELETE FROM visits WHERE id = ?", (visit_id,))
 	if person_id is not None:
-		save_person_data_file(person_id)
+		sync_after_person_mutation(person_id)
 
 
-def update_visit(visit_id: int, complaint: str, symptoms: str, observation: str, action: str,
-				 guardian_contacted: bool, referral: str, follow_up: str) -> None:
+def _infer_visit_follow_up_status(
+	referral: str | None,
+	follow_up: str | None,
+	explicit_status: str | None = None,
+) -> str:
+	if explicit_status in FOLLOW_UP_STATUS_OPTIONS:
+		return str(explicit_status)
+	ref_clean = clean_text(referral)
+	fup_clean = clean_text(follow_up)
+	has_real_ref = bool(ref_clean and ref_clean.lower() not in {"sevk edilmedi", "yok", "gerekmedi", "-", "—"})
+	resolved_fups = {"revirde dinlendi, derse döndü", "derse döndü", "tamamlandı", "izlem gerekmiyor"}
+	has_real_fup = bool(fup_clean and fup_clean.lower() not in resolved_fups)
+	return "Açık" if (has_real_ref or has_real_fup) else "İzlem Gerekmiyor"
+
+
+def update_visit(
+	visit_id: int,
+	complaint: str,
+	symptoms: str,
+	observation: str,
+	action: str,
+	guardian_contacted: bool,
+	referral: str,
+	follow_up: str,
+	incident_location: str | None = None,
+	witness_teacher: str | None = None,
+	follow_up_status: str | None = None,
+	follow_up_result: str | None = None,
+	follow_up_closed_at: str | None = None,
+) -> None:
 	person_id = None
 	with connect_db() as connection:
-		row = connection.execute("SELECT student_id FROM visits WHERE id = ?", (visit_id,)).fetchone()
+		row = connection.execute(
+			"SELECT student_id, follow_up_status, follow_up_result, follow_up_closed_at, incident_location, witness_teacher FROM visits WHERE id = ?",
+			(visit_id,),
+		).fetchone()
 		if row:
 			person_id = int(row["student_id"])
+			final_loc = incident_location if incident_location is not None else row["incident_location"]
+			final_wit = witness_teacher if witness_teacher is not None else row["witness_teacher"]
+			final_fup_res = follow_up_result if follow_up_result is not None else row["follow_up_result"]
+			final_status = (
+				follow_up_status
+				if follow_up_status in FOLLOW_UP_STATUS_OPTIONS
+				else (row["follow_up_status"] or _infer_visit_follow_up_status(referral, follow_up))
+			)
+			if follow_up_closed_at is not None:
+				final_closed_at = follow_up_closed_at
+			elif final_status == "Tamamlandı" and not row["follow_up_closed_at"]:
+				final_closed_at = datetime.now().isoformat(timespec="minutes")
+			elif final_status == "Açık":
+				final_closed_at = None
+			else:
+				final_closed_at = row["follow_up_closed_at"]
+		else:
+			final_loc = incident_location
+			final_wit = witness_teacher
+			final_status = _infer_visit_follow_up_status(referral, follow_up, follow_up_status)
+			final_fup_res = follow_up_result
+			final_closed_at = follow_up_closed_at
+
 		connection.execute(
 			"""UPDATE visits SET complaint=?, symptoms=?, observation=?, action=?,
-			   guardian_contacted=?, referral=?, follow_up=? WHERE id=?""",
-			(complaint, symptoms, observation, action, int(guardian_contacted), referral, follow_up, visit_id),
+			   guardian_contacted=?, referral=?, follow_up=?,
+			   incident_location=?, witness_teacher=?,
+			   follow_up_status=?, follow_up_result=?, follow_up_closed_at=?
+			   WHERE id=?""",
+			(
+				complaint,
+				symptoms,
+				observation,
+				action,
+				int(guardian_contacted),
+				referral,
+				follow_up,
+				final_loc,
+				final_wit,
+				final_status,
+				final_fup_res,
+				final_closed_at,
+				visit_id,
+			),
 		)
 	if person_id is not None:
-		save_person_data_file(person_id)
+		sync_after_person_mutation(person_id)
+
+
+def get_pending_followup_visits() -> list[dict[str, Any]]:
+	with connect_db() as connection:
+		rows = connection.execute(
+			"""SELECT v.id, v.student_id, v.visit_date, v.visit_time, v.complaint,
+					  v.symptoms, v.observation, v.action, v.guardian_contacted,
+					  v.referral, v.follow_up,
+					  COALESCE(v.follow_up_status, 'Açık') AS follow_up_status,
+					  v.follow_up_result, v.follow_up_closed_at,
+					  v.incident_location, v.witness_teacher,
+					  s.full_name, s.student_no, s.person_type,
+					  COALESCE(c.name, '—') AS class_name,
+					  COALESCE(hp.guardian_name, s.guardian_name) AS guardian_name,
+					  COALESCE(hp.guardian_phone, s.guardian_phone) AS guardian_phone
+			   FROM visits v
+			   JOIN students s ON s.id = v.student_id
+			   LEFT JOIN classes c ON c.id = s.class_id
+			   LEFT JOIN health_profiles hp ON hp.student_id = s.id
+			   WHERE (
+					 (v.follow_up IS NOT NULL AND TRIM(v.follow_up) != '')
+				  OR (v.referral IS NOT NULL AND TRIM(v.referral) != '')
+			   )
+				 AND COALESCE(v.follow_up_status, 'Açık') = 'Açık'
+			   ORDER BY v.visit_date DESC, v.visit_time DESC, v.id DESC"""
+		).fetchall()
+	return [dict(r) for r in rows]
+
+
+def close_visit_followup(
+	visit_id: int,
+	result_note: str = "",
+	new_status: str = "Tamamlandı",
+) -> int | None:
+	person_id: int | None = None
+	status_val = new_status if new_status in FOLLOW_UP_STATUS_OPTIONS else "Tamamlandı"
+	closed_ts = datetime.now().isoformat(timespec="minutes") if status_val != "Açık" else None
+	clean_res = clean_text(result_note) or None
+	with connect_db() as connection:
+		row = connection.execute("SELECT student_id FROM visits WHERE id = ?", (int(visit_id),)).fetchone()
+		if not row:
+			return None
+		person_id = int(row["student_id"])
+		connection.execute(
+			"""UPDATE visits
+			   SET follow_up_status = ?, follow_up_result = ?, follow_up_closed_at = ?
+			   WHERE id = ?""",
+			(status_val, clean_res, closed_ts, int(visit_id)),
+		)
+	if person_id is not None:
+		sync_after_person_mutation(person_id)
+	return person_id
 
 
 def delete_measurement(measurement_id: int) -> None:
@@ -4432,7 +5401,7 @@ def delete_measurement(measurement_id: int) -> None:
 			person_id = int(row["student_id"])
 		connection.execute("DELETE FROM measurements WHERE id = ?", (measurement_id,))
 	if person_id is not None:
-		save_person_data_file(person_id)
+		sync_after_person_mutation(person_id)
 
 
 def delete_vital(vital_id: int) -> None:
@@ -4443,7 +5412,7 @@ def delete_vital(vital_id: int) -> None:
 			person_id = int(row["student_id"])
 		connection.execute("DELETE FROM vital_readings WHERE id = ?", (vital_id,))
 	if person_id is not None:
-		save_person_data_file(person_id)
+		sync_after_person_mutation(person_id)
 
 
 def clean_text(value: object) -> str:
@@ -4464,7 +5433,24 @@ def parse_birth_date(value: object) -> str | None:
 	if isinstance(value, (datetime, date, pd.Timestamp)):
 		return value.strftime("%Y-%m-%d")
 	text = clean_text(value)
-	for pattern in ("%d.%m.%Y", "%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
+	if text.endswith(".0") and text[:-2].isdigit():
+		text = text[:-2]
+	if re.fullmatch(r"\d{8}", text):
+		# Öncelik Türkiye standardı GGAAYYYY (ör. 15032019 -> 2019-03-15); olası değilse YYYYMMDD dene
+		cur_year = date.today().year + 1
+		try:
+			dt_tr = datetime.strptime(text, "%d%m%Y")
+			if 1915 <= dt_tr.year <= cur_year:
+				return dt_tr.strftime("%Y-%m-%d")
+		except ValueError:
+			pass
+		try:
+			dt_iso = datetime.strptime(text, "%Y%m%d")
+			if 1915 <= dt_iso.year <= cur_year:
+				return dt_iso.strftime("%Y-%m-%d")
+		except ValueError:
+			pass
+	for pattern in ("%d.%m.%Y", "%d/%m/%Y", "%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%d %m %Y"):
 		try:
 			return datetime.strptime(text, pattern).strftime("%Y-%m-%d")
 		except ValueError:
@@ -4856,6 +5842,7 @@ def apply_class_template(classes_to_add: list[str], clear_empty: bool = False) -
 				cursor = connection.execute("INSERT OR IGNORE INTO classes(name) VALUES (?)", (c_clean,))
 				if cursor.rowcount > 0:
 					added += 1
+	clear_all_data_caches()
 	return added, removed
 
 
@@ -5165,13 +6152,14 @@ def import_eokul_classes_and_students(classes_data: list[dict]) -> tuple[int, in
 					students_added += 1
 
 	try:
-		sync_student_measurements()
+		sync_student_measurements(_sync=False)
 	except Exception:
 		pass
-	clear_all_data_caches()
+	sync_all_person_data_files()
 	return classes_added, students_added, students_updated
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def get_classes() -> list[str]:
 	with connect_db() as connection:
 		return [row["name"] for row in connection.execute("SELECT name FROM classes ORDER BY name")]
@@ -5226,14 +6214,768 @@ def percentile(z_value: float) -> float:
 
 
 def numeric_value(value: object) -> float | None:
-	if value is None or pd.isna(value) or not clean_text(value):
+	if value is None or isinstance(value, (bool, list, tuple, dict, set)):
 		return None
-	if isinstance(value, str):
-		value = value.strip().replace(",", ".")
 	try:
-		return float(value)
+		if pd.isna(value):
+			return None
+	except (TypeError, ValueError):
+		pass
+	if isinstance(value, (int, float)):
+		f_val = float(value)
+		return f_val if math.isfinite(f_val) else None
+	txt = clean_text(value)
+	if not txt or txt.lower() in {"nan", "none", "null", "na", "n/a", "<na>", "-", "—", "inf", "-inf"}:
+		return None
+	txt_clean = re.sub(
+		r"(?:°\s*[cC]?|%|(?:\b(?:cm|kg|gr|g|mmhg|bpm|mg/dl)\b)|/dk|/min)",
+		"",
+		txt,
+		flags=re.IGNORECASE,
+	).strip()
+	if not txt_clean:
+		return None
+	try:
+		f_val = float(txt_clean.replace(",", ".").strip())
+		return f_val if math.isfinite(f_val) else None
 	except (TypeError, ValueError):
 		return None
+
+
+# ---------------------------------------------------------------------------
+# MERKEZİ AKILLI KLİNİK VERİ DÖNÜŞTÜRÜCÜ & UX ENJEKSİYONU
+# ---------------------------------------------------------------------------
+
+def normalize_temperature(val: object) -> float | None:
+	num = numeric_value(val)
+	if num is None or num <= 0:
+		return None
+	if 300.0 <= num <= 440.0:
+		num = num / 10.0
+	elif 3000.0 <= num <= 4400.0:
+		num = num / 100.0
+	num = round(num, 1)
+	if 30.0 <= num <= 44.0:
+		return num
+	return None
+
+
+def _has_explicit_decimal_separator(val: object) -> bool:
+	if isinstance(val, str):
+		return "." in val or "," in val
+	if isinstance(val, float):
+		return not float(val).is_integer()
+	return False
+
+
+def normalize_fridge_temp(val: object) -> float | None:
+	num = numeric_value(val)
+	if num is None:
+		return None
+	if not _has_explicit_decimal_separator(val):
+		if 18.0 <= num <= 150.0:
+			num = num / 10.0
+		elif 150.0 < num <= 1500.0:
+			num = num / 100.0
+	num = round(num, 1)
+	if -20.0 <= num <= 45.0:
+		return num
+	return None
+
+
+def normalize_room_temp(val: object) -> float | None:
+	num = numeric_value(val)
+	if num is None:
+		return None
+	if not _has_explicit_decimal_separator(val):
+		if 100.0 <= num <= 450.0:
+			num = num / 10.0
+		elif 1000.0 <= num <= 4500.0:
+			num = num / 100.0
+	num = round(num, 1)
+	if 0.0 <= num <= 50.0:
+		return num
+	return None
+
+
+def normalize_humidity(val: object) -> float | None:
+	num = numeric_value(val)
+	if num is None or num < 0:
+		return None
+	if not _has_explicit_decimal_separator(val) and 100.0 < num <= 1000.0:
+		num = num / 10.0
+	num = round(num, 1)
+	if 0.0 <= num <= 100.0:
+		return num
+	return None
+
+
+def normalize_height(val: object) -> float | None:
+	num = numeric_value(val)
+	if num is None or num <= 0:
+		return None
+	if 0.40 <= num <= 2.30:
+		num = num * 100.0
+	elif 400.0 <= num <= 2300.0:
+		num = num / 10.0
+	num = round(num, 1)
+	if 40.0 <= num <= 230.0:
+		return num
+	return None
+
+
+def normalize_weight(val: object, is_adult: bool = False) -> float | None:
+	num = numeric_value(val)
+	if num is None or num <= 0:
+		return None
+	if 2000.0 <= num <= 150000.0:
+		num = num / 1000.0
+	elif (not is_adult) and (130.0 < num <= 999.0):
+		num = num / 10.0
+	elif is_adult and (220.0 < num <= 1500.0):
+		num = num / 10.0
+	num = round(num, 1)
+	if 1.0 <= num <= 300.0:
+		return num
+	return None
+
+
+def normalize_head_circ(val: object) -> float | None:
+	num = numeric_value(val)
+	if num is None or num <= 0:
+		return None
+	if 300.0 <= num <= 650.0:
+		num = num / 10.0
+	num = round(num, 1)
+	if 30.0 <= num <= 65.0:
+		return num
+	return None
+
+
+def _scale_single_bp_component(num: float | None, is_sys: bool) -> int | None:
+	if num is None or num <= 0:
+		return None
+	if is_sys:
+		if 6.0 <= num <= 24.0:
+			num = num * 10.0
+		iv = int(round(num))
+		return iv if 50 <= iv <= 260 else None
+	else:
+		if 3.0 <= num <= 15.0:
+			num = num * 10.0
+		iv = int(round(num))
+		return iv if 30 <= iv <= 160 else None
+
+
+def normalize_bp(sys_val: object, dia_val: object = None) -> tuple[int | None, int | None]:
+	def _try_split_bp_text(raw_obj: object) -> tuple[float | None, float | None] | None:
+		if raw_obj is None or isinstance(raw_obj, (bool, int, float)):
+			return None
+		txt = clean_text(raw_obj)
+		if not txt:
+			return None
+		txt_no_unit = re.sub(r"\bmmhg\b", "", txt, flags=re.IGNORECASE).strip()
+		parts = [p for p in re.split(r"\s*[/\-]\s*|\s+", txt_no_unit) if p]
+		if len(parts) == 2:
+			p1 = numeric_value(parts[0])
+			p2 = numeric_value(parts[1])
+			if p1 is not None and p2 is not None:
+				return (p1, p2)
+		return None
+
+	s_num: float | None = None
+	d_num: float | None = None
+
+	split_res = _try_split_bp_text(sys_val)
+	if split_res is not None:
+		s_num, d_num = split_res
+	else:
+		dia_empty = dia_val is None or (isinstance(dia_val, str) and not clean_text(dia_val)) or numeric_value(dia_val) in (None, 0.0)
+		split_dia = _try_split_bp_text(dia_val) if (sys_val is None or (isinstance(sys_val, str) and not clean_text(sys_val))) else None
+		if split_dia is not None:
+			s_num, d_num = split_dia
+		else:
+			# Bitişik 4, 5 veya 6 haneli tek sayı: 12080 -> 120/80, 11070 -> 110/70, 9060 -> 90/60
+			raw_sys = clean_text(sys_val)
+			if raw_sys.endswith(".0") and raw_sys[:-2].isdigit():
+				raw_sys = raw_sys[:-2]
+			raw_sys_digits = re.sub(r"\s+", "", raw_sys)
+			if raw_sys_digits.isdigit() and len(raw_sys_digits) in (4, 5, 6) and dia_empty:
+				if len(raw_sys_digits) == 4:
+					c_s, c_d = int(raw_sys_digits[:2]), int(raw_sys_digits[2:])
+				elif len(raw_sys_digits) == 5:
+					c_s, c_d = int(raw_sys_digits[:3]), int(raw_sys_digits[3:])
+				else:
+					c_s, c_d = int(raw_sys_digits[:3]), int(raw_sys_digits[3:])
+				if 50 <= c_s <= 260 and 30 <= c_d <= 160 and c_s > c_d:
+					return (c_s, c_d)
+			s_num = numeric_value(sys_val)
+			d_num = numeric_value(dia_val)
+
+	if s_num == 0:
+		s_num = None
+	if d_num == 0:
+		d_num = None
+	return (_scale_single_bp_component(s_num, is_sys=True), _scale_single_bp_component(d_num, is_sys=False))
+
+
+def normalize_spo2(val: object) -> int | None:
+	num = numeric_value(val)
+	if num is None or num <= 0:
+		return None
+	if 500.0 <= num <= 999.0:
+		res = int(num // 10)
+	elif num > 100.0:
+		res = 100
+	else:
+		res = int(round(num))
+	return res if 30 <= res <= 100 else None
+
+
+def normalize_pulse(val: object) -> int | None:
+	num = numeric_value(val)
+	if num is None or num <= 0:
+		return None
+	res = int(round(num))
+	return res if 30 <= res <= 240 else None
+
+
+def normalize_glucose(val: object) -> float | None:
+	num = numeric_value(val)
+	if num is None or num <= 0:
+		return None
+	num = round(num, 1)
+	return num if 20.0 <= num <= 800.0 else None
+
+
+def normalize_phone(val: object) -> str | None:
+	if val is None or isinstance(val, (bool, list, tuple, dict, set)):
+		return None
+	try:
+		if pd.isna(val):
+			return None
+	except (TypeError, ValueError):
+		pass
+	raw = clean_text(val)
+	if not raw:
+		return None
+	if raw.endswith(".0") and raw[:-2].replace(" ", "").isdigit():
+		raw = raw[:-2]
+	digits = re.sub(r"\D+", "", raw)
+	if not digits:
+		return None
+	if digits.startswith("0090") and len(digits) >= 14:
+		digits = "0" + digits[4:]
+	elif digits.startswith("90") and len(digits) >= 12:
+		digits = "0" + digits[2:]
+	elif len(digits) == 10 and not digits.startswith("0"):
+		digits = "0" + digits
+	if len(digits) < 7:
+		return raw
+	return digits
+
+
+def normalize_schedule_times(val: object) -> str:
+	if val is None:
+		return ""
+	raw = clean_text(val)
+	if not raw:
+		return ""
+	tokens = [t.strip() for t in re.split(r"[,;\s]+", raw) if t.strip()]
+	result: list[str] = []
+	seen: set[str] = set()
+	for tok in tokens:
+		tok_norm = tok.replace(".", ":").replace("-", ":")
+		hh: int | None = None
+		mm: int | None = None
+		if ":" in tok_norm:
+			parts = tok_norm.split(":")
+			if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+				hh, mm = int(parts[0]), int(parts[1][:2]) if len(parts[1]) >= 2 else int(parts[1]) * 10
+		elif tok_norm.isdigit():
+			if len(tok_norm) == 4:
+				hh, mm = int(tok_norm[:2]), int(tok_norm[2:])
+			elif len(tok_norm) == 3:
+				hh, mm = int(tok_norm[:1]), int(tok_norm[1:])
+			elif len(tok_norm) in (1, 2):
+				hh, mm = int(tok_norm), 0
+		if hh is not None and mm is not None and 0 <= hh <= 23 and 0 <= mm <= 59:
+			fmt = f"{hh:02d}:{mm:02d}"
+			if fmt not in seen:
+				seen.add(fmt)
+				result.append(fmt)
+	return ", ".join(result) if result else raw
+
+
+def normalize_dosage_pattern(val: object) -> str:
+	if val is None:
+		return ""
+	raw = clean_text(val)
+	if not raw:
+		return ""
+	m = re.fullmatch(r"\s*(\d+)\s*[*xX×]\s*(\d+(?:[.,]\d+)?)\s*", raw)
+	if m:
+		return f"{int(m.group(1))}x{m.group(2).replace(',', '.')}"
+	return re.sub(r"(\d)\s*[*xX×]\s*(\d)", r"\1x\2", raw)
+
+
+def parse_smart_clinical_value(field_type: str, val: object, is_adult: bool = False, **kwargs):
+	ft = (field_type or "").strip().lower()
+	if ft in {"temperature", "temperature_c", "temp", "ates"}:
+		return normalize_temperature(val)
+	if ft in {"fridge_temp", "fridge_temp_c", "buzdolabi_isi"}:
+		return normalize_fridge_temp(val)
+	if ft in {"room_temp", "room_temp_c", "oda_isi"}:
+		return normalize_room_temp(val)
+	if ft in {"humidity", "humidity_pct", "nem"}:
+		return normalize_humidity(val)
+	if ft in {"height", "height_cm", "boy"}:
+		return normalize_height(val)
+	if ft in {"weight", "weight_kg", "kilo"}:
+		return normalize_weight(val, is_adult=is_adult)
+	if ft in {"head_circ", "head_circ_cm", "bas_cevresi"}:
+		return normalize_head_circ(val)
+	if ft in {"bp", "blood_pressure", "tansiyon"}:
+		return normalize_bp(val, kwargs.get("dia_val"))
+	if ft in {"bp_sys", "sys", "sistolik"}:
+		return normalize_bp(val, None)[0]
+	if ft in {"bp_dia", "dia", "diyastolik"}:
+		return normalize_bp(None, val)[1]
+	if ft in {"spo2", "spo2_pct"}:
+		return normalize_spo2(val)
+	if ft in {"pulse", "pulse_bpm", "nabiz"}:
+		return normalize_pulse(val)
+	if ft in {"glucose", "glucose_mg_dl", "kan_sekeri"}:
+		return normalize_glucose(val)
+	if ft in {"phone", "guardian_phone", "telefon"}:
+		return normalize_phone(val)
+	if ft in {"schedule_times", "scheduled_times"}:
+		return normalize_schedule_times(val)
+	if ft in {"dosage_pattern", "doz_sablonu"}:
+		return normalize_dosage_pattern(val)
+	if ft in {"birth_date", "date", "dogum_tarihi"}:
+		return parse_birth_date(val)
+	return numeric_value(val)
+
+
+def _format_smart_display(field_type: str, parsed_val: object) -> str:
+	if parsed_val is None:
+		return ""
+	ft = (field_type or "").strip().lower()
+	if ft in {"pulse", "pulse_bpm", "spo2", "spo2_pct", "bp_sys", "bp_dia"}:
+		return str(int(round(float(parsed_val))))
+	if ft in {"temperature", "temperature_c", "fridge_temp", "fridge_temp_c", "room_temp", "room_temp_c", "humidity", "humidity_pct", "height", "height_cm", "weight", "weight_kg", "head_circ", "head_circ_cm", "glucose", "glucose_mg_dl"}:
+		return f"{float(parsed_val):.1f}"
+	return str(parsed_val)
+
+
+def smart_text_input(
+	label: str,
+	field_type: str,
+	key: str,
+	value: object = None,
+	placeholder: str = "",
+	help: str | None = None,
+	in_form: bool = False,
+	is_adult: bool = False,
+	paired_dia_key: str | None = None,
+	clear_zero_default: bool = True,
+	**kwargs,
+) -> str:
+	"""Akıllı normalizasyon ve otomatik temizleme destekli text_input bileşeni."""
+	init_str = ""
+	if value is not None:
+		if isinstance(value, (int, float)):
+			if not (clear_zero_default and float(value) == 0.0):
+				init_str = _format_smart_display(field_type, value)
+		else:
+			txt = clean_text(value)
+			if txt and not (clear_zero_default and txt in {"0", "0.0", "0,0"}):
+				init_str = txt
+
+	if key not in st.session_state:
+		st.session_state[key] = init_str
+
+	def _on_smart_change() -> None:
+		raw_val = st.session_state.get(key, "")
+		if raw_val is None or not str(raw_val).strip():
+			st.session_state[key] = ""
+			return
+		ft_low = (field_type or "").strip().lower()
+		if paired_dia_key and ft_low in {"bp_sys", "bp", "blood_pressure", "tansiyon"}:
+			dia_cur = st.session_state.get(paired_dia_key, "")
+			sys_p, dia_p = normalize_bp(raw_val, dia_cur if str(dia_cur).strip() else None)
+			if sys_p is not None:
+				st.session_state[key] = str(sys_p)
+			if dia_p is not None:
+				st.session_state[paired_dia_key] = str(dia_p)
+			return
+		parsed = parse_smart_clinical_value(field_type, raw_val, is_adult=is_adult)
+		if parsed is not None and parsed != "":
+			st.session_state[key] = _format_smart_display(field_type, parsed)
+
+	text_kwargs = dict(kwargs)
+	if not in_form:
+		text_kwargs["on_change"] = _on_smart_change
+	if help is not None:
+		text_kwargs["help"] = help
+	if placeholder:
+		text_kwargs["placeholder"] = placeholder
+	return st.text_input(label, key=key, **text_kwargs)
+
+
+def inject_smart_input_ux() -> None:
+	"""Sayfa ve diyalog içindeki tüm giriş alanlarına odakta otomatik silme/seçme ve blur akıllı biçimlendirme JS enjekte eder."""
+	smart_js = """
+	<script>
+	(function() {
+		var pDoc = null;
+		var pWin = null;
+		try {
+			pWin = window.parent;
+			pDoc = pWin && pWin.document;
+		} catch (e) {
+			return;
+		}
+		if (!pDoc || !pDoc.body) return;
+
+		function setNativeInputValue(el, newVal) {
+			var strVal = (newVal === null || newVal === undefined) ? "" : String(newVal);
+			if (el.value === strVal) return;
+			try {
+				var proto = (el.tagName === "TEXTAREA")
+					? (pWin.HTMLTextAreaElement && pWin.HTMLTextAreaElement.prototype)
+					: (pWin.HTMLInputElement && pWin.HTMLInputElement.prototype);
+				var desc = proto && Object.getOwnPropertyDescriptor(proto, "value");
+				if (desc && desc.set) {
+					desc.set.call(el, strVal);
+				} else {
+					el.value = strVal;
+				}
+				el.dispatchEvent(new pWin.Event("input", { bubbles: true }));
+				el.dispatchEvent(new pWin.Event("change", { bubbles: true }));
+			} catch (err) {
+				el.value = strVal;
+			}
+		}
+
+		function shouldSkipInput(el) {
+			if (!el || el.tagName !== "INPUT") return true;
+			if (el.readOnly || el.disabled) return true;
+			var t = (el.getAttribute("type") || "text").toLowerCase();
+			if (t !== "text" && t !== "number" && t !== "tel" && t !== "search") return true;
+			var role = (el.getAttribute("role") || "").toLowerCase();
+			if (role === "combobox") return true;
+			if (el.closest('[data-baseweb="select"]')) return true;
+			return false;
+		}
+
+		function getLabelOnly(el) {
+			var parts = [el.getAttribute("aria-label") || ""];
+			var cont = el.closest('[data-testid="stTextInput"], [data-testid="stNumberInput"], [data-testid="stDateInput"]');
+			if (cont) {
+				var lbl = cont.querySelector("label");
+				if (lbl) parts.push(lbl.textContent || "");
+			}
+			return parts.join(" ").toLowerCase();
+		}
+
+		function getInputHint(el) {
+			var lbl = getLabelOnly(el);
+			var ph = (el.getAttribute("placeholder") || "").toLowerCase();
+			if (/şikayet|sikayet|ön tanı|tanı|muayene|yapılan|müdahale|notlar|klinik not|açıklama|aciklama|adres|ad soyad|veli adı|arama|ara\b|filtre|ilaç adı|etken madde/.test(lbl)) {
+				return "";
+			}
+			return (lbl + " " + ph).trim();
+		}
+
+		function isAdultContainer(el) {
+			var formOrTab = el.closest('[data-testid="stForm"], [role="tabpanel"], [role="dialog"], section.main');
+			var txt = formOrTab ? (formOrTab.textContent || "").toLowerCase() : "";
+			if (txt.indexOf("yetişkin") !== -1 || txt.indexOf("yetiskin") !== -1 || txt.indexOf("personel revir") !== -1) {
+				if (txt.indexOf("öğrenci revir") === -1 && txt.indexOf("okul taraması") === -1) {
+					return true;
+				}
+			}
+			var hint = getInputHint(el);
+			return hint.indexOf("yetişkin") !== -1 || hint.indexOf("yetiskin") !== -1;
+		}
+
+		function parseFloatTR(raw) {
+			if (!raw) return NaN;
+			var cleaned = String(raw).replace(/%/g, "").replace(/°\\s*c?/gi, "").replace(/,/g, ".").replace(/\\s+/g, "").trim();
+			if (!cleaned || !/^-?\\d+(\\.\\d+)?$/.test(cleaned)) return NaN;
+			return parseFloat(cleaned);
+		}
+
+		function findSiblingDiastolic(sysEl) {
+			var root = sysEl.closest('[data-testid="stHorizontalBlock"], [data-testid="stForm"], section.main') || pDoc;
+			var inputs = root.querySelectorAll('input[type="text"], input[type="number"]');
+			for (var i = 0; i < inputs.length; i++) {
+				var cand = inputs[i];
+				if (cand === sysEl) continue;
+				var h = getInputHint(cand);
+				if (h.indexOf("küçük") !== -1 || h.indexOf("kucuk") !== -1 || h.indexOf("diyastolik") !== -1) {
+					return cand;
+				}
+			}
+			return null;
+		}
+
+		function applySmartBlur(el) {
+			var raw = (el.value || "").trim();
+			if (!raw) return;
+			var hint = getInputHint(el);
+			if (!hint) return;
+			var isNumInput = (el.getAttribute("type") || "").toLowerCase() === "number";
+
+			// 1. Telefon normalizasyonu
+			if (hint.indexOf("telefon") !== -1 || hint.indexOf("tel:") !== -1 || hint.indexOf("05xx") !== -1 || hint.indexOf("+90") !== -1) {
+				var d = raw.replace(/\\.0$/, "").replace(/\\D+/g, "");
+				if (d.length >= 14 && d.indexOf("0090") === 0) d = "0" + d.slice(4);
+				else if (d.length >= 12 && d.indexOf("90") === 0) d = "0" + d.slice(2);
+				else if (d.length === 10 && d.charAt(0) !== "0") d = "0" + d;
+				if (d.length >= 10 && d !== raw) setNativeInputValue(el, d);
+				return;
+			}
+
+			// 2. Doğum tarihi hızlı GGAAYYYY (15032019 -> 2019/03/15 stDateInput için veya YYYY-MM-DD)
+			if (hint.indexOf("ggaayyyy") !== -1 || hint.indexOf("doğum tarihi") !== -1 || el.closest('[data-testid="stDateInput"]')) {
+				var m8 = raw.match(/^(\\d{2})(\\d{2})(\\d{4})$/);
+				if (m8) {
+					var dd = parseInt(m8[1], 10), mm = parseInt(m8[2], 10), yy = parseInt(m8[3], 10);
+					if (dd >= 1 && dd <= 31 && mm >= 1 && mm <= 12 && yy >= 1915 && yy <= 2035) {
+						var padD = (dd < 10 ? "0" : "") + dd;
+						var padM = (mm < 10 ? "0" : "") + mm;
+						if (el.closest('[data-testid="stDateInput"]')) {
+							setNativeInputValue(el, yy + "/" + padM + "/" + padD);
+						} else {
+							setNativeInputValue(el, yy + "-" + padM + "-" + padD);
+						}
+					}
+				}
+				return;
+			}
+
+			// 3. Hatırlatma saatleri (930, 1330 -> 09:30, 13:30)
+			if (hint.indexOf("saatleri") !== -1 || hint.indexOf("hatırlatma") !== -1 || hint.indexOf("930, 1330") !== -1) {
+				var toks = raw.split(/[,;\\s]+/).filter(Boolean);
+				var outT = [];
+				for (var ti = 0; ti < toks.length; ti++) {
+					var tk = toks[ti].replace(/[.-]/g, ":");
+					var hh = -1, mi = -1;
+					if (tk.indexOf(":") !== -1) {
+						var sp = tk.split(":");
+						if (sp.length >= 2 && /^\\d+$/.test(sp[0]) && /^\\d+$/.test(sp[1])) {
+							hh = parseInt(sp[0], 10);
+							mi = parseInt(sp[1].slice(0, 2), 10);
+						}
+					} else if (/^\\d{4}$/.test(tk)) {
+						hh = parseInt(tk.slice(0, 2), 10);
+						mi = parseInt(tk.slice(2, 4), 10);
+					} else if (/^\\d{3}$/.test(tk)) {
+						hh = parseInt(tk.slice(0, 1), 10);
+						mi = parseInt(tk.slice(1, 3), 10);
+					} else if (/^\\d{1,2}$/.test(tk)) {
+						hh = parseInt(tk, 10);
+						mi = 0;
+					}
+					if (hh >= 0 && hh <= 23 && mi >= 0 && mi <= 59) {
+						var f = (hh < 10 ? "0" : "") + hh + ":" + (mi < 10 ? "0" : "") + mi;
+						if (outT.indexOf(f) === -1) outT.push(f);
+					}
+				}
+				if (outT.length > 0) setNativeInputValue(el, outT.join(", "));
+				return;
+			}
+
+			// 4. Doz şablonu (2*1, 3X2 -> 2x1, 3x2)
+			if (hint.indexOf("doz şablonu") !== -1 || hint.indexOf("2*1") !== -1) {
+				var pat = raw.replace(/(\\d)\\s*[*xX×]\\s*(\\d)/g, "$1x$2");
+				if (pat !== raw) setNativeInputValue(el, pat);
+				return;
+			}
+
+			// 5. Tansiyon (120/80, 12080, 12/8)
+			if (hint.indexOf("tansiyon") !== -1 || hint.indexOf("sistolik") !== -1 || hint.indexOf("diyastolik") !== -1) {
+				var isDia = hint.indexOf("küçük") !== -1 || hint.indexOf("kucuk") !== -1 || hint.indexOf("diyastolik") !== -1;
+				if (!isDia) {
+					var sepMatch = raw.replace(/mmhg/gi, "").trim().match(/^(\\d+(?:[.,]\\d+)?)\\s*[/\\-\\s]\\s*(\\d+(?:[.,]\\d+)?)$/);
+					if (sepMatch) {
+						var sV = parseFloatTR(sepMatch[1]);
+						var dV = parseFloatTR(sepMatch[2]);
+						if (!isNaN(sV) && !isNaN(dV)) {
+							if (sV >= 6 && sV <= 24) sV = sV * 10;
+							if (dV >= 3 && dV <= 15) dV = dV * 10;
+							var diaEl = findSiblingDiastolic(el);
+							if (diaEl && !isNumInput) {
+								setNativeInputValue(el, String(Math.round(sV)));
+								setNativeInputValue(diaEl, String(Math.round(dV)));
+							} else if (!isNumInput) {
+								setNativeInputValue(el, Math.round(sV) + "/" + Math.round(dV));
+							}
+						}
+						return;
+					}
+					if (/^\\d{4,6}$/.test(raw)) {
+						var cs = parseInt(raw.slice(0, raw.length === 4 ? 2 : 3), 10);
+						var cd = parseInt(raw.slice(raw.length === 4 ? 2 : 3), 10);
+						if (cs >= 50 && cs <= 260 && cd >= 30 && cd <= 160 && cs > cd) {
+							var diaEl2 = findSiblingDiastolic(el);
+							if (diaEl2 && !isNumInput) {
+								setNativeInputValue(el, String(cs));
+								setNativeInputValue(diaEl2, String(cd));
+								return;
+							}
+						}
+					}
+					var sOnly = parseFloatTR(raw);
+					if (!isNaN(sOnly) && sOnly >= 6 && sOnly <= 24) {
+						setNativeInputValue(el, String(Math.round(sOnly * 10)));
+					}
+				} else {
+					var dOnly = parseFloatTR(raw);
+					if (!isNaN(dOnly) && dOnly >= 3 && dOnly <= 15) {
+						setNativeInputValue(el, String(Math.round(dOnly * 10)));
+					}
+				}
+				return;
+			}
+
+			// 6. Ateş (°C)
+			if (hint.indexOf("ateş") !== -1 || hint.indexOf("ates") !== -1) {
+				var t = parseFloatTR(raw);
+				if (!isNaN(t)) {
+					if (t >= 300 && t <= 440) t = t / 10.0;
+					else if (t >= 3000 && t <= 4400) t = t / 100.0;
+					t = Math.round(t * 10) / 10;
+					if (t >= 30.0 && t <= 44.0) setNativeInputValue(el, t.toFixed(1));
+				}
+				return;
+			}
+
+			// 7. Baş Çevresi (cm)
+			if (hint.indexOf("baş çevresi") !== -1 || hint.indexOf("bas cevresi") !== -1) {
+				var hc = parseFloatTR(raw);
+				if (!isNaN(hc)) {
+					if (hc >= 300 && hc <= 650) hc = hc / 10.0;
+					hc = Math.round(hc * 10) / 10;
+					if (hc >= 30.0 && hc <= 65.0) setNativeInputValue(el, hc.toFixed(1));
+				}
+				return;
+			}
+
+			// 8. Boy (cm)
+			if (hint.indexOf("boy") !== -1 && hint.indexOf("doğum") === -1) {
+				var hVal = parseFloatTR(raw);
+				if (!isNaN(hVal)) {
+					if (hVal >= 0.40 && hVal <= 2.30) hVal = hVal * 100.0;
+					else if (hVal >= 400 && hVal <= 2300) hVal = hVal / 10.0;
+					hVal = Math.round(hVal * 10) / 10;
+					if (hVal >= 40.0 && hVal <= 230.0) setNativeInputValue(el, hVal.toFixed(1));
+				}
+				return;
+			}
+
+			// 9. Kilo (kg)
+			if (hint.indexOf("kilo") !== -1) {
+				var w = parseFloatTR(raw);
+				if (!isNaN(w)) {
+					var adult = isAdultContainer(el);
+					if (w >= 2000 && w <= 150000) w = w / 1000.0;
+					else if (!adult && w > 130 && w <= 999) w = w / 10.0;
+					else if (adult && w > 220 && w <= 1500) w = w / 10.0;
+					w = Math.round(w * 10) / 10;
+					if (w >= 1.0 && w <= 300.0) setNativeInputValue(el, w.toFixed(1));
+				}
+				return;
+			}
+
+			// 10. SpO2 (%)
+			if (hint.indexOf("spo2") !== -1 || hint.indexOf("oksijen") !== -1 || hint.indexOf("saturasyon") !== -1) {
+				var sp = parseFloatTR(raw);
+				if (!isNaN(sp) && sp > 0) {
+					var sRes = Math.round(sp);
+					if (sp >= 500 && sp <= 999) sRes = Math.floor(sp / 10);
+					else if (sp > 100) sRes = 100;
+					if (sRes >= 30 && sRes <= 100) setNativeInputValue(el, String(sRes));
+				}
+				return;
+			}
+
+			// 11. Nabız (/dk)
+			if (hint.indexOf("nabız") !== -1 || hint.indexOf("nabiz") !== -1) {
+				var pl = parseFloatTR(raw);
+				if (!isNaN(pl)) {
+					var pRes = Math.round(pl);
+					if (pRes >= 30 && pRes <= 240) setNativeInputValue(el, String(pRes));
+				}
+				return;
+			}
+		}
+
+		function bindSmartElement(el) {
+			if (!el || el.dataset.smartUxBound === "1") return;
+			if (shouldSkipInput(el)) return;
+			el.dataset.smartUxBound = "1";
+
+			el.addEventListener("focus", function() {
+				if (shouldSkipInput(el)) return;
+				var v = (el.value || "").trim();
+				if (v === "0" || v === "0.0" || v === "0,0") {
+					setNativeInputValue(el, "");
+				} else if (v !== "") {
+					el.__smartJustFocused = true;
+					setTimeout(function() {
+						try { el.select(); } catch (e) {}
+					}, 0);
+				}
+			});
+
+			el.addEventListener("mouseup", function(ev) {
+				if (el.__smartJustFocused) {
+					el.__smartJustFocused = false;
+					if ((el.value || "").trim() !== "") {
+						ev.preventDefault();
+						try { el.select(); } catch (e) {}
+					}
+				}
+			});
+
+			el.addEventListener("blur", function() {
+				el.__smartJustFocused = false;
+				if (!shouldSkipInput(el)) applySmartBlur(el);
+			});
+		}
+
+		function scanInputs(root) {
+			if (!root || !root.querySelectorAll) return;
+			if (root.tagName === "INPUT") bindSmartElement(root);
+			var list = root.querySelectorAll('input[type="text"], input[type="number"], input[type="tel"], input[type="search"], input:not([type])');
+			for (var i = 0; i < list.length; i++) {
+				bindSmartElement(list[i]);
+			}
+		}
+
+		scanInputs(pDoc.body);
+
+		if (!pWin.__revirSmartUxObserver) {
+			var obs = new pWin.MutationObserver(function(mutations) {
+				for (var m = 0; m < mutations.length; m++) {
+					var added = mutations[m].addedNodes;
+					for (var j = 0; j < added.length; j++) {
+						var node = added[j];
+						if (node && node.nodeType === 1) scanInputs(node);
+					}
+				}
+			});
+			obs.observe(pDoc.body, { childList: true, subtree: true });
+			pWin.__revirSmartUxObserver = obs;
+		}
+	})();
+	</script>
+	"""
+	st.components.v1.html(smart_js, height=0)
 
 
 def assess_range(value: float, low: float | None, high: float | None) -> str:
@@ -5644,12 +7386,13 @@ def _ensure_lms_cache() -> None:
 def get_lms_row(indicator: str, sex: str, months: int) -> dict | None:
 	if not sex or months is None:
 		return None
+	norm_sex = normalize_sex(sex) or (str(sex).strip().upper() if sex else "")
 	_ensure_lms_cache()
 	m_int = int(months)
 	if indicator == "head_circ" and m_int > 60:
 		m_int = 60
 	for candidate in (m_int, m_int - 1, m_int + 1):
-		hit = _LMS_CACHE.get((indicator, sex, int(candidate)))
+		hit = _LMS_CACHE.get((indicator, norm_sex, int(candidate)))
 		if hit is not None:
 			return hit
 	return None
@@ -6027,9 +7770,9 @@ def get_clinical_growth_column_config() -> dict:
 	return {
 		"Ölçülen Değer": st.column_config.NumberColumn(
 			"✏️ Ölçülen Değer (Düzenlenebilir)",
-			help="Boy, kilo veya baş çevresi değerine çift tıklayarak doğrudan tablo üzerinden değiştirebilirsiniz.",
-			min_value=1.0,
-			max_value=300.0,
+			help="Boy (örn. 1055 veya 1.45), kilo (örn. 185 veya 18500) veya baş çevresi değerine çift tıklayarak doğrudan tablo üzerinden değiştirebilirsiniz.",
+			min_value=0.4,
+			max_value=150000.0,
 			step=0.1,
 			format="%.1f",
 		),
@@ -6479,14 +8222,12 @@ def student_options(class_name: str | None = None, person_type: str | None = Non
 
 def clear_all_data_caches() -> None:
 	"""Veri değişikliklerinde önbellekleri temizler ve belleği boşaltır."""
-	try:
-		get_students_enriched.clear()
-	except Exception:
-		pass
-	try:
-		get_classes.clear()
-	except Exception:
-		pass
+	for cached_fn in (get_students_enriched, get_classes, get_class_teacher_map):
+		try:
+			if callable(getattr(cached_fn, "clear", None)):
+				cached_fn.clear()
+		except Exception:
+			pass
 	try:
 		st.session_state.pop("_cached_app_settings", None)
 		st.session_state.pop("_cached_page_sections_visibility", None)
@@ -6494,6 +8235,172 @@ def clear_all_data_caches() -> None:
 	except Exception:
 		pass
 	gc.collect()
+
+
+def sync_after_person_mutation(person_id: int | None = None, active_measurement_id: int | None = None) -> None:
+	"""Veri değişikliği sonrası kişi JSON dosyasını, Streamlit önbelleklerini ve dinamik UI state'lerini eşitler."""
+	pid: int | None = None
+	if person_id is not None:
+		try:
+			pid = int(person_id)
+		except (TypeError, ValueError):
+			pid = None
+
+	if pid is not None:
+		try:
+			save_person_data_file(pid)
+		except Exception:
+			pass
+
+	try:
+		st.session_state.pop("_cached_persons", None)
+	except Exception:
+		pass
+
+	if pid is not None:
+		valid_meas_ids: list[int] = []
+		try:
+			with connect_db() as connection:
+				m_rows = connection.execute(
+					"SELECT id FROM measurements WHERE student_id=? ORDER BY measured_on DESC, id DESC",
+					(pid,),
+				).fetchall()
+			valid_meas_ids = [int(r["id"]) for r in m_rows]
+		except Exception:
+			valid_meas_ids = []
+
+		try:
+			for meas_key in (f"dossier_active_meas_{pid}", f"active_meas_id_{pid}"):
+				if active_measurement_id is not None and int(active_measurement_id) in valid_meas_ids:
+					st.session_state[meas_key] = int(active_measurement_id)
+				else:
+					st.session_state.pop(meas_key, None)
+
+			st.session_state.pop(f"sel_active_meas_{pid}", None)
+			st.session_state.pop(f"active_edit_box_{pid}", None)
+
+			pid_suffix = f"_{pid}"
+			editor_prefixes = (
+				"pfile_v_ed_",
+				"pfile_m_ed_",
+				"pfile_vr_ed_",
+				"pfile_raw_json_",
+				f"dossier_clinical_editor_{pid}_",
+				f"clinical_growth_editor_{pid}_",
+			)
+			for skey in list(st.session_state.keys()):
+				if any(skey.startswith(pfx) for pfx in editor_prefixes):
+					if skey.endswith(pid_suffix) or f"_{pid}_" in skey:
+						st.session_state.pop(skey, None)
+				elif skey.endswith("_last_synced_id") or skey.endswith("_last_synced_cls"):
+					st.session_state.pop(skey, None)
+		except Exception:
+			pass
+	else:
+		try:
+			for skey in list(st.session_state.keys()):
+				if skey.endswith("_last_synced_id") or skey.endswith("_last_synced_cls"):
+					st.session_state.pop(skey, None)
+		except Exception:
+			pass
+
+	clear_all_data_caches()
+
+
+_HEALTH_PROFILE_UPDATABLE_COLS = frozenset({
+	"guardian_name",
+	"guardian_phone",
+	"blood_group",
+	"allergies",
+	"chronic_conditions",
+	"medications",
+	"medical_history",
+	"emergency_notes",
+	"reviewed_by",
+	"wears_glasses",
+	"vision_right",
+	"vision_left",
+	"hair_screening",
+	"hearing_right",
+	"hearing_left",
+	"health_behavior",
+	"harmful_habits",
+	"psychosocial_status",
+	"last_screened_at",
+	"special_needs_codes",
+	"medical_devices",
+	"dietary_swallowing_notes",
+	"seizure_emergency_protocol",
+})
+
+
+def _sync_guardian_bidirectional_conn(connection: sqlite3.Connection, student_id: int) -> None:
+	"""students ve health_profiles tablolarındaki eksik veli ad/telefon alanlarını karşılıklı tamamlar."""
+	pid = int(student_id)
+	stu_row = connection.execute(
+		"SELECT guardian_name, guardian_phone FROM students WHERE id=?",
+		(pid,),
+	).fetchone()
+	hp_row = connection.execute(
+		"SELECT guardian_name, guardian_phone FROM health_profiles WHERE student_id=?",
+		(pid,),
+	).fetchone()
+	if not stu_row or not hp_row:
+		return
+
+	s_name = (stu_row["guardian_name"] or "").strip() or None
+	s_phone = (stu_row["guardian_phone"] or "").strip() or None
+	h_name = (hp_row["guardian_name"] or "").strip() or None
+	h_phone = (hp_row["guardian_phone"] or "").strip() or None
+
+	merged_name = s_name or h_name
+	merged_phone = s_phone or h_phone
+
+	if merged_name != s_name or merged_phone != s_phone:
+		connection.execute(
+			"UPDATE students SET guardian_name=?, guardian_phone=? WHERE id=?",
+			(merged_name, merged_phone, pid),
+		)
+	if merged_name != h_name or merged_phone != h_phone:
+		connection.execute(
+			"UPDATE health_profiles SET guardian_name=?, guardian_phone=? WHERE student_id=?",
+			(merged_name, merged_phone, pid),
+		)
+
+
+def _upsert_health_profile_fields(person_id: int, fields: dict[str, Any]) -> None:
+	"""Kişinin health_profiles kaydını (yoksa oluşturarak) verilen alanlarla atomik olarak günceller."""
+	pid = int(person_id)
+	clean_items = [(col, val) for col, val in fields.items() if col in _HEALTH_PROFILE_UPDATABLE_COLS]
+	if not clean_items:
+		return
+	now_iso = datetime.now().isoformat(timespec="minutes")
+	with connect_db() as connection:
+		stu_g = connection.execute(
+			"SELECT guardian_name, guardian_phone FROM students WHERE id=?",
+			(pid,),
+		).fetchone()
+		g_name = stu_g["guardian_name"] if stu_g else None
+		g_phone = stu_g["guardian_phone"] if stu_g else None
+
+		cols = [col for col, _ in clean_items]
+		vals = [val for _, val in clean_items]
+		col_list = ", ".join(["student_id", "guardian_name", "guardian_phone", "updated_at", *cols])
+		placeholders = ", ".join(["?"] * (4 + len(cols)))
+		update_clause = ", ".join([
+			"guardian_name=COALESCE(health_profiles.guardian_name, excluded.guardian_name)",
+			"guardian_phone=COALESCE(health_profiles.guardian_phone, excluded.guardian_phone)",
+			"updated_at=excluded.updated_at",
+			*[f"{col}=excluded.{col}" for col in cols],
+		])
+		connection.execute(
+			f"""INSERT INTO health_profiles({col_list})
+			    VALUES ({placeholders})
+			    ON CONFLICT(student_id) DO UPDATE SET {update_clause}""",
+			(pid, g_name, g_phone, now_iso, *vals),
+		)
+		_sync_guardian_bidirectional_conn(connection, pid)
+	sync_after_person_mutation(pid)
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -6640,6 +8547,79 @@ def get_students_enriched(class_name: str | None = None, person_type: str | None
 	return pd.DataFrame(out_rows)
 
 
+def is_kvkk_privacy_active() -> bool:
+	try:
+		return bool(st.session_state.get("kvkk_privacy_mode", False))
+	except Exception:
+		return False
+
+
+def mask_kvkk_value(val: object, field_type: str = "name") -> str:
+	"""KVKK Gizlilik Modu açıkken ekrandaki ad, telefon ve tıbbi verileri maskeler."""
+	try:
+		is_masked = bool(st.session_state.get("kvkk_privacy_mode", False))
+	except Exception:
+		is_masked = False
+
+	if not is_masked:
+		if val is None:
+			return ""
+		try:
+			if pd.isna(val):
+				return ""
+		except (TypeError, ValueError):
+			pass
+		return str(val)
+
+	txt = clean_text(val)
+	ft = (field_type or "name").strip().lower()
+
+	if ft == "medical":
+		if not txt or txt == "—":
+			return txt
+		return "🔒 [Gizli Sağlık Verisi]"
+
+	if not txt or txt == "—":
+		return txt
+
+	if ft == "phone":
+		digits = re.sub(r"\D+", "", txt)
+		if len(digits) >= 10:
+			return f"{digits[:4]} *** ** {digits[-2:]}"
+		if len(digits) >= 5:
+			return f"{digits[:2]} *** {digits[-2:]}"
+		if len(txt) >= 5:
+			return f"{txt[:2]} *** {txt[-2:]}"
+		return "***"
+
+	# Default: field_type == "name" ("ALİ ASAF DOĞAN" -> "A** A*** D****")
+	masked_parts = []
+	for word in txt.split():
+		if len(word) <= 1:
+			masked_parts.append(word)
+		else:
+			masked_parts.append(word[0] + ("*" * (len(word) - 1)))
+	return " ".join(masked_parts)
+
+
+def apply_kvkk_mask_to_roster_df(df: pd.DataFrame) -> pd.DataFrame:
+	"""Öğrenci/Yetişkin listeleme tabloları görüntülenirken KVKK Gizlilik Modu açıksa kimlik, telefon ve klinik sütunları maskeler."""
+	if df is None or df.empty or not is_kvkk_privacy_active():
+		return df
+	out_df = df.copy()
+	for col_name, ftype in (
+		("Ad Soyad", "name"),
+		("Öğrenci", "name"),
+		("Veli", "name"),
+		("Telefon", "phone"),
+		("Alerji / Kronik", "medical"),
+		("Gelişim Durumu", "medical"),
+	):
+		if col_name in out_df.columns:
+			out_df[col_name] = out_df[col_name].apply(lambda x, t=ftype: mask_kvkk_value(x, t))
+	return out_df
+
+
 def get_students_column_config() -> dict:
 	return {
 		"id": None,
@@ -6703,27 +8683,53 @@ def select_shared_person(key_prefix: str, person_type: str | None = None, label:
 		classes = all_classes
 
 	active_id = st.session_state.get("active_person_id")
-	active_person = get_person_by_id(active_id)
+	active_person = get_person_by_id(active_id) if active_id is not None else None
+	if active_id is not None and active_person is None:
+		active_id = None
+		set_active_person(None)
+
+	widget_key = f"{key_prefix}_person_select"
+	last_synced_key = f"{key_prefix}_last_synced_id"
 
 	if person_type != "Sivil":
 		class_opts = ["Tüm sınıflar", *classes]
-		saved_class = st.session_state.get("active_class_filter", "Tüm sınıflar")
 		cls_widget_key = f"{key_prefix}_cls_filter"
+		cls_sync_key = f"{key_prefix}_last_synced_cls"
 
-		# If an active person exists and their class doesn't match saved filter, reset to "Tüm sınıflar" so they are visible
-		if active_person and saved_class != "Tüm sınıflar" and active_person["class_name"] != saved_class:
-			if person_type is None or (person_type == "Öğrenci" and active_person["class_name"] != "Sivil / Diğer"):
-				saved_class = "Tüm sınıflar"
-				st.session_state["active_class_filter"] = "Tüm sınıflar"
-				if cls_widget_key in st.session_state:
-					st.session_state[cls_widget_key] = "Tüm sınıflar"
+		global_cls = st.session_state.get("active_class_filter", "Tüm sınıflar")
+		if global_cls not in class_opts:
+			global_cls = "Tüm sınıflar"
+			st.session_state["active_class_filter"] = "Tüm sınıflar"
 
-		cls_idx = class_opts.index(saved_class) if saved_class in class_opts else 0
+		person_changed_globally = (st.session_state.get(last_synced_key) != active_id)
+		cls_first_init = (cls_widget_key not in st.session_state)
+		cur_widget_cls = st.session_state.get(cls_widget_key)
+		last_seen_cls = st.session_state.get(cls_sync_key)
+
+		if cls_first_init or person_changed_globally:
+			if active_person and global_cls != "Tüm sınıflar" and active_person["class_name"] != global_cls:
+				if person_type is None or (person_type == "Öğrenci" and active_person["class_name"] != "Sivil / Diğer"):
+					global_cls = "Tüm sınıflar"
+					st.session_state["active_class_filter"] = "Tüm sınıflar"
+			st.session_state[cls_widget_key] = global_cls
+			st.session_state[cls_sync_key] = global_cls
+		elif cur_widget_cls != last_seen_cls:
+			# User manually picked a different class in this page's filter widget
+			if cur_widget_cls not in class_opts:
+				st.session_state[cls_widget_key] = "Tüm sınıflar"
+		elif global_cls != last_seen_cls:
+			# Another page updated active_class_filter
+			st.session_state[cls_widget_key] = global_cls
+			st.session_state[cls_sync_key] = global_cls
+
+		if st.session_state.get(cls_widget_key) not in class_opts:
+			st.session_state[cls_widget_key] = "Tüm sınıflar"
 
 		col_f, col_s = st.columns([1, 2.2])
 		with col_f:
-			chosen_class = st.selectbox("Sınıf Filtresi", class_opts, index=cls_idx, key=cls_widget_key)
+			chosen_class = st.selectbox("Sınıf Filtresi", class_opts, key=cls_widget_key)
 			st.session_state["active_class_filter"] = chosen_class
+			st.session_state[cls_sync_key] = chosen_class
 	else:
 		chosen_class = "Sivil / Diğer"
 		col_s = st.container()
@@ -6754,90 +8760,294 @@ def select_shared_person(key_prefix: str, person_type: str | None = None, label:
 
 	lookup = {_person_label(r): r for r in people}
 	labels = list(lookup.keys())
-	id_to_idx = {r["id"]: i for i, r in enumerate(people)}
-	default_idx = id_to_idx.get(active_id, None)
+	id_to_label = {r["id"]: lbl for lbl, r in lookup.items()}
+	expected_label = id_to_label.get(active_id)
 
-	# Keep widget state synchronized with global active_person_id when switching pages
-	widget_key = f"{key_prefix}_person_select"
-	last_synced_key = f"{key_prefix}_last_synced_id"
-	if st.session_state.get(last_synced_key) != active_id:
+	# Keep widget state synchronized with global active_person_id and label format before widget creation
+	synced_id = st.session_state.get(last_synced_key)
+	cur_widget_val = st.session_state.get(widget_key)
+	was_synced_selected = (synced_id == active_id and active_id in id_to_label and widget_key in st.session_state)
+
+	if widget_key not in st.session_state or synced_id != active_id:
+		st.session_state[widget_key] = expected_label
 		st.session_state[last_synced_key] = active_id
-		st.session_state[widget_key] = labels[default_idx] if default_idx is not None else None
+	elif cur_widget_val is not None and cur_widget_val not in lookup:
+		# Label changed format (e.g. class filter changed or student renamed), restore active person's updated label
+		st.session_state[widget_key] = expected_label
+
+	def _on_person_change() -> None:
+		sel_lbl = st.session_state.get(widget_key)
+		if sel_lbl and sel_lbl in lookup:
+			new_pid = int(lookup[sel_lbl]["id"])
+			set_active_person(new_pid)
+			st.session_state[last_synced_key] = new_pid
+		elif sel_lbl is None:
+			set_active_person(None)
+			st.session_state[last_synced_key] = None
 
 	with col_s:
-		selected_label = st.selectbox(label, labels, index=default_idx, placeholder="İsim, sınıf veya okul numarası ile arayın...", key=widget_key)
+		selected_label = st.selectbox(
+			label,
+			labels,
+			placeholder="İsim, sınıf veya okul numarası ile arayın...",
+			key=widget_key,
+			on_change=_on_person_change,
+		)
 
 	if not selected_label or selected_label not in lookup:
+		if was_synced_selected and selected_label is None:
+			set_active_person(None)
+			st.session_state[last_synced_key] = None
 		return None
 
 	chosen_person = lookup[selected_label]
 	if chosen_person["id"] != active_id:
 		set_active_person(chosen_person["id"])
-		st.session_state[last_synced_key] = chosen_person["id"]
+	st.session_state[last_synced_key] = chosen_person["id"]
 	return chosen_person
 
 
-def record_linked_measurement(student_id: int, measured_on: date, height_cm: float | None, weight_kg: float | None,
-							  birth_date: str | None = None, sex: str | None = None,
-							  head_circ_cm: float | None = None) -> str:
-	months = age_in_months(birth_date, measured_on) if birth_date else None
-	h_val = float(height_cm) if (height_cm is not None and height_cm > 0) else None
-	w_val = float(weight_kg) if (weight_kg is not None and weight_kg > 0) else None
-	hc_val = float(head_circ_cm) if (head_circ_cm is not None and head_circ_cm > 0) else None
-	bmi = (w_val / ((h_val / 100.0) ** 2)) if (h_val and w_val) else None
-	with connect_db() as connection:
-		existing = connection.execute(
-			"SELECT id, height_cm, weight_kg, head_circ_cm, age_months, bmi FROM measurements WHERE student_id=? AND measured_on=? ORDER BY id DESC LIMIT 1",
-			(student_id, measured_on.isoformat()),
+def _upsert_measurement_conn(
+	connection: sqlite3.Connection,
+	student_id: int,
+	measured_on: date,
+	height_cm: float | None,
+	weight_kg: float | None,
+	birth_date: str | None = None,
+	sex: str | None = None,
+	head_circ_cm: float | None = None,
+) -> tuple[int | None, str]:
+	sid = int(student_id)
+	m_date_obj = measured_on if isinstance(measured_on, date) else date.fromisoformat(str(measured_on)[:10])
+	m_date_iso = m_date_obj.isoformat()
+
+	is_adult_person = False
+	stu_info = connection.execute("SELECT birth_date, sex, person_type FROM students WHERE id=?", (sid,)).fetchone()
+	if stu_info:
+		if not birth_date:
+			birth_date = stu_info["birth_date"]
+		if not sex:
+			sex = stu_info["sex"]
+		if stu_info["person_type"] and str(stu_info["person_type"]).strip() != "Öğrenci":
+			is_adult_person = True
+
+	norm_sex = normalize_sex(sex) or sex
+	months = age_in_months(birth_date, m_date_obj) if birth_date else None
+
+	h_val = normalize_height(height_cm)
+	w_val = normalize_weight(weight_kg, is_adult=is_adult_person)
+	hc_val = normalize_head_circ(head_circ_cm)
+
+	if h_val is None and w_val is None and hc_val is None:
+		return None, ""
+
+	existing = connection.execute(
+		"""SELECT id, height_cm, weight_kg, head_circ_cm, age_months, bmi
+		   FROM measurements WHERE student_id=? AND measured_on=? ORDER BY id DESC LIMIT 1""",
+		(sid, m_date_iso),
+	).fetchone()
+
+	if existing:
+		final_h = h_val if h_val is not None else (float(existing["height_cm"]) if existing["height_cm"] is not None else None)
+		final_w = w_val if w_val is not None else (float(existing["weight_kg"]) if existing["weight_kg"] is not None else None)
+		final_hc = hc_val if hc_val is not None else (float(existing["head_circ_cm"]) if existing["head_circ_cm"] is not None else None)
+		exclude_id = int(existing["id"])
+	else:
+		final_h = h_val
+		final_w = w_val
+		final_hc = hc_val
+		exclude_id = -1
+
+	# Complete missing height or weight from most recent prior valid measurement for BMI & percentile calculation
+	completed_from_prev: set[str] = set()
+	if (final_h is not None and final_h > 0) and (final_w is None or final_w <= 0):
+		prev_w = connection.execute(
+			"""SELECT weight_kg FROM measurements
+			   WHERE student_id=? AND measured_on<=? AND id!=? AND weight_kg IS NOT NULL AND weight_kg > 0
+			   ORDER BY measured_on DESC, id DESC LIMIT 1""",
+			(sid, m_date_iso, exclude_id),
 		).fetchone()
-		if existing:
-			final_h = h_val if h_val is not None else existing["height_cm"]
-			final_w = w_val if w_val is not None else existing["weight_kg"]
-			final_hc = hc_val if hc_val is not None else existing["head_circ_cm"]
-			final_bmi = (final_w / ((final_h / 100.0) ** 2)) if (final_h and final_w) else existing["bmi"]
-			connection.execute(
-				"""UPDATE measurements
-				   SET height_cm=?, weight_kg=?, head_circ_cm=?, age_months=?, bmi=?
-				   WHERE id=?""",
-				(final_h, final_w, final_hc, months or existing["age_months"], final_bmi, existing["id"]),
-			)
-		else:
-			connection.execute(
-				"""INSERT INTO measurements(student_id, measured_on, height_cm, weight_kg, head_circ_cm, age_months, bmi)
-				   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-				(student_id, measured_on.isoformat(), h_val, w_val, hc_val, months, float(bmi) if bmi else None),
-			)
-	save_person_data_file(student_id)
+		if prev_w and prev_w["weight_kg"]:
+			final_w = float(prev_w["weight_kg"])
+			completed_from_prev.add("weight")
+	elif (final_w is not None and final_w > 0) and (final_h is None or final_h <= 0):
+		prev_h = connection.execute(
+			"""SELECT height_cm FROM measurements
+			   WHERE student_id=? AND measured_on<=? AND id!=? AND height_cm IS NOT NULL AND height_cm > 0
+			   ORDER BY measured_on DESC, id DESC LIMIT 1""",
+			(sid, m_date_iso, exclude_id),
+		).fetchone()
+		if prev_h and prev_h["height_cm"]:
+			final_h = float(prev_h["height_cm"])
+			completed_from_prev.add("height")
+
+	final_bmi = (final_w / ((final_h / 100.0) ** 2)) if (final_h and final_w and final_h > 0 and final_w > 0) else None
+	final_months = months if months is not None else (existing["age_months"] if existing else None)
+
+	if existing:
+		meas_id = int(existing["id"])
+		connection.execute(
+			"""UPDATE measurements
+			   SET height_cm=?, weight_kg=?, head_circ_cm=?, age_months=?, bmi=?
+			   WHERE id=?""",
+			(final_h, final_w, final_hc, final_months, float(final_bmi) if final_bmi is not None else None, meas_id),
+		)
+	else:
+		cur = connection.execute(
+			"""INSERT INTO measurements(student_id, measured_on, height_cm, weight_kg, head_circ_cm, age_months, bmi)
+			   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+			(sid, m_date_iso, final_h, final_w, final_hc, final_months, float(final_bmi) if final_bmi is not None else None),
+		)
+		meas_id = int(cur.lastrowid)
+
 	parts = []
-	if h_val is not None:
-		h_str = f"Boy: {h_val:.1f} cm"
-		if sex and months is not None:
-			h_ev = evaluate_measurement(h_val, "height", sex, months)
+	if final_h is not None and (h_val is not None or "height" in completed_from_prev or existing):
+		h_str = f"Boy: {final_h:.1f} cm" + (" (önceki ölçümden)" if "height" in completed_from_prev else "")
+		if norm_sex and final_months is not None:
+			h_ev = evaluate_measurement(final_h, "height", norm_sex, final_months)
 			if h_ev:
 				h_str += f" ({h_ev['z']:+.2f} SDS, %{h_ev['percentile']:.1f}p)"
 		parts.append(h_str)
-	if w_val is not None:
-		w_str = f"Kilo: {w_val:.1f} kg"
-		if sex and months is not None:
-			w_ev = evaluate_measurement(w_val, "weight", sex, months)
+	if final_w is not None and (w_val is not None or "weight" in completed_from_prev or existing):
+		w_str = f"Kilo: {final_w:.1f} kg" + (" (önceki ölçümden)" if "weight" in completed_from_prev else "")
+		if norm_sex and final_months is not None:
+			w_ev = evaluate_measurement(final_w, "weight", norm_sex, final_months)
 			if w_ev:
 				w_str += f" ({w_ev['z']:+.2f} SDS, %{w_ev['percentile']:.1f}p)"
 		parts.append(w_str)
-	if bmi is not None:
-		b_str = f"VKİ: {bmi:.1f} kg/m²"
-		if sex and months is not None:
-			b_ev = evaluate_measurement(bmi, "bmi", sex, months)
+	if final_bmi is not None:
+		b_str = f"VKİ: {final_bmi:.1f} kg/m²"
+		if norm_sex and final_months is not None:
+			b_ev = evaluate_measurement(final_bmi, "bmi", norm_sex, final_months)
 			if b_ev:
 				b_str += f" ({b_ev['z']:+.2f} SDS, %{b_ev['percentile']:.1f}p - {b_ev['status']})"
 		parts.append(b_str)
 	if hc_val is not None:
 		hc_str = f"Baş Çevresi: {hc_val:.1f} cm"
-		if sex and months is not None:
-			hc_ev = evaluate_measurement(hc_val, "head_circ", sex, months)
+		if norm_sex and final_months is not None:
+			hc_ev = evaluate_measurement(hc_val, "head_circ", norm_sex, final_months)
 			if hc_ev:
 				hc_str += f" ({hc_ev['z']:+.2f} SDS, %{hc_ev['percentile']:.1f}p)"
 		parts.append(hc_str)
-	return " | ".join(parts)
+	return meas_id, " | ".join(parts)
+
+
+def record_linked_measurement(student_id: int, measured_on: date, height_cm: float | None, weight_kg: float | None,
+							  birth_date: str | None = None, sex: str | None = None,
+							  head_circ_cm: float | None = None) -> str:
+	with connect_db() as connection:
+		meas_id, summary_txt = _upsert_measurement_conn(
+			connection,
+			student_id,
+			measured_on,
+			height_cm,
+			weight_kg,
+			birth_date=birth_date,
+			sex=sex,
+			head_circ_cm=head_circ_cm,
+		)
+	if meas_id is not None:
+		sync_after_person_mutation(int(student_id), active_measurement_id=meas_id)
+	return summary_txt
+
+
+def _upsert_vital_conn(
+	connection: sqlite3.Connection,
+	student_id: int,
+	measured_at: str,
+	systolic: float | None,
+	diastolic: float | None,
+	pulse: float | None,
+	temperature: float | None,
+	glucose: float | None,
+	glucose_context: str | None = None,
+	notes: str | None = None,
+	spo2: float | None = None,
+	upsert_same_slot: bool = True,
+	upsert_screening_day: bool = False,
+) -> tuple[int | None, str]:
+	sid = int(student_id)
+	raw_ts = str(measured_at or datetime.now().isoformat(timespec="minutes")).strip()
+	norm_ts = raw_ts.replace(" ", "T")[:16]
+	if len(norm_ts) == 10:
+		norm_ts = f"{norm_ts}T09:30"
+	day_prefix = norm_ts[:10]
+
+	sys_i, dia_i = normalize_bp(systolic, diastolic)
+	sys_v = float(sys_i) if sys_i is not None else None
+	dia_v = float(dia_i) if dia_i is not None else None
+	pls_i = normalize_pulse(pulse)
+	pls_v = float(pls_i) if pls_i is not None else None
+	tmp_v = normalize_temperature(temperature)
+	spo_i = normalize_spo2(spo2)
+	spo_v = float(spo_i) if spo_i is not None else None
+	glu_v = normalize_glucose(glucose)
+
+	if all(x is None for x in (sys_v, dia_v, pls_v, tmp_v, spo_v, glu_v)):
+		return None, ""
+
+	existing = None
+	if upsert_screening_day or (notes and "Okul Taraması" in notes):
+		existing = connection.execute(
+			"""SELECT id, measured_at, systolic_mmhg, diastolic_mmhg, pulse_bpm, temperature_c,
+			          spo2_pct, glucose_mg_dl, glucose_context, notes
+			   FROM vital_readings
+			   WHERE student_id=? AND (
+			       substr(replace(measured_at, ' ', 'T'), 1, 16) = ?
+			       OR (substr(measured_at, 1, 10) = ? AND COALESCE(notes, '') LIKE '%Okul Taraması%')
+			   )
+			   ORDER BY id DESC LIMIT 1""",
+			(sid, norm_ts, day_prefix),
+		).fetchone()
+	elif upsert_same_slot:
+		existing = connection.execute(
+			"""SELECT id, measured_at, systolic_mmhg, diastolic_mmhg, pulse_bpm, temperature_c,
+			          spo2_pct, glucose_mg_dl, glucose_context, notes
+			   FROM vital_readings
+			   WHERE student_id=? AND substr(replace(measured_at, ' ', 'T'), 1, 16) = ?
+			   ORDER BY id DESC LIMIT 1""",
+			(sid, norm_ts),
+		).fetchone()
+
+	if existing:
+		vital_id = int(existing["id"])
+		final_sys = sys_v if sys_v is not None else existing["systolic_mmhg"]
+		final_dia = dia_v if dia_v is not None else existing["diastolic_mmhg"]
+		final_pls = pls_v if pls_v is not None else existing["pulse_bpm"]
+		final_tmp = tmp_v if tmp_v is not None else existing["temperature_c"]
+		final_spo = spo_v if spo_v is not None else existing["spo2_pct"]
+		final_glu = glu_v if glu_v is not None else existing["glucose_mg_dl"]
+		final_gctx = glucose_context if glucose_context else existing["glucose_context"]
+		final_notes = notes if notes else existing["notes"]
+		connection.execute(
+			"""UPDATE vital_readings
+			   SET measured_at=?, systolic_mmhg=?, diastolic_mmhg=?, pulse_bpm=?, temperature_c=?,
+			       spo2_pct=?, glucose_mg_dl=?, glucose_context=?, notes=?
+			   WHERE id=?""",
+			(norm_ts, final_sys, final_dia, final_pls, final_tmp, final_spo, final_glu, final_gctx, final_notes, vital_id),
+		)
+	else:
+		cur = connection.execute(
+			"""INSERT INTO vital_readings(student_id, measured_at, systolic_mmhg, diastolic_mmhg,
+			   pulse_bpm, temperature_c, spo2_pct, glucose_mg_dl, glucose_context, notes)
+			   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+			(sid, norm_ts, sys_v, dia_v, pls_v, tmp_v, spo_v, glu_v, glucose_context, notes),
+		)
+		vital_id = int(cur.lastrowid)
+
+	v_parts = []
+	if tmp_v is not None:
+		v_parts.append(f"Ateş: {tmp_v:.1f} °C")
+	if spo_v is not None:
+		v_parts.append(f"SpO2 (Saturasyon): %{spo_v:.0f}")
+	if sys_v is not None and dia_v is not None:
+		v_parts.append(f"Tansiyon: {sys_v:.0f}/{dia_v:.0f} mmHg")
+	if pls_v is not None:
+		v_parts.append(f"Nabız: {pls_v:.0f} atım/dk")
+	if glu_v is not None:
+		ctx = f" ({glucose_context})" if glucose_context else ""
+		v_parts.append(f"Kan Şekeri: {glu_v:.0f} mg/dL{ctx}")
+	return vital_id, " | ".join(v_parts)
 
 
 def record_linked_vital(student_id: int, measured_at: str, systolic: float | None, diastolic: float | None,
@@ -6845,26 +9055,24 @@ def record_linked_vital(student_id: int, measured_at: str, systolic: float | Non
 						glucose_context: str | None = None, notes: str | None = None,
 						spo2: float | None = None) -> str:
 	with connect_db() as connection:
-		connection.execute(
-			"""INSERT INTO vital_readings(student_id, measured_at, systolic_mmhg, diastolic_mmhg,
-			   pulse_bpm, temperature_c, spo2_pct, glucose_mg_dl, glucose_context, notes)
-			   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-			(student_id, measured_at, systolic, diastolic, pulse, temperature, spo2, glucose, glucose_context, notes),
+		vital_id, v_summary = _upsert_vital_conn(
+			connection,
+			student_id,
+			measured_at,
+			systolic,
+			diastolic,
+			pulse,
+			temperature,
+			glucose,
+			glucose_context=glucose_context,
+			notes=notes,
+			spo2=spo2,
+			upsert_same_slot=True,
+			upsert_screening_day=False,
 		)
-	save_person_data_file(student_id)
-	v_parts = []
-	if temperature is not None:
-		v_parts.append(f"Ateş: {temperature:.1f} °C")
-	if spo2 is not None:
-		v_parts.append(f"SpO2 (Saturasyon): %{spo2:.0f}")
-	if systolic is not None and diastolic is not None:
-		v_parts.append(f"Tansiyon: {systolic:.0f}/{diastolic:.0f} mmHg")
-	if pulse is not None:
-		v_parts.append(f"Nabız: {pulse:.0f} atım/dk")
-	if glucose is not None:
-		ctx = f" ({glucose_context})" if glucose_context else ""
-		v_parts.append(f"Kan Şekeri: {glucose:.0f} mg/dL{ctx}")
-	return " | ".join(v_parts)
+	if vital_id is not None:
+		sync_after_person_mutation(int(student_id))
+	return v_summary
 
 
 def get_person_latest_measurements(person_id: int | None) -> dict:
@@ -7056,20 +9264,34 @@ def render_shared_person_summary(person: sqlite3.Row, section_key: str = "") -> 
 	visit_cnt = visit_stat["cnt"] if visit_stat else 0
 	last_v_date = visit_stat["last_date"] if (visit_stat and visit_stat["last_date"]) else "Yok"
 
-	has_alert = profile and any(profile[k] for k in ["allergies", "chronic_conditions", "medical_history", "medications", "emergency_notes"])
+	def _hp_val(col: str) -> str:
+		if not profile:
+			return ""
+		if hasattr(profile, "keys"):
+			if col not in profile.keys():
+				return ""
+			return clean_text(profile[col])
+		return clean_text(profile.get(col) if isinstance(profile, dict) else "")
+
+	alert_field_defs = [
+		("allergies", "🔴", "Alerji"),
+		("chronic_conditions", "🟠", "Kronik Hastalıklar"),
+		("medical_history", "📋", "Sağlık Geçmişi"),
+		("medications", "💊", "Düzenli İlaç"),
+		("emergency_notes", "⚠️", "Acil Not"),
+		("special_needs_codes", "♿", "Özel Gereksinim"),
+		("medical_devices", "🦻", "Tıbbi Cihaz/Protez"),
+		("dietary_swallowing_notes", "🍽️", "Yutma/Diyet Güvenliği"),
+		("seizure_emergency_protocol", "⚡", "Acil Nöbet Protokolü"),
+	]
+	a_items = []
+	for f_col, f_icon, f_lbl in alert_field_defs:
+		f_val = _hp_val(f_col)
+		if f_val:
+			a_items.append(f"{f_icon} <b>{f_lbl}:</b> {html.escape(f_val)}")
+
 	alert_banner_html = ""
-	if has_alert:
-		a_items = []
-		if profile["allergies"]:
-			a_items.append(f"🔴 <b>Alerji:</b> {html.escape(profile['allergies'])}")
-		if profile["chronic_conditions"]:
-			a_items.append(f"🟠 <b>Kronik Hastalıklar:</b> {html.escape(profile['chronic_conditions'])}")
-		if profile["medical_history"]:
-			a_items.append(f"📋 <b>Sağlık Geçmişi:</b> {html.escape(profile['medical_history'])}")
-		if profile["medications"]:
-			a_items.append(f"💊 <b>Düzenli İlaç:</b> {html.escape(profile['medications'])}")
-		if profile["emergency_notes"]:
-			a_items.append(f"⚠️ <b>Acil Not:</b> {html.escape(profile['emergency_notes'])}")
+	if a_items:
 		alert_bg = "#450a0a" if is_dark else "#fef2f2"
 		alert_col = "#fecaca" if is_dark else "#7f1d1d"
 		alert_banner_html = (
@@ -7088,19 +9310,8 @@ def render_shared_person_summary(person: sqlite3.Row, section_key: str = "") -> 
 		st.markdown(meas_summary_html, unsafe_allow_html=True)
 		st.markdown(vital_summary_html, unsafe_allow_html=True)
 
-		if has_alert:
-			a_items = []
-			if profile["allergies"]:
-				a_items.append(f"🔴 **Alerji:** {profile['allergies']}")
-			if profile["chronic_conditions"]:
-				a_items.append(f"🟠 **Kronik:** {profile['chronic_conditions']}")
-			if profile["medical_history"]:
-				a_items.append(f"📋 **Geçmiş:** {profile['medical_history']}")
-			if profile["medications"]:
-				a_items.append(f"💊 **İlaç:** {profile['medications']}")
-			if profile["emergency_notes"]:
-				a_items.append(f"⚠️ **Acil:** {profile['emergency_notes']}")
-			st.warning("  ·  ".join(a_items))
+		if alert_banner_html:
+			st.markdown(alert_banner_html, unsafe_allow_html=True)
 
 
 
@@ -7140,7 +9351,7 @@ def render_person_data_file_editor(person_id: int, section_key: str = "overview"
 		)
 	with d_c2:
 		if st.button("🔄 Dosyayı Veritabanıyla Yeniden Senkronize Et", key=f"sync_pfile_{section_key}_{person_id}", use_container_width=True):
-			save_person_data_file(person_id)
+			sync_after_person_mutation(person_id)
 			st.success(f"{person_data.get('full_name')} veri dosyası güncellendi.")
 			st.rerun()
 	with d_c3:
@@ -7149,7 +9360,7 @@ def render_person_data_file_editor(person_id: int, section_key: str = "overview"
 				connection.execute("DELETE FROM visits WHERE student_id=?", (int(person_id),))
 				connection.execute("DELETE FROM measurements WHERE student_id=?", (int(person_id),))
 				connection.execute("DELETE FROM vital_readings WHERE student_id=?", (int(person_id),))
-			save_person_data_file(int(person_id))
+			sync_after_person_mutation(int(person_id))
 			st.success(f"{person_data.get('full_name')} adlı kişinin revir, ölçüm ve vital kayıtları temizlendi.")
 			st.rerun()
 
@@ -7183,10 +9394,13 @@ def render_person_data_file_editor(person_id: int, section_key: str = "overview"
 			},
 		)
 		if st.button("💾 Revir Kayıtlarını Kişi Dosyasına Kaydet", type="primary", key=f"save_pfile_v_{section_key}_{person_id}"):
-			person_data["visits"] = edited_v.dropna(how="all").to_dict(orient="records")
-			apply_person_data_file_to_db(person_id, person_data)
-			st.success("Kişinin revir kayıtları kendi veri dosyasına kaydedildi.")
-			st.rerun()
+			try:
+				person_data["visits"] = edited_v.dropna(how="all").to_dict(orient="records")
+				apply_person_data_file_to_db(person_id, person_data)
+				st.success("Kişinin revir kayıtları kendi veri dosyasına kaydedildi.")
+				st.rerun()
+			except Exception as err:
+				st.error(f"Revir kayıtları uygulanamadı (mevcut veriler korundu): {err}")
 
 	with ed_tab_m:
 		m_list = person_data.get("measurements", [])
@@ -7202,17 +9416,20 @@ def render_person_data_file_editor(person_id: int, section_key: str = "overview"
 			hide_index=True,
 			key=f"pfile_m_ed_{section_key}_{person_id}",
 			column_config={
-				"measured_on": st.column_config.TextColumn("Ölçüm Tarihi (YYYY-AA-GG)"),
-				"height_cm": st.column_config.NumberColumn("Boy (cm)", format="%.1f"),
-				"weight_kg": st.column_config.NumberColumn("Kilo (kg)", format="%.1f"),
-				"head_circ_cm": st.column_config.NumberColumn("Baş Çevresi (cm)", format="%.1f"),
+				"measured_on": st.column_config.TextColumn("Ölçüm Tarihi (YYYY-AA-GG / GGAAYYYY)"),
+				"height_cm": st.column_config.NumberColumn("Boy (cm)", min_value=0.4, max_value=2300.0, step=0.1, format="%.1f", help="Örn: 145, 1.45 veya 1055"),
+				"weight_kg": st.column_config.NumberColumn("Kilo (kg)", min_value=1.0, max_value=150000.0, step=0.1, format="%.1f", help="Örn: 35.5, 355 veya 18500"),
+				"head_circ_cm": st.column_config.NumberColumn("Baş Çevresi (cm)", min_value=20.0, max_value=650.0, step=0.1, format="%.1f", help="Örn: 48.5 veya 485"),
 			},
 		)
 		if st.button("💾 Boy-Kilo Ölçümlerini Kişi Dosyasına Kaydet", type="primary", key=f"save_pfile_m_{section_key}_{person_id}"):
-			person_data["measurements"] = edited_m.dropna(how="all").to_dict(orient="records")
-			apply_person_data_file_to_db(person_id, person_data)
-			st.success("Kişinin boy-kilo ölçümleri kendi veri dosyasına kaydedildi.")
-			st.rerun()
+			try:
+				person_data["measurements"] = edited_m.dropna(how="all").to_dict(orient="records")
+				apply_person_data_file_to_db(person_id, person_data)
+				st.success("Kişinin boy-kilo ölçümleri kendi veri dosyasına kaydedildi.")
+				st.rerun()
+			except Exception as err:
+				st.error(f"Ölçüm kayıtları uygulanamadı (mevcut veriler korundu): {err}")
 
 	with ed_tab_vr:
 		vr_list = person_data.get("vital_readings", [])
@@ -7229,20 +9446,23 @@ def render_person_data_file_editor(person_id: int, section_key: str = "overview"
 			key=f"pfile_vr_ed_{section_key}_{person_id}",
 			column_config={
 				"measured_at": st.column_config.TextColumn("Tarih/Saat (YYYY-AA-GGTHH:MM)"),
-				"temperature_c": st.column_config.NumberColumn("Ateş (°C)", format="%.1f"),
-				"spo2_pct": st.column_config.NumberColumn("SpO2 (%)", format="%.0f"),
-				"systolic_mmhg": st.column_config.NumberColumn("Büyük Tansiyon", format="%.0f"),
-				"diastolic_mmhg": st.column_config.NumberColumn("Küçük Tansiyon", format="%.0f"),
-				"pulse_bpm": st.column_config.NumberColumn("Nabız (/dk)", format="%.0f"),
-				"glucose_mg_dl": st.column_config.NumberColumn("Kan Şekeri", format="%.0f"),
+				"temperature_c": st.column_config.NumberColumn("Ateş (°C)", min_value=30.0, max_value=4400.0, step=0.1, format="%.1f", help="Örn: 36.6, 366 veya 3665"),
+				"spo2_pct": st.column_config.NumberColumn("SpO2 (%)", min_value=30.0, max_value=1000.0, step=1.0, format="%.0f", help="Örn: 98, 988 veya 1000"),
+				"systolic_mmhg": st.column_config.NumberColumn("Büyük Tansiyon", min_value=6.0, max_value=260160.0, step=1.0, format="%.0f", help="Örn: 120, 12 veya 12080"),
+				"diastolic_mmhg": st.column_config.NumberColumn("Küçük Tansiyon", min_value=3.0, max_value=160.0, step=1.0, format="%.0f", help="Örn: 80 veya 8"),
+				"pulse_bpm": st.column_config.NumberColumn("Nabız (/dk)", min_value=30.0, max_value=240.0, step=1.0, format="%.0f"),
+				"glucose_mg_dl": st.column_config.NumberColumn("Kan Şekeri", min_value=20.0, max_value=800.0, step=1.0, format="%.0f"),
 				"notes": st.column_config.TextColumn("Notlar"),
 			},
 		)
 		if st.button("💾 Vital Kayıtları Kişi Dosyasına Kaydet", type="primary", key=f"save_pfile_vr_{section_key}_{person_id}"):
-			person_data["vital_readings"] = edited_vr.dropna(how="all").to_dict(orient="records")
-			apply_person_data_file_to_db(person_id, person_data)
-			st.success("Kişinin vital kayıtları kendi veri dosyasına kaydedildi.")
-			st.rerun()
+			try:
+				person_data["vital_readings"] = edited_vr.dropna(how="all").to_dict(orient="records")
+				apply_person_data_file_to_db(person_id, person_data)
+				st.success("Kişinin vital kayıtları kendi veri dosyasına kaydedildi.")
+				st.rerun()
+			except Exception as err:
+				st.error(f"Vital kayıtlar uygulanamadı (mevcut veriler korundu): {err}")
 
 	with ed_tab_json:
 		raw_json_str = st.text_area(
@@ -7420,7 +9640,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 				)
 			with dl_c2:
 				if st.button("🔄 Senkronize Et", key=f"dossier_sync_json_{person_id}", use_container_width=True):
-					save_person_data_file(person_id)
+					sync_after_person_mutation(person_id)
 					st.success("Senkronize edildi.")
 					st.rerun()
 
@@ -7459,12 +9679,14 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 					new_vr = st.text_input("Sağ Göz Durumu / Numara", value=(hp["vision_right"] if hp and hp["vision_right"] else "Tam / Normal (10/10)"))
 					new_vl = st.text_input("Sol Göz Durumu / Numara", value=(hp["vision_left"] if hp and hp["vision_left"] else "Tam / Normal (10/10)"))
 					if st.form_submit_button("💾 Kaydet", type="primary", use_container_width=True):
-						with connect_db() as connection:
-							connection.execute(
-								"UPDATE health_profiles SET wears_glasses=?, vision_right=?, vision_left=?, updated_at=? WHERE student_id=?",
-								(new_gl, new_vr.strip() or None, new_vl.strip() or None, datetime.now().isoformat(timespec="minutes"), person_id)
-							)
-						save_person_data_file(person_id)
+						_upsert_health_profile_fields(
+							person_id,
+							{
+								"wears_glasses": new_gl,
+								"vision_right": new_vr.strip() or None,
+								"vision_left": new_vl.strip() or None,
+							},
+						)
 						st.session_state[active_box_key] = None
 						st.success("Göz ve görme bilgisi güncellendi.")
 						st.rerun()
@@ -7494,12 +9716,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 					cust_beh = st.text_input("Açıklama / Serbest Not (Opsiyonel)", value="", placeholder="Diyet, su tüketimi, hijyen notu...", key=f"il_beh_note_{person_id}")
 					if st.form_submit_button("💾 Kaydet", type="primary", use_container_width=True):
 						res_beh = format_multiselect_save_str(sel_beh, cust_beh)
-						with connect_db() as connection:
-							connection.execute(
-								"UPDATE health_profiles SET health_behavior=?, updated_at=? WHERE student_id=?",
-								(res_beh, datetime.now().isoformat(timespec="minutes"), person_id)
-							)
-						save_person_data_file(person_id)
+						_upsert_health_profile_fields(person_id, {"health_behavior": res_beh})
 						st.session_state[active_box_key] = None
 						st.success("Sağlık davranışı bilgisi güncellendi.")
 						st.rerun()
@@ -7531,12 +9748,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 					cust_hair = st.text_input("Açıklama / Serbest Not (Opsiyonel)", value="", placeholder="İlaç, sirke durumu, kontrol notu...", key=f"il_hair_note_{person_id}")
 					if st.form_submit_button("💾 Kaydet", type="primary", use_container_width=True):
 						res_hair = format_multiselect_save_str(sel_hair, cust_hair)
-						with connect_db() as connection:
-							connection.execute(
-								"UPDATE health_profiles SET hair_screening=?, updated_at=? WHERE student_id=?",
-								(res_hair, datetime.now().isoformat(timespec="minutes"), person_id)
-							)
-						save_person_data_file(person_id)
+						_upsert_health_profile_fields(person_id, {"hair_screening": res_hair})
 						st.session_state[active_box_key] = None
 						st.success("Saç taraması bilgisi güncellendi.")
 						st.rerun()
@@ -7576,12 +9788,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 					cust_psy = st.text_input("Açıklama / Özel Not", value="" if sel_psy != "Diğer / Serbest Not" else cur_psy)
 					if st.form_submit_button("💾 Kaydet", type="primary", use_container_width=True):
 						res_psy = cust_psy.strip() if sel_psy == "Diğer / Serbest Not" and cust_psy.strip() else sel_psy
-						with connect_db() as connection:
-							connection.execute(
-								"UPDATE health_profiles SET psychosocial_status=?, updated_at=? WHERE student_id=?",
-								(res_psy, datetime.now().isoformat(timespec="minutes"), person_id)
-							)
-						save_person_data_file(person_id)
+						_upsert_health_profile_fields(person_id, {"psychosocial_status": res_psy})
 						st.session_state[active_box_key] = None
 						st.success("Psikososyal durum bilgisi güncellendi.")
 						st.rerun()
@@ -7612,12 +9819,10 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 					if st.form_submit_button("💾 Kaydet", type="primary", use_container_width=True):
 						res_hr = format_multiselect_save_str(sel_hr, cust_hear if not sel_hl else None)
 						res_hl = format_multiselect_save_str(sel_hl)
-						with connect_db() as connection:
-							connection.execute(
-								"UPDATE health_profiles SET hearing_right=?, hearing_left=?, updated_at=? WHERE student_id=?",
-								(res_hr, res_hl, datetime.now().isoformat(timespec="minutes"), person_id)
-							)
-						save_person_data_file(person_id)
+						_upsert_health_profile_fields(
+							person_id,
+							{"hearing_right": res_hr, "hearing_left": res_hl},
+						)
 						st.session_state[active_box_key] = None
 						st.success("İşitme bilgisi güncellendi.")
 						st.rerun()
@@ -7645,12 +9850,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 					cust_harm = st.text_input("Açıklama / Serbest Not (Opsiyonel)", value="", placeholder="Dijital ekran süresi, tütün, kafein vb...", key=f"il_harm_note_{person_id}")
 					if st.form_submit_button("💾 Kaydet", type="primary", use_container_width=True):
 						res_harm = format_multiselect_save_str(sel_harm, cust_harm)
-						with connect_db() as connection:
-							connection.execute(
-								"UPDATE health_profiles SET harmful_habits=?, updated_at=? WHERE student_id=?",
-								(res_harm, datetime.now().isoformat(timespec="minutes"), person_id)
-							)
-						save_person_data_file(person_id)
+						_upsert_health_profile_fields(person_id, {"harmful_habits": res_harm})
 						st.session_state[active_box_key] = None
 						st.success("Zararlı alışkanlıklar bilgisi güncellendi.")
 						st.rerun()
@@ -7685,14 +9885,16 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 					new_em = st.text_input("Acil Durum Notu", value=(hp["emergency_notes"] if hp and hp["emergency_notes"] else ""))
 					if st.form_submit_button("💾 Kaydet", type="primary", use_container_width=True):
 						res_bg = None if new_bg == "Belirtilmedi" else new_bg
-						with connect_db() as connection:
-							connection.execute(
-								"""UPDATE health_profiles SET blood_group=?, allergies=?, chronic_conditions=?,
-								   medications=?, emergency_notes=?, updated_at=? WHERE student_id=?""",
-								(res_bg, new_al.strip() or None, new_ch.strip() or None, new_med.strip() or None,
-								 new_em.strip() or None, datetime.now().isoformat(timespec="minutes"), person_id)
-							)
-						save_person_data_file(person_id)
+						_upsert_health_profile_fields(
+							person_id,
+							{
+								"blood_group": res_bg,
+								"allergies": new_al.strip() or None,
+								"chronic_conditions": new_ch.strip() or None,
+								"medications": new_med.strip() or None,
+								"emergency_notes": new_em.strip() or None,
+							},
+						)
 						st.session_state[active_box_key] = None
 						st.success("Klinik profil güncellendi.")
 						st.rerun()
@@ -7733,8 +9935,18 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 						vac_updates[vcode] = st.checkbox(vtitle, value=cur_d, key=f"il_vac_{person_id}_{vcode}")
 
 					if st.form_submit_button("💾 Kaydet", type="primary", use_container_width=True):
+						vac_records = []
 						for vcode, is_checked in vac_updates.items():
-							save_student_vaccination(person_id, vcode, is_checked)
+							prev = vac_sum["records"].get(vcode, {})
+							vac_records.append({
+								"vaccine_code": vcode,
+								"is_done": is_checked,
+								"administered_date": prev.get("administered_date"),
+								"facility": prev.get("facility"),
+								"lot_number": prev.get("lot_number"),
+								"notes": prev.get("notes"),
+							})
+						save_bulk_student_vaccinations(person_id, vac_records)
 						st.session_state[active_box_key] = None
 						st.success("Aşı bilgileri güncellendi.")
 						st.rerun()
@@ -7756,6 +9968,115 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 			st.caption("Öğrencinin tüm bebeklik ve okul çağı aşılarını resmi Sağlık Bakanlığı matris tablosu üstünde incelemek ve işaretlemek için:")
 			st.info("💡 Yukarıdaki sekmelerden **'💉 Aşı Takvimi'** sekmesine geçerek tüm aşıları renkli matriste görebilir, tek tıkla tamamlayabilir veya Aşı Kartı çıktısı alabilirsiniz.")
 
+	# Card 9: Özel Gereksinim, Tıbbi Cihaz & Yutma Güvenliği
+	def _hp_col_txt(col_name: str) -> str:
+		if not hp or not hasattr(hp, "keys") or col_name not in hp.keys():
+			return ""
+		return clean_text(hp[col_name])
+
+	def _clean_special_save(selected: list[str], sentinel: str, custom_note: str) -> str | None:
+		cleaned = [s for s in selected if s and s != sentinel]
+		extra = clean_text(custom_note)
+		if extra:
+			cleaned.append(extra)
+		if not cleaned:
+			return None
+		return ", ".join(dict.fromkeys(cleaned))
+
+	def _toggle_sn_box(skey: str) -> None:
+		st.session_state[skey] = None if st.session_state.get(skey) == "special_needs" else "special_needs"
+
+	with st.container(border=True):
+		hdr_sn1, hdr_sn2 = st.columns([4.0, 1.0])
+		hdr_sn1.markdown("##### ♿ Özel Gereksinim, Tıbbi Cihaz & Yutma Güvenliği")
+		is_editing_sn = (st.session_state.get(active_box_key) == "special_needs")
+		btn_sn_label = "✖ Kapat" if is_editing_sn else "✏️ Düzenle"
+		hdr_sn2.button(
+			btn_sn_label,
+			key=f"btn_edit_special_needs_{person_id}",
+			on_click=_toggle_sn_box,
+			args=(active_box_key,),
+			use_container_width=True,
+		)
+
+		cur_sn_raw = _hp_col_txt("special_needs_codes")
+		cur_dev_raw = _hp_col_txt("medical_devices")
+		cur_diet_raw = _hp_col_txt("dietary_swallowing_notes")
+		cur_proto_raw = _hp_col_txt("seizure_emergency_protocol")
+
+		if is_editing_sn:
+			with st.form(f"form_inline_special_needs_{person_id}"):
+				cur_sn_list = parse_multiselect_values(cur_sn_raw or None, ["Özel Gereksinim Yok"])
+				cur_dev_list = parse_multiselect_values(cur_dev_raw or None, ["Tıbbi Cihaz / Protez Yok"])
+				cur_diet_list = parse_multiselect_values(cur_diet_raw or None, ["Normal Beslenme / Risk Yok"])
+
+				sel_sn = st.multiselect(
+					"♿ Özel Gereksinim / Tanı Grubu (Çoklu)",
+					ensure_options_contain(SPECIAL_NEEDS_CODE_OPTIONS, cur_sn_list),
+					default=cur_sn_list,
+					key=f"il_sn_codes_{person_id}",
+				)
+				cust_sn = st.text_input(
+					"Ek Tanı / ÇÖZGER Detayı (Opsiyonel)",
+					value="",
+					placeholder="Örn: ÇÖZGER Özel Gereksinim Düzeyi, engel oranı veya ek tanı notu...",
+					key=f"il_sn_codes_note_{person_id}",
+				)
+				sel_dev = st.multiselect(
+					"🦻 Tıbbi Cihaz / Protez (Çoklu)",
+					ensure_options_contain(MEDICAL_DEVICE_OPTIONS, cur_dev_list),
+					default=cur_dev_list,
+					key=f"il_sn_dev_{person_id}",
+				)
+				cust_dev = st.text_input(
+					"Ek Cihaz / Bakım Notu (Opsiyonel)",
+					value="",
+					placeholder="Örn: Sağ kulak pil değişimi, AFO kullanım saatleri, VP şant uyarısı...",
+					key=f"il_sn_dev_note_{person_id}",
+				)
+				sel_diet = st.multiselect(
+					"🍽️ Beslenme ve Yutma Güvenliği (Çoklu)",
+					ensure_options_contain(DIETARY_SWALLOWING_OPTIONS, cur_diet_list),
+					default=cur_diet_list,
+					key=f"il_sn_diet_{person_id}",
+				)
+				cust_diet = st.text_input(
+					"Ek Diyet / Aspirasyon Önlemi Notu (Opsiyonel)",
+					value="",
+					placeholder="Örn: Beslenme sırasında baş 45° dik tutulmalı, yasaklı gıdalar...",
+					key=f"il_sn_diet_note_{person_id}",
+				)
+				new_proto = st.text_area(
+					"⚡ Acil Nöbet Müdahale Protokolü & İlaç Dozu",
+					value=cur_proto_raw,
+					placeholder="Örn: Nöbet > 5 dk sürerse 5 mg Rektal Diazepam veya Bukkal Midazolam uygula, yan yatır, 112 ve veliyi ara...",
+					key=f"il_sn_proto_{person_id}",
+				)
+				if st.form_submit_button("💾 Kaydet", type="primary", use_container_width=True):
+					_upsert_health_profile_fields(
+						person_id,
+						{
+							"special_needs_codes": _clean_special_save(sel_sn, "Özel Gereksinim Yok", cust_sn),
+							"medical_devices": _clean_special_save(sel_dev, "Tıbbi Cihaz / Protez Yok", cust_dev),
+							"dietary_swallowing_notes": _clean_special_save(sel_diet, "Normal Beslenme / Risk Yok", cust_diet),
+							"seizure_emergency_protocol": clean_text(new_proto) or None,
+						},
+					)
+					st.session_state[active_box_key] = None
+					st.success("Özel gereksinim, tıbbi cihaz ve yutma güvenliği bilgileri güncellendi.")
+					try:
+						st.rerun(scope="fragment")
+					except Exception:
+						st.rerun()
+		else:
+			sn_c1, sn_c2 = st.columns(2)
+			with sn_c1:
+				st.markdown(f"♿ **Özel Gereksinim / Tanı:** `{cur_sn_raw or 'Yok / Bildirilmedi'}`")
+				st.markdown(f"🦻 **Tıbbi Cihaz/Protez:** `{cur_dev_raw or 'Yok / Kullanmıyor'}`")
+			with sn_c2:
+				st.markdown(f"🍽️ **Yutma/Diyet Güvenliği:** `{cur_diet_raw or 'Normal Beslenme / Risk Yok'}`")
+				st.markdown(f"⚡ **Acil Nöbet Protokolü:** `{cur_proto_raw or 'Tanımlanmadı'}`")
+
 def _render_dossier_tab_visits(person: sqlite3.Row, person_id: int) -> None:
 	st.markdown("#### ➕ Bu Kişiye Yeni Revir Ziyareti Kaydet")
 	with st.expander("📝 Yeni Revir Kayıt Formunu Aç", expanded=True):
@@ -7773,29 +10094,62 @@ def _render_dossier_tab_visits(person: sqlite3.Row, person_id: int) -> None:
 			v_obs = st.text_area("Gözlem ve Muayene Bulguları", placeholder="Örn: Boğaz hiperemik, ciltte döküntü yok...", height=70, key=f"dossier_v_obs_{person_id}")
 			v_action = st.text_area("Yapılan Müdahale / Tedavi", placeholder="Örn: İstirahat verildi, ılık su içirildi, veliye bilgi verildi...", height=70, key=f"dossier_v_act_{person_id}")
 
+			v_loc_c1, v_loc_c2 = st.columns(2)
+			v_incident_loc = v_loc_c1.selectbox("📍 Olay Yeri", INCIDENT_LOCATIONS, key=f"dossier_v_loc_{person_id}")
+			v_witness_teacher = v_loc_c2.text_input("👩‍🏫 İlgili / Nöbetçi Öğretmen", placeholder="Örn: Nöbetçi Öğretmen / Sınıf Öğretmeni", key=f"dossier_v_wit_{person_id}")
+
 			v_chk1, v_chk2, v_chk3 = st.columns([1.2, 1.4, 1.4])
 			v_guardian_cont = v_chk1.checkbox("Veli Bilgilendirildi", value=False, key=f"dossier_v_gcont_{person_id}")
 			v_referral = v_chk2.text_input("Sevk Durumu", placeholder="Örn: Aile Hekimi / Devlet Hastanesi", key=f"dossier_v_ref_{person_id}")
 			v_follow_up = v_chk3.text_input("İzlem Planı", placeholder="Örn: 1 saat sonra ateş kontrolü", key=f"dossier_v_fup_{person_id}")
 
-			st.markdown("###### 💓 Bu vizitte alınan ölçümler (İsteğe bağlı - otomatik bağlantılanır):")
+			is_adult_dos_v = str(person["person_type"] or "Öğrenci").strip() != "Öğrenci"
+			st.markdown("###### 💓 Bu vizitte alınan ölçümler (İsteğe bağlı - akıllı otomatik format ve bağlantılama):")
 			m_c1, m_c2, m_c3, m_c4, m_c5 = st.columns(5)
-			v_temp = m_c1.number_input("Ateş (°C)", min_value=30.0, max_value=45.0, value=None, step=0.1, format="%.1f", key=f"dossier_v_temp_{person_id}")
-			v_sys = m_c2.number_input("Sistolik", min_value=40.0, max_value=250.0, value=None, step=1.0, key=f"dossier_v_sys_{person_id}")
-			v_dia = m_c3.number_input("Diyastolik", min_value=20.0, max_value=150.0, value=None, step=1.0, key=f"dossier_v_dia_{person_id}")
-			v_pulse = m_c4.number_input("Nabız (/dk)", min_value=30.0, max_value=220.0, value=None, step=1.0, key=f"dossier_v_pls_{person_id}")
-			v_spo2 = m_c5.number_input("SpO2 (%)", min_value=50.0, max_value=100.0, value=None, step=1.0, key=f"dossier_v_spo2_{person_id}")
+			with m_c1:
+				v_temp_raw = smart_text_input("Ateş (°C)", "temperature", key=f"dossier_v_temp_{person_id}", placeholder="Örn: 36.6 veya 366", in_form=True)
+			with m_c2:
+				v_sys_raw = smart_text_input("Sistolik (Büyük Tansiyon)", "bp_sys", key=f"dossier_v_sys_{person_id}", placeholder="Örn: 120 veya 120/80", in_form=True)
+			with m_c3:
+				v_dia_raw = smart_text_input("Diyastolik (Küçük Tansiyon)", "bp_dia", key=f"dossier_v_dia_{person_id}", placeholder="Örn: 80 veya 8", in_form=True)
+			with m_c4:
+				v_pulse_raw = smart_text_input("Nabız (/dk)", "pulse", key=f"dossier_v_pls_{person_id}", placeholder="Örn: 84", in_form=True)
+			with m_c5:
+				v_spo2_raw = smart_text_input("SpO2 (%)", "spo2", key=f"dossier_v_spo2_{person_id}", placeholder="Örn: %98 veya 98", in_form=True)
 
 			hw_c1, hw_c2, hw_c3 = st.columns(3)
-			v_height = hw_c1.number_input("Boy (cm)", min_value=40.0, max_value=230.0, value=None, step=0.1, format="%.1f", key=f"dossier_v_h_{person_id}")
-			v_weight = hw_c2.number_input("Kilo (kg)", min_value=2.0, max_value=200.0, value=None, step=0.1, format="%.1f", key=f"dossier_v_w_{person_id}")
-			v_head_circ = hw_c3.number_input("Baş Çevresi (cm)", min_value=20.0, max_value=100.0, value=None, step=0.1, format="%.1f", key=f"dossier_v_hc_{person_id}")
+			with hw_c1:
+				v_height_raw = smart_text_input("Boy (cm)", "height", key=f"dossier_v_h_{person_id}", placeholder="Örn: 145, 1,45 veya 1055", in_form=True)
+			with hw_c2:
+				w_ph = "Örn: 75.5 veya 755" if is_adult_dos_v else "Örn: 24.6, 246 veya 18500"
+				v_weight_raw = smart_text_input("Kilo (kg)", "weight", key=f"dossier_v_w_{person_id}", placeholder=w_ph, in_form=True, is_adult=is_adult_dos_v)
+			with hw_c3:
+				v_head_circ_raw = smart_text_input("Baş Çevresi (cm)", "head_circ", key=f"dossier_v_hc_{person_id}", placeholder="Örn: 48.5 veya 485", in_form=True)
 
 			submit_v = st.form_submit_button("💾 Revir Ziyaretini Bu Kişiye Kaydet", type="primary", use_container_width=True)
 
 		if submit_v:
+			v_temp = normalize_temperature(v_temp_raw)
+			v_sys, v_dia = normalize_bp(v_sys_raw, v_dia_raw)
+			v_pulse = normalize_pulse(v_pulse_raw)
+			v_spo2 = normalize_spo2(v_spo2_raw)
+			v_height = normalize_height(v_height_raw)
+			v_weight = normalize_weight(v_weight_raw, is_adult=is_adult_dos_v)
+			v_head_circ = normalize_head_circ(v_head_circ_raw)
+
+			invalid_msgs = []
+			if str(v_temp_raw).strip() and v_temp is None: invalid_msgs.append("Ateş (30.0–44.0 °C veya 366)")
+			if (str(v_sys_raw).strip() or str(v_dia_raw).strip()) and (v_sys is None) != (v_dia is None): invalid_msgs.append("Tansiyon (büyük ve küçük birlikte ya da '120/80')")
+			if str(v_pulse_raw).strip() and v_pulse is None: invalid_msgs.append("Nabız (30–240 /dk)")
+			if str(v_spo2_raw).strip() and v_spo2 is None: invalid_msgs.append("SpO2 (30–100 %)")
+			if str(v_height_raw).strip() and v_height is None: invalid_msgs.append("Boy (40–230 cm veya 1,45 m)")
+			if str(v_weight_raw).strip() and v_weight is None: invalid_msgs.append("Kilo (kg veya gram)")
+			if str(v_head_circ_raw).strip() and v_head_circ is None: invalid_msgs.append("Baş Çevresi (30–65 cm)")
+			if invalid_msgs:
+				st.error("Geçersiz ölçüm değeri: " + ", ".join(invalid_msgs))
+				return
 			auto_notes = []
-			if any(x is not None for x in [v_temp, v_sys, v_pulse, v_spo2]):
+			if any(x is not None for x in [v_temp, v_sys, v_dia, v_pulse, v_spo2]):
 				v_summary = record_linked_vital(
 					person_id,
 					f"{v_date.isoformat()} {v_time.strftime('%H:%M')}",
@@ -7803,7 +10157,7 @@ def _render_dossier_tab_visits(person: sqlite3.Row, person_id: int) -> None:
 				)
 				if v_summary:
 					auto_notes.append(f"[Vital: {v_summary}]")
-			has_hw = (v_height is not None and v_weight is not None and v_height > 0 and v_weight > 0) or (v_head_circ is not None and v_head_circ > 0)
+			has_hw = any(x is not None and float(x) > 0 for x in [v_height, v_weight, v_head_circ])
 			if has_hw:
 				hw_summary = record_linked_measurement(
 					person_id, v_date, v_height, v_weight,
@@ -7813,14 +10167,20 @@ def _render_dossier_tab_visits(person: sqlite3.Row, person_id: int) -> None:
 					auto_notes.append(f"[Antropometri: {hw_summary}]")
 
 			final_observation = " · ".join(filter(None, [v_obs.strip(), *auto_notes]))
+			ref_val = v_referral.strip() or None
+			fup_val = v_follow_up.strip() or None
+			fup_status_val = _infer_visit_follow_up_status(ref_val, fup_val)
 			with connect_db() as connection:
 				connection.execute(
 					"""INSERT INTO visits(student_id, visit_date, visit_time, complaint, symptoms, observation,
-					   action, guardian_contacted, referral, follow_up) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+					   action, guardian_contacted, referral, follow_up,
+					   follow_up_status, incident_location, witness_teacher)
+					   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
 					(person_id, v_date.isoformat(), v_time.strftime("%H:%M"), v_complaint, v_symptoms.strip(),
-					 final_observation, v_action.strip(), int(v_guardian_cont), v_referral.strip() or None, v_follow_up.strip() or None),
+					 final_observation, v_action.strip(), int(v_guardian_cont), ref_val, fup_val,
+					 fup_status_val, v_incident_loc, v_witness_teacher.strip() or None),
 				)
-			save_person_data_file(person_id)
+			sync_after_person_mutation(person_id)
 			st.success(f"{person['full_name']} için yeni revir kaydı başarıyla eklendi.")
 			st.rerun()
 
@@ -7828,29 +10188,39 @@ def _render_dossier_tab_visits(person: sqlite3.Row, person_id: int) -> None:
 	with connect_db() as connection:
 		visits_df = pd.read_sql_query(
 			"""SELECT id, visit_date AS Tarih, visit_time AS Saat, complaint AS Başvuru,
+					  incident_location AS Olay_Yeri, witness_teacher AS İlgili_Öğretmen,
 					  symptoms AS Belirtiler, observation AS Gözlem_ve_Bulgular, action AS Yapılan_İşlem,
-					  referral AS Sevk, guardian_contacted AS Veli_Arandı, follow_up AS İzlem
+					  referral AS Sevk, guardian_contacted AS Veli_Arandı, follow_up AS İzlem,
+					  COALESCE(follow_up_status, 'Açık') AS İzlem_Durumu, follow_up_result AS İzlem_Sonucu
 			   FROM visits WHERE student_id=? ORDER BY visit_date DESC, visit_time DESC, id DESC""",
 			connection, params=(person_id,)
 		)
 	if visits_df.empty:
 		st.info("Bu kişi için henüz kayıtlı revir ziyareti bulunmuyor.")
 	else:
-		st.dataframe(visits_df.drop(columns=["id", "follow_up"], errors="ignore"), width="stretch", hide_index=True)
-		del_c1, del_c2 = st.columns([3, 1])
-		with del_c2:
-			visit_opts = {f"{r['Tarih']} {r['Saat']} - {r['Başvuru']} (#{r['id']})": int(r["id"]) for _, r in visits_df.iterrows()}
-			sel_del_v = st.selectbox("Silinecek vizit", list(visit_opts.keys()), key=f"dossier_del_v_sel_{person_id}")
+		st.dataframe(visits_df.drop(columns=["id"], errors="ignore"), width="stretch", hide_index=True)
+		visit_opts = {f"{r['Tarih']} {r['Saat']} - {r['Başvuru']} (#{r['id']})": int(r["id"]) for _, r in visits_df.iterrows()}
+		act_c1, act_c2, act_c3 = st.columns([2.6, 1.1, 1.1], vertical_alignment="bottom")
+		with act_c1:
+			sel_dos_v = st.selectbox("İşlem / Evrak İçin Vizit Seçin", list(visit_opts.keys()), key=f"dossier_del_v_sel_{person_id}")
+		sel_dos_vid = visit_opts[sel_dos_v]
+		with act_c2:
+			if st.button("✏️ Viziti Düzenle", key=f"dossier_btn_edit_v_{person_id}", use_container_width=True):
+				open_edit_visit_dialog(sel_dos_vid)
+		with act_c3:
 			if st.button("🗑️ Seçili Viziti Sil", type="secondary", key=f"dossier_btn_del_v_{person_id}", use_container_width=True):
-				delete_visit(visit_opts[sel_del_v])
+				delete_visit(sel_dos_vid)
 				st.success("Revir kaydı silindi.")
 				st.rerun()
+
+		_render_visit_doc_actions_bar(person_id, sel_dos_vid, key_prefix=f"dos_vdoc_{person_id}", person_name=str(person["full_name"] or ""))
 
 
 def render_clinical_growth_curve(enriched_records: pd.DataFrame, person: dict | sqlite3.Row,
 								indicator_name: str, y_col: str, title: str, unit: str, default_max_mo: int = 72) -> None:
-	has_sex = person["sex"] in {"K", "E"}
-	sex_label = "Kız Çocuk" if person["sex"] == "K" else ("Erkek Çocuk" if person["sex"] == "E" else "Cinsiyet Yok")
+	norm_sex = normalize_sex(person["sex"]) or person["sex"]
+	has_sex = norm_sex in {"K", "E"}
+	sex_label = "Kız Çocuk" if norm_sex == "K" else ("Erkek Çocuk" if norm_sex == "E" else "Cinsiyet Yok")
 	if not has_sex:
 		st.warning("WHO klinik büyüme eğrilerini çizmek için öğrenci profilinde cinsiyet bilgisi gereklidir.")
 		return
@@ -7859,7 +10229,7 @@ def render_clinical_growth_curve(enriched_records: pd.DataFrame, person: dict | 
 	max_stu_mo = max(stu_months) if stu_months else 60
 	graph_max_mo = min(default_max_mo, max(72, max_stu_mo + 6))
 
-	curves_df = generate_who_percentile_curves(indicator_name, person["sex"], min_month=0, max_month=graph_max_mo)
+	curves_df = generate_who_percentile_curves(indicator_name, norm_sex, min_month=0, max_month=graph_max_mo)
 	if curves_df.empty:
 		st.info(f"'{title}' için WHO referans verisi bulunamadı.")
 		return
@@ -7929,12 +10299,21 @@ def render_clinical_growth_curve(enriched_records: pd.DataFrame, person: dict | 
 
 def _render_dossier_tab_measurements(person: sqlite3.Row, person_id: int) -> None:
 	st.markdown("#### ➕ Yeni Boy, Kilo veya Baş Çevresi Ölçümü Ekle")
+	is_adult_dos_m = str(person["person_type"] or "Öğrenci").strip() != "Öğrenci"
 	with st.expander("📏 Yeni Ölçüm Giriş Formunu Aç", expanded=True):
 		mc1, mc2, mc3, mc4 = st.columns(4)
 		m_date = mc1.date_input("Ölçüm Tarihi", value=date.today(), key=f"dossier_m_date_{person_id}")
-		m_height = mc2.number_input("Boy (cm)", min_value=0.0, max_value=250.0, value=None, step=0.1, format="%.1f", key=f"dossier_m_h_{person_id}")
-		m_weight = mc3.number_input("Kilo (kg)", min_value=0.0, max_value=300.0, value=None, step=0.1, format="%.1f", key=f"dossier_m_w_{person_id}")
-		m_head_circ = mc4.number_input("Baş Çevresi (cm, opsiyonel)", min_value=0.0, max_value=100.0, value=None, step=0.1, format="%.1f", key=f"dossier_m_hc_{person_id}")
+		with mc2:
+			m_height_raw = smart_text_input("Boy (cm)", "height", key=f"dossier_m_h_{person_id}", placeholder="Örn: 145, 1,45 veya 1055", in_form=False)
+		with mc3:
+			mw_ph = "Örn: 75.5 veya 755" if is_adult_dos_m else "Örn: 18.5, 185 veya 18500"
+			m_weight_raw = smart_text_input("Kilo (kg)", "weight", key=f"dossier_m_w_{person_id}", placeholder=mw_ph, in_form=False, is_adult=is_adult_dos_m)
+		with mc4:
+			m_hc_raw = smart_text_input("Baş Çevresi (cm, opsiyonel)", "head_circ", key=f"dossier_m_hc_{person_id}", placeholder="Örn: 48.5 veya 485", in_form=False)
+
+		m_height = normalize_height(m_height_raw)
+		m_weight = normalize_weight(m_weight_raw, is_adult=is_adult_dos_m)
+		m_head_circ = normalize_head_circ(m_hc_raw)
 
 		# Instant live calculation preview
 		has_hw_in = m_height is not None and m_weight is not None and m_height > 0 and m_weight > 0
@@ -7966,18 +10345,22 @@ def _render_dossier_tab_measurements(person: sqlite3.Row, person_id: int) -> Non
 			st.info("⚡ **Canlı Önizleme:** " + "  |  ".join(p_items))
 
 		if st.button("💾 Ölçümü Bu Kişiye Kaydet", type="primary", key=f"dossier_btn_save_m_{person_id}"):
-			if (m_height is not None and m_height > 0) != (m_weight is not None and m_weight > 0):
-				st.error("Boy ve kilo ölçümünü birlikte girin.")
-			elif not has_hw_in and not has_hc_in:
-				st.error("Kaydetmek için boy-kilo veya baş çevresi girin.")
+			has_h_only = m_height is not None and m_height > 0
+			has_w_only = m_weight is not None and m_weight > 0
+			if (str(m_height_raw).strip() and m_height is None) or (str(m_weight_raw).strip() and m_weight is None) or (str(m_hc_raw).strip() and m_head_circ is None):
+				st.error("Lütfen geçerli boy (40–230 cm), kilo veya baş çevresi (30–65 cm) değeri girin.")
+			elif not (has_h_only or has_w_only or has_hc_in):
+				st.error("Kaydetmek için en az bir ölçüm (boy, kilo veya baş çevresi) girin.")
 			else:
 				summary_txt = record_linked_measurement(
 					person_id, m_date,
-					m_height if has_hw_in else None,
-					m_weight if has_hw_in else None,
+					m_height if has_h_only else None,
+					m_weight if has_w_only else None,
 					person["birth_date"], person["sex"],
 					head_circ_cm=m_head_circ if has_hc_in else None,
 				)
+				for _mk in (f"dossier_m_h_{person_id}", f"dossier_m_w_{person_id}", f"dossier_m_hc_{person_id}"):
+					st.session_state.pop(_mk, None)
 				st.success(f"Ölçüm kaydedildi: {summary_txt}")
 				st.rerun()
 
@@ -8031,10 +10414,10 @@ def _render_dossier_tab_measurements(person: sqlite3.Row, person_id: int) -> Non
 	)
 
 	if not edited_clinical_df.empty:
-		param_map = {str(r["Antropometrik Parametre"]): numeric_value(r["Ölçülen Değer"]) for _, r in edited_clinical_df.iterrows()}
-		new_h_val = param_map.get("📏 Boy (cm)", latest_h)
-		new_w_val = param_map.get("⚖️ Kilo (kg)", latest_w)
-		new_hc_val = param_map.get("🧠 Baş Çevresi (cm)", display_hc)
+		param_map_raw = {str(r["Antropometrik Parametre"]): r["Ölçülen Değer"] for _, r in edited_clinical_df.iterrows()}
+		new_h_val = normalize_height(param_map_raw["📏 Boy (cm)"]) if "📏 Boy (cm)" in param_map_raw else latest_h
+		new_w_val = normalize_weight(param_map_raw["⚖️ Kilo (kg)"], is_adult=is_adult_dos_m) if "⚖️ Kilo (kg)" in param_map_raw else latest_w
+		new_hc_val = normalize_head_circ(param_map_raw["🧠 Baş Çevresi (cm)"]) if "🧠 Baş Çevresi (cm)" in param_map_raw else display_hc
 		orig_h_val = round(float(latest_h), 1) if latest_h is not None else None
 		orig_w_val = round(float(latest_w), 1) if latest_w is not None else None
 		orig_hc_val = round(float(display_hc), 1) if display_hc is not None else None
@@ -8056,7 +10439,7 @@ def _render_dossier_tab_measurements(person: sqlite3.Row, person_id: int) -> Non
 						"UPDATE measurements SET height_cm=?, weight_kg=?, head_circ_cm=?, age_months=?, bmi=? WHERE id=? AND student_id=?",
 						(float(new_h_val) if new_h_val else None, float(new_w_val) if new_w_val else None, clean_hc, new_months, float(new_bmi) if new_bmi else None, active_meas_id, person_id),
 					)
-				save_person_data_file(person_id)
+				sync_after_person_mutation(person_id, active_measurement_id=active_meas_id)
 				st.success("Tablo üzerinden ölçüm güncellendi.")
 				st.rerun()
 
@@ -8136,21 +10519,40 @@ def _render_dossier_tab_vitals(person: sqlite3.Row, person_id: int) -> None:
 			vr_time = vt_c2.time_input("Ölçüm Saati", value=datetime.now().time(), key=f"dossier_vr_time_{person_id}")
 
 			v1, v2, v3, v4 = st.columns(4)
-			v_temp = v1.number_input("Ateş (°C)", min_value=32.0, max_value=43.0, value=None, step=0.1, format="%.1f", key=f"dossier_vr_temp_{person_id}")
-			v_spo2 = v2.number_input("SpO2 Saturasyon (%)", min_value=50.0, max_value=100.0, value=None, step=1.0, key=f"dossier_vr_spo2_{person_id}")
-			v_sys = v3.number_input("Sistolik (Büyük Tansiyon)", min_value=40.0, max_value=250.0, value=None, step=1.0, key=f"dossier_vr_sys_{person_id}")
-			v_dia = v4.number_input("Diyastolik (Küçük Tansiyon)", min_value=20.0, max_value=150.0, value=None, step=1.0, key=f"dossier_vr_dia_{person_id}")
+			with v1:
+				v_temp_raw = smart_text_input("Ateş (°C)", "temperature", key=f"dossier_vr_temp_{person_id}", placeholder="Örn: 36.6 veya 366", in_form=True)
+			with v2:
+				v_spo2_raw = smart_text_input("SpO2 Saturasyon (%)", "spo2", key=f"dossier_vr_spo2_{person_id}", placeholder="Örn: %98 veya 988", in_form=True)
+			with v3:
+				v_sys_raw = smart_text_input("Sistolik (Büyük Tansiyon)", "bp_sys", key=f"dossier_vr_sys_{person_id}", placeholder="Örn: 120 veya 120/80", in_form=True)
+			with v4:
+				v_dia_raw = smart_text_input("Diyastolik (Küçük Tansiyon)", "bp_dia", key=f"dossier_vr_dia_{person_id}", placeholder="Örn: 80 veya 8", in_form=True)
 
 			v5, v6, v7 = st.columns(3)
-			v_pulse = v5.number_input("Nabız (atım/dk)", min_value=30.0, max_value=220.0, value=None, step=1.0, key=f"dossier_vr_pls_{person_id}")
-			v_gluc = v6.number_input("Kan Şekeri (mg/dL)", min_value=20.0, max_value=600.0, value=None, step=1.0, key=f"dossier_vr_glu_{person_id}")
+			with v5:
+				v_pulse_raw = smart_text_input("Nabız (atım/dk)", "pulse", key=f"dossier_vr_pls_{person_id}", placeholder="Örn: 84", in_form=True)
+			with v6:
+				v_gluc_raw = smart_text_input("Kan Şekeri (mg/dL)", "glucose", key=f"dossier_vr_glu_{person_id}", placeholder="Örn: 95", in_form=True)
 			v_gctx = v7.selectbox("Şeker Durumu", ["Belirtilmedi", "Açlık", "Tokluk", "Rastgele"], key=f"dossier_vr_gctx_{person_id}")
 
 			v_notes = st.text_input("Ek Not / Açıklama", placeholder="Örn: Dinlenmiş vaziyette ölçüldü", key=f"dossier_vr_not_{person_id}")
 			save_vr = st.form_submit_button("💾 Vital Bulguyu Bu Kişiye Kaydet", type="primary", use_container_width=True)
 
 		if save_vr:
-			if all(x is None for x in [v_temp, v_spo2, v_sys, v_dia, v_pulse, v_gluc]):
+			v_temp = normalize_temperature(v_temp_raw)
+			v_spo2 = normalize_spo2(v_spo2_raw)
+			v_sys, v_dia = normalize_bp(v_sys_raw, v_dia_raw)
+			v_pulse = normalize_pulse(v_pulse_raw)
+			v_gluc = normalize_glucose(v_gluc_raw)
+			invalid_vr = []
+			if str(v_temp_raw).strip() and v_temp is None: invalid_vr.append("Ateş (30.0–44.0 °C)")
+			if str(v_spo2_raw).strip() and v_spo2 is None: invalid_vr.append("SpO2 (30–100 %)")
+			if (str(v_sys_raw).strip() or str(v_dia_raw).strip()) and (v_sys is None) != (v_dia is None): invalid_vr.append("Tansiyon (büyük/küçük veya '120/80')")
+			if str(v_pulse_raw).strip() and v_pulse is None: invalid_vr.append("Nabız (30–240 /dk)")
+			if str(v_gluc_raw).strip() and v_gluc is None: invalid_vr.append("Kan Şekeri (20–800 mg/dL)")
+			if invalid_vr:
+				st.error("Geçersiz değer: " + ", ".join(invalid_vr))
+			elif all(x is None for x in [v_temp, v_spo2, v_sys, v_dia, v_pulse, v_gluc]):
 				st.error("Kaydetmek için en az bir vital değer girin.")
 			else:
 				meas_at = f"{vr_date.isoformat()} {vr_time.strftime('%H:%M')}"
@@ -8233,7 +10635,7 @@ def _render_dossier_tab_labs(person: sqlite3.Row, person_id: int) -> None:
 								"INSERT INTO lab_results(report_id, test_name, value, unit, ref_low, ref_high, lab_flag) VALUES (?, ?, ?, ?, ?, ?, ?)",
 								(rep_id, t_name, float(t_val), lr.get("unit"), numeric_value(lr.get("ref_low")), numeric_value(lr.get("ref_high")), lr.get("lab_flag"))
 							)
-				save_person_data_file(person_id)
+				sync_after_person_mutation(person_id)
 				st.success("Tahlil sonuçları kaydedildi.")
 				st.rerun()
 
@@ -8757,7 +11159,7 @@ def render_nanda_care_plan_editor(person_id: int, prefix: str = "cp") -> None:
 						 val_diag, val_facts or None, val_goals or None,
 						 val_interv or None, val_mon or None, val_esc or None, val_stat),
 					)
-				save_person_data_file(person_id)
+				sync_after_person_mutation(person_id)
 				for k in [k_diag, k_facts, k_goals, k_interv, k_mon, k_esc]:
 					st.session_state.pop(k, None)
 				st.session_state[k_rev] = default_nurse
@@ -8807,7 +11209,7 @@ def render_nanda_care_plan_editor(person_id: int, prefix: str = "cp") -> None:
 				if st.button("🗑️ Planı Sil", key=f"del_cp_{prefix}_{p_id}", type="secondary", use_container_width=True):
 					with connect_db() as connection:
 						connection.execute("DELETE FROM care_plans WHERE id=? AND student_id=?", (p_id, person_id))
-					save_person_data_file(person_id)
+					sync_after_person_mutation(person_id)
 					st.warning("Bakım planı silindi.")
 					st.rerun()
 
@@ -8873,12 +11275,16 @@ def _render_dossier_tab_care_plans(person: sqlite3.Row, person_id: int, hp: sqli
 	if save_hp:
 		res_bg = None if f_bg == "Belirtilmedi" else f_bg
 		with connect_db() as connection:
+			stu_g = connection.execute("SELECT guardian_name, guardian_phone FROM students WHERE id=?", (person_id,)).fetchone()
 			connection.execute(
-				"""INSERT INTO health_profiles(student_id, blood_group, allergies, chronic_conditions, medications,
+				"""INSERT INTO health_profiles(student_id, guardian_name, guardian_phone, blood_group, allergies, chronic_conditions, medications,
 				   medical_history, emergency_notes, reviewed_by, updated_at, wears_glasses, vision_right,
 				   vision_left, hair_screening, hearing_right, hearing_left, health_behavior, harmful_habits, psychosocial_status)
-				   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-				   ON CONFLICT(student_id) DO UPDATE SET blood_group=excluded.blood_group, allergies=excluded.allergies,
+				   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				   ON CONFLICT(student_id) DO UPDATE SET
+				   guardian_name=COALESCE(health_profiles.guardian_name, excluded.guardian_name),
+				   guardian_phone=COALESCE(health_profiles.guardian_phone, excluded.guardian_phone),
+				   blood_group=excluded.blood_group, allergies=excluded.allergies,
 				   chronic_conditions=excluded.chronic_conditions, medications=excluded.medications,
 				   medical_history=excluded.medical_history, emergency_notes=excluded.emergency_notes,
 				   reviewed_by=excluded.reviewed_by, updated_at=excluded.updated_at,
@@ -8887,14 +11293,18 @@ def _render_dossier_tab_care_plans(person: sqlite3.Row, person_id: int, hp: sqli
 				   hearing_right=excluded.hearing_right, hearing_left=excluded.hearing_left,
 				   health_behavior=excluded.health_behavior, harmful_habits=excluded.harmful_habits, psychosocial_status=excluded.psychosocial_status""",
 				(
-					person_id, res_bg, f_al.strip() or None, f_ch.strip() or None, f_med.strip() or None,
+					person_id,
+					stu_g["guardian_name"] if stu_g else None,
+					stu_g["guardian_phone"] if stu_g else None,
+					res_bg, f_al.strip() or None, f_ch.strip() or None, f_med.strip() or None,
 					f_mh.strip() or None, f_em.strip() or None, f_rev.strip() or None,
 					datetime.now().isoformat(timespec="minutes"), f_gl, f_vr.strip() or None,
 					f_vl.strip() or None, f_hair.strip() or None, f_hr.strip() or None,
 					f_hl.strip() or None, f_beh.strip() or None, f_harm.strip() or None, f_psy.strip() or None,
 				)
 			)
-		save_person_data_file(person_id)
+			_sync_guardian_bidirectional_conn(connection, person_id)
+		sync_after_person_mutation(person_id)
 		st.success("Sağlık profili ve tarama bilgileri başarıyla güncellendi.")
 		st.rerun()
 
@@ -8942,7 +11352,7 @@ def _render_dossier_tab_edit_demographics(person: sqlite3.Row, person_id: int, h
 		cur_g = (hp["guardian_name"] if hp and hp["guardian_name"] else person["guardian_name"]) or ""
 		cur_ph = (hp["guardian_phone"] if hp and hp["guardian_phone"] else person["guardian_phone"]) or ""
 		f_guard = ed_c7.text_input("Veli / Yakını Adı", value=cur_g, key=f"dossier_ed_guard_{person_id}")
-		f_phone = ed_c8.text_input("İletişim Telefonu", value=cur_ph, key=f"dossier_ed_phone_{person_id}")
+		f_phone = ed_c8.text_input("İletişim Telefonu", value=cur_ph, placeholder="Örn: 05321234567 veya +90 532...", key=f"dossier_ed_phone_{person_id}")
 
 		f_addr = st.text_input("Açık Adres / Mahalle / Not", value=person["notes"] or "", key=f"dossier_ed_addr_{person_id}")
 
@@ -8982,6 +11392,7 @@ def _render_dossier_tab_edit_demographics(person: sqlite3.Row, person_id: int, h
 			clean_sex = {"Kız": "K", "Erkek": "E"}.get(f_sex)
 			clean_birth = f_birth.isoformat() if f_birth else None
 			clean_notes = f_addr.strip() if f_ptype == "Öğrenci" else (f_role.strip() or f_addr.strip())
+			clean_phone_demo = normalize_phone(f_phone)
 			with connect_db() as connection:
 				connection.execute("INSERT OR IGNORE INTO classes(name) VALUES (?)", (resolved_class,))
 				cid = connection.execute("SELECT id FROM classes WHERE name=?", (resolved_class,)).fetchone()["id"]
@@ -8989,17 +11400,17 @@ def _render_dossier_tab_edit_demographics(person: sqlite3.Row, person_id: int, h
 					"""UPDATE students SET class_id=?, person_type=?, student_no=?, full_name=?, sex=?, birth_date=?,
 					   guardian_name=?, guardian_phone=?, notes=?, country=?, province=?, district=?, village=? WHERE id=?""",
 					(cid, f_ptype, f_sno.strip() or None, f_name.strip(), clean_sex, clean_birth,
-					 f_guard.strip() or None, f_phone.strip() or None, clean_notes or None,
+					 f_guard.strip() or None, clean_phone_demo, clean_notes or None,
 					 f_country or None, (f_province or "").strip() or None,
 					 (f_district or "").strip() or None, (f_village or "").strip() or None, person_id)
 				)
 				connection.execute(
 					"""INSERT INTO health_profiles(student_id, guardian_name, guardian_phone, updated_at) VALUES (?, ?, ?, ?)
 					   ON CONFLICT(student_id) DO UPDATE SET guardian_name=excluded.guardian_name, guardian_phone=excluded.guardian_phone, updated_at=excluded.updated_at""",
-					(person_id, f_guard.strip() or None, f_phone.strip() or None, datetime.now().isoformat(timespec="minutes"))
+					(person_id, f_guard.strip() or None, clean_phone_demo, datetime.now().isoformat(timespec="minutes"))
 				)
-			sync_student_measurements(person_id)
-			save_person_data_file(person_id)
+			sync_student_measurements(person_id, _sync=False)
+			sync_after_person_mutation(person_id)
 			st.success("Kimlik ve iletişim bilgileri başarıyla güncellendi.")
 			st.rerun()
 
@@ -9073,6 +11484,372 @@ button.print-btn:hover { background: #115e59; }
 	)
 
 
+def add_seizure_log(
+	student_id: int,
+	seizure_date: str,
+	seizure_time: str,
+	duration_seconds: int | None,
+	seizure_type: str,
+	triggers: str | None = None,
+	observations: str | None = None,
+	emergency_med_given: str | None = None,
+	ambulance_called: bool = False,
+	guardian_notified: bool = False,
+	recorded_by: str | None = None,
+) -> int:
+	sid = int(student_id)
+	s_date = clean_text(seizure_date) or date.today().isoformat()
+	s_time = clean_text(seizure_time) or datetime.now().strftime("%H:%M")
+	s_type = clean_text(seizure_type) or "Tonik-Klonik"
+	dur_val = int(duration_seconds) if (duration_seconds is not None and int(duration_seconds) >= 0) else None
+	rec_by = clean_text(recorded_by) or clean_text(get_app_settings().get("nurse_name")) or "Okul Revir Sorumlusu"
+	created_at = datetime.now().isoformat(timespec="minutes")
+	with connect_db() as connection:
+		cur = connection.execute(
+			"""INSERT INTO seizure_logs(
+				student_id, seizure_date, seizure_time, duration_seconds, seizure_type,
+				triggers, observations, emergency_med_given, ambulance_called,
+				guardian_notified, recorded_by, created_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+			(
+				sid,
+				s_date,
+				s_time,
+				dur_val,
+				s_type,
+				clean_text(triggers) or None,
+				clean_text(observations) or None,
+				clean_text(emergency_med_given) or None,
+				1 if ambulance_called else 0,
+				1 if guardian_notified else 0,
+				rec_by,
+				created_at,
+			),
+		)
+		new_id = int(cur.lastrowid)
+	sync_after_person_mutation(sid)
+	return new_id
+
+
+def get_student_seizure_logs(student_id: int) -> list[dict]:
+	with connect_db() as connection:
+		rows = connection.execute(
+			"""SELECT id, student_id, seizure_date, seizure_time, duration_seconds, seizure_type,
+					  triggers, observations, emergency_med_given, ambulance_called,
+					  guardian_notified, recorded_by, created_at
+			   FROM seizure_logs
+			   WHERE student_id = ?
+			   ORDER BY seizure_date DESC, seizure_time DESC, id DESC""",
+			(int(student_id),),
+		).fetchall()
+	return [dict(r) for r in rows]
+
+
+def delete_seizure_log(log_id: int) -> None:
+	sid: int | None = None
+	with connect_db() as connection:
+		row = connection.execute("SELECT student_id FROM seizure_logs WHERE id=?", (int(log_id),)).fetchone()
+		if row:
+			sid = int(row["student_id"])
+			connection.execute("DELETE FROM seizure_logs WHERE id=?", (int(log_id),))
+	if sid is not None:
+		sync_after_person_mutation(sid)
+
+
+def build_seizure_log_docx(student_id: int) -> bytes:
+	"""Öğrencinin özel gereksinim/acil protokol özeti ve epilepsi nöbet izlem çizelgesini (.docx) üretir."""
+	if not HAS_DOCX or docx is None:
+		raise RuntimeError("Word belge oluşturucu (python-docx) yüklü değil.")
+	pid = int(student_id)
+	with connect_db() as connection:
+		stu = connection.execute(
+			"""SELECT s.*, COALESCE(c.name, '—') AS class_name
+			   FROM students s LEFT JOIN classes c ON c.id = s.class_id WHERE s.id = ?""",
+			(pid,),
+		).fetchone()
+		if not stu:
+			raise ValueError("Öğrenci bulunamadı.")
+		hp = connection.execute("SELECT * FROM health_profiles WHERE student_id=?", (pid,)).fetchone()
+		logs = [
+			dict(r)
+			for r in connection.execute(
+				"""SELECT * FROM seizure_logs WHERE student_id=?
+				   ORDER BY seizure_date DESC, seizure_time DESC, id DESC""",
+				(pid,),
+			).fetchall()
+		]
+
+	hp_dict = dict(hp) if hp else {}
+	g_name = clean_text(hp_dict.get("guardian_name") or stu["guardian_name"]) or "Belirtilmedi"
+	g_phone = clean_text(hp_dict.get("guardian_phone") or stu["guardian_phone"]) or "Belirtilmedi"
+
+	doc = docx.Document()
+	for sec in doc.sections:
+		sec.top_margin = Cm(1.3)
+		sec.bottom_margin = Cm(1.3)
+		sec.left_margin = Cm(1.4)
+		sec.right_margin = Cm(1.4)
+
+	antet_info = _add_official_docx_antet(
+		doc,
+		"ÖĞRENCİ EPİLEPSİ NÖBET İZLEM ÇİZELGESİ VE ACİL PROTOKOLLERİ",
+		f"Düzenleme Tarihi: {date.today().strftime('%d.%m.%Y')}  ·  Toplam Kayıtlı Nöbet: {len(logs)}",
+	)
+
+	stu_rows = [
+		("Adı Soyadı / No", f"{stu['full_name']} (No: {stu['student_no'] or '—'})"),
+		("Sınıf / Şube", clean_text(stu["class_name"]) or "—"),
+		("Doğum Tarihi", _format_iso_tr(stu["birth_date"])),
+		("Veli / Acil İletişim", f"{g_name} — {g_phone}"),
+		("Özel Gereksinim / Tanı", clean_text(hp_dict.get("special_needs_codes")) or "Bildirilmedi"),
+		("Tıbbi Cihaz / Protez", clean_text(hp_dict.get("medical_devices")) or "Yok"),
+		("Yutma / Diyet Güvenliği", clean_text(hp_dict.get("dietary_swallowing_notes")) or "Normal Beslenme"),
+		("Acil Nöbet Protokolü & İlaç Dozu", clean_text(hp_dict.get("seizure_emergency_protocol")) or "Tanımlanmadı"),
+	]
+	_add_kv_docx_section_table(doc, "1. ÖĞRENCİ KİMLİK, CİHAZ VE ACİL MÜDAHALE PROTOKOLÜ", stu_rows)
+
+	p_h = doc.add_paragraph()
+	p_h.paragraph_format.space_before = Pt(8)
+	p_h.paragraph_format.space_after = Pt(3)
+	r_h = p_h.add_run("2. EPİLEPSİ NÖBET ATAĞI İZLEM TABLOSU")
+	r_h.font.name = "Calibri"
+	r_h.font.size = Pt(10.5)
+	r_h.bold = True
+	r_h.font.color.rgb = RGBColor(15, 118, 110)
+
+	headers = ["Tarih / Saat", "Süre (sn)", "Nöbet Tipi", "Tetikleyici", "Gözlem & Bulgular", "Acil İlaç / 112 / Veli", "Kaydeden"]
+	row_count = max(1, len(logs)) + 1
+	tbl = doc.add_table(rows=row_count, cols=len(headers))
+	tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+	tbl.autofit = False
+	set_table_borders(tbl, color="CBD5E1", sz="4", val="single")
+	col_widths = [Cm(2.3), Cm(1.5), Cm(2.4), Cm(2.5), Cm(4.2), Cm(3.1), Cm(2.0)]
+
+	for c_idx, h_txt in enumerate(headers):
+		cell = tbl.cell(0, c_idx)
+		cell.width = col_widths[c_idx]
+		set_cell_background(cell, "0F766E")
+		set_cell_margins(cell, top=55, bottom=55, left=60, right=60)
+		rp = cell.paragraphs[0]
+		rp.paragraph_format.space_after = Pt(0)
+		rr = rp.add_run(h_txt)
+		rr.font.name = "Calibri"
+		rr.font.size = Pt(8.5)
+		rr.bold = True
+		rr.font.color.rgb = RGBColor(255, 255, 255)
+
+	if logs:
+		for r_idx, lg in enumerate(logs, start=1):
+			dur_s = f"{lg['duration_seconds']} sn" if lg.get("duration_seconds") is not None else "—"
+			flags = []
+			if clean_text(lg.get("emergency_med_given")) and clean_text(lg.get("emergency_med_given")) != "Uygulanmadı":
+				flags.append(f"İlaç: {clean_text(lg.get('emergency_med_given'))}")
+			flags.append("112: Evet" if lg.get("ambulance_called") else "112: Hayır")
+			flags.append("Veli: Bilgilendirildi" if lg.get("guardian_notified") else "Veli: —")
+			row_vals = [
+				f"{_format_iso_tr(lg.get('seizure_date'))}\n{clean_text(lg.get('seizure_time'))}",
+				dur_s,
+				clean_text(lg.get("seizure_type")) or "—",
+				clean_text(lg.get("triggers")) or "—",
+				clean_text(lg.get("observations")) or "—",
+				" / ".join(flags),
+				clean_text(lg.get("recorded_by")) or "—",
+			]
+			bg_hex = "FFFFFF" if r_idx % 2 == 1 else "F8FAFC"
+			for c_idx, val_txt in enumerate(row_vals):
+				cell = tbl.cell(r_idx, c_idx)
+				cell.width = col_widths[c_idx]
+				set_cell_background(cell, bg_hex)
+				set_cell_margins(cell, top=45, bottom=45, left=55, right=55)
+				cp = cell.paragraphs[0]
+				cp.paragraph_format.space_after = Pt(0)
+				cr = cp.add_run(val_txt)
+				cr.font.name = "Calibri"
+				cr.font.size = Pt(8.5)
+				cr.font.color.rgb = RGBColor(15, 23, 42)
+	else:
+		merged_cell = tbl.cell(1, 0).merge(tbl.cell(1, len(headers) - 1))
+		set_cell_background(merged_cell, "F8FAFC")
+		set_cell_margins(merged_cell, top=80, bottom=80, left=80, right=80)
+		mp = merged_cell.paragraphs[0]
+		mp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+		mr = mp.add_run("Bu öğrenci için henüz kayıtlı epilepsi nöbet atağı bulunmamaktadır. Gerektiğinde okul/servis nöbet gözlem formu olarak kullanılabilir.")
+		mr.font.name = "Calibri"
+		mr.font.size = Pt(9)
+		mr.font.color.rgb = RGBColor(71, 85, 105)
+
+	_add_signature_docx_block(
+		doc,
+		[
+			("Okul Hemşiresi / Revir Sorumlusu", antet_info["nurse_name"]),
+			("Öğrenci Velisi (Bilgilendirme)", g_name),
+			("Okul Müdürü", antet_info["principal_name"]),
+		],
+	)
+	buf = io.BytesIO()
+	doc.save(buf)
+	return buf.getvalue()
+
+
+def _render_dossier_tab_seizures(person: sqlite3.Row, person_id: int, hp: sqlite3.Row | None) -> None:
+	st.markdown("#### ⚡ Epilepsi Nöbet Günlüğü & Özel Gereksinim İzlemi")
+
+	def _hp_text(col: str) -> str:
+		if not hp or not hasattr(hp, "keys") or col not in hp.keys():
+			return ""
+		return clean_text(hp[col])
+
+	proto_txt = _hp_text("seizure_emergency_protocol")
+	sn_txt = _hp_text("special_needs_codes")
+	dev_txt = _hp_text("medical_devices")
+	diet_txt = _hp_text("dietary_swallowing_notes")
+
+	if any([proto_txt, sn_txt, dev_txt, diet_txt]):
+		with st.container(border=True):
+			if proto_txt:
+				st.error(f"⚡ **Acil Nöbet Protokolü & İlaç Dozu:** {proto_txt}")
+			info_parts = []
+			if sn_txt:
+				info_parts.append(f"♿ **Özel Gereksinim:** {sn_txt}")
+			if dev_txt:
+				info_parts.append(f"🦻 **Tıbbi Cihaz/Protez:** {dev_txt}")
+			if diet_txt:
+				info_parts.append(f"🍽️ **Yutma/Diyet Güvenliği:** {diet_txt}")
+			if info_parts:
+				st.info("  ·  ".join(info_parts))
+	else:
+		st.info("💡 Bu öğrenci için acil nöbet protokolü veya cihaz bilgisi tanımlamak isterseniz '📋 360° Genel Özet' sekmesindeki **♿ Özel Gereksinim, Tıbbi Cihaz & Yutma Güvenliği** kutusunu düzenleyebilirsiniz.")
+
+	with st.container(border=True):
+		st.markdown("##### ➕ Yeni Epilepsi Nöbet Atağı Kaydı Ekle")
+		with st.form(f"form_add_seizure_log_{person_id}", clear_on_submit=True):
+			sz_c1, sz_c2, sz_c3, sz_c4 = st.columns([1.2, 1.0, 1.1, 1.4])
+			with sz_c1:
+				f_sz_date = st.date_input("Nöbet Tarihi", value=date.today(), key=f"sz_date_{person_id}")
+			with sz_c2:
+				f_sz_time = st.text_input("Saat (SS:DD)", value=datetime.now().strftime("%H:%M"), key=f"sz_time_{person_id}")
+			with sz_c3:
+				f_sz_dur = st.number_input("Süre (Saniye)", min_value=0, step=5, value=None, placeholder="Örn: 45", key=f"sz_dur_{person_id}")
+			with sz_c4:
+				f_sz_type = st.selectbox("Nöbet Tipi", SEIZURE_TYPE_OPTIONS, key=f"sz_type_{person_id}")
+
+			sz_c5, sz_c6, sz_c7 = st.columns([1.5, 1.3, 1.2])
+			with sz_c5:
+				f_sz_triggers = st.text_input(
+					"Tetikleyici Faktör",
+					value="",
+					placeholder="Örn: Uykusuzluk, ateş, parlak ışık, ilaç atlama...",
+					key=f"sz_trig_{person_id}",
+				)
+			with sz_c6:
+				f_sz_med = st.selectbox("Uygulanan Acil İlaç", SEIZURE_EMERGENCY_MED_OPTIONS, key=f"sz_med_{person_id}")
+			with sz_c7:
+				f_sz_med_detail = st.text_input(
+					"İlaç Dozu / Detay",
+					value="",
+					placeholder="Örn: 5 mg rektal uygulandı",
+					key=f"sz_med_det_{person_id}",
+				)
+
+			f_sz_obs = st.text_area(
+				"Gözlem ve Nöbet Sonrası Durum",
+				value="",
+				placeholder="Örn: Sağ kolda kasılma, bilinç kaybı, dudaklarda morarma, nöbet sonrası 15 dk uyku hali...",
+				key=f"sz_obs_{person_id}",
+			)
+
+			sz_chk1, sz_chk2 = st.columns(2)
+			with sz_chk1:
+				f_sz_112 = st.checkbox("🚑 112 Acil / Ambulans Çağrıldı", value=False, key=f"sz_112_{person_id}")
+			with sz_chk2:
+				f_sz_guard = st.checkbox("📞 Veliye Bilgi Verildi", value=True, key=f"sz_guard_{person_id}")
+
+			if st.form_submit_button("⚡ Nöbet Kaydını Kaydet", type="primary", use_container_width=True):
+				med_final = f_sz_med
+				if f_sz_med_detail.strip():
+					med_final = f"{f_sz_med} ({f_sz_med_detail.strip()})" if f_sz_med != "Uygulanmadı" else f_sz_med_detail.strip()
+				dur_int = int(f_sz_dur) if f_sz_dur is not None else None
+				add_seizure_log(
+					student_id=person_id,
+					seizure_date=f_sz_date.isoformat(),
+					seizure_time=f_sz_time.strip() or datetime.now().strftime("%H:%M"),
+					duration_seconds=dur_int,
+					seizure_type=f_sz_type,
+					triggers=f_sz_triggers,
+					observations=f_sz_obs,
+					emergency_med_given=med_final,
+					ambulance_called=f_sz_112,
+					guardian_notified=f_sz_guard,
+				)
+				st.success("Epilepsi nöbet kaydı güvenli biçimde eklendi.")
+				try:
+					st.rerun(scope="fragment")
+				except Exception:
+					st.rerun()
+
+	logs = get_student_seizure_logs(person_id)
+	safe_slug = _slugify_person_name(person["full_name"])
+
+	dl_l, dl_r = st.columns([2.2, 1.5], vertical_alignment="center")
+	with dl_l:
+		st.markdown(f"##### 📜 Geçmiş Nöbet Kayıtları ({len(logs)})")
+	with dl_r:
+		st.download_button(
+			"🖨️ Öğrenci Epilepsi Nöbet İzlem Çizelgesi (.docx)",
+			data=build_seizure_log_docx(person_id),
+			file_name=f"Epilepsi_Nobet_Izlem_Cizelgesi_{safe_slug}.docx",
+			mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+			type="primary",
+			key=f"dossier_dl_seizure_docx_{person_id}",
+			use_container_width=True,
+		)
+
+	if not logs:
+		st.info("Bu öğrenci için henüz kayıtlı nöbet atağı bulunmuyor.")
+		return
+
+	durations = [int(lg["duration_seconds"]) for lg in logs if lg.get("duration_seconds") is not None]
+	avg_dur = f"{(sum(durations) / len(durations)):.0f} sn" if durations else "—"
+	amb_cnt = sum(1 for lg in logs if lg.get("ambulance_called"))
+	m1, m2, m3, m4 = st.columns(4)
+	m1.metric("Toplam Nöbet", len(logs))
+	m2.metric("Son Nöbet Tarihi", _format_iso_tr(logs[0].get("seizure_date")))
+	m3.metric("Ortalama Süre", avg_dur)
+	m4.metric("112 Sevk Sayısı", amb_cnt)
+
+	df_logs = pd.DataFrame([
+		{
+			"ID": int(lg["id"]),
+			"Tarih": _format_iso_tr(lg.get("seizure_date")),
+			"Saat": clean_text(lg.get("seizure_time")) or "—",
+			"Süre (sn)": int(lg["duration_seconds"]) if lg.get("duration_seconds") is not None else None,
+			"Nöbet Tipi": clean_text(lg.get("seizure_type")) or "—",
+			"Tetikleyici": clean_text(lg.get("triggers")) or "—",
+			"Gözlem": clean_text(lg.get("observations")) or "—",
+			"Acil İlaç": clean_text(lg.get("emergency_med_given")) or "—",
+			"112": "Evet" if lg.get("ambulance_called") else "Hayır",
+			"Veli": "Bilgilendirildi" if lg.get("guardian_notified") else "—",
+			"Kaydeden": clean_text(lg.get("recorded_by")) or "—",
+		}
+		for lg in logs
+	])
+	st.dataframe(df_logs, width="stretch", hide_index=True)
+
+	with st.expander("🗑️ Yanlış Girilen Nöbet Kaydını Sil"):
+		del_map = {
+			f"#{int(lg['id'])} — {_format_iso_tr(lg.get('seizure_date'))} {clean_text(lg.get('seizure_time'))} · {clean_text(lg.get('seizure_type'))}": int(lg["id"])
+			for lg in logs
+		}
+		sel_del_lbl = st.selectbox("Silinecek Nöbet Kaydı", list(del_map.keys()), key=f"sz_del_sel_{person_id}")
+		if st.button("Seçili Nöbet Kaydını Sil", key=f"sz_del_btn_{person_id}", type="secondary"):
+			delete_seizure_log(del_map[sel_del_lbl])
+			st.success("Seçili nöbet kaydı silindi.")
+			try:
+				st.rerun(scope="fragment")
+			except Exception:
+				st.rerun()
+
+
 def render_person_dossier_content(person_id: int, is_dialog: bool = False) -> None:
 	app_cfg = get_app_settings()
 	theme_name = app_cfg.get("theme_name", "Klinik Turkuaz (Varsayılan)")
@@ -9105,6 +11882,10 @@ def render_person_dossier_content(person_id: int, is_dialog: bool = False) -> No
 	chronic = (hp["chronic_conditions"] if hp and hp["chronic_conditions"] else "").strip()
 	meds = (hp["medications"] if hp and hp["medications"] else "").strip()
 	emergency = (hp["emergency_notes"] if hp and hp["emergency_notes"] else "").strip()
+	sn_codes = (hp["special_needs_codes"] if (hp and "special_needs_codes" in hp.keys() and hp["special_needs_codes"]) else "").strip()
+	med_devs = (hp["medical_devices"] if (hp and "medical_devices" in hp.keys() and hp["medical_devices"]) else "").strip()
+	diet_notes = (hp["dietary_swallowing_notes"] if (hp and "dietary_swallowing_notes" in hp.keys() and hp["dietary_swallowing_notes"]) else "").strip()
+	seizure_proto = (hp["seizure_emergency_protocol"] if (hp and "seizure_emergency_protocol" in hp.keys() and hp["seizure_emergency_protocol"]) else "").strip()
 
 	badge_htmls = []
 	if allergies:
@@ -9115,6 +11896,14 @@ def render_person_dossier_content(person_id: int, is_dialog: bool = False) -> No
 		badge_htmls.append(f"<span style='background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0;padding:3px 9px;border-radius:12px;font-size:12px;font-weight:600;'>💊 İlaç: {html.escape(meds)}</span>")
 	if emergency:
 		badge_htmls.append(f"<span style='background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;padding:3px 9px;border-radius:12px;font-size:12px;font-weight:600;'>🚨 Acil: {html.escape(emergency)}</span>")
+	if sn_codes:
+		badge_htmls.append(f"<span style='background:#f5f3ff;color:#6d28d9;border:1px solid #ddd6fe;padding:3px 9px;border-radius:12px;font-size:12px;font-weight:600;'>♿ Özel Gereksinim: {html.escape(sn_codes)}</span>")
+	if med_devs:
+		badge_htmls.append(f"<span style='background:#fef2f2;color:#991b1b;border:1px solid #fca5a5;padding:3px 9px;border-radius:12px;font-size:12px;font-weight:600;'>🦻 Cihaz: {html.escape(med_devs)}</span>")
+	if diet_notes:
+		badge_htmls.append(f"<span style='background:#fff7ed;color:#9a3412;border:1px solid #fed7aa;padding:3px 9px;border-radius:12px;font-size:12px;font-weight:600;'>🍽️ Yutma/Diyet: {html.escape(diet_notes)}</span>")
+	if seizure_proto:
+		badge_htmls.append(f"<span style='background:#fef2f2;color:#7f1d1d;border:1px solid #f87171;padding:3px 9px;border-radius:12px;font-size:12px;font-weight:600;'>⚡ Nöbet Protokolü: {html.escape(seizure_proto)}</span>")
 
 	with st.container(border=True):
 		hero_l, hero_r = st.columns([2.2, 1.0])
@@ -9139,6 +11928,7 @@ def render_person_dossier_content(person_id: int, is_dialog: bool = False) -> No
 		"🧪 Tahlil & Laboratuvar",
 		"💉 Aşı Takvimi (Sağlık Bakanlığı)",
 		"📑 Sağlık Profili & Bakım Planı",
+		"⚡ Nöbet & Özel İzlem",
 		"✏️ Kimlik & İletişim Düzenle",
 		"🖨️ Yazdırılabilir Sağlık Dosyası",
 	])
@@ -9158,8 +11948,10 @@ def render_person_dossier_content(person_id: int, is_dialog: bool = False) -> No
 	with d_tabs[6]:
 		_render_dossier_tab_care_plans(person, person_id, hp)
 	with d_tabs[7]:
-		_render_dossier_tab_edit_demographics(person, person_id, hp)
+		_render_dossier_tab_seizures(person, person_id, hp)
 	with d_tabs[8]:
+		_render_dossier_tab_edit_demographics(person, person_id, hp)
+	with d_tabs[9]:
 		_render_dossier_tab_printable(person, person_id)
 
 	if is_dialog:
@@ -9207,6 +11999,1206 @@ def render_person_dossier() -> None:
 	render_person_dossier_content(active_id, is_dialog=False)
 
 
+def _format_iso_tr(iso_val: object, include_time: bool = False) -> str:
+	txt = clean_text(iso_val)
+	if not txt:
+		return "—"
+	d_part = txt[:10]
+	try:
+		d_fmt = date.fromisoformat(d_part).strftime("%d.%m.%Y")
+	except ValueError:
+		return txt
+	if include_time and len(txt) >= 16:
+		t_part = txt[11:16].strip()
+		if t_part:
+			return f"{d_fmt} {t_part}"
+	return d_fmt
+
+
+def _format_whatsapp_phone(raw_phone: object) -> str | None:
+	norm = normalize_phone(raw_phone)
+	if not norm:
+		return None
+	digits = re.sub(r"\D+", "", str(norm))
+	if not digits or len(digits) < 10:
+		return None
+	if digits.startswith("00") and len(digits) >= 12:
+		digits = digits[2:]
+	if digits.startswith("90") and len(digits) == 12:
+		return digits
+	if digits.startswith("0") and len(digits) == 11:
+		return "90" + digits[1:]
+	if len(digits) == 10 and digits.startswith("5"):
+		return "90" + digits
+	if len(digits) >= 11:
+		return digits
+	return None
+
+
+def _get_visit_day_clinical_summary(connection: sqlite3.Connection, student_id: int, visit_date_str: str) -> tuple[str, str]:
+	vital_parts: list[str] = []
+	meas_parts: list[str] = []
+	v_row = connection.execute(
+		"""SELECT temperature_c, systolic_mmhg, diastolic_mmhg, pulse_bpm, spo2_pct, glucose_mg_dl
+		   FROM vital_readings
+		   WHERE student_id = ? AND substr(measured_at, 1, 10) = ?
+		   ORDER BY measured_at DESC, id DESC LIMIT 1""",
+		(int(student_id), str(visit_date_str or "")[:10]),
+	).fetchone()
+	if v_row:
+		if v_row["temperature_c"] is not None:
+			vital_parts.append(f"Ateş: {float(v_row['temperature_c']):.1f} °C")
+		if v_row["systolic_mmhg"] is not None and v_row["diastolic_mmhg"] is not None:
+			vital_parts.append(f"Tansiyon: {int(round(v_row['systolic_mmhg']))}/{int(round(v_row['diastolic_mmhg']))} mmHg")
+		if v_row["pulse_bpm"] is not None:
+			vital_parts.append(f"Nabız: {int(round(v_row['pulse_bpm']))} /dk")
+		if v_row["spo2_pct"] is not None:
+			vital_parts.append(f"SpO2: %{float(v_row['spo2_pct']):.0f}")
+		if v_row["glucose_mg_dl"] is not None:
+			vital_parts.append(f"Kan Şekeri: {float(v_row['glucose_mg_dl']):.0f} mg/dL")
+
+	m_row = connection.execute(
+		"""SELECT height_cm, weight_kg, head_circ_cm, bmi
+		   FROM measurements
+		   WHERE student_id = ? AND measured_on = ?
+		   ORDER BY id DESC LIMIT 1""",
+		(int(student_id), str(visit_date_str or "")[:10]),
+	).fetchone()
+	if m_row:
+		if m_row["height_cm"] is not None:
+			meas_parts.append(f"Boy: {float(m_row['height_cm']):.1f} cm")
+		if m_row["weight_kg"] is not None:
+			meas_parts.append(f"Kilo: {float(m_row['weight_kg']):.1f} kg")
+		if m_row["bmi"] is not None:
+			meas_parts.append(f"VKİ: {float(m_row['bmi']):.1f}")
+		if m_row["head_circ_cm"] is not None:
+			meas_parts.append(f"Baş Çevresi: {float(m_row['head_circ_cm']):.1f} cm")
+
+	return (" · ".join(vital_parts), " · ".join(meas_parts))
+
+
+def _add_official_docx_antet(doc: docx.Document, title_text: str, meta_text: str) -> dict[str, str]:
+	app_cfg = get_app_settings()
+	inst_top = app_cfg.get("institution_top_header") or "T.C. MİLLÎ EĞİTİM BAKANLIĞI"
+	school_name = app_cfg.get("school_name") or "Okul / Kurum Reviri"
+	nurse_name = app_cfg.get("nurse_name") or "Okul Revir Sorumlusu"
+	principal_name = app_cfg.get("principal_name") or "Okul Müdürü"
+	school_phone = app_cfg.get("institution_phone") or ""
+
+	p_top = doc.add_paragraph()
+	p_top.alignment = WD_ALIGN_PARAGRAPH.CENTER
+	p_top.paragraph_format.space_before = Pt(0)
+	p_top.paragraph_format.space_after = Pt(1)
+	r_top = p_top.add_run(inst_top)
+	r_top.font.name = "Calibri"
+	r_top.font.size = Pt(10)
+	r_top.font.color.rgb = RGBColor(100, 116, 139)
+
+	p_sch = doc.add_paragraph()
+	p_sch.alignment = WD_ALIGN_PARAGRAPH.CENTER
+	p_sch.paragraph_format.space_before = Pt(0)
+	p_sch.paragraph_format.space_after = Pt(2)
+	r_sch = p_sch.add_run(school_name.upper())
+	r_sch.font.name = "Calibri"
+	r_sch.font.size = Pt(13)
+	r_sch.bold = True
+	r_sch.font.color.rgb = RGBColor(15, 118, 110)
+
+	p_title = doc.add_paragraph()
+	p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+	p_title.paragraph_format.space_before = Pt(2)
+	p_title.paragraph_format.space_after = Pt(2)
+	r_title = p_title.add_run(title_text)
+	r_title.font.name = "Calibri"
+	r_title.font.size = Pt(12)
+	r_title.bold = True
+	r_title.font.color.rgb = RGBColor(30, 41, 59)
+
+	if meta_text:
+		p_meta = doc.add_paragraph()
+		p_meta.alignment = WD_ALIGN_PARAGRAPH.CENTER
+		p_meta.paragraph_format.space_before = Pt(0)
+		p_meta.paragraph_format.space_after = Pt(8)
+		r_meta = p_meta.add_run(meta_text)
+		r_meta.font.name = "Calibri"
+		r_meta.font.size = Pt(9)
+		r_meta.font.color.rgb = RGBColor(71, 85, 105)
+
+	return {
+		"inst_top": inst_top,
+		"school_name": school_name,
+		"nurse_name": nurse_name,
+		"principal_name": principal_name,
+		"school_phone": school_phone,
+	}
+
+
+def _add_kv_docx_section_table(doc: docx.Document, section_title: str, rows_kv: list[tuple[str, str]]) -> None:
+	if section_title:
+		p_sec = doc.add_paragraph()
+		p_sec.paragraph_format.space_before = Pt(7)
+		p_sec.paragraph_format.space_after = Pt(3)
+		r_sec = p_sec.add_run(section_title)
+		r_sec.font.name = "Calibri"
+		r_sec.font.size = Pt(10.5)
+		r_sec.bold = True
+		r_sec.font.color.rgb = RGBColor(15, 118, 110)
+
+	tbl = doc.add_table(rows=len(rows_kv), cols=2)
+	tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+	tbl.autofit = False
+	set_table_borders(tbl, color="CBD5E1", sz="4", val="single")
+
+	for idx, (label, val) in enumerate(rows_kv):
+		c_lbl = tbl.cell(idx, 0)
+		c_val = tbl.cell(idx, 1)
+		c_lbl.width = Cm(5.8)
+		c_val.width = Cm(12.2)
+		set_cell_background(c_lbl, "F1F5F9")
+		set_cell_background(c_val, "FFFFFF" if idx % 2 == 0 else "F8FAFC")
+		set_cell_margins(c_lbl, top=55, bottom=55, left=90, right=90)
+		set_cell_margins(c_val, top=55, bottom=55, left=90, right=90)
+
+		p_l = c_lbl.paragraphs[0]
+		p_l.paragraph_format.space_after = Pt(0)
+		r_l = p_l.add_run(label)
+		r_l.font.name = "Calibri"
+		r_l.font.size = Pt(9.5)
+		r_l.bold = True
+		r_l.font.color.rgb = RGBColor(30, 41, 59)
+
+		p_v = c_val.paragraphs[0]
+		p_v.paragraph_format.space_after = Pt(0)
+		r_v = p_v.add_run(str(val or "—"))
+		r_v.font.name = "Calibri"
+		r_v.font.size = Pt(9.5)
+		r_v.font.color.rgb = RGBColor(15, 23, 42)
+
+
+def _add_signature_docx_block(doc: docx.Document, signers: list[tuple[str, str]]) -> None:
+	p_sp = doc.add_paragraph()
+	p_sp.paragraph_format.space_before = Pt(10)
+	p_sp.paragraph_format.space_after = Pt(2)
+
+	tbl = doc.add_table(rows=1, cols=len(signers))
+	tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+	for idx, (role_title, person_name) in enumerate(signers):
+		cell = tbl.cell(0, idx)
+		set_cell_margins(cell, top=80, bottom=80, left=60, right=60)
+		cp = cell.paragraphs[0]
+		cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+		r1 = cp.add_run(f"{role_title}\n")
+		r1.font.name = "Calibri"
+		r1.font.size = Pt(9.5)
+		r1.bold = True
+		r1.font.color.rgb = RGBColor(30, 41, 59)
+
+		name_line = clean_text(person_name) or "................................."
+		r2 = cp.add_run(f"{name_line}\n\nİmza / Tarih")
+		r2.font.name = "Calibri"
+		r2.font.size = Pt(8.5)
+		r2.font.color.rgb = RGBColor(71, 85, 105)
+
+
+def build_visit_official_document_docx(visit_id: int, doc_mode: str = "tutanak") -> bytes:
+	"""Seçili revir başvurusu için resmi Kaza/İlk Müdahale Tutanağı veya Veli Bilgilendirme Fişi (.docx) üretir."""
+	if not HAS_DOCX or docx is None:
+		raise RuntimeError("Word belge oluşturucu (python-docx) yüklü değil.")
+
+	with connect_db() as connection:
+		v_row = connection.execute(
+			"""SELECT v.*,
+					  s.full_name, s.student_no, s.sex, s.birth_date, s.person_type,
+					  s.guardian_name AS s_guardian_name, s.guardian_phone AS s_guardian_phone,
+					  COALESCE(c.name, '—') AS class_name, c.teacher_name AS class_teacher,
+					  hp.guardian_name AS hp_guardian_name, hp.guardian_phone AS hp_guardian_phone,
+					  hp.allergies, hp.chronic_conditions, hp.blood_group, hp.emergency_notes
+			   FROM visits v
+			   JOIN students s ON s.id = v.student_id
+			   LEFT JOIN classes c ON c.id = s.class_id
+			   LEFT JOIN health_profiles hp ON hp.student_id = s.id
+			   WHERE v.id = ?""",
+			(int(visit_id),),
+		).fetchone()
+		vital_summary, meas_summary = (
+			_get_visit_day_clinical_summary(connection, int(v_row["student_id"]), v_row["visit_date"])
+			if v_row
+			else ("", "")
+		)
+
+	doc = docx.Document()
+	section = doc.sections[0]
+	section.orientation = WD_ORIENT.PORTRAIT
+	section.page_width = Cm(21.0)
+	section.page_height = Cm(29.7)
+	section.top_margin = Cm(1.3)
+	section.bottom_margin = Cm(1.3)
+	section.left_margin = Cm(1.5)
+	section.right_margin = Cm(1.5)
+
+	if not v_row:
+		_add_official_docx_antet(doc, "REVİR KAYDI BULUNAMADI", f"Kayıt No: #{visit_id}")
+		doc.add_paragraph(f"Belirtilen #{visit_id} numaralı revir başvuru kaydı veritabanında bulunamadı.")
+		buf = BytesIO()
+		doc.save(buf)
+		return buf.getvalue()
+
+	mode = (doc_mode or "tutanak").strip().lower()
+	visit_date_tr = _format_iso_tr(v_row["visit_date"])
+	visit_time = clean_text(v_row["visit_time"]) or "—"
+	today_tr = date.today().strftime("%d.%m.%Y")
+
+	birth_iso = clean_text(v_row["birth_date"])
+	ref_day = date.today()
+	if clean_text(v_row["visit_date"]):
+		try:
+			ref_day = date.fromisoformat(str(v_row["visit_date"])[:10])
+		except ValueError:
+			pass
+	age_m = age_in_months(birth_iso, ref_day) if birth_iso else None
+	age_str = f"{age_m // 12} yaş {age_m % 12} ay" if age_m is not None else "—"
+	birth_age_str = f"{_format_iso_tr(birth_iso)} ({age_str})" if birth_iso else "Belirtilmedi"
+
+	sex_norm = normalize_sex(v_row["sex"])
+	sex_str = "Kız" if sex_norm == "K" else ("Erkek" if sex_norm == "E" else "Belirtilmedi")
+	guardian_name = clean_text(v_row["hp_guardian_name"]) or clean_text(v_row["s_guardian_name"]) or "Belirtilmedi"
+	guardian_phone = clean_text(v_row["hp_guardian_phone"]) or clean_text(v_row["s_guardian_phone"]) or "Belirtilmedi"
+	allergy_str = clean_text(v_row["allergies"]) or "Bilinen alerji yok"
+	chronic_str = clean_text(v_row["chronic_conditions"]) or "Bilinen kronik hastalık yok"
+	allergy_chronic_combined = f"Alerji: {allergy_str}  |  Kronik: {chronic_str}"
+	blood_group = clean_text(v_row["blood_group"]) or "Belirtilmedi"
+
+	inc_loc = clean_text(v_row["incident_location"]) or "Belirtilmedi"
+	witness_t = clean_text(v_row["witness_teacher"]) or clean_text(v_row["class_teacher"]) or "Belirtilmedi"
+	complaint = clean_text(v_row["complaint"]) or "Revir Başvurusu"
+	symptoms = clean_text(v_row["symptoms"]) or "Belirtilmedi"
+	obs_text = clean_text(v_row["observation"])
+	day_measures_combined = " | ".join(filter(None, [vital_summary, meas_summary]))
+	if obs_text and day_measures_combined:
+		if "[Vital:" in obs_text or "[Antropometri:" in obs_text:
+			obs_and_meas = obs_text
+		else:
+			obs_and_meas = f"{obs_text}\nÖlçümler: {day_measures_combined}"
+	else:
+		obs_and_meas = obs_text or day_measures_combined or "Belirtilmedi"
+
+	action_text = clean_text(v_row["action"]) or "Genel değerlendirme ve ilk müdahale yapıldı"
+	guardian_inf = "Evet — Veli telefonla/yüz yüze bilgilendirildi" if int(v_row["guardian_contacted"] or 0) == 1 else "Bilgilendirilmedi / İşaretlenmedi"
+	referral_text = clean_text(v_row["referral"]) or "Sevk edilmedi"
+	follow_up_text = clean_text(v_row["follow_up"]) or "Belirtilmedi"
+	fup_status = clean_text(v_row["follow_up_status"]) or "Açık"
+	fup_result = clean_text(v_row["follow_up_result"])
+	follow_up_full = f"{follow_up_text} (Durum: {fup_status})"
+	if fup_result:
+		follow_up_full += f"\nİzlem Sonucu: {fup_result}"
+
+	if mode == "veli_fisi":
+		cfg = _add_official_docx_antet(
+			doc,
+			"VELİ SAĞLIK BİLGİLENDİRME VE YÖNLENDİRME FİŞİ",
+			f"Belge Tarihi: {today_tr}  |  Kayıt / Protokol No: #{visit_id}",
+		)
+
+		p_greet = doc.add_paragraph()
+		p_greet.paragraph_format.space_before = Pt(2)
+		p_greet.paragraph_format.space_after = Pt(6)
+		r_gr = p_greet.add_run(f"Sayın {guardian_name if guardian_name != 'Belirtilmedi' else 'Velimiz'},\n")
+		r_gr.font.name = "Calibri"
+		r_gr.font.size = Pt(10.5)
+		r_gr.bold = True
+		r_gr2 = p_greet.add_run(
+			f"Öğrenciniz {v_row['full_name']} ({v_row['class_name']}), {visit_date_tr} tarihinde saat {visit_time} itibarıyla "
+			f"okul revirimize başvurmuştur. Yapılan değerlendirme ve müdahale özeti aşağıda bilginize sunulmuştur."
+		)
+		r_gr2.font.name = "Calibri"
+		r_gr2.font.size = Pt(10)
+
+		veli_rows = [
+			("Öğrenci Adı Soyadı", f"{v_row['full_name']} (Okul No: {v_row['student_no'] or '—'})"),
+			("Sınıf / Şube", f"{v_row['class_name']}"),
+			("Revire Geliş Tarih ve Saati", f"{visit_date_tr} · Saat: {visit_time}"),
+			("Olay / Başvuru Yeri", f"{inc_loc} (İlgili Öğretmen: {witness_t})"),
+			("Başvuru Nedeni ve Şikayet", f"{complaint} — {symptoms}"),
+			("Ölçülen Ateş / Vital ve Gözlem", obs_and_meas),
+			("Revirde Yapılan İşlem / Müdahale", action_text),
+			("Sevk / Yönlendirme ve Takip", f"{referral_text} | {follow_up_text}"),
+			("Aileye Öneriler (Evde Takip / Hekim)", (
+				"Ağırlaşan şikayet, ateş yüksekliği (>38.0 °C), nefes darlığı veya ağrı artışı halinde hekim muayenesi önerilir."
+				if referral_text.lower() in {"sevk edilmedi", "—"}
+				else f"Önerilen yönlendirme ({referral_text}) kapsamında sağlık kuruluşu değerlendirmesi yapılması rica olunur."
+			)),
+		]
+		_add_kv_docx_section_table(doc, "REVİR MUAYENE VE YÖNLENDİRME BİLGİLERİ", veli_rows)
+
+		note_tbl = doc.add_table(rows=1, cols=1)
+		note_tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+		set_table_borders(note_tbl, color="0F766E", sz="6", val="single")
+		ncell = note_tbl.cell(0, 0)
+		set_cell_background(ncell, "ECFDF5")
+		set_cell_margins(ncell, top=90, bottom=90, left=120, right=120)
+		np = ncell.paragraphs[0]
+		nr = np.add_run("Önemli Bilgilendirme: ")
+		nr.font.name = "Calibri"
+		nr.font.size = Pt(9.5)
+		nr.bold = True
+		nr.font.color.rgb = RGBColor(6, 95, 70)
+		nr2 = np.add_run("Sağlık kuruluşuna başvurmanız halinde muayene sonucunu okul revirimize bildirmenizi rica ederiz.")
+		nr2.font.name = "Calibri"
+		nr2.font.size = Pt(9.5)
+		nr2.font.color.rgb = RGBColor(6, 95, 70)
+		if cfg["school_phone"]:
+			nr3 = np.add_run(f"\nOkul / Revir İletişim: {cfg['school_phone']}")
+			nr3.font.name = "Calibri"
+			nr3.font.size = Pt(8.5)
+			nr3.font.color.rgb = RGBColor(15, 118, 110)
+
+		_add_signature_docx_block(
+			doc,
+			[
+				("Okul Revir Sorumlusu / Hemşire", cfg["nurse_name"]),
+				("Teslim Alan Veli / Yakını", guardian_name if guardian_name != "Belirtilmedi" else ""),
+			],
+		)
+	else:
+		cfg = _add_official_docx_antet(
+			doc,
+			"OKUL İÇİ KAZA / ACİL BAŞVURU VE İLK MÜDAHALE TUTANAĞI",
+			f"Belge Tarihi: {today_tr}  |  Protokol / Kayıt No: #{visit_id}",
+		)
+
+		_add_kv_docx_section_table(
+			doc,
+			"1. ÖĞRENCİ KİMLİK VE İLETİŞİM BİLGİLERİ",
+			[
+				("Adı Soyadı", str(v_row["full_name"])),
+				("Sınıf / Şube · Okul No", f"{v_row['class_name']}  ·  Okul No: {v_row['student_no'] or '—'}"),
+				("Doğum Tarihi / Yaş", birth_age_str),
+				("Cinsiyet / Kan Grubu", f"{sex_str}  ·  Kan Grubu: {blood_group}"),
+				("Bilinen Alerji / Kronik Durum", allergy_chronic_combined),
+				("Veli Adı ve Telefonu", f"{guardian_name}  ·  Tel: {guardian_phone}"),
+			],
+		)
+
+		_add_kv_docx_section_table(
+			doc,
+			"2. OLAY VE KLİNİK DEĞERLENDİRME BİLGİLERİ",
+			[
+				("Başvuru / Olay Tarihi ve Saati", f"{visit_date_tr}  ·  Saat: {visit_time}"),
+				("Olay / Başvuru Yeri", inc_loc),
+				("Nöbetçi / İlgili Öğretmen", witness_t),
+				("Başvuru Nedeni", complaint),
+				("Şikayet ve Belirtiler", symptoms),
+				("Fiziksel Gözlem ve Ölçümler", obs_and_meas),
+			],
+		)
+
+		_add_kv_docx_section_table(
+			doc,
+			"3. YAPILAN HEMŞİRELİK MÜDAHALESİ VE SONUÇ",
+			[
+				("Uygulanan İşlem / İlk Yardım", action_text),
+				("Veli Bilgilendirme Durumu", guardian_inf),
+				("Sevk / Yönlendirme Durumu", referral_text),
+				("İzlem Planı ve Takip Durumu", follow_up_full),
+			],
+		)
+
+		stmt_tbl = doc.add_table(rows=1, cols=1)
+		stmt_tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+		set_table_borders(stmt_tbl, color="CBD5E1", sz="4", val="single")
+		scell = stmt_tbl.cell(0, 0)
+		set_cell_background(scell, "F8FAFC")
+		set_cell_margins(scell, top=80, bottom=80, left=110, right=110)
+		sp = scell.paragraphs[0]
+		sr = sp.add_run(
+			"Yukarıda açık kimliği yazılı öğrencimiz belirtilen tarih ve saatte okul revirimize başvurmuş/getirilmiş olup, "
+			"revir sorumlusu tarafından yapılan ilk değerlendirme ve müdahale bilgileri işbu tutanakla kayıt altına alınmıştır."
+		)
+		sr.font.name = "Calibri"
+		sr.font.size = Pt(9.5)
+		sr.font.italic = True
+		sr.font.color.rgb = RGBColor(30, 41, 59)
+
+		_add_signature_docx_block(
+			doc,
+			[
+				("Okul Revir Sorumlusu / Hemşire", cfg["nurse_name"]),
+				("Nöbetçi / Sınıf Öğretmeni", witness_t if witness_t != "Belirtilmedi" else ""),
+				("Okul Müdürü", cfg["principal_name"]),
+			],
+		)
+
+	buf = BytesIO()
+	doc.save(buf)
+	return buf.getvalue()
+
+
+def build_medication_consent_docx(
+	med_id: int | None = None,
+	student_id: int | None = None,
+	med_override: dict[str, Any] | None = None,
+) -> bytes:
+	"""Okulda İlaç Uygulama Veli İzin ve Teslim Tutanağı (.docx) oluşturur."""
+	if not HAS_DOCX or docx is None:
+		raise RuntimeError("Word belge oluşturucu (python-docx) yüklü değil.")
+
+	med_data: dict[str, Any] = {}
+	stu_data: dict[str, Any] = {}
+	resolved_stu_id = int(student_id) if student_id is not None else None
+
+	with connect_db() as connection:
+		if med_id is not None:
+			m_row = connection.execute(
+				"""SELECT * FROM student_medications WHERE id = ?""",
+				(int(med_id),),
+			).fetchone()
+			if m_row:
+				med_data = dict(m_row)
+				if resolved_stu_id is None:
+					resolved_stu_id = int(m_row["student_id"])
+
+		if resolved_stu_id is not None:
+			s_row = connection.execute(
+				"""SELECT s.*, COALESCE(c.name, '—') AS class_name,
+						  hp.guardian_name AS hp_guardian_name, hp.guardian_phone AS hp_guardian_phone,
+						  hp.allergies, hp.chronic_conditions
+				   FROM students s
+				   LEFT JOIN classes c ON c.id = s.class_id
+				   LEFT JOIN health_profiles hp ON hp.student_id = s.id
+				   WHERE s.id = ?""",
+				(resolved_stu_id,),
+			).fetchone()
+			if s_row:
+				stu_data = dict(s_row)
+
+	if med_override and isinstance(med_override, dict):
+		for mk, mv in med_override.items():
+			if mv is not None and str(mv).strip() != "":
+				med_data[mk] = mv
+
+	blank_line = "...................................................."
+	doc = docx.Document()
+	section = doc.sections[0]
+	section.orientation = WD_ORIENT.PORTRAIT
+	section.page_width = Cm(21.0)
+	section.page_height = Cm(29.7)
+	section.top_margin = Cm(1.3)
+	section.bottom_margin = Cm(1.3)
+	section.left_margin = Cm(1.5)
+	section.right_margin = Cm(1.5)
+
+	today_tr = date.today().strftime("%d.%m.%Y")
+	proto_txt = f"İlaç Kayıt No: #{med_id}  |  " if med_id is not None else ""
+	cfg = _add_official_docx_antet(
+		doc,
+		"OKULDA İLAÇ UYGULAMA VELİ İZİN VE TESLİM TUTANAĞI",
+		f"{proto_txt}Düzenlenme Tarihi: {today_tr}",
+	)
+
+	if stu_data:
+		birth_iso = clean_text(stu_data.get("birth_date"))
+		age_m = age_in_months(birth_iso, date.today()) if birth_iso else None
+		age_str = f"{age_m // 12} yaş {age_m % 12} ay" if age_m is not None else "—"
+		birth_age_str = f"{_format_iso_tr(birth_iso)} ({age_str})" if birth_iso else "—"
+		g_name = clean_text(stu_data.get("hp_guardian_name")) or clean_text(stu_data.get("guardian_name")) or blank_line
+		g_phone = clean_text(stu_data.get("hp_guardian_phone")) or clean_text(stu_data.get("guardian_phone")) or blank_line
+		all_chr = " / ".join(filter(None, [clean_text(stu_data.get("allergies")), clean_text(stu_data.get("chronic_conditions"))])) or "Bilinen alerji / kronik hastalık yok"
+		stu_rows = [
+			("Öğrenci Adı Soyadı", str(stu_data.get("full_name") or blank_line)),
+			("Sınıf / Şube · Okul No", f"{stu_data.get('class_name') or '—'}  ·  Okul No: {stu_data.get('student_no') or '—'}"),
+			("Doğum Tarihi / Yaş", birth_age_str),
+			("Bilinen Alerji / Kronik Durum", all_chr),
+			("Veli Adı Soyadı / Telefon", f"{g_name}  ·  Tel: {g_phone}"),
+		]
+	else:
+		g_name = ""
+		stu_rows = [
+			("Öğrenci Adı Soyadı", blank_line),
+			("Sınıf / Şube · Okul No", blank_line),
+			("Doğum Tarihi / Yaş", blank_line),
+			("Bilinen Alerji / Kronik Durum", blank_line),
+			("Veli Adı Soyadı / Telefon", blank_line),
+		]
+	_add_kv_docx_section_table(doc, "1. ÖĞRENCİ VE VELİ BİLGİLERİ", stu_rows)
+
+	if med_data:
+		d_amt = med_data.get("dose_amount")
+		d_unit = clean_text(med_data.get("dose_unit"))
+		pat = clean_text(med_data.get("dosage_pattern"))
+		dosage_str = pat or ""
+		if d_amt is not None:
+			dose_part = f"{d_amt} {d_unit}".strip()
+			dosage_str = f"{pat} (Tek Doz: {dose_part})" if pat else dose_part
+		s_dt = clean_text(med_data.get("start_date"))
+		e_dt = clean_text(med_data.get("end_date"))
+		date_range_str = (
+			f"{_format_iso_tr(s_dt)} — {_format_iso_tr(e_dt) if e_dt else 'Süresiz / Gerektiğinde'}"
+			if s_dt
+			else "—"
+		)
+		tot_v = med_data.get("total_volume")
+		stk_u = clean_text(med_data.get("stock_unit")) or d_unit or "adet"
+		qty_str = f"{tot_v} {stk_u}" if tot_v is not None else "Belirtilmedi"
+		med_rows = [
+			("İlaç Adı", clean_text(med_data.get("medication_name")) or blank_line),
+			("Formu", clean_text(med_data.get("med_type")) or d_unit or "—"),
+			("Uygulama Yolu", clean_text(med_data.get("route")) or "—"),
+			("Dozaj Şablonu", dosage_str or "—"),
+			("Verilecek Saatler", clean_text(med_data.get("scheduled_times")) or "—"),
+			("Açlık / Tokluk Durumu", clean_text(med_data.get("meal_relation")) or "—"),
+			("Başlangıç – Bitiş Tarihi", date_range_str),
+			("Teslim Edilen Miktar", qty_str),
+			("Saklama Koşulu", clean_text(med_data.get("storage_condition")) or "Oda Sıcaklığı (15-25 °C)"),
+			("Son Kullanma Tarihi (SKT)", _format_iso_tr(med_data.get("expiry_date")) if clean_text(med_data.get("expiry_date")) else "Belirtilmedi"),
+			("Özel Hemşirelik Notu / Reçete", clean_text(med_data.get("special_notes")) or "—"),
+		]
+	else:
+		med_rows = [
+			("İlaç Adı", blank_line),
+			("Formu", blank_line),
+			("Uygulama Yolu", blank_line),
+			("Dozaj Şablonu", blank_line),
+			("Verilecek Saatler", blank_line),
+			("Açlık / Tokluk Durumu", blank_line),
+			("Başlangıç – Bitiş Tarihi", blank_line),
+			("Teslim Edilen Miktar", blank_line),
+			("Saklama Koşulu", blank_line),
+			("Son Kullanma Tarihi (SKT)", blank_line),
+			("Özel Hemşirelik Notu / Reçete", blank_line),
+		]
+	_add_kv_docx_section_table(doc, "2. TESLİM EDİLEN İLAÇ VE UYGULAMA PLANI", med_rows)
+
+	consent_tbl = doc.add_table(rows=1, cols=1)
+	consent_tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+	set_table_borders(consent_tbl, color="0F766E", sz="4", val="single")
+	ccell = consent_tbl.cell(0, 0)
+	set_cell_background(ccell, "F8FAFC")
+	set_cell_margins(ccell, top=85, bottom=85, left=110, right=110)
+	cp_hdr = ccell.paragraphs[0]
+	cp_hdr.paragraph_format.space_after = Pt(3)
+	rh = cp_hdr.add_run("VELİ MUVAFAKATNAMESİ VE YASAL BEYAN\n")
+	rh.font.name = "Calibri"
+	rh.font.size = Pt(9.5)
+	rh.bold = True
+	rh.font.color.rgb = RGBColor(15, 118, 110)
+
+	rb = cp_hdr.add_run(
+		"Velisi bulunduğum öğrencime ait, yukarıda adı, dozu, uygulama saatleri, saklama koşulu ve son kullanma tarihi "
+		"belirtilen hekim reçeteli/onaylı ilacın; orijinal ambalajında ve açılmamış/uygun koşullarda okul revirine teslim edildiğini, "
+		"okul saatleri içinde revir sorumlusu/hemşiresi veya okul idaresince görevlendirilen yetkili personel tarafından belirtilen "
+		"şekilde uygulanmasına açık rıza ve onay verdiğimi; ilacın kullanımına bağlı oluşabilecek her türlü yan etki, alerji veya doz/tedavi "
+		"değişikliğini derhal okul revirine bildireceğimi beyan ve taahhüt ederim."
+	)
+	rb.font.name = "Calibri"
+	rb.font.size = Pt(9)
+	rb.font.color.rgb = RGBColor(30, 41, 59)
+
+	_add_signature_docx_block(
+		doc,
+		[
+			("Teslim Eden Veli (Ad Soyad / İmza)", g_name if g_name and g_name != blank_line else ""),
+			("Teslim Alan Revir Sorumlusu (Ad Soyad / İmza)", cfg["nurse_name"]),
+		],
+	)
+
+	buf = BytesIO()
+	doc.save(buf)
+	return buf.getvalue()
+
+
+def generate_whatsapp_guardian_link(student_id: int, visit_id: int | None = None) -> str | None:
+	"""Öğrenci velisine WhatsApp üzerinden doğrudan vaka bilgilendirme mesajı gönderen bağlantıyı üretir."""
+	with connect_db() as connection:
+		stu_row = connection.execute(
+			"""SELECT s.id, s.full_name, COALESCE(c.name, 'Belirtilmedi') AS class_name,
+					  COALESCE(NULLIF(TRIM(hp.guardian_name), ''), NULLIF(TRIM(s.guardian_name), ''), 'Velimiz') AS veli_adi,
+					  COALESCE(NULLIF(TRIM(hp.guardian_phone), ''), NULLIF(TRIM(s.guardian_phone), '')) AS veli_tel
+			   FROM students s
+			   LEFT JOIN classes c ON c.id = s.class_id
+			   LEFT JOIN health_profiles hp ON hp.student_id = s.id
+			   WHERE s.id = ?""",
+			(int(student_id),),
+		).fetchone()
+		if not stu_row:
+			return None
+
+		wa_phone = _format_whatsapp_phone(stu_row["veli_tel"])
+		if not wa_phone:
+			return None
+
+		if visit_id is not None:
+			v_row = connection.execute(
+				"SELECT * FROM visits WHERE id = ? AND student_id = ?",
+				(int(visit_id), int(student_id)),
+			).fetchone()
+		else:
+			v_row = connection.execute(
+				"SELECT * FROM visits WHERE student_id = ? ORDER BY visit_date DESC, visit_time DESC, id DESC LIMIT 1",
+				(int(student_id),),
+			).fetchone()
+
+	app_cfg = get_app_settings()
+	okul_adi = app_cfg.get("school_name") or "Okulumuz"
+	hemsire_adi = app_cfg.get("nurse_name") or "Okul Revir Sorumlusu"
+	veli_adi = clean_text(stu_row["veli_adi"]) or "Velimiz"
+	ogrenci_adi = clean_text(stu_row["full_name"]) or "Öğrencimiz"
+	sinif = clean_text(stu_row["class_name"]) or "Belirtilmedi"
+
+	if v_row:
+		saat = clean_text(v_row["visit_time"]) or "—"
+		comp = clean_text(v_row["complaint"])
+		symp = clean_text(v_row["symptoms"])
+		sikayet = f"{comp} ({symp})" if (comp and symp and symp.lower() not in comp.lower()) else (symp or comp or "sağlık değerlendirmesi")
+		gozlem = clean_text(v_row["observation"]) or "Genel durumu stabil gözlenmiştir"
+		islem = clean_text(v_row["action"]) or "Gerekli ilk değerlendirme ve bakım yapılmıştır"
+		ref = clean_text(v_row["referral"])
+		fup = clean_text(v_row["follow_up"])
+		if ref and ref.lower() not in {"sevk edilmedi", "—"}:
+			sevk = f"{ref} ({fup})" if fup else ref
+		elif fup:
+			sevk = fup
+		else:
+			sevk = "Durumu revirimizde takip edilmektedir"
+	else:
+		saat = datetime.now().strftime("%H:%M")
+		sikayet = "genel sağlık değerlendirmesi"
+		gozlem = "Genel değerlendirme yapılmıştır"
+		islem = "Kontrol sağlanmıştır"
+		sevk = "Takip edilmektedir"
+
+	msg = (
+		f"Sayın {veli_adi}, {okul_adi} Revirinden bilgilendirme: Öğrencimiz {ogrenci_adi} ({sinif}) "
+		f"bugün saat {saat} itibarıyla '{sikayet}' nedeniyle revirimize başvurmuştur. "
+		f"Bulgular: {gozlem}. Yapılan müdahale: {islem}. Sonuç/Yönlendirme: {sevk}. "
+		f"Sağlıklı günler dileriz. - {hemsire_adi}"
+	)
+	return f"https://wa.me/{wa_phone}?text={url_quote(msg, safe='')}"
+
+
+def _render_visit_doc_actions_bar(
+	student_id: int,
+	visit_id: int,
+	key_prefix: str = "vdoc",
+	person_name: str = "",
+) -> None:
+	safe_slug = _slugify_person_name(person_name or f"ogrenci_{student_id}")
+	dc1, dc2, dc3 = st.columns(3)
+	with dc1:
+		st.download_button(
+			"📝 Kaza/Müdahale Tutanağı İndir (.docx)",
+			data=build_visit_official_document_docx(visit_id, doc_mode="tutanak"),
+			file_name=f"Kaza_Mudahale_Tutanagi_{safe_slug}_{visit_id}.docx",
+			mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+			key=f"{key_prefix}_dl_tutanak_{visit_id}",
+			use_container_width=True,
+		)
+	with dc2:
+		st.download_button(
+			"📩 Veli Bilgilendirme Fişi İndir (.docx)",
+			data=build_visit_official_document_docx(visit_id, doc_mode="veli_fisi"),
+			file_name=f"Veli_Bilgilendirme_Fisi_{safe_slug}_{visit_id}.docx",
+			mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+			key=f"{key_prefix}_dl_velifisi_{visit_id}",
+			use_container_width=True,
+		)
+	with dc3:
+		wa_url = generate_whatsapp_guardian_link(student_id, visit_id=visit_id)
+		if wa_url:
+			st.link_button(
+				"💬 WhatsApp ile Veliye Bildir",
+				wa_url,
+				use_container_width=True,
+			)
+		else:
+			st.button(
+				"💬 WhatsApp ile Veliye Bildir",
+				disabled=True,
+				help="Bu öğrenci için geçerli bir veli cep telefonu numarası kayıtlı değil.",
+				key=f"{key_prefix}_wa_disabled_{visit_id}",
+				use_container_width=True,
+			)
+
+
+def render_pending_followups_panel() -> None:
+	"""Genel Bakış üzerinde açık izlem ve sevk sonucu bekleyen vizit kuyruğunu görüntüler ve kapatır."""
+	pending_list = get_pending_followup_visits()
+	with st.container(border=True):
+		hdr_l, hdr_r = st.columns([4, 1])
+		with hdr_l:
+			st.markdown(f"##### ⏳ Bekleyen İzlemler ve Sevk Sonuçları ({len(pending_list)})")
+		with hdr_r:
+			st.caption("Açık Vaka Kuyruğu")
+
+		if not pending_list:
+			st.success("✅ Şu anda bekleyen açık izlem veya sonuçlanmamış sevk kaydı bulunmuyor.")
+			return
+
+		st.caption("Sevk veya izlem planı girilmiş olup henüz sonucu kapatılmamış başvurular aşağıda listelenir. Sonucu işleyip kapatabilirsiniz.")
+		for item in pending_list:
+			vid = int(item["id"])
+			sid = int(item["student_id"])
+			v_date_fmt = _format_iso_tr(item.get("visit_date"))
+			v_time_str = clean_text(item.get("visit_time")) or "—"
+			reason_parts = []
+			if clean_text(item.get("referral")):
+				reason_parts.append(f"🚨 Sevk: {item['referral']}")
+			if clean_text(item.get("follow_up")):
+				reason_parts.append(f"⏱️ İzlem: {item['follow_up']}")
+			if clean_text(item.get("incident_location")) and item.get("incident_location") != "Belirtilmedi":
+				reason_parts.append(f"📍 {item['incident_location']}")
+			reason_txt = "  ·  ".join(reason_parts) or item.get("complaint", "İzlem")
+
+			with st.container(border=True):
+				c_info, c_note, c_btn = st.columns([2.6, 2.2, 1.3], vertical_alignment="center")
+				with c_info:
+					sno = f" (No: {item['student_no']})" if item.get("student_no") else ""
+					disp_fup_name = mask_kvkk_value(item['full_name'], "name")
+					disp_comp = mask_kvkk_value(item.get('complaint'), "medical")
+					disp_reason = mask_kvkk_value(reason_txt, "medical")
+					st.markdown(f"**👤 {html.escape(disp_fup_name)}**{html.escape(sno)} · `{html.escape(item['class_name'])}`")
+					st.caption(f"🗓️ {v_date_fmt} {v_time_str} · 📌 {disp_comp} — {disp_reason}")
+				with c_note:
+					res_note = st.text_input(
+						"İzlem / Sevk Sonucu Notu",
+						placeholder="Örn: Veliyle görüşüldü, muayene oldu, durumu iyi...",
+						key=f"ov_fup_note_{vid}",
+						label_visibility="collapsed",
+					)
+				with c_btn:
+					if st.button("✔ Sonuçlandır & Kapat", type="primary", key=f"ov_fup_close_{vid}", use_container_width=True):
+						close_visit_followup(vid, result_note=res_note, new_status="Tamamlandı")
+						st.success(f"{item['full_name']} için izlem/sevk kaydı sonuçlandırılarak kapatıldı.")
+						st.rerun()
+
+
+def _normalize_tr_search(val: object) -> str:
+	txt = clean_text(val)
+	if not txt:
+		return ""
+	return (
+		txt.replace("İ", "i")
+		.replace("I", "ı")
+		.replace("Ü", "ü")
+		.replace("Ö", "ö")
+		.replace("Ş", "ş")
+		.replace("Ç", "ç")
+		.replace("Ğ", "ğ")
+		.lower()
+	)
+
+
+_OUTBREAK_CLUSTER_SPECS: list[dict[str, Any]] = [
+	{
+		"key": "respiratory",
+		"name": "🌡️ Ateşli / Üst Solunum Yolu Enfeksiyonu Kümesi",
+		"action": "Sınıf havalandırmasını artırın, ateş/öksürük şikayeti olan öğrencileri maske/izolasyon ile ayırıp velilere bilgi verin.",
+	},
+	{
+		"key": "gastro",
+		"name": "🤢 Akut Gastroenterit (Bulantı/Kusma/İshal) Kümesi",
+		"action": "Sınıf ve ortak tuvaletlerde klorlu yüzey dezenfeksiyonu uygulayın, el hijyeni denetimi ve sıvı alımı/su kontrolü yapın.",
+	},
+	{
+		"key": "pediculosis",
+		"name": "💇 Pediküloz (Bit / Sirke) Kümesi",
+		"action": "Sınıf genelinde saç/pediküloz taramasını tekrarlayın, velilere eşzamanlı parazit şampuanı ve tarama bilgilendirmesi gönderin.",
+	},
+	{
+		"key": "rash_eye",
+		"name": "🔴 Döküntülü / Göz Enfeksiyonu Kümesi",
+		"action": "Bulaşıcı döküntü/konjonktivit şüphesi olan öğrencileri hekim raporu kontrolüne dek izole edin, ortak temas eşyalarını dezenfekte edin.",
+	},
+]
+
+
+def _classify_outbreak_clusters(
+	combined_text: str,
+	hair_text: str = "",
+	temp_c: float | None = None,
+) -> list[str]:
+	matched: list[str] = []
+	norm = _normalize_tr_search(combined_text)
+	norm_hair = _normalize_tr_search(hair_text)
+
+	# 1. Ateşli / ÜSYE
+	fever_num = temp_c is not None and float(temp_c) >= 37.8
+	cleaned_fever = re.sub(r"ateş(?:i)?\s*(yok|normal|düşük)|ateşsiz|boğaz\s*yok|öksürük\s*yok", " ", norm)
+	resp_kw = any(k in cleaned_fever for k in ("ateş", "ates", "boğaz", "bogaz", "öksürük", "oksuruk", "grip", "nezle", "üsye", "usye", "influenza"))
+	if fever_num or resp_kw:
+		matched.append("respiratory")
+
+	# 2. Akut Gastroenterit
+	cleaned_gi = re.sub(r"(bulantı|kusma|ishal|karın ağrısı)\s*yok", " ", norm)
+	gi_kw = any(k in cleaned_gi for k in ("bulantı", "bulanti", "kusma", "kustu", "ishal", "karın ağrısı", "karin agrisi", "gastroenterit"))
+	if gi_kw:
+		matched.append("gastro")
+
+	# 3. Pediküloz (Bit / Sirke)
+	hair_pos = False
+	if norm_hair and ("bit / sirke" in norm_hair or "bitlenme" in norm_hair or "pediküloz" in norm_hair):
+		if "tespit edildi" in norm_hair or ("yok" not in norm_hair and "temiz" not in norm_hair):
+			hair_pos = True
+	cleaned_ped = re.sub(r"(bit|sirke|pediküloz)\s*(yok|temiz|görülmedi)", " ", norm)
+	ped_kw = bool(re.search(r"(?:^|[^a-zçğıöşü])(bit|bitli|bitlenme|sirke|pediküloz|pedikuloz)(?:$|[^a-zçğıöşü])", cleaned_ped))
+	if hair_pos or ped_kw:
+		matched.append("pediculosis")
+
+	# 4. Döküntülü / Göz Enfeksiyonu
+	cleaned_rash = re.sub(r"(döküntü|kızarıklık|çapak)\s*yok", " ", norm)
+	rash_kw = any(
+		k in cleaned_rash
+		for k in (
+			"döküntü",
+			"dokuntu",
+			"suçiçeği",
+			"su çiçeği",
+			"sucicegi",
+			"su cicegi",
+			"el ayak",
+			"el-ayak",
+			"konjonktivit",
+			"gözde çapak",
+			"gozde capak",
+			"göz çapak",
+			"goz capak",
+			"kızamık",
+			"kızamıkçık",
+			"kızıl",
+		)
+	)
+	if rash_kw:
+		matched.append("rash_eye")
+
+	return matched
+
+
+def detect_school_outbreaks(days_window: int = 5, min_cases: int = 3) -> list[dict]:
+	"""Son days_window gün içindeki revir, tarama ve vital kayıtlarını sınıf bazında tarayarak sendromik kümelenmeleri saptar."""
+	days_w = max(1, int(days_window))
+	min_c = max(1, int(min_cases))
+	cutoff_date = (date.today() - timedelta(days=days_w)).isoformat()
+
+	# bucket[(class_name, cluster_key)][student_id] = student info dict
+	buckets: dict[tuple[str, str], dict[int, dict[str, Any]]] = {}
+
+	def _record_hit(class_name: str, cluster_key: str, stu_id: int, full_name: str, student_no: str, ev_date: str, evidence: str) -> None:
+		bkey = (class_name, cluster_key)
+		cls_map = buckets.setdefault(bkey, {})
+		cur = cls_map.get(stu_id)
+		if cur is None:
+			cls_map[stu_id] = {
+				"student_id": stu_id,
+				"full_name": full_name,
+				"student_no": student_no,
+				"latest_date": ev_date,
+				"evidence": evidence,
+			}
+		else:
+			if ev_date > cur["latest_date"]:
+				cur["latest_date"] = ev_date
+			if evidence and evidence not in cur["evidence"]:
+				cur["evidence"] = f"{cur['evidence']} | {evidence}"[:180]
+
+	with connect_db() as connection:
+		v_rows = connection.execute(
+			"""SELECT v.student_id, v.visit_date, v.complaint, v.symptoms, v.observation, v.action,
+					  s.full_name, s.student_no, COALESCE(c.name, 'Sınıfsız') AS class_name
+			   FROM visits v
+			   JOIN students s ON s.id = v.student_id
+			   LEFT JOIN classes c ON c.id = s.class_id
+			   WHERE v.visit_date >= ?""",
+			(cutoff_date,),
+		).fetchall()
+		for vr in v_rows:
+			txt = " ".join(filter(None, [vr["complaint"], vr["symptoms"], vr["observation"], vr["action"]]))
+			temp_match = re.search(r"ateş[:\s]*(\d{2}[.,]\d)", _normalize_tr_search(txt))
+			t_val = None
+			if temp_match:
+				try:
+					t_val = float(temp_match.group(1).replace(",", "."))
+				except ValueError:
+					t_val = None
+			for ck in _classify_outbreak_clusters(txt, temp_c=t_val):
+				ev_lbl = clean_text(vr["complaint"]) or clean_text(vr["symptoms"]) or "Revir Başvurusu"
+				_record_hit(
+					str(vr["class_name"]),
+					ck,
+					int(vr["student_id"]),
+					str(vr["full_name"]),
+					clean_text(vr["student_no"]),
+					str(vr["visit_date"] or ""),
+					ev_lbl,
+				)
+
+		sc_rows = connection.execute(
+			"""SELECT sc.student_id, sc.screening_date, sc.temperature_c, sc.hair_screening, sc.notes,
+					  s.full_name, s.student_no, COALESCE(c.name, 'Sınıfsız') AS class_name
+			   FROM school_screenings sc
+			   JOIN students s ON s.id = sc.student_id
+			   LEFT JOIN classes c ON c.id = s.class_id
+			   WHERE sc.screening_date >= ?""",
+			(cutoff_date,),
+		).fetchall()
+		for sc in sc_rows:
+			t_val = float(sc["temperature_c"]) if sc["temperature_c"] is not None else None
+			txt = " ".join(filter(None, [sc["hair_screening"], sc["notes"]]))
+			for ck in _classify_outbreak_clusters(txt, hair_text=clean_text(sc["hair_screening"]), temp_c=t_val):
+				ev_parts = []
+				if t_val is not None and t_val >= 37.8:
+					ev_parts.append(f"Ateş {t_val:.1f}°C")
+				if clean_text(sc["hair_screening"]):
+					ev_parts.append(clean_text(sc["hair_screening"]))
+				if clean_text(sc["notes"]):
+					ev_parts.append(clean_text(sc["notes"]))
+				_record_hit(
+					str(sc["class_name"]),
+					ck,
+					int(sc["student_id"]),
+					str(sc["full_name"]),
+					clean_text(sc["student_no"]),
+					str(sc["screening_date"] or ""),
+					" / ".join(ev_parts) or "Okul Taraması",
+				)
+
+		vt_rows = connection.execute(
+			"""SELECT vr.student_id, substr(vr.measured_at, 1, 10) AS m_date, vr.temperature_c, vr.notes,
+					  s.full_name, s.student_no, COALESCE(c.name, 'Sınıfsız') AS class_name
+			   FROM vital_readings vr
+			   JOIN students s ON s.id = vr.student_id
+			   LEFT JOIN classes c ON c.id = s.class_id
+			   WHERE substr(vr.measured_at, 1, 10) >= ? AND vr.temperature_c >= 37.8""",
+			(cutoff_date,),
+		).fetchall()
+		for vt in vt_rows:
+			_record_hit(
+				str(vt["class_name"]),
+				"respiratory",
+				int(vt["student_id"]),
+				str(vt["full_name"]),
+				clean_text(vt["student_no"]),
+				str(vt["m_date"] or ""),
+				f"Ateş {float(vt['temperature_c']):.1f}°C",
+			)
+
+	spec_by_key = {sp["key"]: sp for sp in _OUTBREAK_CLUSTER_SPECS}
+	results: list[dict] = []
+	for (cls_name, ckey), stu_map in buckets.items():
+		if len(stu_map) < min_c:
+			continue
+		sp = spec_by_key[ckey]
+		stu_list = sorted(stu_map.values(), key=lambda x: (x["latest_date"], x["full_name"]), reverse=True)
+		results.append({
+			"class_name": cls_name,
+			"cluster_key": ckey,
+			"cluster_name": sp["name"],
+			"case_count": len(stu_list),
+			"days_window": days_w,
+			"students": stu_list,
+			"student_names": [s["full_name"] for s in stu_list],
+			"recommended_action": sp["action"],
+		})
+
+	results.sort(key=lambda x: (-int(x["case_count"]), x["class_name"], x["cluster_name"]))
+	return results
+
+
+def add_isolation_record(
+	student_id: int,
+	disease_name: str,
+	detected_date: str,
+	expected_return_date: str | None = None,
+	doctor_clearance_required: bool = True,
+	notes: str | None = None,
+	status: str = "İzolasyonda / İstirahatte",
+) -> int:
+	sid = int(student_id)
+	d_name = clean_text(disease_name) or "Bulaşıcı Hastalık"
+	det_d = clean_text(detected_date) or date.today().isoformat()
+	exp_d = clean_text(expected_return_date) or None
+	created_at = datetime.now().isoformat(timespec="minutes")
+	with connect_db() as connection:
+		cur = connection.execute(
+			"""INSERT INTO isolation_records(
+				student_id, disease_name, detected_date, expected_return_date, actual_return_date,
+				doctor_clearance_required, clearance_received, status, notes, created_at
+			) VALUES (?, ?, ?, ?, NULL, ?, 0, ?, ?, ?)""",
+			(
+				sid,
+				d_name,
+				det_d,
+				exp_d,
+				1 if doctor_clearance_required else 0,
+				clean_text(status) or "İzolasyonda / İstirahatte",
+				clean_text(notes) or None,
+				created_at,
+			),
+		)
+		new_id = int(cur.lastrowid)
+	sync_after_person_mutation(sid)
+	return new_id
+
+
+def get_isolation_records(active_only: bool = True, limit: int = 100) -> list[dict]:
+	where_sql = "WHERE COALESCE(ir.status, 'İzolasyonda / İstirahatte') = 'İzolasyonda / İstirahatte'" if active_only else ""
+	with connect_db() as connection:
+		rows = connection.execute(
+			f"""SELECT ir.*, s.full_name, s.student_no, COALESCE(c.name, '—') AS class_name
+			   FROM isolation_records ir
+			   JOIN students s ON s.id = ir.student_id
+			   LEFT JOIN classes c ON c.id = s.class_id
+			   {where_sql}
+			   ORDER BY ir.detected_date DESC, ir.id DESC
+			   LIMIT ?""",
+			(int(limit),),
+		).fetchall()
+	return [dict(r) for r in rows]
+
+
+def close_isolation_record(
+	record_id: int,
+	actual_return_date: str | None = None,
+	clearance_received: bool = True,
+	notes_append: str | None = None,
+) -> None:
+	sid: int | None = None
+	ret_date = clean_text(actual_return_date) or date.today().isoformat()
+	with connect_db() as connection:
+		row = connection.execute("SELECT student_id, notes FROM isolation_records WHERE id=?", (int(record_id),)).fetchone()
+		if row:
+			sid = int(row["student_id"])
+			old_notes = clean_text(row["notes"])
+			extra = clean_text(notes_append)
+			new_notes = f"{old_notes} | {extra}".strip(" |") if (old_notes or extra) else None
+			connection.execute(
+				"""UPDATE isolation_records
+				   SET status='İyileşti / Okula Döndü',
+					   actual_return_date=?,
+					   clearance_received=?,
+					   notes=?
+				   WHERE id=?""",
+				(ret_date, 1 if clearance_received else 0, new_notes, int(record_id)),
+			)
+	if sid is not None:
+		sync_after_person_mutation(sid)
+
+
+def render_outbreak_and_isolation_panel() -> None:
+	"""Genel Bakış üzerinde salgın erken uyarı radarı ve bulaşıcı hastalık izolasyon takibi panelini gösterir."""
+	with st.container(border=True):
+		hdr_l, hdr_m, hdr_r = st.columns([3.4, 1.0, 1.0], vertical_alignment="center")
+		with hdr_l:
+			st.markdown("##### 🦠 Salgın Erken Uyarı Radarı & Bulaşıcı İzolasyon Takibi")
+		with hdr_m:
+			radar_days = int(st.number_input("Tarama Penceresi (Gün)", min_value=1, max_value=30, value=5, step=1, key="ov_outbreak_days"))
+		with hdr_r:
+			radar_min = int(st.number_input("Küme Eşiği (Vaka)", min_value=2, max_value=15, value=3, step=1, key="ov_outbreak_min"))
+
+		outbreaks = detect_school_outbreaks(days_window=radar_days, min_cases=radar_min)
+		if outbreaks:
+			st.error(f"🚨 DİKKAT: Son {radar_days} gün içinde {len(outbreaks)} sınıf/sendrom kümesinde salgın eşiğine (≥ {radar_min} vaka) ulaşıldı!")
+			for ob in outbreaks:
+				stu_lines = ", ".join(
+					f"{mask_kvkk_value(s['full_name'], 'name')} ({_format_iso_tr(s['latest_date'])})"
+					for s in ob["students"]
+				)
+				st.markdown(
+					f"""<div style='background:#fef2f2;border:1px solid #f87171;border-left:5px solid #dc2626;padding:10px 14px;border-radius:8px;margin-bottom:8px;color:#7f1d1d;'>
+						<div style='font-size:15px;font-weight:700;'>{html.escape(ob['cluster_name'])} — {html.escape(ob['class_name'])} ({int(ob['case_count'])} Öğrenci)</div>
+						<div style='font-size:13px;margin-top:4px;'><b>Etkilenen Öğrenciler:</b> {html.escape(stu_lines)}</div>
+						<div style='font-size:13px;margin-top:4px;color:#991b1b;'><b>🛡️ Önerilen Enfeksiyon Kontrol Önlemi:</b> {html.escape(ob['recommended_action'])}</div>
+					</div>""",
+					unsafe_allow_html=True,
+				)
+		else:
+			st.success(f"🟢 Son {radar_days} gün içinde sınıf bazlı salgın eşiğine (≥ {radar_min} farklı vaka) ulaşan bulaşıcı hastalık kümesi saptanmadı.")
+
+		st.markdown("---")
+		active_iso = get_isolation_records(active_only=True)
+		st.markdown(f"###### 🏠 Aktif İzolasyondaki / İstirahatteki Öğrenciler ({len(active_iso)})")
+
+		if active_iso:
+			for rec in active_iso:
+				rid = int(rec["id"])
+				sno = f" (No: {rec['student_no']})" if rec.get("student_no") else ""
+				exp_str = _format_iso_tr(rec.get("expected_return_date")) if rec.get("expected_return_date") else "Belirtilmedi"
+				doc_req = "Evet (Doktor İyileşme Raporu Gerekli)" if rec.get("doctor_clearance_required") else "İzlem / Veli Beyanı"
+				with st.container(border=True):
+					ic_l, ic_r = st.columns([2.6, 1.5], vertical_alignment="center")
+					with ic_l:
+						disp_iso_name = mask_kvkk_value(rec['full_name'], "name")
+						disp_iso_dis = mask_kvkk_value(rec['disease_name'], "medical")
+						st.markdown(f"**👤 {html.escape(disp_iso_name)}**{html.escape(sno)} · `{html.escape(rec['class_name'])}` — 🦠 **{html.escape(disp_iso_dis)}**")
+						raw_note_txt = clean_text(rec.get('notes'))
+						disp_iso_note = mask_kvkk_value(raw_note_txt, "medical") if raw_note_txt else ""
+						note_s = f" · 📝 {disp_iso_note}" if disp_iso_note else ""
+						st.caption(f"🗓️ Tespit: {_format_iso_tr(rec.get('detected_date'))} · 📅 Beklenen Dönüş: {exp_str} · 📄 {doc_req}{note_s}")
+					with ic_r:
+						if st.button("✔ Doktor İyileşme Raporu Kontrol Edildi - Okula Döndü", type="primary", key=f"iso_close_{rid}", use_container_width=True):
+							close_isolation_record(rid, actual_return_date=date.today().isoformat(), clearance_received=True)
+							st.success(f"{rec['full_name']} için izolasyon tamamlandı ve okula dönüş onaylandı.")
+							st.rerun()
+		else:
+			st.caption("Şu anda bulaşıcı hastalık nedeniyle aktif izolasyonda olan öğrenci bulunmuyor.")
+
+		with st.expander("➕ Yeni Bulaşıcı Hastalık İzolasyon Kaydı Ekle"):
+			df_people = get_students()
+			if df_people.empty:
+				st.info("Kayıtlı öğrenci bulunamadı.")
+			else:
+				person_opts = {}
+				for _, r in df_people.iterrows():
+					no_s = clean_text(r["okul_no"])
+					lbl = f"{r['ad_soyad']} ({r['sinif']}" + (f" · No: {no_s}" if no_s else "") + ")"
+					person_opts[lbl] = int(r["id"])
+				with st.form("form_add_isolation_record", clear_on_submit=True):
+					ia_c1, ia_c2, ia_c3 = st.columns([1.8, 1.4, 1.2])
+					with ia_c1:
+						sel_p_lbl = st.selectbox("Öğrenci", list(person_opts.keys()), key="iso_add_stu")
+					with ia_c2:
+						sel_dis = st.selectbox("Bulaşıcı Hastalık / Tanı", ISOLATION_DISEASE_OPTIONS, key="iso_add_dis")
+					with ia_c3:
+						cust_dis = st.text_input("Diğer / Alt Tanı (Opsiyonel)", value="", placeholder="Örn: Suçiçeği / A Tipi Grip", key="iso_add_dis_custom")
+
+					ia_c4, ia_c5, ia_c6 = st.columns([1.1, 1.1, 1.4])
+					with ia_c4:
+						det_d = st.date_input("Tespit Tarihi", value=date.today(), key="iso_add_det_date")
+					with ia_c5:
+						exp_d = st.date_input("Beklenen Dönüş Tarihi", value=date.today() + timedelta(days=5), key="iso_add_exp_date")
+					with ia_c6:
+						doc_req_chk = st.checkbox("📄 Okula Dönüşte Doktor İyileşme Raporu Zorunlu", value=True, key="iso_add_doc_req")
+
+					iso_notes = st.text_input("Veli Görüşme / Önlem Notu", value="", placeholder="Örn: Veli bilgilendirildi, ev istirahati başlatıldı...", key="iso_add_notes")
+					if st.form_submit_button("🏠 İzolasyon Kaydını Başlat", type="primary", use_container_width=True):
+						final_dis = clean_text(cust_dis) or sel_dis
+						add_isolation_record(
+							student_id=person_opts[sel_p_lbl],
+							disease_name=final_dis,
+							detected_date=det_d.isoformat(),
+							expected_return_date=exp_d.isoformat(),
+							doctor_clearance_required=doc_req_chk,
+							notes=iso_notes,
+						)
+						st.success("Bulaşıcı hastalık izolasyon kaydı oluşturuldu.")
+						st.rerun()
+
+		closed_iso = [r for r in get_isolation_records(active_only=False, limit=30) if r.get("status") != "İzolasyonda / İstirahatte"]
+		if closed_iso:
+			with st.expander(f"✅ Tamamlanan / Okula Dönen İzolasyon Geçmişi ({len(closed_iso)})"):
+				df_closed = pd.DataFrame([
+					{
+						"Öğrenci": r["full_name"],
+						"Sınıf": r["class_name"],
+						"Hastalık": r["disease_name"],
+						"Tespit": _format_iso_tr(r.get("detected_date")),
+						"Okula Dönüş": _format_iso_tr(r.get("actual_return_date")),
+						"Rapor Kontrol": "Onaylandı" if r.get("clearance_received") else "—",
+						"Not": clean_text(r.get("notes")) or "—",
+					}
+					for r in closed_iso
+				])
+				st.dataframe(df_closed, width="stretch", hide_index=True)
+
+
 @st.dialog("✏️ Revir Başvuru Kaydını Düzenle", width="large")
 def open_edit_visit_dialog(visit_id: int) -> None:
 	with connect_db() as connection:
@@ -9252,6 +13244,14 @@ def open_edit_visit_dialog(visit_id: int) -> None:
 		new_obs = st.text_area("🔍 Gözlem ve Ölçümler", value=v_row["observation"] or "", height=80)
 		new_act = st.text_area("🛠️ Yapılan İşlem / Müdahale", value=v_row["action"] or "", height=80)
 
+		loc_col, wit_col = st.columns(2)
+		cur_loc = v_row["incident_location"] if ("incident_location" in v_row.keys() and v_row["incident_location"] in INCIDENT_LOCATIONS) else "Belirtilmedi"
+		cur_wit = (v_row["witness_teacher"] or "") if "witness_teacher" in v_row.keys() else ""
+		with loc_col:
+			new_inc_loc = st.selectbox("📍 Olay / Başvuru Yeri", INCIDENT_LOCATIONS, index=INCIDENT_LOCATIONS.index(cur_loc))
+		with wit_col:
+			new_wit = st.text_input("👩‍🏫 Nöbetçi / İlgili Öğretmen", value=cur_wit, placeholder="Örn: Nöbetçi Öğretmen / Sınıf Öğretmeni")
+
 		c_ext1, c_ext2, c_ext3 = st.columns([1, 1.5, 1.5])
 		with c_ext1:
 			new_cont = st.checkbox("📞 Veli Arandı", value=bool(v_row["guardian_contacted"]))
@@ -9260,20 +13260,44 @@ def open_edit_visit_dialog(visit_id: int) -> None:
 		with c_ext3:
 			new_foll = st.text_input("⏱️ İzlem / Takip", value=v_row["follow_up"] or "")
 
+		fup_c1, fup_c2 = st.columns([1.2, 2.2])
+		cur_fup_st = v_row["follow_up_status"] if ("follow_up_status" in v_row.keys() and v_row["follow_up_status"] in FOLLOW_UP_STATUS_OPTIONS) else "Açık"
+		cur_fup_res = (v_row["follow_up_result"] or "") if "follow_up_result" in v_row.keys() else ""
+		with fup_c1:
+			new_fup_st = st.selectbox("⏳ İzlem Durumu", FOLLOW_UP_STATUS_OPTIONS, index=FOLLOW_UP_STATUS_OPTIONS.index(cur_fup_st))
+		with fup_c2:
+			new_fup_res = st.text_input("📝 İzlem / Sevk Sonucu Açıklaması", value=cur_fup_res, placeholder="Sevk veya izlem sonuç notu...")
+
 		btn_save, btn_del = st.columns([2, 1])
 		with btn_save:
 			if st.form_submit_button("💾 Değişiklikleri Kaydet", type="primary", use_container_width=True):
+				cur_closed_at = v_row["follow_up_closed_at"] if "follow_up_closed_at" in v_row.keys() else None
+				if new_fup_st == "Tamamlandı" and not cur_closed_at:
+					final_closed_at = datetime.now().isoformat(timespec="minutes")
+				elif new_fup_st == "Açık":
+					final_closed_at = None
+				else:
+					final_closed_at = cur_closed_at
 				with connect_db() as connection:
 					connection.execute(
 						"""UPDATE visits SET visit_date=?, visit_time=?, complaint=?, symptoms=?, observation=?,
-						                      action=?, guardian_contacted=?, referral=?, follow_up=? WHERE id=?""",
+						                      action=?, guardian_contacted=?, referral=?, follow_up=?,
+						                      incident_location=?, witness_teacher=?,
+						                      follow_up_status=?, follow_up_result=?, follow_up_closed_at=?
+						   WHERE id=?""",
 						(new_v_date.isoformat(), new_v_time.strftime("%H:%M"), new_complaint,
 						 new_syms.strip(), new_obs.strip(), new_act.strip(), int(new_cont),
-						 new_ref.strip(), new_foll.strip(), visit_id),
+						 new_ref.strip(), new_foll.strip(),
+						 new_inc_loc, new_wit.strip() or None,
+						 new_fup_st, new_fup_res.strip() or None, final_closed_at,
+						 visit_id),
 					)
-				save_person_data_file(int(v_row["student_id"]))
+				sync_after_person_mutation(int(v_row["student_id"]))
 				st.success("Revir başvuru kaydı güncellendi.")
 				st.rerun()
+
+	st.markdown("###### 📄 Bu Kayıt İçin Resmi Evraklar & Veli Bildirimi")
+	_render_visit_doc_actions_bar(int(v_row["student_id"]), int(visit_id), key_prefix="dlg_edit_v", person_name=stu_name)
 
 	with st.expander("🗑️ Bu Başvuru Kaydını Sil"):
 		st.warning("Bu revir kaydını silmek istediğinize emin misiniz?")
@@ -9455,6 +13479,12 @@ def render_overview() -> None:
 					st.session_state["target_page"] = "💊 İlaç Takip Sistemi"
 					st.rerun()
 
+	if is_section_visible("overview_pending_followups"):
+		render_pending_followups_panel()
+
+	if is_section_visible("overview_outbreak_radar"):
+		render_outbreak_and_isolation_panel()
+
 	if is_section_visible("overview_charts"):
 		try:
 			with connect_db() as conn:
@@ -9489,12 +13519,18 @@ def render_overview() -> None:
 						badges.append(f"<span style='color:#64748b; font-size:12.5px; font-weight:600;'>{html.escape(op['date_str'])}</span>")
 					if op["class_name"] and op["class_name"] != "—":
 						badges.append(f"<span style='background-color:#e0f2fe; color:#0369a1; padding:2px 8px; border-radius:6px; font-weight:700; font-size:13.5px;'>{html.escape(op['class_name'])}</span>")
-					badges.append(f"<span style='font-weight:700; color:#0f172a; font-size:15px;'>{html.escape(op['full_name'])}</span>")
+					disp_op_name = mask_kvkk_value(op["full_name"], "name")
+					badges.append(f"<span style='font-weight:700; color:#0f172a; font-size:15px;'>{html.escape(disp_op_name)}</span>")
 					if op["student_no"]:
 						badges.append(f"<span style='background-color:#f1f5f9; color:#475569; padding:2px 7px; border-radius:6px; font-weight:600; font-size:13px;'>{html.escape(op['student_no'])}</span>")
-					for d in op["details"]:
-						clean_d = html.escape(d)
-						badges.append(f"<span style='color:#94a3b8;'>·</span><span style='color:#334155; font-size:14px; font-weight:500;'>{clean_d}</span>")
+					if is_kvkk_privacy_active():
+						if op["details"]:
+							masked_med = mask_kvkk_value(" · ".join(op["details"]), "medical")
+							badges.append(f"<span style='color:#94a3b8;'>·</span><span style='color:#64748b; font-size:13.5px; font-weight:600;'>{html.escape(masked_med)}</span>")
+					else:
+						for d in op["details"]:
+							clean_d = html.escape(d)
+							badges.append(f"<span style='color:#94a3b8;'>·</span><span style='color:#334155; font-size:14px; font-weight:500;'>{clean_d}</span>")
 
 					content_html = " ".join(badges)
 					st.markdown(
@@ -9606,7 +13642,7 @@ def open_class_manager_dialog() -> None:
 								connection.execute("UPDATE classes SET name=?, teacher_name=? WHERE id=?", (new_c_name, new_t_name, old_r["id"]))
 						else:
 							connection.execute("UPDATE classes SET teacher_name=? WHERE id=?", (new_t_name, old_r["id"]))
-				clear_all_data_caches()
+				sync_all_person_data_files()
 				st.success(f"'{target_cls}' bilgileri başarıyla güncellendi.")
 				st.rerun()
 
@@ -9620,6 +13656,7 @@ def open_class_manager_dialog() -> None:
 						connection.execute("DELETE FROM classes WHERE id=?", (old_r["id"],))
 				if st.session_state.get("active_class_filter") == target_cls:
 					st.session_state["active_class_filter"] = "Tüm sınıflar"
+				sync_all_person_data_files()
 				st.success(f"'{target_cls}' sınıfı kaldırıldı.")
 				st.rerun()
 
@@ -9692,19 +13729,21 @@ def open_new_profile_dialog(default_person_type: str = "Öğrenci") -> None:
 			st.text_input("Kayıt grubu", value="Sivil / Diğer", disabled=True, key=f"new_group_{new_nonce}")
 		sex = st.selectbox("Cinsiyet", ["Belirtilmedi", "Kız / Kadın", "Erkek"], key=f"new_sex_{new_nonce}")
 	with second:
-		birth = st.date_input("Doğum tarihi", value=None, min_value=date(1940, 1, 1), max_value=date.today(), key=f"new_birth_{new_nonce}")
+		birth = st.date_input("Doğum tarihi", value=None, min_value=date(1940, 1, 1), max_value=date.today(), help="Doğrudan GGAAYYYY (ör. 15032019) yazabilirsiniz.", key=f"new_birth_{new_nonce}")
 		guardian_lbl = "Veli adı" if person_type == "Öğrenci" else "Acil durumda aranacak yakını"
 		phone_lbl = "Veli telefonu" if person_type == "Öğrenci" else "İletişim telefonu"
 		guardian = st.text_input(guardian_lbl, key=f"new_guardian_{new_nonce}")
-		phone = st.text_input(phone_lbl, key=f"new_phone_{new_nonce}")
+		phone_raw = smart_text_input(phone_lbl, "phone", key=f"new_phone_{new_nonce}", placeholder="Örn: 05321234567 veya 532...", in_form=False)
 		blood_grp = st.selectbox("Kan grubu", BLOOD_GROUP_OPTIONS, key=f"new_blood_{new_nonce}")
 	with third:
-		init_height = st.number_input("İlk Boy Ölçümü (cm, isteğe bağlı)", min_value=0.0, max_value=250.0, value=None, step=0.1, format="%.1f", key=f"new_h_{new_nonce}")
-		init_weight = st.number_input("İlk Kilo Ölçümü (kg, isteğe bağlı)", min_value=0.0, max_value=300.0, value=None, step=0.1, format="%.1f", key=f"new_w_{new_nonce}")
+		is_adult_new = (person_type != "Öğrenci")
+		init_height_raw = smart_text_input("İlk Boy Ölçümü (cm, isteğe bağlı)", "height", key=f"new_h_{new_nonce}", placeholder="Örn: 135, 1,35 veya 1055", in_form=False)
+		nw_ph = "Örn: 75.5 veya 755" if is_adult_new else "Örn: 24.5, 245 veya 18500"
+		init_weight_raw = smart_text_input("İlk Kilo Ölçümü (kg, isteğe bağlı)", "weight", key=f"new_w_{new_nonce}", placeholder=nw_ph, in_form=False, is_adult=is_adult_new)
 		if person_type == "Öğrenci":
-			init_head_circ = st.number_input("İlk Baş Çevresi (cm, isteğe bağlı)", min_value=0.0, max_value=100.0, value=None, step=0.1, format="%.1f", key=f"new_hc_{new_nonce}")
+			init_hc_raw = smart_text_input("İlk Baş Çevresi (cm, isteğe bağlı)", "head_circ", key=f"new_hc_{new_nonce}", placeholder="Örn: 48.5 veya 485", in_form=False)
 		else:
-			init_head_circ = None
+			init_hc_raw = ""
 		init_allergy = st.text_input("Bilinen Alerji (İsteğe bağlı)", key=f"new_allergy_{new_nonce}")
 		init_chronic = st.text_input("Kronik Hastalıklar (İsteğe bağlı)", key=f"new_chronic_{new_nonce}")
 		init_med_hist = st.text_input("Sağlık Geçmişi / Diğer Yaşadığı Durumlar (İsteğe bağlı)", key=f"new_medhist_{new_nonce}")
@@ -9754,6 +13793,10 @@ def open_new_profile_dialog(default_person_type: str = "Öğrenci") -> None:
 				resolved_sex = {"Kız / Kadın": "K", "Kız": "K", "Erkek": "E"}.get(sex)
 				resolved_birth = birth.isoformat() if birth else None
 				resolved_note = (role_note or "").strip() or None
+				clean_phone_new = normalize_phone(phone_raw)
+				init_height = normalize_height(init_height_raw)
+				init_weight = normalize_weight(init_weight_raw, is_adult=is_adult_new)
+				init_head_circ = normalize_head_circ(init_hc_raw) if person_type == "Öğrenci" else None
 				with connect_db() as connection:
 					connection.execute("INSERT OR IGNORE INTO classes(name) VALUES (?)", (resolved_class,))
 					class_id = connection.execute("SELECT id FROM classes WHERE name=?", (resolved_class,)).fetchone()["id"]
@@ -9763,33 +13806,34 @@ def open_new_profile_dialog(default_person_type: str = "Öğrenci") -> None:
 						   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
 						(class_id, person_type, student_no.strip() or None, full_name.strip(),
 						 resolved_sex, resolved_birth,
-						 guardian.strip() or None, phone.strip() or None, resolved_note,
+						 guardian.strip() or None, clean_phone_new, resolved_note,
 						 sel_country or None, (sel_province or "").strip() or None,
 						 (sel_district or "").strip() or None, (sel_village or "").strip() or None),
 					)
 					new_id = cur.lastrowid
-					if blood_grp != "Belirtilmedi" or init_allergy.strip() or init_chronic.strip() or init_med_hist.strip() or guardian.strip() or phone.strip():
+					if blood_grp != "Belirtilmedi" or init_allergy.strip() or init_chronic.strip() or init_med_hist.strip() or guardian.strip() or clean_phone_new:
 						connection.execute(
 							"""INSERT INTO health_profiles(student_id, guardian_name, guardian_phone, allergies,
 							   chronic_conditions, medical_history, blood_group, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-							(new_id, guardian.strip() or None, phone.strip() or None,
+							(new_id, guardian.strip() or None, clean_phone_new,
 							 init_allergy.strip() or None, init_chronic.strip() or None, init_med_hist.strip() or None,
 							 None if blood_grp == "Belirtilmedi" else blood_grp,
 							 datetime.now().isoformat(timespec="minutes")),
 						)
-				has_init_hw = init_height is not None and init_weight is not None and init_height > 0 and init_weight > 0
+				has_init_h = init_height is not None and init_height > 0
+				has_init_w = init_weight is not None and init_weight > 0
 				has_init_hc = init_head_circ is not None and init_head_circ > 0
-				if has_init_hw or has_init_hc:
+				if has_init_h or has_init_w or has_init_hc:
 					record_linked_measurement(
 						new_id,
 						date.today(),
-						float(init_height) if has_init_hw else None,
-						float(init_weight) if has_init_hw else None,
+						float(init_height) if has_init_h else None,
+						float(init_weight) if has_init_w else None,
 						resolved_birth,
 						resolved_sex,
 						head_circ_cm=float(init_head_circ) if has_init_hc else None,
 					)
-				save_person_data_file(new_id)
+				sync_after_person_mutation(new_id)
 				set_active_person(new_id)
 			except sqlite3.IntegrityError:
 				st.error("Bu sınıfta aynı isimle kayıtlı bir öğrenci zaten var.")
@@ -9869,9 +13913,13 @@ def open_edit_profile_dialog(edit_id: int, key_suffix: str = "modal") -> None:
 			edit_number = ""
 		edit_sex = st.selectbox("Cinsiyet", ["Belirtilmedi", "Kız / Kadın", "Erkek"], key="edit_sex")
 	with edit_second:
-		edit_birth = st.date_input("Doğum tarihi", value=None, min_value=date(1940, 1, 1), max_value=date.today(), key="edit_birth")
+		edit_birth = st.date_input("Doğum tarihi", value=None, min_value=date(1940, 1, 1), max_value=date.today(), help="Doğrudan GGAAYYYY (ör. 15032019) yazabilirsiniz.", key="edit_birth")
 		edit_guardian = st.text_input("Veli / Yakını adı", key="edit_guardian")
-		edit_phone = st.text_input("İletişim telefonu", key="edit_phone")
+		def _on_edit_phone_change() -> None:
+			norm_p = normalize_phone(st.session_state.get("edit_phone"))
+			if norm_p is not None:
+				st.session_state["edit_phone"] = norm_p
+		edit_phone = st.text_input("İletişim telefonu", placeholder="Örn: 05321234567 veya +90 532...", key="edit_phone", on_change=_on_edit_phone_change)
 		edit_blood = st.selectbox("Kan grubu", BLOOD_GROUP_OPTIONS, key="edit_blood_group")
 
 	st.markdown("##### 📍 Yerleşim Yeri (Ülke / İl / İlçe / Köy-Mahalle)")
@@ -9915,6 +13963,7 @@ def open_edit_profile_dialog(edit_id: int, key_suffix: str = "modal") -> None:
 			else:
 				try:
 					resolved_bg = None if edit_blood == "Belirtilmedi" else edit_blood
+					clean_edit_phone = normalize_phone(edit_phone)
 					with connect_db() as connection:
 						connection.execute("INSERT OR IGNORE INTO classes(name) VALUES (?)", (resolved_class,))
 						class_id = connection.execute("SELECT id FROM classes WHERE name=?", (resolved_class,)).fetchone()["id"]
@@ -9922,8 +13971,9 @@ def open_edit_profile_dialog(edit_id: int, key_suffix: str = "modal") -> None:
 							"""UPDATE students SET class_id=?, person_type=?, student_no=?, full_name=?, sex=?, birth_date=?,
 							   guardian_name=?, guardian_phone=?, notes=?, country=?, province=?, district=?, village=? WHERE id=?""",
 							(class_id, edit_type, edit_number.strip() or None, edit_name.strip(),
-							 {"Kız / Kadın": "K", "E": "E", "Erkek": "E"}.get(edit_sex), edit_birth.isoformat() if edit_birth else None,
-							 edit_guardian.strip() or None, edit_phone.strip() or None, edit_notes.strip() or None,
+							 normalize_sex(edit_sex) or {"Kız / Kadın": "K", "E": "E", "Erkek": "E"}.get(edit_sex),
+							 edit_birth.isoformat() if edit_birth else None,
+							 edit_guardian.strip() or None, clean_edit_phone, edit_notes.strip() or None,
 							 edit_country or None, (edit_province or "").strip() or None,
 							 (edit_district or "").strip() or None, (edit_village or "").strip() or None, edit_id),
 						)
@@ -9933,10 +13983,11 @@ def open_edit_profile_dialog(edit_id: int, key_suffix: str = "modal") -> None:
 							   ON CONFLICT(student_id) DO UPDATE SET
 							   guardian_name=excluded.guardian_name, guardian_phone=excluded.guardian_phone,
 							   blood_group=excluded.blood_group, updated_at=excluded.updated_at""",
-							(edit_id, edit_guardian.strip() or None, edit_phone.strip() or None,
+							(edit_id, edit_guardian.strip() or None, clean_edit_phone,
 							 resolved_bg, datetime.now().isoformat(timespec="minutes")),
 						)
-					sync_student_measurements(edit_id)
+					sync_student_measurements(edit_id, _sync=False)
+					sync_after_person_mutation(edit_id)
 				except sqlite3.IntegrityError:
 					st.error("Bu sınıfta aynı isimle kayıtlı başka bir kişi var.")
 				else:
@@ -10029,12 +14080,15 @@ def render_students() -> None:
 
 	if is_section_visible("students_table"):
 		st.caption(f"Toplam {len(students)} öğrenci listeleniyor · Sol kutudan öğrenciyi seçebilir, **📂 Aç** sembolüne tıklayarak Kişi Dosyasını açabilirsiniz.")
+		if is_kvkk_privacy_active():
+			st.info("🛡️ **KVKK Gizlilik Modu Aktif:** Ekrandaki ad/soyad, veli adı, telefon ve klinik sağlık verileri maskelenmiştir. Word/Excel indirmeleri gerçek verilerle üretilmeye devam eder.")
 		app_cfg = get_app_settings()
 		tbl_h = int(app_cfg.get("default_table_height", "420") or 420)
 
+		table_display_students = apply_kvkk_mask_to_roster_df(display_students)
 		roster_seed = st.session_state.get("roster_table_seed", 0)
 		table_event = st.dataframe(
-			display_students,
+			table_display_students,
 			width="stretch",
 			height=tbl_h,
 			hide_index=True,
@@ -10090,16 +14144,22 @@ def render_students() -> None:
 			if person_map:
 				labels_list = list(person_map.keys())
 				cur_lbl = id_to_label.get(active_id)
-				def_idx = labels_list.index(cur_lbl) if cur_lbl in labels_list else None
+				if (
+					"students_page_active_picker" not in st.session_state
+					or st.session_state.get("students_page_picker_synced_id") != active_id
+					or (st.session_state.get("students_page_active_picker") is not None and st.session_state.get("students_page_active_picker") not in person_map)
+				):
+					st.session_state["students_page_active_picker"] = cur_lbl
+					st.session_state["students_page_picker_synced_id"] = active_id
 				picked_lbl = st.selectbox(
 					"Aktif Öğrenci (Tüm Pencerelerde Ortak Seçili)",
 					labels_list,
-					index=def_idx,
 					placeholder="Tablodan tıklayın veya buradan öğrenci arayın...",
 					key="students_page_active_picker",
 				)
 				if picked_lbl and person_map[picked_lbl] != active_id:
 					set_active_person(person_map[picked_lbl])
+					st.session_state["students_page_picker_synced_id"] = person_map[picked_lbl]
 					active_id = person_map[picked_lbl]
 
 	if is_section_visible("students_selected_card"):
@@ -10168,9 +14228,12 @@ def render_civilians() -> None:
 		if civilians.empty:
 			st.info("Henüz kayıtlı yetişkin kişi veya personel bulunmuyor. Sağ üstteki '➕ Yeni Kayıt' butonuna tıklayarak ekleyebilirsiniz.")
 		else:
+			if is_kvkk_privacy_active():
+				st.info("🛡️ **KVKK Gizlilik Modu Aktif:** Ekrandaki isim, telefon ve klinik veriler maskelenmiştir.")
+			table_display_civilians = apply_kvkk_mask_to_roster_df(display_civilians)
 			civ_roster_seed = st.session_state.get("civ_roster_table_seed", 0)
 			civ_table_event = st.dataframe(
-				display_civilians,
+				table_display_civilians,
 				width="stretch",
 				hide_index=True,
 				on_select="rerun",
@@ -10225,16 +14288,22 @@ def render_civilians() -> None:
 			if civ_map:
 				civ_labels = list(civ_map.keys())
 				cur_civ_lbl = id_to_civ_label.get(active_id)
-				def_civ_idx = civ_labels.index(cur_civ_lbl) if cur_civ_lbl in civ_labels else None
+				if (
+					"civilians_page_active_picker" not in st.session_state
+					or st.session_state.get("civilians_page_picker_synced_id") != active_id
+					or (st.session_state.get("civilians_page_active_picker") is not None and st.session_state.get("civilians_page_active_picker") not in civ_map)
+				):
+					st.session_state["civilians_page_active_picker"] = cur_civ_lbl
+					st.session_state["civilians_page_picker_synced_id"] = active_id
 				picked_civ_lbl = st.selectbox(
 					"Aktif Sivil / Personel (Tüm Pencerelerde Ortak Seçili)",
-				civ_labels,
-					index=def_civ_idx,
+					civ_labels,
 					placeholder="Tablodan tıklayın veya buradan kişi arayın...",
 					key="civilians_page_active_picker",
 				)
 				if picked_civ_lbl and civ_map[picked_civ_lbl] != active_id:
 					set_active_person(civ_map[picked_civ_lbl])
+					st.session_state["civilians_page_picker_synced_id"] = civ_map[picked_civ_lbl]
 					active_id = civ_map[picked_civ_lbl]
 
 	if is_section_visible("civilians_selected_card"):
@@ -10361,7 +14430,8 @@ def render_health_profile_and_plan() -> None:
 						key=f"health_profile_{person_id}_{field}",
 					)
 				else:
-					values[field] = st.text_input(profile_labels[field], key=f"health_profile_{person_id}_{field}")
+					hp_ph = "Örn: 05321234567 veya +90 532..." if field == "guardian_phone" else profile_placeholders.get(field, "")
+					values[field] = st.text_input(profile_labels[field], placeholder=hp_ph, key=f"health_profile_{person_id}_{field}")
 			app_cfg = get_app_settings()
 			def_nurse_val = app_cfg.get("nurse_name", "Okul Revir Sorumlusu")
 			reviewed_by = st.text_input("Bilgileri doğrulayan görevli", value=def_nurse_val)
@@ -10376,6 +14446,8 @@ def render_health_profile_and_plan() -> None:
 					val = values[field].strip() if values.get(field) else ""
 					if field == "blood_group" and val == "Belirtilmedi":
 						val = ""
+					elif field == "guardian_phone" and val:
+						val = normalize_phone(val) or val
 					resolved_fields.append(val or None)
 				with connect_db() as connection:
 					connection.execute(
@@ -10391,10 +14463,12 @@ def render_health_profile_and_plan() -> None:
 						(person_id, *resolved_fields,
 						 datetime.now().isoformat(timespec="minutes"), reviewed_by.strip() or None),
 					)
+					g_name_clean = (values.get("guardian_name") or "").strip() or None
+					g_phone_clean = normalize_phone(values.get("guardian_phone"))
 					connection.execute(
 						"UPDATE students SET guardian_name=?, guardian_phone=?, sex=?, birth_date=? WHERE id=?",
-						(values["guardian_name"].strip() or None, values["guardian_phone"].strip() or None,
-						 {"Kız": "K", "Erkek": "E"}.get(hp_sex), hp_birth.isoformat() if hp_birth else None, person_id),
+						(g_name_clean, g_phone_clean,
+						 normalize_sex(hp_sex) or {"Kız": "K", "Erkek": "E"}.get(hp_sex), hp_birth.isoformat() if hp_birth else None, person_id),
 					)
 					if uploaded is not None:
 						connection.execute(
@@ -10402,7 +14476,8 @@ def render_health_profile_and_plan() -> None:
 							(person_id, datetime.now().isoformat(timespec="minutes"), Path(uploaded.name).name,
 							 uploaded.getvalue(), extracted_text or None, "Alanlar kullanıcı tarafından doğrulandı"),
 						)
-				sync_student_measurements(person_id)
+				sync_student_measurements(person_id, _sync=False)
+				sync_after_person_mutation(person_id)
 				st.success("Doğrulanmış sağlık profili kaydedildi ve tüm sekmelerle senkronize edildi.")
 				st.rerun()
 		if form_files:
@@ -10506,17 +14581,26 @@ def render_student_visit_tab() -> None:
 				st.markdown("###### 🌡️📏 Başvuru Sırasında Yapılan Ölçümler")
 				st.caption("Buraya girilen ateş, saturasyon (SpO2), tansiyon, nabız, şeker, boy-kilo ve baş çevresi değerleri ilgili takip pencerelerine ve persantil hesaplamalarına otomatik kaydedilir.")
 				v_c1, v_c2, v_c3, v_c4 = st.columns(4)
-				v_temp = v_c1.number_input("Ateş (°C)", min_value=30.0, max_value=45.0, value=None, step=0.1, format="%.1f", key=f"v_temp_{stu_id}")
-				v_spo2 = v_c2.number_input("Saturasyon - SpO2 (%)", min_value=30.0, max_value=100.0, value=None, step=1.0, format="%.0f", key=f"v_spo2_{stu_id}")
-				v_pulse = v_c3.number_input("Nabız (/dk)", min_value=20.0, max_value=240.0, value=None, step=1.0, format="%.0f", key=f"v_pulse_{stu_id}")
-				v_glu = v_c4.number_input("Kan Şekeri (mg/dL)", min_value=1.0, max_value=1500.0, value=None, step=1.0, format="%.0f", key=f"v_glu_{stu_id}")
+				with v_c1:
+					v_temp_raw = smart_text_input("Ateş (°C)", "temperature", key=f"v_temp_{stu_id}", placeholder="Örn: 36.6 veya 366", in_form=False)
+				with v_c2:
+					v_spo2_raw = smart_text_input("Saturasyon - SpO2 (%)", "spo2", key=f"v_spo2_{stu_id}", placeholder="Örn: %98 veya 988", in_form=False)
+				with v_c3:
+					v_pulse_raw = smart_text_input("Nabız (/dk)", "pulse", key=f"v_pulse_{stu_id}", placeholder="Örn: 84", in_form=False)
+				with v_c4:
+					v_glu_raw = smart_text_input("Kan Şekeri (mg/dL)", "glucose", key=f"v_glu_{stu_id}", placeholder="Örn: 95", in_form=False)
 
 				v_c5, v_c6, v_c7, v_c8, v_c9 = st.columns(5)
-				v_sys = v_c5.number_input("Büyük Tansiyon", min_value=40.0, max_value=260.0, value=None, step=1.0, format="%.0f", key=f"v_sys_{stu_id}")
-				v_dia = v_c6.number_input("Küçük Tansiyon", min_value=20.0, max_value=180.0, value=None, step=1.0, format="%.0f", key=f"v_dia_{stu_id}")
-				v_height = v_c7.number_input("Boy (cm)", min_value=30.0, max_value=250.0, value=None, step=0.1, format="%.1f", key=f"v_height_{stu_id}")
-				v_weight = v_c8.number_input("Kilo (kg)", min_value=1.0, max_value=300.0, value=None, step=0.1, format="%.1f", key=f"v_weight_{stu_id}")
-				v_head_circ = v_c9.number_input("Baş Çevresi (cm)", min_value=20.0, max_value=100.0, value=None, step=0.1, format="%.1f", key=f"v_head_circ_{stu_id}")
+				with v_c5:
+					v_sys_raw = smart_text_input("Büyük Tansiyon", "bp_sys", key=f"v_sys_{stu_id}", placeholder="Örn: 120 veya 120/80", in_form=False, paired_dia_key=f"v_dia_{stu_id}")
+				with v_c6:
+					v_dia_raw = smart_text_input("Küçük Tansiyon", "bp_dia", key=f"v_dia_{stu_id}", placeholder="Örn: 80 veya 8", in_form=False)
+				with v_c7:
+					v_height_raw = smart_text_input("Boy (cm)", "height", key=f"v_height_{stu_id}", placeholder="Örn: 145, 1,45 veya 1055", in_form=False)
+				with v_c8:
+					v_weight_raw = smart_text_input("Kilo (kg)", "weight", key=f"v_weight_{stu_id}", placeholder="Örn: 24.6, 246 veya 18500", in_form=False, is_adult=False)
+				with v_c9:
+					v_head_circ_raw = smart_text_input("Baş Çevresi (cm)", "head_circ", key=f"v_head_circ_{stu_id}", placeholder="Örn: 48.5 veya 485", in_form=False)
 
 				st.multiselect(
 					"⚡ Hızlı Şikayet / Belirti Şablonu",
@@ -10551,6 +14635,12 @@ def render_student_visit_tab() -> None:
 						with m_c2:
 							st.caption("Bu kayıt onaylandığında seçilen ilacın stok miktarı otomatik olarak güncellenecektir.")
 
+				loc_c1, loc_c2 = st.columns(2)
+				with loc_c1:
+					incident_location = st.selectbox("📍 Olay / Başvuru Yeri", INCIDENT_LOCATIONS, key=f"vis_loc_{stu_id}")
+				with loc_c2:
+					witness_teacher = st.text_input("👩‍🏫 Nöbetçi / İlgili Öğretmen", placeholder="Örn: Nöbetçi Öğretmen / Sınıf Öğretmeni", key=f"vis_wit_{stu_id}")
+
 				bot_c1, bot_c2, bot_c3 = st.columns([1.2, 1.4, 1.4])
 				with bot_c1:
 					guardian_contacted = st.checkbox("Veli arandı / bilgilendirildi", key=f"vis_gc_{stu_id}")
@@ -10560,32 +14650,46 @@ def render_student_visit_tab() -> None:
 					follow_up = st.selectbox("Sonuç / İzlem", ["Revirde dinlendi, derse döndü", "Ailesine teslim edildi", "Hastaneye yönlendirildi", "İzlem devam ediyor", "Raporlu / İzinli"], key=f"vis_fu_{stu_id}")
 
 				if st.button("💾 Revir Başvuru Kaydını Tamamla", type="primary", use_container_width=True, key=f"btn_save_visit_{stu_id}"):
+					v_temp = normalize_temperature(v_temp_raw)
+					v_spo2 = normalize_spo2(v_spo2_raw)
+					v_pulse = normalize_pulse(v_pulse_raw)
+					v_glu = normalize_glucose(v_glu_raw)
+					v_sys, v_dia = normalize_bp(v_sys_raw, v_dia_raw)
+					v_height = normalize_height(v_height_raw)
+					v_weight = normalize_weight(v_weight_raw, is_adult=False)
+					v_head_circ = normalize_head_circ(v_head_circ_raw)
+
+					invalid_stu_v = []
+					if str(v_temp_raw).strip() and v_temp is None: invalid_stu_v.append("Ateş")
+					if str(v_spo2_raw).strip() and v_spo2 is None: invalid_stu_v.append("SpO2")
+					if str(v_pulse_raw).strip() and v_pulse is None: invalid_stu_v.append("Nabız")
+					if str(v_glu_raw).strip() and v_glu is None: invalid_stu_v.append("Kan Şekeri")
+					if str(v_height_raw).strip() and v_height is None: invalid_stu_v.append("Boy")
+					if str(v_weight_raw).strip() and v_weight is None: invalid_stu_v.append("Kilo")
+					if str(v_head_circ_raw).strip() and v_head_circ is None: invalid_stu_v.append("Baş Çevresi")
+					if invalid_stu_v:
+						st.error("Geçersiz değer algılandı: " + ", ".join(invalid_stu_v))
+						return
 					# Validate BP pairs
 					if (v_sys is None) != (v_dia is None):
 						st.error("Tansiyon kaydı için büyük ve küçük tansiyonu birlikte girmelisiniz.")
 						return
 
-					# Validate Height/Weight pairs if entered
-					if (v_height is None) != (v_weight is None):
-						st.error("Boy ve kilo değerleri persantil hesaplaması için birlikte girilmelidir.")
-						return
-
-					# Automatically record linked measurements and vitals if any were entered
+					# Automatically record linked measurements and vitals if any were entered (single height/weight/head_circ supported)
 					auto_notes = []
 					has_vital_inputs = any(val is not None for val in [v_temp, v_spo2, v_pulse, v_glu, v_sys, v_dia])
 					if has_vital_inputs:
 						m_at = datetime.combine(visit_date, visit_time).isoformat(timespec="minutes")
-						with connect_db() as connection:
-							connection.execute(
-								"""INSERT INTO vital_readings(student_id, measured_at, systolic, diastolic, pulse,
-								   temperature, spo2, glucose, glucose_context, notes)
-								   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-								(student["id"], m_at, v_sys, v_dia, v_pulse, v_temp, v_spo2, v_glu,
-								 "Revir Başvurusu", f"Revir viziti sırasında kaydedildi. Şikayet: {symptoms.strip()}"),
-							)
-						auto_notes.append("[Vital ölçümleri kaydedildi]")
+						v_summary = record_linked_vital(
+							student["id"], m_at, v_sys, v_dia, v_pulse, v_temp, v_glu,
+							glucose_context="Revir Başvurusu",
+							notes=f"Revir viziti sırasında kaydedildi. Şikayet: {symptoms.strip()}",
+							spo2=v_spo2,
+						)
+						if v_summary:
+							auto_notes.append(f"[Vital: {v_summary}]")
 
-					has_hw_inputs = (v_height is not None and v_weight is not None and v_height > 0 and v_weight > 0) or (v_head_circ is not None and v_head_circ > 0)
+					has_hw_inputs = any(x is not None and float(x) > 0 for x in [v_height, v_weight, v_head_circ])
 					if has_hw_inputs:
 						meas_summary = record_linked_measurement(
 							student["id"], visit_date, v_height, v_weight,
@@ -10594,19 +14698,24 @@ def render_student_visit_tab() -> None:
 						if meas_summary:
 							auto_notes.append(f"[Antropometri: {meas_summary}]")
 					final_obs = " · ".join(filter(None, [observation.strip(), *auto_notes]))
+					fup_status_val = _infer_visit_follow_up_status(referral, follow_up)
 					with connect_db() as connection:
 						connection.execute(
 							"""INSERT INTO visits(student_id, visit_date, visit_time, complaint, symptoms, observation,
-							   action, guardian_contacted, referral, follow_up) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+							   action, guardian_contacted, referral, follow_up,
+							   follow_up_status, incident_location, witness_teacher)
+							   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
 							(student["id"], visit_date.isoformat(), visit_time.strftime("%H:%M"), complaint, symptoms.strip(),
-							 final_obs, action.strip(), int(guardian_contacted), referral.strip(), follow_up.strip()),
+							 final_obs, action.strip(), int(guardian_contacted), referral.strip(), follow_up.strip(),
+							 fup_status_val, incident_location, witness_teacher.strip() or None),
 						)
-					save_person_data_file(student["id"])
+					sync_after_person_mutation(student["id"])
 
 					# Clear input fields for next entry
 					for k_clear in [
 						s_txt_key, s_tpl_key, s_prev_key, a_txt_key, a_tpl_key, a_prev_key,
 						f"vis_obs_{stu_id}", f"vis_ref_{stu_id}", f"vis_fu_{stu_id}",
+						f"vis_loc_{stu_id}", f"vis_wit_{stu_id}", f"stu_v_doc_sel_{stu_id}",
 						f"v_temp_{stu_id}", f"v_spo2_{stu_id}", f"v_pulse_{stu_id}", f"v_glu_{stu_id}",
 						f"v_sys_{stu_id}", f"v_dia_{stu_id}", f"v_height_{stu_id}", f"v_weight_{stu_id}", f"v_head_circ_{stu_id}"
 					]:
@@ -10622,16 +14731,30 @@ def render_student_visit_tab() -> None:
 			with connect_db() as connection:
 				history = pd.read_sql_query(
 					"""SELECT id, visit_date AS Tarih, visit_time AS Saat, complaint AS Başvuru,
+							  incident_location AS Olay_Yeri, witness_teacher AS İlgili_Öğretmen,
 							  symptoms AS Belirtiler, observation AS Gözlem_ve_Ölçümler, action AS İşlem, referral AS Yönlendirme,
-							  guardian_contacted AS Veli_Arandı, follow_up AS İzlem
+							  guardian_contacted AS Veli_Arandı, follow_up AS İzlem,
+							  COALESCE(follow_up_status, 'Açık') AS İzlem_Durumu
 					   FROM visits WHERE student_id=? ORDER BY visit_date DESC, visit_time DESC, id DESC LIMIT 15""",
 					connection, params=(student["id"],),
 				)
 			if history.empty:
 				st.caption("Bu öğrenci için henüz revir kaydı bulunmuyor.")
 			else:
-				display_history = history.drop(columns=["id", "follow_up"], errors="ignore")
+				display_history = history.drop(columns=["id"], errors="ignore")
 				st.dataframe(display_history, width="stretch", hide_index=True)
+
+				v_doc_opts = {
+					f"{r['Tarih']} {r['Saat']} — {r['Başvuru']} (#{r['id']})": int(r["id"])
+					for _, r in history.iterrows()
+				}
+				sel_doc_lbl = st.selectbox(
+					"📄 Resmi Evrak / WhatsApp Bildirimi İçin Kayıt Seçin",
+					list(v_doc_opts.keys()),
+					key=f"stu_v_doc_sel_{stu_id}",
+				)
+				sel_doc_vid = v_doc_opts[sel_doc_lbl]
+				_render_visit_doc_actions_bar(stu_id, sel_doc_vid, key_prefix=f"stu_vdoc_{stu_id}", person_name=str(student["full_name"] or ""))
 
 				with st.expander("🛠️ Seçili Kaydı Düzenle veya Sil"):
 					for _, row in history.iterrows():
@@ -10711,15 +14834,23 @@ def render_civilian_visit_tab(show_new_button: bool = True) -> None:
 			st.markdown("###### 🌡️📏 Başvuru Sırasında Yapılan Ölçümler")
 			st.caption("Buraya girilen ateş, saturasyon (SpO2), tansiyon, nabız, şeker ve boy-kilo değerleri ilgili takip pencerelerine otomatik kaydedilir.")
 			cv_c1, cv_c2, cv_c3, cv_c4 = st.columns(4)
-			cv_temp = cv_c1.number_input("Ateş (°C)", min_value=30.0, max_value=45.0, value=None, step=0.1, format="%.1f", key=f"cv_temp_{civ_id}")
-			cv_spo2 = cv_c2.number_input("Saturasyon - SpO2 (%)", min_value=30.0, max_value=100.0, value=None, step=1.0, format="%.0f", key=f"cv_spo2_{civ_id}")
-			cv_pulse = cv_c3.number_input("Nabız (/dk)", min_value=20.0, max_value=240.0, value=None, step=1.0, format="%.0f", key=f"cv_pulse_{civ_id}")
-			cv_glu = cv_c4.number_input("Kan Şekeri (mg/dL)", min_value=1.0, max_value=1500.0, value=None, step=1.0, format="%.0f", key=f"cv_glu_{civ_id}")
+			with cv_c1:
+				cv_temp_raw = smart_text_input("Ateş (°C)", "temperature", key=f"cv_temp_{civ_id}", placeholder="Örn: 36.6 veya 366", in_form=False)
+			with cv_c2:
+				cv_spo2_raw = smart_text_input("Saturasyon - SpO2 (%)", "spo2", key=f"cv_spo2_{civ_id}", placeholder="Örn: %98 veya 988", in_form=False)
+			with cv_c3:
+				cv_pulse_raw = smart_text_input("Nabız (/dk)", "pulse", key=f"cv_pulse_{civ_id}", placeholder="Örn: 76", in_form=False)
+			with cv_c4:
+				cv_glu_raw = smart_text_input("Kan Şekeri (mg/dL)", "glucose", key=f"cv_glu_{civ_id}", placeholder="Örn: 95", in_form=False)
 			cm_c1, cm_c2, cm_c3, cm_c4 = st.columns(4)
-			cv_sys = cm_c1.number_input("Büyük Tansiyon", min_value=40.0, max_value=260.0, value=None, step=1.0, format="%.0f", key=f"cv_sys_{civ_id}")
-			cv_dia = cm_c2.number_input("Küçük Tansiyon", min_value=20.0, max_value=180.0, value=None, step=1.0, format="%.0f", key=f"cv_dia_{civ_id}")
-			cv_height = cm_c3.number_input("Boy (cm)", min_value=30.0, max_value=250.0, value=None, step=0.1, format="%.1f", key=f"cv_height_{civ_id}")
-			cv_weight = cm_c4.number_input("Kilo (kg)", min_value=1.0, max_value=300.0, value=None, step=0.1, format="%.1f", key=f"cv_weight_{civ_id}")
+			with cm_c1:
+				cv_sys_raw = smart_text_input("Büyük Tansiyon", "bp_sys", key=f"cv_sys_{civ_id}", placeholder="Örn: 120 veya 120/80", in_form=False, paired_dia_key=f"cv_dia_{civ_id}")
+			with cm_c2:
+				cv_dia_raw = smart_text_input("Küçük Tansiyon", "bp_dia", key=f"cv_dia_{civ_id}", placeholder="Örn: 80 veya 8", in_form=False)
+			with cm_c3:
+				cv_height_raw = smart_text_input("Boy (cm)", "height", key=f"cv_height_{civ_id}", placeholder="Örn: 175 veya 1,75", in_form=False)
+			with cm_c4:
+				cv_weight_raw = smart_text_input("Kilo (kg) [Yetişkin]", "weight", key=f"cv_weight_{civ_id}", placeholder="Örn: 75.5, 755 veya 75500", in_form=False, is_adult=True)
 
 			st.markdown("---")
 			st.markdown("##### 🤒 Şikayet / Beyan *")
@@ -10772,10 +14903,25 @@ def render_civilian_visit_tab(show_new_button: bool = True) -> None:
 			civ_save = st.button("💾 Sivil Revir Kaydını ve Ölçümleri Kaydet", type="primary", use_container_width=True, key=f"btn_save_civ_visit_{civ_id}")
 
 		if civ_save:
-			if (cv_sys is None) != (cv_dia is None):
+			cv_temp = normalize_temperature(cv_temp_raw)
+			cv_spo2 = normalize_spo2(cv_spo2_raw)
+			cv_pulse = normalize_pulse(cv_pulse_raw)
+			cv_glu = normalize_glucose(cv_glu_raw)
+			cv_sys, cv_dia = normalize_bp(cv_sys_raw, cv_dia_raw)
+			cv_height = normalize_height(cv_height_raw)
+			cv_weight = normalize_weight(cv_weight_raw, is_adult=True)
+
+			invalid_civ_v = []
+			if str(cv_temp_raw).strip() and cv_temp is None: invalid_civ_v.append("Ateş")
+			if str(cv_spo2_raw).strip() and cv_spo2 is None: invalid_civ_v.append("SpO2")
+			if str(cv_pulse_raw).strip() and cv_pulse is None: invalid_civ_v.append("Nabız")
+			if str(cv_glu_raw).strip() and cv_glu is None: invalid_civ_v.append("Kan Şekeri")
+			if str(cv_height_raw).strip() and cv_height is None: invalid_civ_v.append("Boy")
+			if str(cv_weight_raw).strip() and cv_weight is None: invalid_civ_v.append("Kilo")
+			if invalid_civ_v:
+				st.error("Geçersiz değer algılandı: " + ", ".join(invalid_civ_v))
+			elif (cv_sys is None) != (cv_dia is None):
 				st.error("Tansiyon kaydı için büyük ve küçük tansiyonu birlikte girin.")
-			elif (cv_height is None) != (cv_weight is None):
-				st.error("Boy ve kilo ölçümünü birlikte girin.")
 			else:
 				c_auto_notes = []
 				if any(x is not None for x in (cv_temp, cv_spo2, cv_pulse, cv_sys, cv_dia, cv_glu)):
@@ -10786,21 +14932,23 @@ def render_civilian_visit_tab(show_new_button: bool = True) -> None:
 					)
 					if c_vital_sum:
 						c_auto_notes.append(f"[Vital: {c_vital_sum}]")
-				if cv_height is not None and cv_weight is not None and cv_height > 0 and cv_weight > 0:
+				if any(x is not None and float(x) > 0 for x in [cv_height, cv_weight]):
 					c_meas_sum = record_linked_measurement(
 						civ_person["id"], civ_visit_date, cv_height, cv_weight, civ_person["birth_date"], civ_person["sex"]
 					)
 					if c_meas_sum:
 						c_auto_notes.append(f"[Antropometri: {c_meas_sum}]")
 				c_final_obs = " · ".join(filter(None, [civ_observation.strip(), *c_auto_notes]))
+				civ_fup_status = _infer_visit_follow_up_status(civ_referral, civ_follow_up)
 				with connect_db() as connection:
 					connection.execute(
 						"""INSERT INTO visits(student_id, visit_date, visit_time, complaint, symptoms, observation,
-						   action, guardian_contacted, referral, follow_up) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+						   action, guardian_contacted, referral, follow_up, follow_up_status)
+						   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
 						(civ_person["id"], civ_visit_date.isoformat(), civ_visit_time.strftime("%H:%M"), civ_complaint, civ_symptoms.strip(),
-						 c_final_obs, civ_action.strip(), int(civ_guardian_contacted), civ_referral.strip(), civ_follow_up.strip()),
+						 c_final_obs, civ_action.strip(), int(civ_guardian_contacted), civ_referral.strip(), civ_follow_up.strip(), civ_fup_status),
 					)
-				save_person_data_file(civ_person["id"])
+				sync_after_person_mutation(civ_person["id"])
 
 				# Clear input fields for next entry
 				for k_clear in [
@@ -11037,7 +15185,7 @@ def open_add_medication_dialog(preselected_student_id: int | None = None, edit_m
 	med = None
 	if is_edit and active_edit_id:
 		with connect_db() as conn:
-			med = conn.execute(
+			med_row = conn.execute(
 				"""SELECT m.*, s.full_name, s.student_no, c.name as class_name, hp.allergies, hp.chronic_conditions, hp.emergency_notes
 				   FROM student_medications m
 				   JOIN students s ON s.id = m.student_id
@@ -11046,6 +15194,7 @@ def open_add_medication_dialog(preselected_student_id: int | None = None, edit_m
 				   WHERE m.id = ?""",
 				(active_edit_id,)
 			).fetchone()
+			med = dict(med_row) if med_row else None
 
 	# Key prefix for widgets to prevent state leaks
 	k = f"dlg_m_{active_edit_id}_" if is_edit else "dlg_new_"
@@ -11172,9 +15321,9 @@ def open_add_medication_dialog(preselected_student_id: int | None = None, edit_m
 
 			dosage_pattern = st.selectbox("🔁 Doz Şablonu", pat_opts, index=p_idx, key=f"{k}pattern")
 			if "Diğer" in dosage_pattern:
-				custom_pat = st.text_input("Özel Doz Şablonu", value=custom_pat_init, placeholder="Örn: 2 haftada bir", key=f"{k}pat_custom")
+				custom_pat = smart_text_input("Özel Doz Şablonu", "dosage_pattern", key=f"{k}pat_custom", value=custom_pat_init, placeholder="Örn: 2*1, 3X2 veya 2 haftada bir", in_form=False)
 				if custom_pat.strip():
-					dosage_pattern = custom_pat.strip()
+					dosage_pattern = normalize_dosage_pattern(custom_pat) or custom_pat.strip()
 
 	with r2_c2:
 		cur_amt = float(med["dose_amount"] or 1.0) if is_edit and med else 1.0
@@ -11266,7 +15415,16 @@ def open_add_medication_dialog(preselected_student_id: int | None = None, edit_m
 
 			formatted_times = [t.strftime("%H:%M") for t in sorted(chosen_times)]
 			scheduled_times = ", ".join(formatted_times)
-			st.caption(f"📌 Kaydedilecek Doz Saatleri: **{scheduled_times}** ({len(formatted_times)} Doz)")
+			fast_times_raw = smart_text_input(
+				"⚡ Hızlı Hatırlatma Saatleri (İsteğe Bağlı)",
+				"schedule_times",
+				key=f"{k}fast_times",
+				placeholder="Örn: 930, 1330 veya 0930 1400",
+				in_form=False,
+			)
+			if fast_times_raw.strip():
+				scheduled_times = normalize_schedule_times(fast_times_raw)
+			st.caption(f"📌 Kaydedilecek Doz Saatleri: **{scheduled_times}**")
 
 		meal_rel = "Tok karnına"
 		with r3_c2:
@@ -11434,8 +15592,31 @@ def open_add_medication_dialog(preselected_student_id: int | None = None, edit_m
 
 	st.markdown("---")
 
+	consent_preview_override = {
+		"medication_name": med_name.strip(),
+		"med_type": dose_unit,
+		"route": med_route,
+		"dosage_pattern": dosage_pattern,
+		"dose_amount": float(dose_amt),
+		"dose_unit": dose_unit,
+		"stock_unit": stock_unit,
+		"meal_relation": meal_rel,
+		"scheduled_times": scheduled_times.strip() if not is_prn else "Gerektiğinde",
+		"total_volume": float(total_vol) if total_vol is not None else None,
+		"start_date": start_d.isoformat(),
+		"end_date": calc_end.isoformat() if (calc_end and not is_prn) else None,
+		"storage_condition": storage_cond,
+		"expiry_date": exp_d,
+		"special_notes": spec_notes.strip(),
+	}
+	consent_docx_bytes = build_medication_consent_docx(
+		med_id=active_edit_id if is_edit else None,
+		student_id=selected_stu_id,
+		med_override=consent_preview_override,
+	)
+
 	if is_edit and active_edit_id:
-		col_btn_save, col_btn_del = st.columns([2.5, 1])
+		col_btn_save, col_btn_consent, col_btn_del = st.columns([1.8, 1.5, 1.0])
 		with col_btn_save:
 			if st.button("💾 Değişiklikleri Güncelle", type="primary", use_container_width=True, key=f"{k}save_btn"):
 				if not med_name.strip():
@@ -11472,6 +15653,16 @@ def open_add_medication_dialog(preselected_student_id: int | None = None, edit_m
 				st.success(f"'{med_name.strip()}' ilacı ve tedavi planı başarıyla güncellendi!")
 				st.rerun()
 
+		with col_btn_consent:
+			st.download_button(
+				"📝 Veli İlaç İzin & Teslim Tutanağı (.docx)",
+				data=consent_docx_bytes,
+				file_name=f"Veli_Ilac_Izin_Tutanagi_{active_edit_id}.docx",
+				mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+				use_container_width=True,
+				key=f"{k}consent_docx_btn",
+			)
+
 		with col_btn_del:
 			if st.button("🗑️ Tedavi Planını Sil", type="secondary", use_container_width=True, key=f"{k}del_btn"):
 				delete_student_medication(active_edit_id)
@@ -11479,48 +15670,802 @@ def open_add_medication_dialog(preselected_student_id: int | None = None, edit_m
 				st.warning("İlaç ve tedavi planı silindi.")
 				st.rerun()
 	else:
-		if st.button("💾 İlacı ve Tedavi Planını Kaydet", type="primary", use_container_width=True, key=f"{k}save_btn"):
-			if not selected_stu_id:
-				st.error("Lütfen bir öğrenci seçin.")
-				return
-			if not med_name.strip():
-				st.error("Lütfen ilaç adını girin.")
-				return
-			if not is_prn and not scheduled_times.strip():
-				st.error("Lütfen en az bir uygulama saati girin (Örn: 09:30).")
-				return
+		col_new_save, col_new_consent = st.columns([2.2, 1.5])
+		with col_new_save:
+			if st.button("💾 İlacı ve Tedavi Planını Kaydet", type="primary", use_container_width=True, key=f"{k}save_btn"):
+				if not selected_stu_id:
+					st.error("Lütfen bir öğrenci seçin.")
+					return
+				if not med_name.strip():
+					st.error("Lütfen ilaç adını girin.")
+					return
+				if not is_prn and not scheduled_times.strip():
+					st.error("Lütfen en az bir uygulama saati girin (Örn: 09:30).")
+					return
 
-			add_student_medication(
-				student_id=selected_stu_id,
-				medication_name=med_name.strip(),
-				med_type=dose_unit,
-				route=med_route,
-				dosage_pattern=dosage_pattern,
-				dose_amount=float(dose_amt),
-				dose_unit=dose_unit,
-				stock_unit=stock_unit,
-				meal_relation=meal_rel,
-				scheduled_times=scheduled_times.strip() if not is_prn else "Gerektiğinde",
-				total_volume=float(total_vol) if total_vol is not None else None,
-				duration_days=int(duration_d) if not is_prn else 0,
-				start_date=start_d.isoformat(),
-				end_date=calc_end.isoformat() if (calc_end and not is_prn) else None,
-				active_days=active_days,
-				storage_condition=storage_cond,
-				guardian_consent=guardian_consent,
-				expiry_date=exp_d,
-				special_notes=spec_notes.strip(),
-				status="Aktif"
+				add_student_medication(
+					student_id=selected_stu_id,
+					medication_name=med_name.strip(),
+					med_type=dose_unit,
+					route=med_route,
+					dosage_pattern=dosage_pattern,
+					dose_amount=float(dose_amt),
+					dose_unit=dose_unit,
+					stock_unit=stock_unit,
+					meal_relation=meal_rel,
+					scheduled_times=scheduled_times.strip() if not is_prn else "Gerektiğinde",
+					total_volume=float(total_vol) if total_vol is not None else None,
+					duration_days=int(duration_d) if not is_prn else 0,
+					start_date=start_d.isoformat(),
+					end_date=calc_end.isoformat() if (calc_end and not is_prn) else None,
+					active_days=active_days,
+					storage_condition=storage_cond,
+					guardian_consent=guardian_consent,
+					expiry_date=exp_d,
+					special_notes=spec_notes.strip(),
+					status="Aktif"
+				)
+				st.session_state["med_add_time_slots"] = [time(9, 30)]
+				st.session_state.pop(f"{k}fast_times", None)
+				st.session_state["med_dialog_target_id"] = None
+				st.success(f"'{med_name.strip()}' ilacı başarıyla kaydedildi ve takip takvimine eklendi!")
+				st.rerun()
+		with col_new_consent:
+			st.download_button(
+				"📝 Veli İlaç İzin & Teslim Tutanağı (.docx)",
+				data=consent_docx_bytes,
+				file_name=f"Veli_Ilac_Izin_Tutanagi_{selected_stu_id or 'sablon'}.docx",
+				mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+				use_container_width=True,
+				key=f"{k}consent_docx_btn",
 			)
-			st.session_state["med_add_time_slots"] = [time(9, 30)]
-			st.session_state["med_dialog_target_id"] = None
-			st.success(f"'{med_name.strip()}' ilacı başarıyla kaydedildi ve takip takvimine eklendi!")
-			st.rerun()
 
 
 def open_edit_medication_dialog(medication_id: int) -> None:
 	st.session_state["med_dialog_target_id"] = medication_id
 	open_add_medication_dialog(edit_medication_id=medication_id)
+
+
+def get_infirmary_inventory() -> list[dict]:
+	with connect_db() as connection:
+		rows = connection.execute(
+			"""SELECT id, item_name, category, quantity, unit, min_threshold,
+					  expiry_date, storage_location, notes, updated_at
+			   FROM infirmary_inventory
+			   ORDER BY COALESCE(category, ''), item_name, id"""
+		).fetchall()
+	return [dict(r) for r in rows]
+
+
+def load_default_infirmary_inventory() -> int:
+	"""Varsayılan 15 kalem okul reviri sarf malzemesini (eksik olanları) veritabanına yükler."""
+	now_iso = datetime.now().isoformat(timespec="minutes")
+	inserted = 0
+	with connect_db() as connection:
+		existing_names = {
+			str(r["item_name"]).strip().lower()
+			for r in connection.execute("SELECT item_name FROM infirmary_inventory").fetchall()
+			if r["item_name"]
+		}
+		for item in DEFAULT_INFIRMARY_SUPPLY_ITEMS:
+			nm = item["item_name"]
+			if nm.strip().lower() in existing_names:
+				continue
+			connection.execute(
+				"""INSERT INTO infirmary_inventory(
+					item_name, category, quantity, unit, min_threshold,
+					expiry_date, storage_location, notes, updated_at
+				) VALUES (?, ?, ?, ?, ?, NULL, ?, NULL, ?)""",
+				(
+					nm,
+					item["category"],
+					float(item["quantity"]),
+					item["unit"],
+					float(item["min_threshold"]),
+					item.get("storage_location"),
+					now_iso,
+				),
+			)
+			existing_names.add(nm.strip().lower())
+			inserted += 1
+	return inserted
+
+
+def add_infirmary_inventory_item(
+	item_name: str,
+	category: str | None = None,
+	quantity: float = 0.0,
+	unit: str | None = None,
+	min_threshold: float = 5.0,
+	expiry_date: str | None = None,
+	storage_location: str | None = None,
+	notes: str | None = None,
+) -> int:
+	clean_nm = clean_text(item_name)
+	if not clean_nm:
+		raise ValueError("Malzeme adı boş olamaz.")
+	exp_norm = parse_birth_date(expiry_date) if clean_text(expiry_date) else None
+	now_iso = datetime.now().isoformat(timespec="minutes")
+	with connect_db() as connection:
+		cur = connection.execute(
+			"""INSERT INTO infirmary_inventory(
+				item_name, category, quantity, unit, min_threshold,
+				expiry_date, storage_location, notes, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+			(
+				clean_nm,
+				clean_text(category) or "Diğer",
+				max(0.0, float(quantity or 0.0)),
+				clean_text(unit) or "Adet",
+				max(0.0, float(min_threshold or 0.0)),
+				exp_norm,
+				clean_text(storage_location) or None,
+				clean_text(notes) or None,
+				now_iso,
+			),
+		)
+		return int(cur.lastrowid)
+
+
+def delete_infirmary_inventory_item(item_id: int) -> None:
+	with connect_db() as connection:
+		connection.execute("DELETE FROM infirmary_inventory WHERE id=?", (int(item_id),))
+
+
+def save_infirmary_inventory_edits(edited_df: pd.DataFrame) -> int:
+	"""st.data_editor üzerinden düzenlenen veya yeni eklenen revir sarf malzemelerini kaydeder."""
+	if edited_df is None or edited_df.empty:
+		return 0
+	now_iso = datetime.now().isoformat(timespec="minutes")
+	saved = 0
+	with connect_db() as connection:
+		for _, row in edited_df.iterrows():
+			raw_id = row.get("id")
+			nm = clean_text(row.get("Malzeme Adı"))
+			if not nm:
+				continue
+			cat = clean_text(row.get("Kategori")) or "Diğer"
+			qty_raw = numeric_value(row.get("Miktar"))
+			qty = max(0.0, float(qty_raw)) if qty_raw is not None else 0.0
+			unit_s = clean_text(row.get("Birim")) or "Adet"
+			thr_raw = numeric_value(row.get("Kritik Eşik"))
+			thr = max(0.0, float(thr_raw)) if thr_raw is not None else 5.0
+			exp_raw = clean_text(row.get("SKT (YYYY-AA-GG)"))
+			exp_norm = (parse_birth_date(exp_raw) or exp_raw[:10]) if exp_raw else None
+			loc = clean_text(row.get("Saklama Yeri")) or None
+			notes = clean_text(row.get("Notlar")) or None
+
+			has_valid_id = False
+			if raw_id is not None and not pd.isna(raw_id):
+				try:
+					iid = int(float(raw_id))
+					has_valid_id = iid > 0
+				except (TypeError, ValueError):
+					has_valid_id = False
+
+			if has_valid_id:
+				connection.execute(
+					"""UPDATE infirmary_inventory
+					   SET item_name=?, category=?, quantity=?, unit=?, min_threshold=?,
+						   expiry_date=?, storage_location=?, notes=?, updated_at=?
+					   WHERE id=?""",
+					(nm, cat, qty, unit_s, thr, exp_norm, loc, notes, now_iso, iid),
+				)
+			else:
+				connection.execute(
+					"""INSERT INTO infirmary_inventory(
+						item_name, category, quantity, unit, min_threshold,
+						expiry_date, storage_location, notes, updated_at
+					) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+					(nm, cat, qty, unit_s, thr, exp_norm, loc, notes, now_iso),
+				)
+			saved += 1
+	return saved
+
+
+def get_infirmary_inventory_alerts(days_horizon: int = 30, ref_date: date | None = None) -> dict[str, list[dict]]:
+	base_d = ref_date or date.today()
+	today_iso = base_d.isoformat()
+	soon_iso = (base_d + timedelta(days=max(1, int(days_horizon)))).isoformat()
+	items = get_infirmary_inventory()
+	critical_stock: list[dict] = []
+	expired: list[dict] = []
+	expiring_soon: list[dict] = []
+	for it in items:
+		qty = float(it.get("quantity") or 0.0)
+		thr = float(it.get("min_threshold") or 0.0)
+		if qty <= thr:
+			critical_stock.append(it)
+		exp_s = clean_text(it.get("expiry_date"))
+		if exp_s:
+			exp_day = (parse_birth_date(exp_s) or exp_s)[:10]
+			if exp_day < today_iso:
+				expired.append(it)
+			elif exp_day <= soon_iso:
+				expiring_soon.append(it)
+	return {"critical_stock": critical_stock, "expired": expired, "expiring_soon": expiring_soon}
+
+
+def _inventory_row_status_label(item: dict, ref_date: date | None = None) -> tuple[str, bool]:
+	base_d = ref_date or date.today()
+	today_iso = base_d.isoformat()
+	soon_iso = (base_d + timedelta(days=30)).isoformat()
+	flags = []
+	is_alert = False
+	qty = float(item.get("quantity") or 0.0)
+	thr = float(item.get("min_threshold") or 0.0)
+	if qty <= 0:
+		flags.append("TÜKENDİ")
+		is_alert = True
+	elif qty <= thr:
+		flags.append("Kritik Stok")
+		is_alert = True
+	exp_s = clean_text(item.get("expiry_date"))
+	if exp_s:
+		exp_day = (parse_birth_date(exp_s) or exp_s)[:10]
+		if exp_day < today_iso:
+			flags.append("SKT GEÇMİŞ")
+			is_alert = True
+		elif exp_day <= soon_iso:
+			flags.append("SKT Yaklaşıyor (≤30 gün)")
+			is_alert = True
+	return (", ".join(flags) if flags else "Normal"), is_alert
+
+
+def build_infirmary_inventory_docx() -> bytes:
+	"""Revir Sarf Malzeme İstem / Depo Sayım Tutanağı (.docx) oluşturur."""
+	if not HAS_DOCX or docx is None:
+		raise RuntimeError("Word belge oluşturucu (python-docx) yüklü değil.")
+	items = get_infirmary_inventory()
+	alerts = get_infirmary_inventory_alerts(days_horizon=30)
+	today_d = date.today()
+
+	doc = docx.Document()
+	for sec in doc.sections:
+		sec.top_margin = Cm(1.3)
+		sec.bottom_margin = Cm(1.3)
+		sec.left_margin = Cm(1.3)
+		sec.right_margin = Cm(1.3)
+
+	antet_info = _add_official_docx_antet(
+		doc,
+		"REVİR SARF MALZEME İSTEM VE DEPO SAYIM TUTANAĞI",
+		f"Sayım / Kontrol Tarihi: {today_d.strftime('%d.%m.%Y')}  ·  Toplam Kalem: {len(items)}",
+	)
+
+	summary_rows = [
+		("Toplam Kayıtlı Malzeme Çeşidi", f"{len(items)} kalem"),
+		("Kritik / Biten Stok Sayısı", f"{len(alerts['critical_stock'])} kalem (miktar ≤ eşik)"),
+		("Miadı (SKT) Dolmuş Malzeme", f"{len(alerts['expired'])} kalem"),
+		("30 Gün İçinde Miadı Dolacak", f"{len(alerts['expiring_soon'])} kalem"),
+	]
+	_add_kv_docx_section_table(doc, "1. DEPO SAYIM VE MİAD DURUM ÖZETİ", summary_rows)
+
+	p_h = doc.add_paragraph()
+	p_h.paragraph_format.space_before = Pt(8)
+	p_h.paragraph_format.space_after = Pt(3)
+	r_h = p_h.add_run("2. REVİR İLK YARDIM VE SARF MALZEME ENVANTER LİSTESİ")
+	r_h.font.name = "Calibri"
+	r_h.font.size = Pt(10.5)
+	r_h.bold = True
+	r_h.font.color.rgb = RGBColor(15, 118, 110)
+
+	headers = ["No", "Malzeme Adı", "Kategori", "Mevcut", "Eşik", "Birim", "SKT / Miad", "Saklama Yeri", "Durum"]
+	tbl = doc.add_table(rows=max(1, len(items)) + 1, cols=len(headers))
+	tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+	tbl.autofit = False
+	set_table_borders(tbl, color="CBD5E1", sz="4", val="single")
+	widths = [Cm(0.8), Cm(4.2), Cm(2.7), Cm(1.4), Cm(1.3), Cm(1.7), Cm(2.1), Cm(2.4), Cm(2.4)]
+
+	for c_idx, h_txt in enumerate(headers):
+		cell = tbl.cell(0, c_idx)
+		cell.width = widths[c_idx]
+		set_cell_background(cell, "0F766E")
+		set_cell_margins(cell, top=50, bottom=50, left=50, right=50)
+		cp = cell.paragraphs[0]
+		cp.paragraph_format.space_after = Pt(0)
+		rr = cp.add_run(h_txt)
+		rr.font.name = "Calibri"
+		rr.font.size = Pt(8.5)
+		rr.bold = True
+		rr.font.color.rgb = RGBColor(255, 255, 255)
+
+	urgent_items: list[dict] = []
+	if items:
+		for r_idx, it in enumerate(items, start=1):
+			status_lbl, is_alert = _inventory_row_status_label(it, ref_date=today_d)
+			if is_alert:
+				urgent_items.append({**it, "_status_lbl": status_lbl})
+			exp_fmt = _format_iso_tr(it.get("expiry_date")) if clean_text(it.get("expiry_date")) else "Belirtilmedi"
+			row_vals = [
+				str(r_idx),
+				clean_text(it.get("item_name")),
+				clean_text(it.get("category")) or "—",
+				f"{float(it.get('quantity') or 0):g}",
+				f"{float(it.get('min_threshold') or 0):g}",
+				clean_text(it.get("unit")) or "—",
+				exp_fmt,
+				clean_text(it.get("storage_location")) or "—",
+				status_lbl,
+			]
+			bg_hex = "FEE2E2" if is_alert else ("FFFFFF" if r_idx % 2 == 1 else "ECFDF5")
+			for c_idx, v_txt in enumerate(row_vals):
+				cell = tbl.cell(r_idx, c_idx)
+				cell.width = widths[c_idx]
+				set_cell_background(cell, bg_hex if c_idx == 8 or is_alert else ("FFFFFF" if r_idx % 2 == 1 else "F8FAFC"))
+				set_cell_margins(cell, top=40, bottom=40, left=45, right=45)
+				cp = cell.paragraphs[0]
+				cp.paragraph_format.space_after = Pt(0)
+				cr = cp.add_run(v_txt)
+				cr.font.name = "Calibri"
+				cr.font.size = Pt(8.2)
+				cr.font.color.rgb = RGBColor(153, 27, 27) if (is_alert and c_idx == 8) else RGBColor(15, 23, 42)
+	else:
+		m_cell = tbl.cell(1, 0).merge(tbl.cell(1, len(headers) - 1))
+		set_cell_background(m_cell, "F8FAFC")
+		set_cell_margins(m_cell, top=70, bottom=70, left=70, right=70)
+		mp = m_cell.paragraphs[0]
+		mp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+		mr = mp.add_run("Henüz envantere kayıtlı sarf malzeme bulunmamaktadır.")
+		mr.font.name = "Calibri"
+		mr.font.size = Pt(9)
+
+	if urgent_items:
+		u_rows = [
+			(
+				f"{u['item_name']} ({u.get('unit') or 'Adet'})",
+				f"Durum: {u['_status_lbl']} · Mevcut: {float(u.get('quantity') or 0):g} (Eşik: {float(u.get('min_threshold') or 0):g}) · SKT: {_format_iso_tr(u.get('expiry_date')) if clean_text(u.get('expiry_date')) else '—'}",
+			)
+			for u in urgent_items
+		]
+		_add_kv_docx_section_table(doc, "3. ACİL İSTEM / TEDARİK GEREKTİREN KALEMLER", u_rows)
+
+	_add_signature_docx_block(
+		doc,
+		[
+			("Sayımı Yapan / Revir Sorumlusu", antet_info["nurse_name"]),
+			("Satın Alma / İlgili Müdür Yrd.", "................................."),
+			("Okul Müdürü (Onay)", antet_info["principal_name"]),
+		],
+	)
+	buf = io.BytesIO()
+	doc.save(buf)
+	return buf.getvalue()
+
+
+def is_fridge_temp_alert(temp_c: float | None) -> bool:
+	return temp_c is not None and (float(temp_c) < 2.0 or float(temp_c) > 8.0)
+
+
+def add_fridge_temp_log(
+	log_date: str,
+	log_time: str,
+	fridge_temp_c: object,
+	room_temp_c: object = None,
+	humidity_pct: object = None,
+	checked_by: str | None = None,
+	notes: str | None = None,
+) -> int:
+	f_temp = normalize_fridge_temp(fridge_temp_c) if (fridge_temp_c is not None and str(fridge_temp_c).strip() != "") else None
+	r_temp = normalize_room_temp(room_temp_c) if (room_temp_c is not None and str(room_temp_c).strip() != "") else None
+	hum = normalize_humidity(humidity_pct) if (humidity_pct is not None and str(humidity_pct).strip() != "") else None
+	if f_temp is None and r_temp is None and hum is None:
+		raise ValueError("Geçerli bir buzdolabı sıcaklığı, oda sıcaklığı veya nem değeri girin.")
+	d_iso = parse_birth_date(log_date) or clean_text(log_date)[:10] or date.today().isoformat()
+	t_str = clean_text(log_time) or datetime.now().strftime("%H:%M")
+	chk_by = clean_text(checked_by) or clean_text(get_app_settings().get("nurse_name")) or "Okul Revir Sorumlusu"
+	now_iso = datetime.now().isoformat(timespec="minutes")
+	with connect_db() as connection:
+		cur = connection.execute(
+			"""INSERT INTO fridge_temp_logs(
+				log_date, log_time, fridge_temp_c, room_temp_c, humidity_pct, checked_by, notes, created_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+			(d_iso, t_str, f_temp, r_temp, hum, chk_by, clean_text(notes) or None, now_iso),
+		)
+		return int(cur.lastrowid)
+
+
+def get_fridge_temp_logs(year_month: str | None = None, limit: int = 300) -> list[dict]:
+	params: list[Any] = []
+	where_sql = ""
+	if clean_text(year_month):
+		where_sql = "WHERE substr(log_date, 1, 7) = ?"
+		params.append(clean_text(year_month)[:7])
+	params.append(int(limit))
+	with connect_db() as connection:
+		rows = connection.execute(
+			f"""SELECT id, log_date, log_time, fridge_temp_c, room_temp_c, humidity_pct,
+					  checked_by, notes, created_at
+			   FROM fridge_temp_logs
+			   {where_sql}
+			   ORDER BY log_date DESC, log_time DESC, id DESC
+			   LIMIT ?""",
+			tuple(params),
+		).fetchall()
+	return [dict(r) for r in rows]
+
+
+def delete_fridge_temp_log(log_id: int) -> None:
+	with connect_db() as connection:
+		connection.execute("DELETE FROM fridge_temp_logs WHERE id=?", (int(log_id),))
+
+
+def build_fridge_temp_monthly_docx(year_month: str | None = None) -> bytes:
+	"""Aylık Soğuk Zincir ve Revir Ortam Isı Takip Çizelgesi (.docx) oluşturur."""
+	if not HAS_DOCX or docx is None:
+		raise RuntimeError("Word belge oluşturucu (python-docx) yüklü değil.")
+	ym = clean_text(year_month)[:7] or date.today().strftime("%Y-%m")
+	logs = sorted(
+		get_fridge_temp_logs(year_month=ym, limit=500),
+		key=lambda r: (str(r.get("log_date") or ""), str(r.get("log_time") or ""), int(r.get("id") or 0)),
+	)
+
+	doc = docx.Document()
+	for sec in doc.sections:
+		sec.top_margin = Cm(1.3)
+		sec.bottom_margin = Cm(1.3)
+		sec.left_margin = Cm(1.3)
+		sec.right_margin = Cm(1.3)
+
+	antet_info = _add_official_docx_antet(
+		doc,
+		f"AYLIK SOĞUK ZİNCİR VE REVİR ORTAM ISI TAKİP ÇİZELGESİ ({ym})",
+		f"Referans: Buzdolabı 2.0–8.0 °C · Oda 15.0–25.0 °C · Nem %30–%60  |  Düzenleme: {date.today().strftime('%d.%m.%Y')}",
+	)
+
+	fridge_vals = [float(r["fridge_temp_c"]) for r in logs if r.get("fridge_temp_c") is not None]
+	excursion_cnt = sum(1 for v in fridge_vals if is_fridge_temp_alert(v))
+	if fridge_vals:
+		temp_summary = f"Min: {min(fridge_vals):.1f} °C · Maks: {max(fridge_vals):.1f} °C · Ort: {(sum(fridge_vals) / len(fridge_vals)):.1f} °C"
+	else:
+		temp_summary = "Bu ay henüz ölçüm girilmedi"
+
+	_add_kv_docx_section_table(
+		doc,
+		"1. DÖNEM ÖZETİ VE STANDART REFERANS ARALIKLARI",
+		[
+			("İzlem Dönemi", ym),
+			("Toplam Ölçüm Sayısı", f"{len(logs)} ölçüm"),
+			("Buzdolabı Sıcaklık Özeti", temp_summary),
+			("Soğuk Zincir İhlali (<2.0 veya >8.0 °C)", f"{excursion_cnt} ölçüm" if excursion_cnt else "0 (Tam Uyumlu)"),
+			("Hedef Soğuk Zincir / Ortam Aralığı", "Buzdolabı: 2.0 – 8.0 °C  |  Revir Odası: 15.0 – 25.0 °C"),
+		],
+	)
+
+	p_h = doc.add_paragraph()
+	p_h.paragraph_format.space_before = Pt(8)
+	p_h.paragraph_format.space_after = Pt(3)
+	r_h = p_h.add_run("2. GÜNLÜK BUZDOLABI VE ORTAM ISI İZLEM TABLOSU")
+	r_h.font.name = "Calibri"
+	r_h.font.size = Pt(10.5)
+	r_h.bold = True
+	r_h.font.color.rgb = RGBColor(15, 118, 110)
+
+	headers = ["Tarih", "Saat", "Buzdolabı (°C)", "Oda (°C)", "Nem (%)", "Soğuk Zincir Durumu", "Kontrol Eden", "Açıklama"]
+	tbl = doc.add_table(rows=max(1, len(logs)) + 1, cols=len(headers))
+	tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+	tbl.autofit = False
+	set_table_borders(tbl, color="CBD5E1", sz="4", val="single")
+	widths = [Cm(2.1), Cm(1.3), Cm(2.2), Cm(1.8), Cm(1.6), Cm(3.3), Cm(2.7), Cm(3.0)]
+
+	for c_idx, h_txt in enumerate(headers):
+		cell = tbl.cell(0, c_idx)
+		cell.width = widths[c_idx]
+		set_cell_background(cell, "0F766E")
+		set_cell_margins(cell, top=50, bottom=50, left=50, right=50)
+		cp = cell.paragraphs[0]
+		cp.paragraph_format.space_after = Pt(0)
+		rr = cp.add_run(h_txt)
+		rr.font.name = "Calibri"
+		rr.font.size = Pt(8.5)
+		rr.bold = True
+		rr.font.color.rgb = RGBColor(255, 255, 255)
+
+	if logs:
+		for r_idx, lg in enumerate(logs, start=1):
+			ft_v = lg.get("fridge_temp_c")
+			rt_v = lg.get("room_temp_c")
+			hu_v = lg.get("humidity_pct")
+			cc_alert = is_fridge_temp_alert(ft_v)
+			status_txt = "UYARI (2.0-8.0 °C Dışı)" if cc_alert else ("Uygun (2.0-8.0 °C)" if ft_v is not None else "—")
+			row_vals = [
+				_format_iso_tr(lg.get("log_date")),
+				clean_text(lg.get("log_time")) or "—",
+				f"{float(ft_v):.1f}" if ft_v is not None else "—",
+				f"{float(rt_v):.1f}" if rt_v is not None else "—",
+				f"%{float(hu_v):.0f}" if hu_v is not None else "—",
+				status_txt,
+				clean_text(lg.get("checked_by")) or "—",
+				clean_text(lg.get("notes")) or "—",
+			]
+			for c_idx, v_txt in enumerate(row_vals):
+				cell = tbl.cell(r_idx, c_idx)
+				cell.width = widths[c_idx]
+				bg = "FEE2E2" if cc_alert and c_idx in (2, 5) else ("ECFDF5" if (not cc_alert and ft_v is not None and c_idx == 5) else ("FFFFFF" if r_idx % 2 == 1 else "F8FAFC"))
+				set_cell_background(cell, bg)
+				set_cell_margins(cell, top=40, bottom=40, left=45, right=45)
+				cp = cell.paragraphs[0]
+				cp.paragraph_format.space_after = Pt(0)
+				cr = cp.add_run(v_txt)
+				cr.font.name = "Calibri"
+				cr.font.size = Pt(8.3)
+				cr.font.color.rgb = RGBColor(153, 27, 27) if (cc_alert and c_idx in (2, 5)) else RGBColor(15, 23, 42)
+	else:
+		m_cell = tbl.cell(1, 0).merge(tbl.cell(1, len(headers) - 1))
+		set_cell_background(m_cell, "F8FAFC")
+		set_cell_margins(m_cell, top=75, bottom=75, left=75, right=75)
+		mp = m_cell.paragraphs[0]
+		mp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+		mr = mp.add_run(f"{ym} dönemi için kayıtlı ısı ölçümü bulunmamaktadır.")
+		mr.font.name = "Calibri"
+		mr.font.size = Pt(9)
+
+	_add_signature_docx_block(
+		doc,
+		[
+			("Ölçümü Yapan / Okul Revir Sorumlusu", antet_info["nurse_name"]),
+			("Okul Müdürü (Aylık Onay)", antet_info["principal_name"]),
+		],
+	)
+	buf = io.BytesIO()
+	doc.save(buf)
+	return buf.getvalue()
+
+
+def _render_med_tab_infirmary_inventory() -> None:
+	st.markdown("#### 🩹 Revir Sarf Malzeme & İlk Yardım Dolabı Stok/Miad (SKT) Takibi")
+	alerts = get_infirmary_inventory_alerts(days_horizon=30)
+
+	if alerts["expired"] or alerts["expiring_soon"] or alerts["critical_stock"]:
+		ac1, ac2 = st.columns(2)
+		with ac1:
+			if alerts["critical_stock"]:
+				crit_names = ", ".join(f"{x['item_name']} ({float(x['quantity'] or 0):g} {x.get('unit') or ''})" for x in alerts["critical_stock"])
+				st.error(f"🚨 **Kritik Stok Uyarısı ({len(alerts['critical_stock'])} Kalem):** {crit_names}")
+			else:
+				st.success("🟢 Tüm sarf malzemeler kritik stok eşiğinin üzerinde.")
+		with ac2:
+			exp_msgs = []
+			if alerts["expired"]:
+				exp_msgs.append("⛔ **Miadı Geçmiş:** " + ", ".join(f"{x['item_name']} ({_format_iso_tr(x.get('expiry_date'))})" for x in alerts["expired"]))
+			if alerts["expiring_soon"]:
+				exp_msgs.append("⏳ **30 Gün İçinde Dolacak:** " + ", ".join(f"{x['item_name']} ({_format_iso_tr(x.get('expiry_date'))})" for x in alerts["expiring_soon"]))
+			if exp_msgs:
+				st.warning("  \n".join(exp_msgs))
+			else:
+				st.success("🟢 Miadı (SKT) yaklaşan veya geçmiş sarf malzeme yok.")
+	else:
+		items_cnt = len(get_infirmary_inventory())
+		if items_cnt > 0:
+			st.success("🟢 Tüm revir sarf malzemeleri yeterli stokta ve SKT açısından uygun.")
+
+	act_c1, act_c2 = st.columns(2)
+	with act_c1:
+		if st.button("📦 Varsayılan 15 Kalem Okul Reviri Malzeme Listesini Yükle", type="secondary", use_container_width=True, key="btn_load_default_inventory"):
+			added_n = load_default_infirmary_inventory()
+			st.session_state["inf_inv_editor_seed"] = st.session_state.get("inf_inv_editor_seed", 0) + 1
+			if added_n > 0:
+				st.success(f"✅ {added_n} yeni varsayılan okul reviri malzemesi envantere eklendi.")
+			else:
+				st.info("Varsayılan 15 kalemin tamamı zaten envanterde kayıtlı.")
+			st.rerun()
+	with act_c2:
+		st.download_button(
+			"🖨️ Revir Eksik Malzeme İstem / Depo Sayım Tutanağı (.docx)",
+			data=build_infirmary_inventory_docx(),
+			file_name=f"Revir_Sarf_Malzeme_Sayim_Istem_{date.today().isoformat()}.docx",
+			mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+			type="primary",
+			use_container_width=True,
+			key="btn_dl_inventory_docx",
+		)
+
+	inv_items = get_infirmary_inventory()
+	if inv_items:
+		inv_rows = []
+		for it in inv_items:
+			st_lbl, _ = _inventory_row_status_label(it)
+			inv_rows.append({
+				"id": int(it["id"]),
+				"Malzeme Adı": it["item_name"],
+				"Kategori": clean_text(it.get("category")) or "Diğer",
+				"Miktar": float(it.get("quantity") or 0.0),
+				"Birim": clean_text(it.get("unit")) or "Adet",
+				"Kritik Eşik": float(it.get("min_threshold") or 0.0),
+				"SKT (YYYY-AA-GG)": clean_text(it.get("expiry_date")) or "",
+				"Saklama Yeri": clean_text(it.get("storage_location")) or "",
+				"Notlar": clean_text(it.get("notes")) or "",
+				"Durum": st_lbl,
+			})
+		inv_df = pd.DataFrame(inv_rows)
+		inv_seed = st.session_state.get("inf_inv_editor_seed", 0)
+		edited_inv_df = st.data_editor(
+			inv_df,
+			key=f"inf_inv_data_editor_{inv_seed}",
+			use_container_width=True,
+			hide_index=True,
+			num_rows="dynamic",
+			column_config={
+				"id": None,
+				"Malzeme Adı": st.column_config.TextColumn("Malzeme Adı", required=True),
+				"Kategori": st.column_config.SelectboxColumn("Kategori", options=INFIRMARY_INVENTORY_CATEGORIES),
+				"Miktar": st.column_config.NumberColumn("Miktar", min_value=0.0, step=1.0),
+				"Birim": st.column_config.TextColumn("Birim"),
+				"Kritik Eşik": st.column_config.NumberColumn("Kritik Eşik", min_value=0.0, step=1.0),
+				"SKT (YYYY-AA-GG)": st.column_config.TextColumn("SKT (YYYY-AA-GG)", help="Örn: 2027-06-30 veya 30.06.2027"),
+				"Saklama Yeri": st.column_config.TextColumn("Saklama Yeri"),
+				"Notlar": st.column_config.TextColumn("Notlar"),
+				"Durum": st.column_config.TextColumn("Durum", disabled=True),
+			},
+		)
+		if st.button("💾 Stok & SKT Değişikliklerini Kaydet", type="primary", key="btn_save_inf_inv_edits", use_container_width=True):
+			saved_n = save_infirmary_inventory_edits(edited_inv_df)
+			st.session_state["inf_inv_editor_seed"] = inv_seed + 1
+			st.success(f"✅ {saved_n} sarf malzeme kaydı güncellendi.")
+			st.rerun()
+	else:
+		st.info("Henüz envanterde sarf malzeme bulunmuyor. Yukarıdaki butondan varsayılan 15 kalemi yükleyebilir veya aşağıdan yeni malzeme ekleyebilirsiniz.")
+
+	with st.expander("➕ Yeni Sarf Malzeme Kalemi Ekle"):
+		with st.form("form_add_inf_inventory_item", clear_on_submit=True):
+			ic1, ic2, ic3 = st.columns([2, 1.4, 1.2])
+			with ic1:
+				n_name = st.text_input("Malzeme Adı*", placeholder="Örn: Steril Serum Fizyolojik", key="inv_add_name")
+			with ic2:
+				n_cat = st.selectbox("Kategori", INFIRMARY_INVENTORY_CATEGORIES, key="inv_add_cat")
+			with ic3:
+				n_unit = st.text_input("Birim", value="Adet", placeholder="Kutu, Rulo, Adet...", key="inv_add_unit")
+
+			ic4, ic5, ic6, ic7 = st.columns([1, 1, 1.2, 1.5])
+			with ic4:
+				n_qty = st.number_input("Mevcut Miktar", min_value=0.0, step=1.0, value=10.0, key="inv_add_qty")
+			with ic5:
+				n_thr = st.number_input("Kritik Eşik", min_value=0.0, step=1.0, value=3.0, key="inv_add_thr")
+			with ic6:
+				n_exp_use = st.checkbox("SKT Gir", value=False, key="inv_add_exp_chk")
+				n_exp_d = st.date_input("Son Kullanma Tarihi", value=date.today() + timedelta(days=365), key="inv_add_exp") if n_exp_use else None
+			with ic7:
+				n_loc = st.text_input("Saklama Yeri", placeholder="İlk Yardım Dolabı", key="inv_add_loc")
+
+			n_note = st.text_input("Not (Opsiyonel)", key="inv_add_note")
+			if st.form_submit_button("💾 Malzemeyi Envantere Ekle", type="primary", use_container_width=True):
+				if not clean_text(n_name):
+					st.error("Lütfen malzeme adını yazın.")
+				else:
+					add_infirmary_inventory_item(
+						item_name=n_name,
+						category=n_cat,
+						quantity=float(n_qty),
+						unit=n_unit,
+						min_threshold=float(n_thr),
+						expiry_date=n_exp_d.isoformat() if n_exp_d else None,
+						storage_location=n_loc,
+						notes=n_note,
+					)
+					st.session_state["inf_inv_editor_seed"] = st.session_state.get("inf_inv_editor_seed", 0) + 1
+					st.success(f"'{clean_text(n_name)}' revir envanterine eklendi.")
+					st.rerun()
+
+	if inv_items:
+		with st.expander("🗑️ Envanterden Malzeme Sil"):
+			del_opts = {f"#{int(it['id'])} — {it['item_name']} ({float(it.get('quantity') or 0):g} {it.get('unit') or ''})": int(it["id"]) for it in inv_items}
+			sel_del = st.selectbox("Silinecek Malzeme", list(del_opts.keys()), key="inv_del_sel")
+			if st.button("Seçili Malzemeyi Sil", key="inv_del_btn", type="secondary"):
+				delete_infirmary_inventory_item(del_opts[sel_del])
+				st.session_state["inf_inv_editor_seed"] = st.session_state.get("inf_inv_editor_seed", 0) + 1
+				st.success("Malzeme envanterden silindi.")
+				st.rerun()
+
+
+def _render_med_tab_cold_chain(nurse_name: str) -> None:
+	st.markdown("#### ❄️ Soğuk Zincir Buzdolabı & Revir Ortam Isı İzlem Çizelgesi")
+	st.caption("İnsülin, adrenalin oto-enjektörü, aşı ve soğuk zincir ilaçları için standart buzdolabı sıcaklığı **2.0 – 8.0 °C**, revir oda sıcaklığı **15.0 – 25.0 °C** olmalıdır.")
+
+	recent_logs = get_fridge_temp_logs(limit=30)
+	if recent_logs:
+		latest = recent_logs[0]
+		lf_temp = latest.get("fridge_temp_c")
+		if is_fridge_temp_alert(lf_temp):
+			st.error(
+				f"🚨 **SOĞUK ZİNCİR UYARISI!** Son ölçümde ({_format_iso_tr(latest.get('log_date'))} {latest.get('log_time')}) "
+				f"buzdolabı sıcaklığı **{float(lf_temp):.1f} °C** ölçüldü (2.0 – 8.0 °C aralığı dışında)! Dolap kapağı, termostat ve elektrik bağlantısını acilen kontrol edin."
+			)
+		elif lf_temp is not None:
+			lr_str = f" · Oda: **{float(latest['room_temp_c']):.1f} °C**" if latest.get("room_temp_c") is not None else ""
+			lh_str = f" · Nem: **%{float(latest['humidity_pct']):.0f}**" if latest.get("humidity_pct") is not None else ""
+			st.success(f"❄️ **Soğuk Zincir Normal:** Son ölçüm ({_format_iso_tr(latest.get('log_date'))} {latest.get('log_time')}): Buzdolabı **{float(lf_temp):.1f} °C**{lr_str}{lh_str}")
+
+	with st.container(border=True):
+		st.markdown("##### ➕ Yeni Günlük Isı / Nem Ölçüm Kaydı")
+		with st.form("form_add_fridge_temp_log", clear_on_submit=True):
+			fc1, fc2, fc3, fc4, fc5 = st.columns([1.2, 1.0, 1.3, 1.3, 1.1])
+			with fc1:
+				f_date = st.date_input("Tarih", value=date.today(), key="cc_log_date")
+			with fc2:
+				f_time = st.text_input("Saat (SS:DD)", value=datetime.now().strftime("%H:%M"), key="cc_log_time")
+			with fc3:
+				f_fridge_raw = st.text_input("Buzdolabı (°C)*", value="", placeholder="Örn: 4.5 veya 45", help="2.0 - 8.0 °C arası olmalı (45 yazarsanız 4.5 °C algılanır)", key="cc_fridge_raw")
+			with fc4:
+				f_room_raw = st.text_input("Oda Sıcaklığı (°C)", value="", placeholder="Örn: 21.5 veya 215", help="215 yazarsanız 21.5 °C algılanır", key="cc_room_raw")
+			with fc5:
+				f_hum_raw = st.text_input("Nem (%)", value="", placeholder="Örn: 45", key="cc_hum_raw")
+
+			fc6, fc7 = st.columns([1.5, 2.5])
+			with fc6:
+				f_checker = st.text_input("Kontrol Eden", value=nurse_name, key="cc_checker")
+			with fc7:
+				f_notes = st.text_input("Not / Sapma Varsa Alınan Önlem", value="", placeholder="Örn: Dolap ayarı kontrol edildi, normal...", key="cc_notes")
+
+			if st.form_submit_button("🌡️ Isı / Nem Ölçümünü Kaydet", type="primary", use_container_width=True):
+				try:
+					new_id = add_fridge_temp_log(
+						log_date=f_date.isoformat(),
+						log_time=f_time.strip() or datetime.now().strftime("%H:%M"),
+						fridge_temp_c=f_fridge_raw,
+						room_temp_c=f_room_raw,
+						humidity_pct=f_hum_raw,
+						checked_by=f_checker,
+						notes=f_notes,
+					)
+					saved_ft = normalize_fridge_temp(f_fridge_raw) if clean_text(f_fridge_raw) else None
+					if is_fridge_temp_alert(saved_ft):
+						st.session_state["cc_last_alert_msg"] = f"🚨 DİKKAT: Girilen buzdolabı sıcaklığı ({saved_ft:.1f} °C) 2.0 - 8.0 °C soğuk zincir aralığının dışındadır!"
+					else:
+						st.session_state["cc_last_alert_msg"] = None
+					st.success(f"✅ Isı izlem kaydı (#{new_id}) kaydedildi.")
+					st.rerun()
+				except ValueError as exc:
+					st.error(str(exc))
+
+	if st.session_state.get("cc_last_alert_msg"):
+		st.error(st.session_state["cc_last_alert_msg"])
+
+	ym_c1, ym_c2 = st.columns([1.5, 2.2], vertical_alignment="center")
+	with ym_c1:
+		month_filter = st.text_input("Çizelge Ayı (YYYY-AA)", value=date.today().strftime("%Y-%m"), key="cc_month_filter")
+	ym_norm = clean_text(month_filter)[:7] or date.today().strftime("%Y-%m")
+	with ym_c2:
+		st.download_button(
+			"🖨️ Aylık Soğuk Zincir ve Revir Ortam Isı Takip Çizelgesi (.docx)",
+			data=build_fridge_temp_monthly_docx(year_month=ym_norm),
+			file_name=f"Soguk_Zincir_Isi_Takip_Cizelgesi_{ym_norm}.docx",
+			mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+			type="primary",
+			use_container_width=True,
+			key="btn_dl_cold_chain_docx",
+		)
+
+	month_logs = get_fridge_temp_logs(year_month=ym_norm, limit=300)
+	if not month_logs:
+		st.info(f"`{ym_norm}` ayı için henüz ısı ölçüm kaydı bulunmuyor.")
+		return
+
+	df_cc = pd.DataFrame([
+		{
+			"ID": int(lg["id"]),
+			"Tarih": _format_iso_tr(lg.get("log_date")),
+			"Saat": clean_text(lg.get("log_time")) or "—",
+			"Buzdolabı (°C)": lg.get("fridge_temp_c"),
+			"Oda (°C)": lg.get("room_temp_c"),
+			"Nem (%)": lg.get("humidity_pct"),
+			"Durum": "🚨 2.0-8.0 °C DIŞI" if is_fridge_temp_alert(lg.get("fridge_temp_c")) else ("🟢 Normal" if lg.get("fridge_temp_c") is not None else "—"),
+			"Kontrol Eden": clean_text(lg.get("checked_by")) or "—",
+			"Not": clean_text(lg.get("notes")) or "—",
+		}
+		for lg in month_logs
+	])
+	st.dataframe(df_cc, use_container_width=True, hide_index=True)
+
+	with st.expander("🗑️ Yanlış Girilen Isı Kaydını Sil"):
+		cc_del_map = {
+			f"#{int(lg['id'])} — {_format_iso_tr(lg.get('log_date'))} {lg.get('log_time')} (Buzdolabı: {lg.get('fridge_temp_c')} °C)": int(lg["id"])
+			for lg in month_logs
+		}
+		sel_cc_del = st.selectbox("Silinecek Kayıt", list(cc_del_map.keys()), key="cc_del_sel")
+		if st.button("Seçili Isı Kaydını Sil", key="cc_del_btn", type="secondary"):
+			delete_fridge_temp_log(cc_del_map[sel_cc_del])
+			st.success("Isı ölçüm kaydı silindi.")
+			st.rerun()
 
 
 def render_medication_tracker() -> None:
@@ -11600,10 +16545,12 @@ def render_medication_tracker() -> None:
 
 	st.markdown("<div style='height: 10px'></div>", unsafe_allow_html=True)
 
-	tab_timetable, tab_cabinet, tab_history = st.tabs([
+	tab_timetable, tab_cabinet, tab_history, tab_supply, tab_cold_chain = st.tabs([
 		f"🕒 Günlük Saatlik İlaç Çizelgesi ({total_doses_count})",
 		f"📦 İlaç Dolabı & Aktif Tedavi Planları ({len(all_active_meds)})",
-		"📜 Revir İlaç Defteri & Geçmiş Kayıtlar"
+		"📜 Revir İlaç Defteri & Geçmiş Kayıtlar",
+		"🩹 Revir Sarf Malzeme & İlk Yardım Stoku",
+		"❄️ Buzdolabı & Ortam Isı İzlem Çizelgesi",
 	])
 
 	# TAB 1: GÜNLÜK SAATLİK ÇİZELGE
@@ -11793,8 +16740,19 @@ def render_medication_tracker() -> None:
 		if not is_section_visible("med_inventory"):
 			st.info("📦 İlaç Dolabı & Aktif Tedavi Planları bölümü Sayfa Ayarlarından gizlendi.")
 		else:
-			st.markdown("#### 📦 Okul Reviri İlaç Dolabı & Kayıtlı Tedavi Planları")
-		st.caption("Revire velisi tarafından teslim edilen ilaçları, aktif tedavi kürlerini, saklama yerlerini ve kalan stokları buradan yönetebilirsiniz.")
+			cab_hdr_l, cab_hdr_r = st.columns([3.2, 1.5], vertical_alignment="center")
+			with cab_hdr_l:
+				st.markdown("#### 📦 Okul Reviri İlaç Dolabı & Kayıtlı Tedavi Planları")
+				st.caption("Revire velisi tarafından teslim edilen ilaçları, aktif tedavi kürlerini, saklama yerlerini ve kalan stokları buradan yönetebilirsiniz.")
+			with cab_hdr_r:
+				st.download_button(
+					"📝 Boş Veli İlaç İzin Tutanağı (.docx)",
+					data=build_medication_consent_docx(),
+					file_name="Bos_Veli_Ilac_Izin_Teslim_Tutanagi_Sablon.docx",
+					mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+					key="btn_dl_blank_med_consent_docx",
+					use_container_width=True,
+				)
 
 		c_f1, c_f2, c_f3 = st.columns([2, 1.5, 1.5])
 		with c_f1:
@@ -11914,6 +16872,14 @@ def render_medication_tracker() -> None:
 								update_student_medication(medication_id=m_id, status="Tamamlandı")
 								st.success("Tedavi planı tamamlandı olarak işaretlendi.")
 								st.rerun()
+						st.download_button(
+							"📝 Veli İlaç İzin & Teslim Tutanağı (.docx)",
+							data=build_medication_consent_docx(med_id=int(m_id), student_id=int(m_item["student_id"])),
+							file_name=f"Veli_Ilac_Izin_Tutanagi_{_slugify_person_name(m_item.get('full_name', 'ogrenci'))}_{m_id}.docx",
+							mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+							key=f"btn_dl_med_consent_{m_id}",
+							use_container_width=True,
+						)
 
 	# TAB 3: REVİR İLAÇ DEFTERİ (UYGULAMA GEÇMİŞİ)
 	with tab_history:
@@ -11980,6 +16946,12 @@ def render_medication_tracker() -> None:
 				key="btn_down_hist_excel"
 			)
 
+	with tab_supply:
+		_render_med_tab_infirmary_inventory()
+
+	with tab_cold_chain:
+		_render_med_tab_cold_chain(nurse_name)
+
 
 def render_vital_tracking() -> None:
 	st.markdown("## Vital ve laboratuvar takibi")
@@ -11992,41 +16964,77 @@ def render_vital_tracking() -> None:
 	vital_tab, lab_tab = st.tabs(["💓 Vital Ölçümleri & Antropometri", "🧪 Tahlil Sonuçları"])
 	with vital_tab:
 		if is_section_visible("vital_form"):
+			is_adult_vit = str(student["person_type"] or "Öğrenci").strip() != "Öğrenci"
+			vid_sfx = int(student["id"])
 			st.caption("Kayıtlar kişinin sağlık geçmişine eklenir. Aynı anda boy, kilo veya baş çevresi girerseniz Persantil/Z-Skor tablosuna da otomatik işlenir.")
 			with st.form("vital_form", clear_on_submit=True):
 				when, context = st.columns(2)
 				reading_date = when.date_input("Ölçüm tarihi", value=date.today(), key="vital_date")
 				reading_time = context.time_input("Saat", value=datetime.now().replace(second=0, microsecond=0).time(), key="vital_time")
 				bp_cols = st.columns(3)
-				systolic = bp_cols[0].number_input("Büyük tansiyon (mmHg)", min_value=40.0, max_value=260.0, value=None, step=1.0)
-				diastolic = bp_cols[1].number_input("Küçük tansiyon (mmHg)", min_value=20.0, max_value=180.0, value=None, step=1.0)
-				spo2 = bp_cols[2].number_input("Saturasyon - SpO2 (%)", min_value=30.0, max_value=100.0, value=None, step=1.0, format="%.0f")
+				with bp_cols[0]:
+					sys_raw = smart_text_input("Büyük tansiyon (mmHg)", "bp_sys", key=f"vit_sys_{vid_sfx}", placeholder="Örn: 120, 120/80 veya 12", in_form=True)
+				with bp_cols[1]:
+					dia_raw = smart_text_input("Küçük tansiyon (mmHg)", "bp_dia", key=f"vit_dia_{vid_sfx}", placeholder="Örn: 80 veya 8", in_form=True)
+				with bp_cols[2]:
+					spo2_raw = smart_text_input("Saturasyon - SpO2 (%)", "spo2", key=f"vit_spo2_{vid_sfx}", placeholder="Örn: %98 veya 988", in_form=True)
 				other_cols = st.columns(3)
-				pulse = other_cols[0].number_input("Nabız (atım/dk)", min_value=20.0, max_value=240.0, value=None, step=1.0)
-				temperature = other_cols[1].number_input("Ateş (°C)", min_value=30.0, max_value=45.0, value=None, step=0.1)
-				glucose = other_cols[2].number_input("Kan şekeri (mg/dL)", min_value=1.0, max_value=1500.0, value=None, step=1.0)
+				with other_cols[0]:
+					pulse_raw = smart_text_input("Nabız (atım/dk)", "pulse", key=f"vit_pulse_{vid_sfx}", placeholder="Örn: 80", in_form=True)
+				with other_cols[1]:
+					temp_raw = smart_text_input("Ateş (°C)", "temperature", key=f"vit_temp_{vid_sfx}", placeholder="Örn: 36.6 veya 366", in_form=True)
+				with other_cols[2]:
+					glu_raw = smart_text_input("Kan şekeri (mg/dL)", "glucose", key=f"vit_glu_{vid_sfx}", placeholder="Örn: 95", in_form=True)
 				hw_cols = st.columns(4)
 				glucose_context = hw_cols[0].selectbox("Kan şekeri ölçüm koşulu", ["Belirtilmedi", "Açlık", "Yemek sonrası", "Rastgele", "Hekim istemiyle"])
-				v_height = hw_cols[1].number_input("Boy (cm) [Persantile işlenir]", min_value=30.0, max_value=250.0, value=None, step=0.1, format="%.1f")
-				v_weight = hw_cols[2].number_input("Kilo (kg) [Persantile işlenir]", min_value=1.0, max_value=300.0, value=None, step=0.1, format="%.1f")
-				v_head_circ = hw_cols[3].number_input("Baş Çevresi (cm) [Persantile işlenir]", min_value=20.0, max_value=100.0, value=None, step=0.1, format="%.1f")
+				with hw_cols[1]:
+					vh_raw = smart_text_input("Boy (cm) [Persantile işlenir]", "height", key=f"vit_h_{vid_sfx}", placeholder="Örn: 145, 1,45 veya 1055", in_form=True)
+				with hw_cols[2]:
+					vw_ph = "Örn: 75.5 veya 755" if is_adult_vit else "Örn: 24.6, 246 veya 18500"
+					vw_raw = smart_text_input("Kilo (kg) [Persantile işlenir]", "weight", key=f"vit_w_{vid_sfx}", placeholder=vw_ph, in_form=True, is_adult=is_adult_vit)
+				with hw_cols[3]:
+					vhc_raw = smart_text_input("Baş Çevresi (cm) [Persantile işlenir]", "head_circ", key=f"vit_hc_{vid_sfx}", placeholder="Örn: 48.5 veya 485", in_form=True)
 				notes = st.text_area("Belirti / ölçüm koşulu / not", key="vital_notes")
 				save = st.form_submit_button("Ölçümleri kaydet", type="primary")
 			if save:
+				systolic, diastolic = normalize_bp(sys_raw, dia_raw)
+				spo2 = normalize_spo2(spo2_raw)
+				pulse = normalize_pulse(pulse_raw)
+				temperature = normalize_temperature(temp_raw)
+				glucose = normalize_glucose(glu_raw)
+				v_height = normalize_height(vh_raw)
+				v_weight = normalize_weight(vw_raw, is_adult=is_adult_vit)
+				v_head_circ = normalize_head_circ(vhc_raw)
+
+				invalid_vit = []
+				if str(spo2_raw).strip() and spo2 is None: invalid_vit.append("SpO2")
+				if str(pulse_raw).strip() and pulse is None: invalid_vit.append("Nabız")
+				if str(temp_raw).strip() and temperature is None: invalid_vit.append("Ateş")
+				if str(glu_raw).strip() and glucose is None: invalid_vit.append("Kan Şekeri")
+				if str(vh_raw).strip() and v_height is None: invalid_vit.append("Boy")
+				if str(vw_raw).strip() and v_weight is None: invalid_vit.append("Kilo")
+				if str(vhc_raw).strip() and v_head_circ is None: invalid_vit.append("Baş Çevresi")
+
 				values = {"systolic": systolic, "diastolic": diastolic, "pulse": pulse,
 						  "temperature": temperature, "spo2": spo2, "glucose": glucose}
 				has_vital = any(value is not None for value in values.values())
-				has_hw = (v_height is not None and v_weight is not None and v_height > 0 and v_weight > 0) or (v_head_circ is not None and v_head_circ > 0)
-				if not has_vital and not has_hw:
-					st.error("Kaydetmeden önce en az bir vital ölçüm veya boy-kilo / baş çevresi girin.")
+				has_hw = any(x is not None and x > 0 for x in (v_height, v_weight, v_head_circ))
+				if invalid_vit:
+					st.error("Geçersiz değer algılandı: " + ", ".join(invalid_vit))
+				elif not has_vital and not has_hw:
+					st.error("Kaydetmeden önce en az bir vital ölçüm veya boy / kilo / baş çevresi girin.")
 				elif (systolic is None) != (diastolic is None):
 					st.error("Tansiyon kaydı için büyük ve küçük tansiyonu birlikte girin.")
-				elif (v_height is None) != (v_weight is None):
-					st.error("Boy-kilo kaydı için hem boy hem kiloyu birlikte girin.")
 				else:
 					extra_note = notes.strip()
 					if has_hw:
-						hw_summary = record_linked_measurement(student["id"], reading_date, v_height, v_weight, student["birth_date"], student["sex"], head_circ_cm=v_head_circ)
+						hw_summary = record_linked_measurement(
+							student["id"], reading_date,
+							v_height if (v_height is not None and v_height > 0) else None,
+							v_weight if (v_weight is not None and v_weight > 0) else None,
+							student["birth_date"], student["sex"],
+							head_circ_cm=v_head_circ if (v_head_circ is not None and v_head_circ > 0) else None,
+						)
 						if hw_summary:
 							extra_note = " · ".join(filter(None, [extra_note, f"[{hw_summary}]"]))
 					if has_vital:
@@ -12205,7 +17213,7 @@ def render_vital_tracking() -> None:
 								"INSERT INTO lab_results(report_id, test_name, value, unit, ref_low, ref_high, lab_flag) VALUES (?, ?, ?, ?, ?, ?, ?)",
 								[(cursor.lastrowid, *row) for row in rows],
 							)
-						save_person_data_file(student["id"])
+						sync_after_person_mutation(student["id"])
 						st.success(f"{len(rows)} sonuç ve kaynak dosya öğrenci dosyasına kaydedildi.")
 						st.rerun()
 		with connect_db() as connection:
@@ -12245,12 +17253,21 @@ def render_measurements() -> None:
 
 	render_shared_person_summary(student, section_key="meas")
 
+	is_adult_meas = str(student["person_type"] or "Öğrenci").strip() != "Öğrenci"
 	if is_section_visible("growth_calc"):
 		columns = st.columns(4)
 		measured_on = columns[0].date_input("Ölçüm tarihi", value=date.today(), key=f"new_measurement_date_{student['id']}")
-		height = columns[1].number_input("Boy (cm)", min_value=0.0, max_value=250.0, value=None, step=0.1, format="%.1f", key=f"new_measurement_height_{student['id']}")
-		weight = columns[2].number_input("Kilo (kg)", min_value=0.0, max_value=300.0, value=None, step=0.1, format="%.1f", key=f"new_measurement_weight_{student['id']}")
-		head_circ = columns[3].number_input("Baş Çevresi (cm, opsiyonel)", min_value=0.0, max_value=100.0, value=None, step=0.1, format="%.1f", key=f"new_measurement_hc_{student['id']}")
+		with columns[1]:
+			height_raw = smart_text_input("Boy (cm)", "height", key=f"new_measurement_height_{student['id']}", placeholder="Örn: 145, 1,45 veya 1055", in_form=False)
+		with columns[2]:
+			mw_ph2 = "Örn: 75.5 veya 755" if is_adult_meas else "Örn: 18.5, 185 veya 18500"
+			weight_raw = smart_text_input("Kilo (kg)", "weight", key=f"new_measurement_weight_{student['id']}", placeholder=mw_ph2, in_form=False, is_adult=is_adult_meas)
+		with columns[3]:
+			hc_raw = smart_text_input("Baş Çevresi (cm, opsiyonel)", "head_circ", key=f"new_measurement_hc_{student['id']}", placeholder="Örn: 48.5 veya 485", in_form=False)
+
+		height = normalize_height(height_raw)
+		weight = normalize_weight(weight_raw, is_adult=is_adult_meas)
+		head_circ = normalize_head_circ(hc_raw)
 
 		# Instant live calculation preview before saving
 		if (height is not None and weight is not None and height > 0 and weight > 0) or (head_circ is not None and head_circ > 0):
@@ -12284,20 +17301,23 @@ def render_measurements() -> None:
 
 		save = st.button("Ölçümü kaydet", type="primary", key=f"save_measurement_{student['id']}")
 		if save:
-			has_hw_in = height is not None and weight is not None and height > 0 and weight > 0
+			has_h_in = height is not None and height > 0
+			has_w_in = weight is not None and weight > 0
 			has_hc_in = head_circ is not None and head_circ > 0
-			if (height is not None and height > 0) != (weight is not None and weight > 0):
-				st.error("Boy ve kilo ölçümünü birlikte girin.")
-			elif not has_hw_in and not has_hc_in:
-				st.error("Kaydetmek için boy-kilo veya baş çevresi ölçümü girin.")
+			if (str(height_raw).strip() and height is None) or (str(weight_raw).strip() and weight is None) or (str(hc_raw).strip() and head_circ is None):
+				st.error("Lütfen geçerli boy (40–230 cm), kilo veya baş çevresi (30–65 cm) değeri girin.")
+			elif not (has_h_in or has_w_in or has_hc_in):
+				st.error("Kaydetmek için en az bir ölçüm (boy, kilo veya baş çevresi) girin.")
 			else:
 				summary_txt = record_linked_measurement(
 					student["id"], measured_on,
-					height if has_hw_in else None,
-					weight if has_hw_in else None,
+					height if has_h_in else None,
+					weight if has_w_in else None,
 					student["birth_date"], student["sex"],
 					head_circ_cm=head_circ if has_hc_in else None,
 				)
+				for _mk2 in (f"new_measurement_height_{student['id']}", f"new_measurement_weight_{student['id']}", f"new_measurement_hc_{student['id']}"):
+					st.session_state.pop(_mk2, None)
 				st.success(f"Ölçüm öğrenci profiline eklendi: {summary_txt}")
 				st.rerun()
 
@@ -12437,7 +17457,7 @@ def render_measurements() -> None:
 						"UPDATE measurements SET measured_on=?, age_months=? WHERE id=? AND student_id=?",
 						(edited_date.isoformat(), new_months, active_meas_id, student["id"]),
 					)
-				save_person_data_file(student["id"])
+				sync_after_person_mutation(student["id"], active_measurement_id=active_meas_id)
 				st.success("Ölçüm tarihi ve yaş persantil hesabı güncellendi.")
 				st.rerun()
 		with ctrl_c3:
@@ -12469,10 +17489,10 @@ def render_measurements() -> None:
 		)
 
 		if not edited_clinical_df.empty:
-			param_map = {str(r["Antropometrik Parametre"]): numeric_value(r["Ölçülen Değer"]) for _, r in edited_clinical_df.iterrows()}
-			new_h_val = param_map.get("📏 Boy (cm)", latest_h)
-			new_w_val = param_map.get("⚖️ Kilo (kg)", latest_w)
-			new_hc_val = param_map.get("🧠 Baş Çevresi (cm)", display_hc)
+			param_map_raw = {str(r["Antropometrik Parametre"]): r["Ölçülen Değer"] for _, r in edited_clinical_df.iterrows()}
+			new_h_val = normalize_height(param_map_raw["📏 Boy (cm)"]) if "📏 Boy (cm)" in param_map_raw else latest_h
+			new_w_val = normalize_weight(param_map_raw["⚖️ Kilo (kg)"], is_adult=is_adult_meas) if "⚖️ Kilo (kg)" in param_map_raw else latest_w
+			new_hc_val = normalize_head_circ(param_map_raw["🧠 Baş Çevresi (cm)"]) if "🧠 Baş Çevresi (cm)" in param_map_raw else display_hc
 			orig_h_val = round(float(latest_h), 1) if latest_h is not None else None
 			orig_w_val = round(float(latest_w), 1) if latest_w is not None else None
 			orig_hc_val = round(float(display_hc), 1) if display_hc is not None else None
@@ -12493,7 +17513,7 @@ def render_measurements() -> None:
 							"UPDATE measurements SET height_cm=?, weight_kg=?, head_circ_cm=?, age_months=?, bmi=? WHERE id=? AND student_id=?",
 							(float(new_h_val) if new_h_val else None, float(new_w_val) if new_w_val else None, clean_hc, new_months, float(new_bmi) if new_bmi else None, active_meas_id, student["id"]),
 						)
-					save_person_data_file(student["id"])
+					sync_after_person_mutation(student["id"], active_measurement_id=active_meas_id)
 					st.success("Tablo üzerinden ölçüm güncellendi.")
 					st.rerun()
 
@@ -12615,10 +17635,11 @@ def render_measurements() -> None:
 					continue
 				rid_int = int(rid)
 				orig_r = records_by_id[rid_int]
-				nh = numeric_value(erow.get("Boy (cm)"))
-				nw = numeric_value(erow.get("Kilo (kg)"))
-				nhc = numeric_value(erow.get("Baş Çevresi (cm)"))
-				nt = str(erow.get("Tarih") or "").strip()[:10]
+				nh = normalize_height(erow.get("Boy (cm)"))
+				nw = normalize_weight(erow.get("Kilo (kg)"), is_adult=is_adult_meas)
+				nhc = normalize_head_circ(erow.get("Baş Çevresi (cm)"))
+				nt_raw = str(erow.get("Tarih") or "").strip()
+				nt = parse_birth_date(nt_raw) or nt_raw[:10]
 				orig_h = float(orig_r["Boy_cm"]) if pd.notna(orig_r["Boy_cm"]) else None
 				orig_w = float(orig_r["Kilo_kg"]) if pd.notna(orig_r["Kilo_kg"]) else None
 				orig_hc = float(orig_r["Bas_Cevresi_cm"]) if (pd.notna(orig_r.get("Bas_Cevresi_cm")) and float(orig_r["Bas_Cevresi_cm"]) > 0) else None
@@ -12643,7 +17664,7 @@ def render_measurements() -> None:
 						"UPDATE measurements SET measured_on=?, height_cm=?, weight_kg=?, head_circ_cm=?, age_months=?, bmi=? WHERE id=? AND student_id=?",
 						(dt_obj.isoformat(), float(nh) if nh else None, float(nw) if nw else None, float(nhc) if (nhc and nhc > 0) else None, m_ay, nbmi, rid_int, student["id"]),
 					)
-			save_person_data_file(student["id"])
+			sync_after_person_mutation(student["id"])
 			st.success("Tablo üzerindeki ölçüm değişiklikleri kaydedildi.")
 			st.rerun()
 
@@ -12809,26 +17830,26 @@ def open_screening_dialog(student_id: int, class_name: str | None = None) -> Non
 			col_idx = 0
 			if "height_cm" in visible_fields:
 				with cols_obj[col_idx]:
-					cur_h_val = float(latest.get("height_cm") or (meas_info["height_cm"] or 0.0))
-					new_h = st.number_input("📏 Boy (cm)", min_value=0.0, max_value=250.0, value=cur_h_val, step=0.5, format="%.1f")
+					cur_h_val = latest.get("height_cm") if latest.get("height_cm") else None
+					new_h_raw = smart_text_input("📏 Boy (cm)", "height", key=f"scr_dlg_{student_id}_h", value=cur_h_val, placeholder="Örn: 135, 1,35 veya 1055", in_form=True)
 				col_idx += 1
 			if "weight_kg" in visible_fields:
 				with cols_obj[col_idx]:
-					cur_w_val = float(latest.get("weight_kg") or (meas_info["weight_kg"] or 0.0))
-					new_w = st.number_input("⚖️ Kilo (kg)", min_value=0.0, max_value=250.0, value=cur_w_val, step=0.1, format="%.1f")
+					cur_w_val = latest.get("weight_kg") if latest.get("weight_kg") else None
+					new_w_raw = smart_text_input("⚖️ Kilo (kg)", "weight", key=f"scr_dlg_{student_id}_w", value=cur_w_val, placeholder="Örn: 28.5, 285 veya 18500", in_form=True, is_adult=False)
 				col_idx += 1
 			if "head_circ_cm" in visible_fields:
 				with cols_obj[col_idx]:
-					cur_hc_val = float(latest.get("head_circ_cm") or (meas_info["head_circ_cm"] or 0.0))
+					cur_hc_val = latest.get("head_circ_cm") if latest.get("head_circ_cm") else None
 					hc_help = "DSÖ standartlarına göre 0-5 yaş arası çocuklarda değerlendirilir." if (today_months is not None and today_months <= 60) else "Öğrenci 5 yaş üstü; rutin taramada opsiyoneldir."
-					new_hc = st.number_input("👶 Baş Çevresi (cm)", min_value=0.0, max_value=80.0, value=cur_hc_val, step=0.5, format="%.1f", help=hc_help)
+					new_hc_raw = smart_text_input("👶 Baş Çevresi (cm)", "head_circ", key=f"scr_dlg_{student_id}_hc", value=cur_hc_val, placeholder="Örn: 48.5 veya 485", help=hc_help, in_form=True)
 				col_idx += 1
 
 		# 3. Vital Bulgular
 		has_vitals = any(f in visible_fields for f in ("temperature_c", "pulse_bpm", "spo2_pct"))
-		new_temp = None
-		new_pulse = None
-		new_spo2 = None
+		new_temp_raw = ""
+		new_pulse_raw = ""
+		new_spo2_raw = ""
 		if has_vitals:
 			st.markdown("##### 💓 Vital Bulgular")
 			vital_cols = []
@@ -12839,18 +17860,18 @@ def open_screening_dialog(student_id: int, class_name: str | None = None) -> Non
 			vcol_idx = 0
 			if "temperature_c" in visible_fields:
 				with vcols_obj[vcol_idx]:
-					cur_t_val = float(latest.get("temperature_c") or (v_row["temperature_c"] if v_row and v_row["temperature_c"] else 36.5))
-					new_temp = st.number_input("🌡️ Ateş (°C)", min_value=0.0, max_value=45.0, value=cur_t_val, step=0.1, format="%.1f")
+					cur_t_val = latest.get("temperature_c") if latest.get("temperature_c") else None
+					new_temp_raw = smart_text_input("🌡️ Ateş (°C)", "temperature", key=f"scr_dlg_{student_id}_t", value=cur_t_val, placeholder="Örn: 36.6 veya 366", in_form=True)
 				vcol_idx += 1
 			if "pulse_bpm" in visible_fields:
 				with vcols_obj[vcol_idx]:
-					cur_p_val = int(latest.get("pulse_bpm") or (v_row["pulse_bpm"] if v_row and v_row["pulse_bpm"] else 80))
-					new_pulse = st.number_input("💓 Nabız (/dk)", min_value=0, max_value=220, value=cur_p_val, step=1)
+					cur_p_val = latest.get("pulse_bpm") if latest.get("pulse_bpm") else None
+					new_pulse_raw = smart_text_input("💓 Nabız (/dk)", "pulse", key=f"scr_dlg_{student_id}_p", value=cur_p_val, placeholder="Örn: 84", in_form=True)
 				vcol_idx += 1
 			if "spo2_pct" in visible_fields:
 				with vcols_obj[vcol_idx]:
-					cur_s_val = int(latest.get("spo2_pct") or (v_row["spo2_pct"] if v_row and v_row["spo2_pct"] else 98))
-					new_spo2 = st.number_input("🫁 Oksijen Saturasyonu (%)", min_value=0, max_value=100, value=cur_s_val, step=1)
+					cur_s_val = latest.get("spo2_pct") if latest.get("spo2_pct") else None
+					new_spo2_raw = smart_text_input("🫁 Oksijen Saturasyonu (%)", "spo2", key=f"scr_dlg_{student_id}_s", value=cur_s_val, placeholder="Örn: %98 veya 988", in_form=True)
 				vcol_idx += 1
 
 		# 4. Göz & Görme
@@ -12973,15 +17994,33 @@ def open_screening_dialog(student_id: int, class_name: str | None = None) -> Non
 		submitted = st.form_submit_button("💾 Sağlık Taramasını Kaydet ve Profile Eşitle", type="primary", use_container_width=True)
 
 		if submitted:
+			new_h = normalize_height(new_h_raw) if ("height_cm" in visible_fields and new_h_raw) else None
+			new_w = normalize_weight(new_w_raw, is_adult=False) if ("weight_kg" in visible_fields and new_w_raw) else None
+			new_hc = normalize_head_circ(new_hc_raw) if ("head_circ_cm" in visible_fields and new_hc_raw) else None
+			new_temp = normalize_temperature(new_temp_raw) if ("temperature_c" in visible_fields and new_temp_raw) else None
+			new_pulse = normalize_pulse(new_pulse_raw) if ("pulse_bpm" in visible_fields and new_pulse_raw) else None
+			new_spo2 = normalize_spo2(new_spo2_raw) if ("spo2_pct" in visible_fields and new_spo2_raw) else None
+
+			invalid_scr = []
+			if "height_cm" in visible_fields and str(new_h_raw).strip() and new_h is None: invalid_scr.append("Boy")
+			if "weight_kg" in visible_fields and str(new_w_raw).strip() and new_w is None: invalid_scr.append("Kilo")
+			if "head_circ_cm" in visible_fields and str(new_hc_raw).strip() and new_hc is None: invalid_scr.append("Baş Çevresi")
+			if "temperature_c" in visible_fields and str(new_temp_raw).strip() and new_temp is None: invalid_scr.append("Ateş")
+			if "pulse_bpm" in visible_fields and str(new_pulse_raw).strip() and new_pulse is None: invalid_scr.append("Nabız")
+			if "spo2_pct" in visible_fields and str(new_spo2_raw).strip() and new_spo2 is None: invalid_scr.append("SpO2")
+			if invalid_scr:
+				st.error("Geçersiz tarama ölçümü: " + ", ".join(invalid_scr))
+				return
+
 			save_school_screening(
 				student_id=student_id,
 				screening_date=scr_date.isoformat(),
-				height_cm=float(new_h) if (new_h is not None and new_h > 0) else None,
-				weight_kg=float(new_w) if (new_w is not None and new_w > 0) else None,
-				head_circ_cm=float(new_hc) if (new_hc is not None and new_hc > 0) else None,
-				temperature_c=float(new_temp) if (new_temp is not None and new_temp > 0) else None,
-				pulse_bpm=float(new_pulse) if (new_pulse is not None and new_pulse > 0) else None,
-				spo2_pct=float(new_spo2) if (new_spo2 is not None and new_spo2 > 0) else None,
+				height_cm=new_h,
+				weight_kg=new_w,
+				head_circ_cm=new_hc,
+				temperature_c=new_temp,
+				pulse_bpm=new_pulse,
+				spo2_pct=new_spo2,
 				wears_glasses=new_wears if "wears_glasses" in visible_fields else None,
 				vision_right=new_vr.strip() if (new_vr and "vision_right" in visible_fields) else None,
 				vision_left=new_vl.strip() if (new_vl and "vision_left" in visible_fields) else None,
@@ -12994,6 +18033,8 @@ def open_screening_dialog(student_id: int, class_name: str | None = None) -> Non
 				notes=scr_notes.strip() or None,
 				screened_by=scr_nurse.strip() or None,
 			)
+			for _sk in (f"scr_dlg_{student_id}_h", f"scr_dlg_{student_id}_w", f"scr_dlg_{student_id}_hc", f"scr_dlg_{student_id}_t", f"scr_dlg_{student_id}_p", f"scr_dlg_{student_id}_s"):
+				st.session_state.pop(_sk, None)
 			st.success(f"✅ {student['full_name']} öğrencisinin sağlık taraması kaydedildi ve tüm profille senkronize edildi.")
 			st.rerun()
 
@@ -13400,6 +18441,1023 @@ tr:nth-child(even) {{ background-color: #f8fafc; }}
 	return html_content
 
 
+
+def make_screening_import_template() -> bytes:
+	wb = Workbook()
+	ws = wb.active
+	ws.title = "Sağlık Taraması"
+
+	headers = ["Sınıf", "Ad Soyad", "Cinsiyet", "Doğum Tarihi", "Boy (cm)", "Kilo (kg)"]
+	header_font = Font(name="Segoe UI", size=11, bold=True, color="FFFFFF")
+	header_fill = PatternFill(start_color="0D9488", end_color="0D9488", fill_type="solid")
+	center_align = Alignment(horizontal="center", vertical="center")
+	left_align = Alignment(horizontal="left", vertical="center")
+	right_align = Alignment(horizontal="right", vertical="center")
+	thin_border = Border(
+		left=Side(style='thin', color='CBD5E1'),
+		right=Side(style='thin', color='CBD5E1'),
+		top=Side(style='thin', color='CBD5E1'),
+		bottom=Side(style='thin', color='CBD5E1')
+	)
+
+	ws.append(headers)
+	for col_idx in range(1, len(headers) + 1):
+		cell = ws.cell(row=1, column=col_idx)
+		cell.font = header_font
+		cell.fill = header_fill
+		cell.alignment = center_align
+		cell.border = thin_border
+	ws.row_dimensions[1].height = 26
+
+	sample_rows = [
+		("A Şubesi", "ALİ ASAF DOĞAN", "E", "2021-09-10", 115.0, 24.0),
+		("A Şubesi", "GÖKTUĞ GÖZEL", "E", "2022-08-03", None, None),
+		("A Şubesi", "SEYCAN AY", "K", "2022-06-09", 121.0, 28.3),
+		("A Şubesi", "ZEYNEP BAL", "K", "2021-05-31", 115.0, 23.0),
+		("A Şubesi", "ZEYNEP TAŞDEMİR", "K", "2021-07-15", 117.0, 23.5),
+		("B Şubesi", "NİSA ÖNLER", "K", "2022-07-16", 104.0, 16.25),
+		("B Şubesi", "YAĞIZ HAN ALADAĞ", "E", "2021-02-23", 105.0, 14.25),
+	]
+
+	row_font = Font(name="Segoe UI", size=10)
+	for r_idx, r_data in enumerate(sample_rows, start=2):
+		ws.append(r_data)
+		ws.row_dimensions[r_idx].height = 20
+		for col_idx in range(1, len(r_data) + 1):
+			cell = ws.cell(row=r_idx, column=col_idx)
+			cell.font = row_font
+			cell.border = thin_border
+			if col_idx in [1, 3, 4]:
+				cell.alignment = center_align
+			elif col_idx in [5, 6]:
+				cell.alignment = right_align
+				if col_idx == 5 and cell.value is not None:
+					cell.number_format = "0.0"
+				elif col_idx == 6 and cell.value is not None:
+					cell.number_format = "0.00"
+			else:
+				cell.alignment = left_align
+
+	col_widths = {1: 18, 2: 30, 3: 12, 4: 16, 5: 14, 6: 14}
+	for col_idx, width in col_widths.items():
+		ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+	buf = io.BytesIO()
+	wb.save(buf)
+	return buf.getvalue()
+
+
+def parse_screening_image_ocr(image_bytes: bytes) -> list[dict[str, Any]]:
+	from PIL import Image
+	import numpy as np
+	reader = get_ocr_reader()
+	img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+	np_img = np.asarray(img)
+	results = reader.readtext(np_img, detail=1)
+
+	items = []
+	for bbox, text, prob in results:
+		t = str(text).strip()
+		if not t:
+			continue
+		ys = [p[1] for p in bbox]
+		xs = [p[0] for p in bbox]
+		h = max(ys) - min(ys)
+		y_center = sum(ys) / len(ys)
+		items.append({
+			"text": t,
+			"y": y_center,
+			"h": h,
+			"min_x": min(xs),
+			"prob": prob
+		})
+	if not items:
+		return []
+
+	items.sort(key=lambda it: it["y"])
+	med_h = sorted(it["h"] for it in items)[len(items)//2]
+	row_thresh = max(12.0, med_h * 0.6)
+
+	rows = []
+	curr_row = [items[0]]
+	for it in items[1:]:
+		if abs(it["y"] - curr_row[0]["y"]) <= row_thresh:
+			curr_row.append(it)
+		else:
+			curr_row.sort(key=lambda x: x["min_x"])
+			rows.append(curr_row)
+			curr_row = [it]
+	if curr_row:
+		curr_row.sort(key=lambda x: x["min_x"])
+		rows.append(curr_row)
+
+	records = []
+	for r in rows:
+		texts = [it["text"] for it in r]
+		line_str = " ".join(texts).lower()
+		if any(h in line_str for h in ["ad soyad", "cinsiyet", "dogum", "boy", "kilo"]):
+			continue
+
+		cls_val = None
+		dob_val = None
+		sex_val = None
+		nums = []
+		name_parts = []
+
+		for it in r:
+			t = it["text"].strip()
+			m_date = re.search(r"(\d{4}[-./]\d{1,2}[-./]\d{1,2}|\d{1,2}[-./]\d{1,2}[-./]\d{4})", t)
+			if m_date and not dob_val:
+				raw_d = m_date.group(1).replace("/", "-").replace(".", "-")
+				parts = raw_d.split("-")
+				if len(parts[0]) == 4:
+					dob_val = f"{parts[0]}-{parts[1].zfill(2)}-{parts[2].zfill(2)}"
+				else:
+					dob_val = f"{parts[2]}-{parts[1].zfill(2)}-{parts[0].zfill(2)}"
+				continue
+			if ("şube" in t.lower() or "sube" in t.lower()) and not cls_val:
+				cls_val = t
+				continue
+			if t.upper() in ["E", "K", "ERKEK", "KIZ", "M", "F"] and not sex_val:
+				sex_val = "Erkek" if t.upper() in ["E", "ERKEK", "M"] else "Kız"
+				continue
+			num_clean = t.replace(",", ".")
+			m_num = re.match(r"^(\d{1,5}(?:\.\d{1,2})?)$", num_clean)
+			if m_num:
+				nums.append(float(m_num.group(1)))
+				continue
+			name_parts.append(t)
+
+		height_val = None
+		weight_val = None
+		if len(nums) == 1:
+			if nums[0] >= 60:
+				height_val = normalize_height(nums[0])
+			else:
+				weight_val = normalize_weight(nums[0], is_adult=False)
+		elif len(nums) >= 2:
+			if nums[0] > nums[1]:
+				height_val = normalize_height(nums[0])
+				weight_val = normalize_weight(nums[1], is_adult=False)
+			else:
+				height_val = normalize_height(nums[1])
+				weight_val = normalize_weight(nums[0], is_adult=False)
+
+		full_name = " ".join(name_parts).strip()
+		if full_name:
+			records.append({
+				"class_name": cls_val or "",
+				"full_name": full_name,
+				"sex": sex_val,
+				"birth_date": dob_val,
+				"height_cm": height_val,
+				"weight_kg": weight_val
+			})
+	return records
+
+
+def parse_screening_file_or_image(file_bytes: bytes, file_name: str) -> list[dict[str, Any]]:
+	lower_fn = file_name.lower()
+	if lower_fn.endswith((".png", ".jpg", ".jpeg", ".bmp", ".webp")):
+		return parse_screening_image_ocr(file_bytes)
+
+	if lower_fn.endswith((".xlsx", ".xls")):
+		df = pd.read_excel(io.BytesIO(file_bytes), dtype=object)
+	elif lower_fn.endswith((".csv", ".txt")):
+		try:
+			df = pd.read_csv(io.BytesIO(file_bytes), sep=None, engine="python", dtype=object)
+		except Exception:
+			df = pd.read_csv(io.BytesIO(file_bytes), dtype=object)
+	else:
+		raise ValueError(f"Desteklenmeyen dosya formatı: {file_name}")
+
+	def clean_val(v):
+		if v is None or pd.isna(v):
+			return None
+		s = str(v).strip()
+		return s if s else None
+
+	def parse_num(v):
+		if v is None or pd.isna(v):
+			return None
+		s = str(v).strip().replace(",", ".")
+		try:
+			val = float(s)
+			return val if val > 0 else None
+		except ValueError:
+			return None
+
+	def parse_date_str(v):
+		if v is None or pd.isna(v):
+			return None
+		if isinstance(v, (datetime, date, pd.Timestamp)):
+			return v.strftime("%Y-%m-%d")
+		s = str(v).strip().replace("/", "-").replace(".", "-")
+		m = re.search(r"(\d{4}-\d{1,2}-\d{1,2}|\d{1,2}-\d{1,2}-\d{4})", s)
+		if m:
+			parts = m.group(1).split("-")
+			if len(parts[0]) == 4:
+				return f"{parts[0]}-{parts[1].zfill(2)}-{parts[2].zfill(2)}"
+			else:
+				return f"{parts[2]}-{parts[1].zfill(2)}-{parts[0].zfill(2)}"
+		return None
+
+	def parse_sex_str(v):
+		if not v or pd.isna(v):
+			return None
+		s = str(v).strip().upper()
+		if s in ["E", "ERKEK", "M", "MALE", "BOY"]:
+			return "Erkek"
+		if s in ["K", "KIZ", "KADIN", "F", "FEMALE", "GIRL"]:
+			return "Kız"
+		return None
+
+	def normalize_col(c):
+		s = str(c).lower().strip()
+		trans = str.maketrans("ıüğşöç", "iugsoc")
+		s = s.translate(trans)
+		return re.sub(r"[^a-z0-9]", "", s)
+
+	col_map = {}
+	for col in df.columns:
+		norm = normalize_col(col)
+		if "sinif" in norm or "sube" in norm or norm in ["class", "grade"]:
+			col_map["class_name"] = col
+		elif any(k in norm for k in ["adsoyad", "adisoyadi", "isim", "ogrenciadi", "fullname", "name"]):
+			col_map["full_name"] = col
+		elif "cinsiyet" in norm or norm in ["sex", "gender"]:
+			col_map["sex"] = col
+		elif any(k in norm for k in ["dogumtarihi", "dogum", "dogumgunu", "bdate", "birthdate", "dob"]):
+			col_map["birth_date"] = col
+		elif "boy" in norm or "height" in norm:
+			col_map["height_cm"] = col
+		elif "kilo" in norm or "agirlik" in norm or "weight" in norm:
+			col_map["weight_kg"] = col
+
+	if "full_name" not in col_map and len(df.columns) >= 2:
+		cols = list(df.columns)
+		col_map["class_name"] = cols[0]
+		col_map["full_name"] = cols[1]
+		if len(cols) >= 3: col_map["sex"] = cols[2]
+		if len(cols) >= 4: col_map["birth_date"] = cols[3]
+		if len(cols) >= 5: col_map["height_cm"] = cols[4]
+		if len(cols) >= 6: col_map["weight_kg"] = cols[5]
+
+	records = []
+	for _, row in df.iterrows():
+		fn = clean_val(row.get(col_map.get("full_name")))
+		if not fn or str(fn).lower() in ["nan", "none", "ad soyad", "isim"]:
+			continue
+		cls = clean_val(row.get(col_map.get("class_name"))) or ""
+		sx = parse_sex_str(row.get(col_map.get("sex")))
+		dob = parse_birth_date(row.get(col_map.get("birth_date"))) or parse_date_str(row.get(col_map.get("birth_date")))
+		h = normalize_height(row.get(col_map.get("height_cm")))
+		w = normalize_weight(row.get(col_map.get("weight_kg")), is_adult=False)
+
+		records.append({
+			"class_name": cls,
+			"full_name": fn,
+			"sex": sx,
+			"birth_date": dob,
+			"height_cm": h,
+			"weight_kg": w
+		})
+	return records
+
+
+def commit_screening_import(
+	parsed_rows: list[dict[str, Any]],
+	screening_date: str | None = None,
+	nurse_name: str | None = None,
+	default_class: str | None = None,
+) -> tuple[int, int, int]:
+	scr_date = str(screening_date or date.today().isoformat())[:10]
+	now_iso = datetime.now().isoformat(timespec="seconds")
+	app_cfg = get_app_settings()
+	scr_by = (nurse_name or app_cfg.get("nurse_name", "")).strip() or "Okul Revir Sorumlusu"
+
+	updated_cnt = 0
+	screened_cnt = 0
+	added_cnt = 0
+
+	with connect_db() as connection:
+		classes_rows = connection.execute("SELECT id, name FROM classes").fetchall()
+		class_map = {r["name"]: r["id"] for r in classes_rows}
+
+		db_students = connection.execute(
+			"SELECT id, full_name, class_id, sex, birth_date, student_no FROM students"
+		).fetchall()
+		student_map = {_normalize_name_for_match(s["full_name"]): s for s in db_students}
+
+		for r in parsed_rows:
+			raw_fn = str(r.get("full_name") or "").strip()
+			if not raw_fn:
+				continue
+			k = _normalize_name_for_match(raw_fn)
+			stu = student_map.get(k)
+
+			cls_in = str(r.get("class_name") or default_class or "").strip()
+			matched_cid = None
+			if cls_in:
+				for cname, cid in class_map.items():
+					if cls_in == cname or cname.endswith(f"/ {cls_in}"):
+						matched_cid = cid
+						break
+				if not matched_cid:
+					m_sube = re.search(r"([A-ZĞÜŞİÖÇIİ])\s*Şubesi?", cls_in, re.IGNORECASE)
+					if m_sube:
+						letter = m_sube.group(1).upper()
+						for cname, cid in class_map.items():
+							if f"/ {letter} Şubesi" in cname or f" {letter} Şubesi" in cname:
+								matched_cid = cid
+								break
+				if not matched_cid:
+					for cname, cid in class_map.items():
+						if cls_in in cname or _normalize_name_for_match(cls_in) in _normalize_name_for_match(cname):
+							matched_cid = cid
+							break
+				if not matched_cid:
+					full_cname = f"Özel Eğitim Ana Sınıfı / {cls_in}" if (not cls_in.startswith("Özel") and "Şubesi" in cls_in) else cls_in
+					connection.execute("INSERT INTO classes(name) VALUES (?)", (full_cname,))
+					matched_cid = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+					class_map[full_cname] = matched_cid
+
+			sex_in = normalize_sex(r.get("sex"))
+			dob_in = r.get("birth_date")
+			h_val = float(r["height_cm"]) if (r.get("height_cm") is not None and float(r["height_cm"]) > 0) else None
+			w_val = float(r["weight_kg"]) if (r.get("weight_kg") is not None and float(r["weight_kg"]) > 0) else None
+
+			if stu:
+				stu_id = int(stu["id"])
+				sex_final = sex_in or normalize_sex(stu["sex"]) or "E"
+				dob_final = dob_in or stu["birth_date"]
+				cid_final = matched_cid or stu["class_id"]
+
+				connection.execute(
+					"UPDATE students SET sex=?, birth_date=?, class_id=? WHERE id=?",
+					(sex_final, dob_final, cid_final, stu_id)
+				)
+				updated_cnt += 1
+			else:
+				sex_final = sex_in or "E"
+				dob_final = dob_in
+				cid_final = matched_cid or (list(class_map.values())[0] if class_map else 1)
+
+				cursor = connection.execute(
+					"""INSERT INTO students(class_id, full_name, sex, birth_date, person_type)
+					   VALUES (?, ?, ?, ?, 'Öğrenci')""",
+					(cid_final, raw_fn, sex_final, dob_final)
+				)
+				stu_id = int(cursor.lastrowid)
+				added_cnt += 1
+
+			if h_val is not None or w_val is not None:
+				# 1. School screenings
+				connection.execute(
+					"""INSERT INTO school_screenings(
+						student_id, screening_date, height_cm, weight_kg,
+						notes, screened_by, created_at
+					) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+					(stu_id, scr_date, h_val, w_val, "Toplu içe aktarım (Excel/OCR)", scr_by, now_iso)
+				)
+
+				# 2. Health profile
+				connection.execute(
+					"""INSERT INTO health_profiles(student_id, last_screened_at, updated_at, reviewed_by)
+					   VALUES (?, ?, ?, ?)
+					   ON CONFLICT(student_id) DO UPDATE SET
+						   last_screened_at = excluded.last_screened_at,
+						   updated_at = excluded.updated_at,
+						   reviewed_by = COALESCE(health_profiles.reviewed_by, excluded.reviewed_by)""",
+					(stu_id, scr_date, now_iso, scr_by)
+				)
+
+				# 3. Measurements (upsert same-date + compute BMI / age_months)
+				_upsert_measurement_conn(
+					connection,
+					stu_id,
+					date.fromisoformat(scr_date),
+					h_val,
+					w_val,
+					birth_date=dob_final,
+					sex=sex_final,
+				)
+				screened_cnt += 1
+
+	sync_all_person_data_files()
+	sync_after_person_mutation(None)
+	return updated_cnt, screened_cnt, added_cnt
+
+
+def render_screening_import_section(target_class: str | None = None) -> None:
+	st.markdown("### 📥 Toplu Tarama Verisi İçe Aktar (Excel / CSV / Resim-OCR)")
+	st.caption("Öğrencilerin sınıf, boy, kilo, cinsiyet ve doğum tarihi tarama verilerini Excel (.xlsx, .xls), CSV (.csv) veya liste fotoğrafları (.png, .jpg) üzerinden topluca sisteme aktarın.")
+
+	card_key = f"scr_imp_{target_class or 'all'}"
+	col_up, col_info = st.columns([2.2, 1.3])
+
+	with col_up:
+		uploaded_file = st.file_uploader(
+			"Tarama Listesi Dosyasını (.xlsx, .xls, .csv) veya Fotoğrafını (.png, .jpg) Seçin",
+			type=["xlsx", "xls", "csv", "png", "jpg", "jpeg"],
+			key=f"uploader_{card_key}"
+		)
+
+		c_date, c_nurse = st.columns(2)
+		app_cfg = get_app_settings()
+		def_nurse = app_cfg.get("nurse_name", "Okul Revir Sorumlusu")
+		scr_date_val = c_date.date_input("🗓️ Tarama Tarihi", value=date.today(), key=f"date_{card_key}")
+		scr_nurse_val = c_nurse.text_input("👩‍⚕️ Taramayı Yapan Yetkili", value=def_nurse, key=f"nurse_{card_key}")
+
+	with col_info:
+		st.markdown("##### 📄 Format & Örnek Excel")
+		st.caption("Beklenen sütun başlıkları ve sırası:")
+		st.code("Sınıf, Ad Soyad, Cinsiyet, Doğum Tarihi, Boy (cm), Kilo (kg)", language="text")
+		st.caption("💡 Belge veya liste fotoğrafı yüklendiğinde optik karakter tanıma (OCR) motoru görseldeki tabloyu okur.")
+		tpl_bytes = make_screening_import_template()
+		st.download_button(
+			"📥 Örnek Tarama Excel Şablonunu İndir (.xlsx)",
+			data=tpl_bytes,
+			file_name="ornek_tarama_listesi.xlsx",
+			mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+			key=f"btn_dl_tpl_{card_key}",
+			use_container_width=True,
+		)
+
+	if uploaded_file is not None:
+		try:
+			with st.spinner("Dosya / Görsel işleniyor ve tarama verileri çözümleniyor..."):
+				parsed_rows = parse_screening_file_or_image(uploaded_file.getvalue(), uploaded_file.name)
+
+			if not parsed_rows:
+				st.warning("⚠️ Yüklenen dosyadan veya görselden geçerli öğrenci tarama satırı tespit edilemedi. Lütfen sütun başlıklarını veya görselin netliğini kontrol edin.")
+				return
+
+			with connect_db() as connection:
+				db_stus = connection.execute("SELECT id, full_name, sex, birth_date FROM students").fetchall()
+				db_map = {_normalize_name_for_match(s["full_name"]): s for s in db_stus}
+
+			preview_list = []
+			meas_cnt = 0
+			matched_cnt = 0
+			new_cnt = 0
+
+			for r in parsed_rows:
+				fn = r.get("full_name") or ""
+				k = _normalize_name_for_match(fn)
+				stu = db_map.get(k)
+				is_matched = stu is not None
+				if is_matched:
+					matched_cnt += 1
+				else:
+					new_cnt += 1
+
+				h = r.get("height_cm")
+				w = r.get("weight_kg")
+				if h or w:
+					meas_cnt += 1
+
+				bmi_calc = (w / ((h / 100.0) ** 2)) if (h and w and h > 0 and w > 0) else None
+
+				status_badge = "🟢 Kayıtlı Öğrenci" if is_matched else "➕ Yeni Eklenecek"
+				if h or w:
+					action_txt = "📏 Tarama & Ölçüm Kaydedilecek"
+				else:
+					action_txt = "ℹ️ Yalnızca Kimlik Güncellenecek"
+
+				preview_list.append({
+					"Sınıf": r.get("class_name") or (target_class or "—"),
+					"Ad Soyad": fn,
+					"Cinsiyet": r.get("sex") or (stu["sex"] if is_matched else "—"),
+					"Doğum Tarihi": r.get("birth_date") or (stu["birth_date"] if is_matched else "—"),
+					"Boy (cm)": f"{h:.1f}" if h else "—",
+					"Kilo (kg)": f"{w:.2f}" if w else "—",
+					"VKİ": f"{bmi_calc:.1f}" if bmi_calc else "—",
+					"Sistem Durumu": status_badge,
+					"İşlem": action_txt,
+				})
+
+			st.markdown("---")
+			st.markdown("##### 🔍 Önizleme ve Veri Özeti")
+			m1, m2, m3, m4 = st.columns(4)
+			m1.metric("Toplam Satır", len(parsed_rows))
+			m2.metric("Ölçüm İçeren (Boy/Kilo)", meas_cnt)
+			m3.metric("Sistemde Kayıtlı", matched_cnt)
+			m4.metric("Yeni Öğrenci", new_cnt)
+
+			st.dataframe(pd.DataFrame(preview_list), hide_index=True, use_container_width=True)
+
+			btn_txt = f"🚀 {len(parsed_rows)} Öğrencinin Tarama ve Ölçüm Bilgilerini Sisteme Aktar"
+			if st.button(btn_txt, type="primary", use_container_width=True, key=f"btn_commit_{card_key}"):
+				with st.spinner("Öğrenci profilleri, boy-kilo ölçümleri ve sağlık taramaları kaydediliyor..."):
+					upd, scr, add = commit_screening_import(
+						parsed_rows,
+						screening_date=scr_date_val.isoformat(),
+						nurse_name=scr_nurse_val,
+						default_class=target_class,
+					)
+				st.balloons()
+				st.success(f"🎉 **Aktarım Başarıyla Tamamlandı!** {scr} öğrencinin boy-kilo ölçümü ve sağlık taraması kaydedildi. {upd} öğrenci bilgisi güncellendi, {add} yeni öğrenci sisteme eklendi.")
+				st.rerun()
+
+		except Exception as ex:
+			st.error(f"Dosya / Görsel işleme sırasında hata oluştu: {ex}")
+
+
+BULK_SCREENING_GLASSES_OPTIONS: list[str] = [
+	"Hayır (Kullanmıyor)",
+	"Evet (Sürekli)",
+	"Bazen / Sadece Okurken",
+	"Gözlük Önerildi / Muayene Bekleniyor",
+]
+
+BULK_SCREENING_AUTOFILL_DEFAULTS: dict[str, str] = {
+	"Gözlük": "Hayır (Kullanmıyor)",
+	"Sağ Göz": "Tam / Normal (10/10)",
+	"Sol Göz": "Tam / Normal (10/10)",
+	"Saç / Hijyen": "Temiz / Parazit Yok",
+	"Sağ Kulak": "Normal / İyi Duyuyor",
+	"Sol Kulak": "Normal / İyi Duyuyor",
+}
+
+BULK_SCREENING_COLUMNS: list[str] = [
+	"student_id",
+	"Okul No",
+	"Ad Soyad",
+	"Boy (cm)",
+	"Kilo (kg)",
+	"Baş Çevresi (cm)",
+	"Ateş (°C)",
+	"Nabız (/dk)",
+	"SpO2 (%)",
+	"Gözlük",
+	"Sağ Göz",
+	"Sol Göz",
+	"Saç / Hijyen",
+	"Sağ Kulak",
+	"Sol Kulak",
+	"Sağlık Davranışı",
+	"Psikososyal Durum",
+	"Tarama Notu",
+]
+
+
+def _is_bulk_cell_blank(val: object) -> bool:
+	if val is None:
+		return True
+	if isinstance(val, float) and math.isnan(val):
+		return True
+	try:
+		if pd.isna(val):
+			return True
+	except (TypeError, ValueError):
+		pass
+	if isinstance(val, str):
+		s = val.strip()
+		return (not s) or s.lower() in {"nan", "none", "<na>"}
+	return False
+
+
+def _clean_bulk_str(val: object) -> str | None:
+	if _is_bulk_cell_blank(val):
+		return None
+	s = clean_text(val)
+	return s or None
+
+
+def _coerce_bulk_float(val: object) -> float | None:
+	if _is_bulk_cell_blank(val):
+		return None
+	num = numeric_value(val)
+	if num is None or (isinstance(num, float) and math.isnan(num)):
+		return None
+	return float(num)
+
+
+def _normalize_bulk_row_payload(row_dict: dict[str, Any]) -> dict[str, Any]:
+	"""Extract and smart-normalize all editable fields for one bulk screening row."""
+	h_val = None if _is_bulk_cell_blank(row_dict.get("Boy (cm)")) else parse_smart_clinical_value("height", row_dict.get("Boy (cm)"), is_adult=False)
+	w_val = None if _is_bulk_cell_blank(row_dict.get("Kilo (kg)")) else parse_smart_clinical_value("weight", row_dict.get("Kilo (kg)"), is_adult=False)
+	hc_val = None if _is_bulk_cell_blank(row_dict.get("Baş Çevresi (cm)")) else parse_smart_clinical_value("head_circ", row_dict.get("Baş Çevresi (cm)"), is_adult=False)
+	t_val = None if _is_bulk_cell_blank(row_dict.get("Ateş (°C)")) else parse_smart_clinical_value("temperature", row_dict.get("Ateş (°C)"), is_adult=False)
+	p_raw = None if _is_bulk_cell_blank(row_dict.get("Nabız (/dk)")) else parse_smart_clinical_value("pulse", row_dict.get("Nabız (/dk)"), is_adult=False)
+	s_raw = None if _is_bulk_cell_blank(row_dict.get("SpO2 (%)")) else parse_smart_clinical_value("spo2", row_dict.get("SpO2 (%)"), is_adult=False)
+	return {
+		"height_cm": float(h_val) if h_val is not None else None,
+		"weight_kg": float(w_val) if w_val is not None else None,
+		"head_circ_cm": float(hc_val) if hc_val is not None else None,
+		"temperature_c": float(t_val) if t_val is not None else None,
+		"pulse_bpm": float(p_raw) if p_raw is not None else None,
+		"spo2_pct": float(s_raw) if s_raw is not None else None,
+		"wears_glasses": _clean_bulk_str(row_dict.get("Gözlük")),
+		"vision_right": _clean_bulk_str(row_dict.get("Sağ Göz")),
+		"vision_left": _clean_bulk_str(row_dict.get("Sol Göz")),
+		"hair_screening": _clean_bulk_str(row_dict.get("Saç / Hijyen")),
+		"hearing_right": _clean_bulk_str(row_dict.get("Sağ Kulak")),
+		"hearing_left": _clean_bulk_str(row_dict.get("Sol Kulak")),
+		"health_behavior": _clean_bulk_str(row_dict.get("Sağlık Davranışı")),
+		"psychosocial_status": _clean_bulk_str(row_dict.get("Psikososyal Durum")),
+		"notes": _clean_bulk_str(row_dict.get("Tarama Notu")),
+	}
+
+
+def _pick_recent_metric(
+	exact_scr: dict[str, Any] | None,
+	latest_scr: dict[str, Any] | None,
+	exact_rec: dict[str, Any] | None,
+	latest_rec: dict[str, Any] | None,
+	scr_col: str,
+	rec_col: str,
+	scr_date_key: str = "screening_date",
+	rec_date_key: str = "measured_at",
+) -> float | None:
+	if exact_scr and exact_scr.get(scr_col) is not None:
+		return float(exact_scr[scr_col])
+	if exact_rec and exact_rec.get(rec_col) is not None:
+		return float(exact_rec[rec_col])
+	s_val = latest_scr.get(scr_col) if latest_scr else None
+	r_val = latest_rec.get(rec_col) if latest_rec else None
+	if s_val is not None and r_val is not None:
+		s_dt = str(latest_scr.get(scr_date_key) or "")[:10]
+		r_dt = str(latest_rec.get(rec_date_key) or "")[:10]
+		return float(r_val) if r_dt >= s_dt else float(s_val)
+	if s_val is not None:
+		return float(s_val)
+	if r_val is not None:
+		return float(r_val)
+	return None
+
+
+def _build_bulk_class_screening_df(class_name: str, target_date_iso: str) -> tuple[pd.DataFrame, set[int]]:
+	"""Load ordered class students pre-populated with exact-date or latest screening/measurement/vital values."""
+	t_date = (parse_birth_date(target_date_iso) or str(target_date_iso or date.today().isoformat()))[:10]
+	with connect_db() as connection:
+		stu_rows = connection.execute(
+			"""SELECT s.id, s.student_no, s.full_name,
+					  h.wears_glasses, h.vision_right, h.vision_left,
+					  h.hair_screening, h.hearing_right, h.hearing_left,
+					  h.health_behavior, h.psychosocial_status
+			   FROM students s
+			   JOIN classes c ON c.id = s.class_id
+			   LEFT JOIN health_profiles h ON h.student_id = s.id
+			   WHERE c.name = ?
+			   ORDER BY
+				   CASE WHEN TRIM(COALESCE(s.student_no, '')) = '' THEN 1 ELSE 0 END,
+				   CASE WHEN TRIM(COALESCE(s.student_no, '')) GLOB '[0-9]*' THEN CAST(TRIM(s.student_no) AS INTEGER) ELSE 999999999 END,
+				   s.student_no,
+				   s.full_name""",
+			(class_name,),
+		).fetchall()
+
+		sids = [int(r["id"]) for r in stu_rows]
+		exact_scr_map: dict[int, dict[str, Any]] = {}
+		latest_scr_map: dict[int, dict[str, Any]] = {}
+		exact_meas_map: dict[int, dict[str, Any]] = {}
+		latest_meas_map: dict[int, dict[str, Any]] = {}
+		exact_vit_map: dict[int, dict[str, Any]] = {}
+		latest_vit_map: dict[int, dict[str, Any]] = {}
+
+		if sids:
+			ph = ",".join("?" for _ in sids)
+			for r in connection.execute(
+				f"SELECT * FROM school_screenings WHERE student_id IN ({ph}) ORDER BY screening_date DESC, id DESC",
+				sids,
+			).fetchall():
+				rd = dict(r)
+				sid = int(rd["student_id"])
+				if sid not in latest_scr_map:
+					latest_scr_map[sid] = rd
+				if str(rd.get("screening_date") or "")[:10] == t_date and sid not in exact_scr_map:
+					exact_scr_map[sid] = rd
+
+			for r in connection.execute(
+				f"SELECT * FROM measurements WHERE student_id IN ({ph}) ORDER BY measured_on DESC, id DESC",
+				sids,
+			).fetchall():
+				rd = dict(r)
+				sid = int(rd["student_id"])
+				if sid not in latest_meas_map:
+					latest_meas_map[sid] = rd
+				if str(rd.get("measured_on") or "")[:10] == t_date and sid not in exact_meas_map:
+					exact_meas_map[sid] = rd
+
+			for r in connection.execute(
+				f"SELECT * FROM vital_readings WHERE student_id IN ({ph}) ORDER BY measured_at DESC, id DESC",
+				sids,
+			).fetchall():
+				rd = dict(r)
+				sid = int(rd["student_id"])
+				if sid not in latest_vit_map:
+					latest_vit_map[sid] = rd
+				if str(rd.get("measured_at") or "")[:10] == t_date and sid not in exact_vit_map:
+					exact_vit_map[sid] = rd
+
+	records: list[dict[str, Any]] = []
+	for s in stu_rows:
+		sd = dict(s)
+		sid = int(sd["id"])
+		ex_s = exact_scr_map.get(sid)
+		lt_s = latest_scr_map.get(sid)
+		ex_m = exact_meas_map.get(sid)
+		lt_m = latest_meas_map.get(sid)
+		ex_v = exact_vit_map.get(sid)
+		lt_v = latest_vit_map.get(sid)
+
+		def _pick_qual(col: str, fallback_hp: bool = True) -> str | None:
+			if ex_s and not _is_bulk_cell_blank(ex_s.get(col)):
+				return str(ex_s[col]).strip()
+			if lt_s and not _is_bulk_cell_blank(lt_s.get(col)):
+				return str(lt_s[col]).strip()
+			if fallback_hp and not _is_bulk_cell_blank(sd.get(col)):
+				return str(sd[col]).strip()
+			return None
+
+		records.append({
+			"student_id": sid,
+			"Okul No": str(sd.get("student_no") or "").strip(),
+			"Ad Soyad": str(sd.get("full_name") or "").strip(),
+			"Boy (cm)": _pick_recent_metric(ex_s, lt_s, ex_m, lt_m, "height_cm", "height_cm", rec_date_key="measured_on"),
+			"Kilo (kg)": _pick_recent_metric(ex_s, lt_s, ex_m, lt_m, "weight_kg", "weight_kg", rec_date_key="measured_on"),
+			"Baş Çevresi (cm)": _pick_recent_metric(ex_s, lt_s, ex_m, lt_m, "head_circ_cm", "head_circ_cm", rec_date_key="measured_on"),
+			"Ateş (°C)": _pick_recent_metric(ex_s, lt_s, ex_v, lt_v, "temperature_c", "temperature_c"),
+			"Nabız (/dk)": _pick_recent_metric(ex_s, lt_s, ex_v, lt_v, "pulse_bpm", "pulse_bpm"),
+			"SpO2 (%)": _pick_recent_metric(ex_s, lt_s, ex_v, lt_v, "spo2_pct", "spo2_pct"),
+			"Gözlük": _pick_qual("wears_glasses"),
+			"Sağ Göz": _pick_qual("vision_right") or "",
+			"Sol Göz": _pick_qual("vision_left") or "",
+			"Saç / Hijyen": _pick_qual("hair_screening"),
+			"Sağ Kulak": _pick_qual("hearing_right"),
+			"Sol Kulak": _pick_qual("hearing_left"),
+			"Sağlık Davranışı": _pick_qual("health_behavior"),
+			"Psikososyal Durum": _pick_qual("psychosocial_status") or "",
+			"Tarama Notu": (str(ex_s["notes"]).strip() if (ex_s and not _is_bulk_cell_blank(ex_s.get("notes"))) else ""),
+		})
+
+	df = pd.DataFrame(records, columns=BULK_SCREENING_COLUMNS) if records else pd.DataFrame(columns=BULK_SCREENING_COLUMNS)
+	for num_col in ("Boy (cm)", "Kilo (kg)", "Baş Çevresi (cm)", "Ateş (°C)", "Nabız (/dk)", "SpO2 (%)"):
+		df[num_col] = pd.to_numeric(df[num_col], errors="coerce")
+	return df, set(exact_scr_map.keys())
+
+
+def _apply_bulk_screening_auto_fill(df: pd.DataFrame) -> pd.DataFrame:
+	"""Fill only blank vision, hearing, hair hygiene, and glasses cells with Normal / Temiz defaults."""
+	out_df = df.copy()
+	if out_df.empty:
+		return out_df
+	for idx in out_df.index:
+		for col, default_val in BULK_SCREENING_AUTOFILL_DEFAULTS.items():
+			if col in out_df.columns and _is_bulk_cell_blank(out_df.at[idx, col]):
+				out_df.at[idx, col] = default_val
+	return out_df
+
+
+def _merge_data_editor_state_into_df(df: pd.DataFrame, editor_state: object) -> pd.DataFrame:
+	"""Apply pending st.data_editor edited_rows onto a snapshot DataFrame before button actions."""
+	if not isinstance(editor_state, dict) or df.empty:
+		return df
+	out_df = df.copy()
+	edited_rows = editor_state.get("edited_rows")
+	if isinstance(edited_rows, dict):
+		for row_idx_key, changes in edited_rows.items():
+			try:
+				pos = int(row_idx_key)
+			except (TypeError, ValueError):
+				continue
+			if 0 <= pos < len(out_df) and isinstance(changes, dict):
+				idx_label = out_df.index[pos]
+				for col_name, new_val in changes.items():
+					if col_name in out_df.columns:
+						out_df.at[idx_label, col_name] = new_val
+	return out_df
+
+
+def save_bulk_class_screening_rows(
+	df_rows: pd.DataFrame,
+	screening_date_iso: str,
+	baseline_df: pd.DataFrame | None = None,
+	save_unchanged: bool = False,
+	screened_by: str | None = None,
+) -> dict[str, int]:
+	"""Persist bulk table screening rows into school_screenings, measurements, vitals, and health_profiles."""
+	if df_rows is None or df_rows.empty:
+		return {"saved_count": 0, "skipped_empty": 0, "skipped_unchanged": 0}
+
+	base_payload_map: dict[int, dict[str, Any]] = {}
+	if baseline_df is not None and not baseline_df.empty:
+		for _, b_row in baseline_df.iterrows():
+			if _is_bulk_cell_blank(b_row.get("student_id")):
+				continue
+			b_sid = int(float(b_row["student_id"]))
+			base_payload_map[b_sid] = _normalize_bulk_row_payload(b_row.to_dict())
+
+	scr_date = parse_birth_date(screening_date_iso) or str(screening_date_iso or date.today().isoformat())[:10]
+	saved_count = 0
+	skipped_empty = 0
+	skipped_unchanged = 0
+
+	for _, row in df_rows.iterrows():
+		if _is_bulk_cell_blank(row.get("student_id")):
+			continue
+		sid = int(float(row["student_id"]))
+		payload = _normalize_bulk_row_payload(row.to_dict())
+		if all(v is None for v in payload.values()):
+			skipped_empty += 1
+			continue
+
+		if (not save_unchanged) and sid in base_payload_map and payload == base_payload_map[sid]:
+			skipped_unchanged += 1
+			continue
+
+		save_school_screening(
+			student_id=sid,
+			screening_date=scr_date,
+			height_cm=payload["height_cm"],
+			weight_kg=payload["weight_kg"],
+			head_circ_cm=payload["head_circ_cm"],
+			temperature_c=payload["temperature_c"],
+			pulse_bpm=payload["pulse_bpm"],
+			spo2_pct=payload["spo2_pct"],
+			wears_glasses=payload["wears_glasses"],
+			vision_right=payload["vision_right"],
+			vision_left=payload["vision_left"],
+			hair_screening=payload["hair_screening"],
+			hearing_right=payload["hearing_right"],
+			hearing_left=payload["hearing_left"],
+			health_behavior=payload["health_behavior"],
+			psychosocial_status=payload["psychosocial_status"],
+			notes=payload["notes"],
+			screened_by=screened_by,
+		)
+		saved_count += 1
+
+	if saved_count > 0:
+		clear_all_data_caches()
+
+	return {
+		"saved_count": saved_count,
+		"skipped_empty": skipped_empty,
+		"skipped_unchanged": skipped_unchanged,
+	}
+
+
+def render_bulk_class_screening_tab(default_class: str | None = None, key_ctx: str = "top") -> None:
+	"""Render Excel-like batch screening st.data_editor workspace for an entire school class."""
+	st.markdown("#### ⚡ Seri Sınıf Taraması (Toplu Tablo Girişi)")
+	st.caption(
+		"Sınıfın tamamını tek tabloda klavyeyle hızlıca doldurun. Sayısal alanlarda `1055` → `105.5 cm`, `185` → `18.5 kg`, `366` → `36.6 °C` akıllı dönüşüm kayıt sırasında otomatik uygulanır."
+	)
+
+	all_classes = [c for c in get_classes() if c != "Sivil / Diğer"]
+	if not all_classes:
+		st.warning("Henüz tanımlı sınıf bulunmuyor.")
+		return
+
+	sel_c1, sel_c2 = st.columns([1.6, 1.2])
+	with sel_c1:
+		if default_class and default_class in all_classes:
+			chosen_cls = default_class
+			st.text_input("Seçili Sınıf", value=chosen_cls, disabled=True, key=f"bulk_scr_cls_locked_{key_ctx}")
+		else:
+			cls_idx = 0
+			prev_cls = st.session_state.get(f"bulk_scr_cls_sel_{key_ctx}")
+			if prev_cls in all_classes:
+				cls_idx = all_classes.index(prev_cls)
+			chosen_cls = st.selectbox("Taranacak Sınıfı Seçin", all_classes, index=cls_idx, key=f"bulk_scr_cls_sel_{key_ctx}")
+	with sel_c2:
+		chosen_date = st.date_input("Tarama Tarihi", value=date.today(), key=f"bulk_scr_date_{key_ctx}")
+
+	target_date_iso = chosen_date.isoformat()
+	ns_key = f"{chosen_cls}||{target_date_iso}"
+	last_ns_key = f"_bulk_scr_last_ns_{key_ctx}"
+	base_df_key = f"_bulk_scr_base_df_{key_ctx}"
+	work_df_key = f"_bulk_scr_work_df_{key_ctx}"
+	exact_ids_key = f"_bulk_scr_exact_ids_{key_ctx}"
+	seed_key = f"_bulk_scr_editor_seed_{key_ctx}"
+	flash_key = f"_bulk_scr_flash_{key_ctx}"
+
+	flash_msg = st.session_state.pop(flash_key, None)
+	if isinstance(flash_msg, tuple) and len(flash_msg) == 2:
+		lvl, txt = flash_msg
+		if lvl == "success":
+			st.success(txt)
+		elif lvl == "warning":
+			st.warning(txt)
+		else:
+			st.info(txt)
+
+	if st.session_state.get(last_ns_key) != ns_key or work_df_key not in st.session_state or base_df_key not in st.session_state:
+		fresh_df, exact_ids = _build_bulk_class_screening_df(chosen_cls, target_date_iso)
+		st.session_state[base_df_key] = fresh_df.copy()
+		st.session_state[work_df_key] = fresh_df.copy()
+		st.session_state[exact_ids_key] = exact_ids
+		st.session_state[last_ns_key] = ns_key
+		st.session_state[seed_key] = int(st.session_state.get(seed_key, 0)) + 1
+
+	base_df: pd.DataFrame = st.session_state[base_df_key]
+	work_df: pd.DataFrame = st.session_state[work_df_key]
+	exact_ids: set[int] = st.session_state.get(exact_ids_key, set())
+	editor_seed = int(st.session_state.get(seed_key, 0))
+	editor_key = f"bulk_scr_editor_{key_ctx}_{editor_seed}"
+
+	if work_df.empty:
+		st.warning(f"{chosen_cls} sınıfında kayıtlı öğrenci bulunmuyor.")
+		return
+
+	st.info(
+		f"👥 **{chosen_cls}** sınıfında **{len(work_df)}** öğrenci yüklendi · Seçili tarih (**{target_date_iso}**) için mevcut taraması olan: **{len(exact_ids)}** öğrenci. *(Diğer öğrenciler için önceki son tarama/ölçüm verileri başlangıç olarak getirildi.)*"
+	)
+
+	act_c1, act_c2 = st.columns([2.4, 1.2])
+	with act_c1:
+		if st.button(
+			"✨ Boş Görme/İşitme/Saç Alanlarını 'Normal / Temiz' Olarak Otomatik Doldur",
+			key=f"btn_bulk_scr_autofill_{key_ctx}",
+			use_container_width=True,
+		):
+			merged_now = _merge_data_editor_state_into_df(work_df, st.session_state.get(editor_key))
+			filled_df = _apply_bulk_screening_auto_fill(merged_now)
+			st.session_state[work_df_key] = filled_df
+			st.session_state[seed_key] = editor_seed + 1
+			st.session_state[flash_key] = (
+				"info",
+				"✨ Boş görme, işitme, saç/hijyen ve gözlük hücreleri 'Normal / Temiz' varsayılanlarıyla dolduruldu. Gözden geçirip alttaki Kaydet butonuna basabilirsiniz.",
+			)
+			st.rerun()
+	with act_c2:
+		if st.button("🔄 Tabloyu Veritabanından Yenile", key=f"btn_bulk_scr_reload_{key_ctx}", use_container_width=True):
+			fresh_df, fresh_exact = _build_bulk_class_screening_df(chosen_cls, target_date_iso)
+			st.session_state[base_df_key] = fresh_df.copy()
+			st.session_state[work_df_key] = fresh_df.copy()
+			st.session_state[exact_ids_key] = fresh_exact
+			st.session_state[seed_key] = editor_seed + 1
+			st.rerun()
+
+	glasses_opts = ensure_options_contain(BULK_SCREENING_GLASSES_OPTIONS, [v for v in work_df["Gözlük"].tolist() if not _is_bulk_cell_blank(v)])
+	hair_opts = ensure_options_contain(HAIR_SCREENING_OPTIONS, [v for v in work_df["Saç / Hijyen"].tolist() if not _is_bulk_cell_blank(v)])
+	hearing_r_opts = ensure_options_contain(HEARING_SCREENING_OPTIONS, [v for v in work_df["Sağ Kulak"].tolist() if not _is_bulk_cell_blank(v)])
+	hearing_l_opts = ensure_options_contain(HEARING_SCREENING_OPTIONS, [v for v in work_df["Sol Kulak"].tolist() if not _is_bulk_cell_blank(v)])
+	behavior_opts = ensure_options_contain(HEALTH_BEHAVIOR_OPTIONS, [v for v in work_df["Sağlık Davranışı"].tolist() if not _is_bulk_cell_blank(v)])
+
+	edited_df = st.data_editor(
+		work_df,
+		hide_index=True,
+		use_container_width=True,
+		num_rows="fixed",
+		height=min(620, max(240, 62 + len(work_df) * 37)),
+		key=editor_key,
+		column_config={
+			"student_id": None,
+			"Okul No": st.column_config.TextColumn("Okul No", disabled=True, width="small"),
+			"Ad Soyad": st.column_config.TextColumn("Ad Soyad", disabled=True, width="medium"),
+			"Boy (cm)": st.column_config.NumberColumn("Boy (cm)", min_value=0.0, max_value=3000.0, step=0.1, format="%.1f", help="Örn: 105.5 veya 1055"),
+			"Kilo (kg)": st.column_config.NumberColumn("Kilo (kg)", min_value=0.0, max_value=3000.0, step=0.1, format="%.1f", help="Örn: 18.5 veya 185"),
+			"Baş Çevresi (cm)": st.column_config.NumberColumn("Baş Çevresi (cm)", min_value=0.0, max_value=800.0, step=0.1, format="%.1f", help="Örn: 48.5 veya 485"),
+			"Ateş (°C)": st.column_config.NumberColumn("Ateş (°C)", min_value=0.0, max_value=500.0, step=0.1, format="%.1f", help="Örn: 36.6 veya 366"),
+			"Nabız (/dk)": st.column_config.NumberColumn("Nabız (/dk)", min_value=0, max_value=300, step=1, format="%d"),
+			"SpO2 (%)": st.column_config.NumberColumn("SpO2 (%)", min_value=0, max_value=100, step=1, format="%d"),
+			"Gözlük": st.column_config.SelectboxColumn("Gözlük", options=glasses_opts, required=False),
+			"Sağ Göz": st.column_config.TextColumn("Sağ Göz", width="small"),
+			"Sol Göz": st.column_config.TextColumn("Sol Göz", width="small"),
+			"Saç / Hijyen": st.column_config.SelectboxColumn("Saç / Hijyen", options=hair_opts, required=False),
+			"Sağ Kulak": st.column_config.SelectboxColumn("Sağ Kulak", options=hearing_r_opts, required=False),
+			"Sol Kulak": st.column_config.SelectboxColumn("Sol Kulak", options=hearing_l_opts, required=False),
+			"Sağlık Davranışı": st.column_config.SelectboxColumn("Sağlık Davranışı", options=behavior_opts, required=False),
+			"Psikososyal Durum": st.column_config.TextColumn("Psikososyal Durum", width="medium"),
+			"Tarama Notu": st.column_config.TextColumn("Tarama Notu", width="medium"),
+		},
+	)
+
+	save_unchanged_opt = st.checkbox(
+		"Önceki tarihlerden hazır gelen ve değiştirilmeyen dolu satırları da seçili tarih için yeniden tarama olarak kaydet",
+		value=False,
+		key=f"chk_bulk_scr_save_unchanged_{key_ctx}",
+	)
+
+	if st.button("💾 Tüm Sınıfın Taramasını Tek Seferde Kaydet", type="primary", use_container_width=True, key=f"btn_bulk_scr_save_{key_ctx}"):
+		res_bulk = save_bulk_class_screening_rows(
+			edited_df,
+			target_date_iso,
+			baseline_df=base_df,
+			save_unchanged=bool(save_unchanged_opt),
+		)
+		if res_bulk["saved_count"] > 0:
+			fresh_df, fresh_exact = _build_bulk_class_screening_df(chosen_cls, target_date_iso)
+			st.session_state[base_df_key] = fresh_df.copy()
+			st.session_state[work_df_key] = fresh_df.copy()
+			st.session_state[exact_ids_key] = fresh_exact
+			st.session_state[seed_key] = editor_seed + 1
+			st.session_state[flash_key] = (
+				"success",
+				f"✅ **{chosen_cls}** sınıfı ({target_date_iso}) için **{res_bulk['saved_count']}** öğrencinin tarama, ölçüm (VKİ/persantil) ve vital verileri kaydedildi! "
+				f"(Değişmeyen atlanan: {res_bulk['skipped_unchanged']}, boş atlanan: {res_bulk['skipped_empty']})",
+			)
+			st.rerun()
+		else:
+			st.warning(
+				f"⚠️ Kaydedilecek yeni veya güncellenmiş veri bulunamadı (Değişmeyen: {res_bulk['skipped_unchanged']}, Boş: {res_bulk['skipped_empty']}). Hücrelerden birini düzenleyin veya Otomatik Doldur butonunu kullanın."
+			)
+
+
 def render_school_screening() -> None:
 	visible_fields = get_screening_visible_fields()
 	all_classes = [c for c in get_classes() if c != "Sivil / Diğer"]
@@ -13436,47 +19494,73 @@ def render_school_screening() -> None:
 
 	# VIEW 1: Sınıf Kutucukları Listesi (Grid of Class Boxes)
 	if not selected_class or selected_class not in all_classes:
-		st.markdown("#### 🗂️ Taranacak Sınıfı Seçin")
-		st.caption("Aşağıdaki sınıf kutucuklarından birine tıklayarak o sınıfın öğrenci listesini ve tarama panelini açabilirsiniz.")
+		tab_cls_cards, tab_bulk_top = st.tabs([
+			"🗂️ Sınıf Kartları & Tekil Tarama",
+			"⚡ Seri Sınıf Taraması (Toplu Tablo Girişi)",
+		])
+		with tab_cls_cards:
+			st.markdown("#### 🗂️ Taranacak Sınıfı Seçin")
+			st.caption("Aşağıdaki sınıf kutucuklarından birine tıklayarak o sınıfın öğrenci listesini ve tarama panelini açabilirsiniz.")
 
-		vis_names = [SCREENING_FIELDS_INFO[f]["name"] for f in visible_fields if f in SCREENING_FIELDS_INFO]
-		st.info(f"⚙️ **Aktif Görünür Tarama Alanları ({len(vis_names)}):** {', '.join(vis_names)} · *(Ayarlar > Okul Taraması Alanları sekmesinden değiştirebilirsiniz)*")
-
-		tch_map = get_class_teacher_map()
-		# Render class cards in 3 columns
-		grid_cols = st.columns(3)
-		for idx, c_name in enumerate(all_classes):
-			stats = get_class_screening_stats(c_name)
-			tch_name = tch_map.get(c_name, "")
-			col = grid_cols[idx % 3]
-			with col:
+			vis_names = [SCREENING_FIELDS_INFO[f]["name"] for f in visible_fields if f in SCREENING_FIELDS_INFO]
+			scr_top_c1, scr_top_c2 = st.columns([3.0, 2.0])
+			with scr_top_c1:
+				st.info(f"⚙️ **Aktif Görünür Tarama Alanları ({len(vis_names)}):** {', '.join(vis_names)} · *(Ayarlar > Okul Taraması Alanları sekmesinden değiştirebilirsiniz)*")
+			with scr_top_c2:
+				if st.button("⚙️ Rapor İçeriği & Sütun Ayarları (Pop-up)", type="primary", use_container_width=True, key="btn_scr_all_open_report_builder"):
+					_trigger_open_report_builder("🏫 Okul Taraması", default_classes=None)
+			if st.toggle("📊 Tarih Seçimli Toplu Tarama & Persantil Raporu Panelini Aç", value=False, key="scr_all_show_inline_rep"):
 				with st.container(border=True):
-					tch_badge = f"<div style='margin-top:2px;'><span style='background:#f0fdf4; color:#166534; padding:2px 8px; border-radius:12px; font-size:12px; font-weight:600;'>👩‍🏫 {html.escape(tch_name)}</span></div>" if tch_name else ""
-					st.markdown(f"<div style='margin-bottom:6px;'><span style='font-size:17.5px; font-weight:800; color:var(--teal);'>🏫 {html.escape(c_name)}</span>{tch_badge}</div>", unsafe_allow_html=True)
-					c_stat1, c_stat2 = st.columns(2)
-					c_stat1.markdown(f"👥 **Mevcut:** {stats['total']}")
-					c_stat2.markdown(f"🩺 **Taranan:** {stats['screened']}")
+					_render_screening_report_workspace(
+						owner_page="🏫 Okul Taraması",
+						key_prefix="scr_all_rep",
+						fixed_classes=None,
+						compact=True,
+						show_config_button=False,
+					)
 
-					pct = stats["percent"]
-					st.progress(pct / 100.0)
+			tch_map = get_class_teacher_map()
+			# Render class cards in 3 columns
+			grid_cols = st.columns(3)
+			for idx, c_name in enumerate(all_classes):
+				stats = get_class_screening_stats(c_name)
+				tch_name = tch_map.get(c_name, "")
+				col = grid_cols[idx % 3]
+				with col:
+					with st.container(border=True):
+						tch_badge = f"<div style='margin-top:2px;'><span style='background:#f0fdf4; color:#166534; padding:2px 8px; border-radius:12px; font-size:12px; font-weight:600;'>👩‍🏫 {html.escape(tch_name)}</span></div>" if tch_name else ""
+						st.markdown(f"<div style='margin-bottom:6px;'><span style='font-size:17.5px; font-weight:800; color:var(--teal);'>🏫 {html.escape(c_name)}</span>{tch_badge}</div>", unsafe_allow_html=True)
+						c_stat1, c_stat2 = st.columns(2)
+						c_stat1.markdown(f"👥 **Mevcut:** {stats['total']}")
+						c_stat2.markdown(f"🩺 **Taranan:** {stats['screened']}")
 
-					if stats["is_complete"]:
-						st.markdown("<span style='background:#dcfce7;color:#15803d;padding:2px 8px;border-radius:6px;font-size:12px;font-weight:600;'>🟢 %100 Tamamlandı</span>", unsafe_allow_html=True)
-					elif stats["screened"] > 0:
-						st.markdown(f"<span style='background:#fef3c7;color:#b45309;padding:2px 8px;border-radius:6px;font-size:12px;font-weight:600;'>🟡 %{pct} Devam Ediyor ({stats['pending']} bekliyor)</span>", unsafe_allow_html=True)
-					else:
-						st.markdown(f"<span style='background:#f1f5f9;color:#64748b;padding:2px 8px;border-radius:6px;font-size:12px;font-weight:600;'>⚪ Henüz Başlanmadı ({stats['total']} bekliyor)</span>", unsafe_allow_html=True)
+						pct = stats["percent"]
+						st.progress(pct / 100.0)
 
-					st.write("")
-					if st.button(f"📋 Sınıfı Aç & Tara ➔", key=f"btn_sel_cls_{idx}_{c_name}", type="primary", use_container_width=True):
-						st.session_state["selected_screening_class"] = c_name
-						st.rerun()
+						if stats["is_complete"]:
+							st.markdown("<span style='background:#dcfce7;color:#15803d;padding:2px 8px;border-radius:6px;font-size:12px;font-weight:600;'>🟢 %100 Tamamlandı</span>", unsafe_allow_html=True)
+						elif stats["screened"] > 0:
+							st.markdown(f"<span style='background:#fef3c7;color:#b45309;padding:2px 8px;border-radius:6px;font-size:12px;font-weight:600;'>🟡 %{pct} Devam Ediyor ({stats['pending']} bekliyor)</span>", unsafe_allow_html=True)
+						else:
+							st.markdown(f"<span style='background:#f1f5f9;color:#64748b;padding:2px 8px;border-radius:6px;font-size:12px;font-weight:600;'>⚪ Henüz Başlanmadı ({stats['total']} bekliyor)</span>", unsafe_allow_html=True)
+
+						st.write("")
+						if st.button(f"📋 Sınıfı Aç & Tara ➔", key=f"btn_sel_cls_{idx}_{c_name}", type="primary", use_container_width=True):
+							st.session_state["selected_screening_class"] = c_name
+							st.rerun()
+
+			st.markdown("---")
+			render_screening_import_section()
+
+		with tab_bulk_top:
+			render_bulk_class_screening_tab(default_class=None, key_ctx="top")
 
 	# VIEW 2: Seçili Sınıfın Tarama Paneli ve Öğrenci Listesi
 	else:
 		hdr_c1, hdr_c2, hdr_c3 = st.columns([1.5, 3.5, 2])
 		with hdr_c1:
 			if st.button("⬅️ Tüm Sınıflara Dön", key="btn_back_to_all_classes", use_container_width=True):
+				_close_dyn_report_builder_dialog()
 				st.session_state["selected_screening_class"] = None
 				st.rerun()
 		with hdr_c2:
@@ -13487,153 +19571,185 @@ def render_school_screening() -> None:
 			st.markdown(f"### 🏫 **{selected_class}** Sağlık Taraması Paneli{sel_tch_txt}")
 			st.caption(f"Sınıf Mevcudu: **{c_stats['total']}** · Taranan: **{c_stats['screened']}** · Bekleyen: **{c_stats['pending']}** · Başarı: **%{c_stats['percent']}**")
 		with hdr_c3:
+			if st.button("⚙️ Rapor İçeriği & Sütun Ayarları (Pop-up)", type="primary", use_container_width=True, key=f"btn_scr_cls_open_report_builder_{selected_class}"):
+				_trigger_open_report_builder("🏫 Okul Taraması", default_classes=[selected_class])
 			rep_docx = build_class_screening_report_docx(selected_class)
 			st.download_button(
-				"📝 Sınıf Tarama Raporunu İndir (.docx)",
+				"📝 Hızlı Sınıf Tarama Formu (.docx)",
 				data=rep_docx,
 				file_name=f"sinif_saglik_taramasi_{selected_class}_{date.today().isoformat()}.docx",
 				mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-				type="primary",
+				type="secondary",
 				key=f"dl_class_scr_rep_{selected_class}",
 				use_container_width=True,
 			)
 
 		st.progress(c_stats["percent"] / 100.0)
-
-		# Fetch students for this class
-		with connect_db() as connection:
-			stu_rows = connection.execute(
-				"""SELECT s.id, s.student_no, s.full_name, s.sex, s.birth_date,
-						  h.last_screened_at, h.wears_glasses, h.vision_right, h.vision_left,
-						  h.hair_screening, h.hearing_right, h.hearing_left, h.health_behavior,
-						  h.harmful_habits, h.psychosocial_status
-				   FROM students s
-				   JOIN classes c ON c.id = s.class_id
-				   LEFT JOIN health_profiles h ON h.student_id = s.id
-				   WHERE c.name = ?
-				   ORDER BY s.student_no, s.full_name""",
-				(selected_class,),
-			).fetchall()
-
-		if not stu_rows:
-			st.warning(f"{selected_class} sınıfında henüz kayıtlı öğrenci bulunmuyor.")
-			return
-
-		# Filters toolbar
-		filt_c1, filt_c2 = st.columns([2.5, 1.5])
-		with filt_c1:
-			search_kw = st.text_input("🔍 Öğrenci Ara (İsim veya Okul No)", placeholder="Aramak için yazın...", key=f"scr_search_{selected_class}")
-		with filt_c2:
-			status_filt = st.selectbox("Durum Filtresi", ["Tümü", "⏳ Taranmamış / Bekleyenler", "🟢 Taranmış Olanlar"], key=f"scr_filt_{selected_class}")
-
-		# Filter student list
-		filtered_students = []
-		for s in stu_rows:
-			is_screened = bool(s["last_screened_at"])
-			if status_filt == "⏳ Taranmamış / Bekleyenler" and is_screened:
-				continue
-			if status_filt == "🟢 Taranmış Olanlar" and not is_screened:
-				continue
-			if search_kw.strip():
-				kw = search_kw.strip().lower()
-				matches_name = kw in str(s["full_name"]).lower()
-				matches_no = kw in str(s["student_no"] or "").lower()
-				if not (matches_name or matches_no):
-					continue
-			filtered_students.append(s)
-
-		st.caption(f"Listelenen: **{len(filtered_students)}** / {len(stu_rows)} öğrenci · Her öğrencinin sağındaki **🩺 Taramayı Gir / Düzenle ✏️** butonuna basarak açılır pencerede taramasını yapabilirsiniz.")
-
-		# Render each student card
-		for s in filtered_students:
-			s_id = int(s["id"])
-			latest_scr = get_student_latest_screening(s_id)
-			m_info = get_person_latest_measurements(s_id)
-			s_age_m = age_in_months(s["birth_date"], date.today()) if s["birth_date"] else None
-			s_age_str = f"{s_age_m // 12}y {s_age_m % 12}a" if s_age_m is not None else "Doğum tarihi yok"
-			s_sex_ico = "♀ Kız" if s["sex"] == "K" else ("♂ Erkek" if s["sex"] == "E" else "—")
-			sno_txt = f"No: {s['student_no']} · " if s["student_no"] else ""
-			is_done = bool(s["last_screened_at"] or latest_scr.get("screening_date"))
-
+		if st.toggle(f"📊 {selected_class} Tarih Seçimli Rapor Önizleme & Çıktı Al (.docx / .xlsx / .html)", value=False, key=f"scr_cls_show_inline_rep_{selected_class}"):
 			with st.container(border=True):
-				row_l, row_r = st.columns([3.2, 1.8])
-				with row_l:
-					st_badge = "<span style='background:#dcfce7;color:#15803d;padding:2px 7px;border-radius:5px;font-size:12px;font-weight:600;'>🟢 Taranmış</span>" if is_done else "<span style='background:#fee2e2;color:#b91c1c;padding:2px 7px;border-radius:5px;font-size:12px;font-weight:600;'>⏳ Bekliyor</span>"
-					st.markdown(f"**👤 {html.escape(s['full_name'])}** &nbsp; {st_badge}", unsafe_allow_html=True)
-					st.caption(f"{sno_txt}{s_sex_ico} · Doğum: {s['birth_date'] or '—'} ({s_age_str}) &nbsp;·&nbsp; Son Tarama: **{latest_scr.get('screening_date') or s['last_screened_at'] or 'Yapılmadı'}**")
+				_render_screening_report_workspace(
+					owner_page="🏫 Okul Taraması",
+					key_prefix=f"scr_cls_rep_{selected_class}",
+					fixed_classes=[selected_class],
+					compact=True,
+					show_config_button=False,
+				)
 
-					preview_chips = []
-					if "height_cm" in visible_fields or "weight_kg" in visible_fields:
-						h_v = latest_scr.get("height_cm") or m_info["height_cm"]
-						w_v = latest_scr.get("weight_kg") or m_info["weight_kg"]
-						bmi_v = m_info["bmi"]
-						hw_parts = []
-						if "height_cm" in visible_fields and h_v: hw_parts.append(f"{h_v:.1f} cm")
-						if "weight_kg" in visible_fields and w_v: hw_parts.append(f"{w_v:.1f} kg")
-						if bmi_v: hw_parts.append(f"VKİ: {bmi_v:.1f}")
-						if hw_parts:
-							preview_chips.append(f"📏 {' / '.join(hw_parts)}")
+		tab_stu_cards, tab_bulk_cls = st.tabs([
+			"👥 Öğrenci Listesi & Tekil Tarama",
+			"⚡ Seri Sınıf Taraması (Toplu Tablo Girişi)",
+		])
 
-					if "head_circ_cm" in visible_fields:
-						hc_v = latest_scr.get("head_circ_cm") or m_info["head_circ_cm"]
-						if hc_v: preview_chips.append(f"👶 Baş Çevresi: {hc_v:.1f} cm")
+		with tab_stu_cards:
+			# Fetch students for this class
+			with connect_db() as connection:
+				stu_rows = connection.execute(
+					"""SELECT s.id, s.student_no, s.full_name, s.sex, s.birth_date,
+							  h.last_screened_at, h.wears_glasses, h.vision_right, h.vision_left,
+							  h.hair_screening, h.hearing_right, h.hearing_left, h.health_behavior,
+							  h.harmful_habits, h.psychosocial_status
+					   FROM students s
+					   JOIN classes c ON c.id = s.class_id
+					   LEFT JOIN health_profiles h ON h.student_id = s.id
+					   WHERE c.name = ?
+					   ORDER BY s.student_no, s.full_name""",
+					(selected_class,),
+				).fetchall()
 
-					if any(f in visible_fields for f in ("temperature_c", "pulse_bpm", "spo2_pct")):
-						vit_parts = []
-						if "temperature_c" in visible_fields and latest_scr.get("temperature_c"):
-							vit_parts.append(f"🌡️ {latest_scr['temperature_c']:.1f}°C")
-						if "pulse_bpm" in visible_fields and latest_scr.get("pulse_bpm"):
-							vit_parts.append(f"💓 {latest_scr['pulse_bpm']:.0f}/dk")
-						if "spo2_pct" in visible_fields and latest_scr.get("spo2_pct"):
-							vit_parts.append(f"🫁 %{latest_scr['spo2_pct']:.0f}")
-						if vit_parts:
-							preview_chips.append(" · ".join(vit_parts))
+			if not stu_rows:
+				st.warning(f"{selected_class} sınıfında henüz kayıtlı öğrenci bulunmuyor.")
+			else:
+				# Filters toolbar
+				filt_c1, filt_c2 = st.columns([2.5, 1.5])
+				with filt_c1:
+					search_kw = st.text_input("🔍 Öğrenci Ara (İsim veya Okul No)", placeholder="Aramak için yazın...", key=f"scr_search_{selected_class}")
+				with filt_c2:
+					status_filt = st.selectbox("Durum Filtresi", ["Tümü", "⏳ Taranmamış / Bekleyenler", "🟢 Taranmış Olanlar"], key=f"scr_filt_{selected_class}")
 
-					if any(f in visible_fields for f in ("wears_glasses", "vision_right", "vision_left")):
-						gl_txt = latest_scr.get("wears_glasses") or s["wears_glasses"]
-						vr_txt = latest_scr.get("vision_right") or s["vision_right"]
-						vl_txt = latest_scr.get("vision_left") or s["vision_left"]
-						vis_parts = []
-						if "wears_glasses" in visible_fields and gl_txt: vis_parts.append(f"Gözlük: {gl_txt}")
-						if "vision_right" in visible_fields and vr_txt: vis_parts.append(f"Sağ: {vr_txt}")
-						if "vision_left" in visible_fields and vl_txt: vis_parts.append(f"Sol: {vl_txt}")
-						if vis_parts:
-							preview_chips.append(f"👓 {' · '.join(vis_parts)}")
+				# Filter student list
+				filtered_students = []
+				for s in stu_rows:
+					is_screened = bool(s["last_screened_at"])
+					if status_filt == "⏳ Taranmamış / Bekleyenler" and is_screened:
+						continue
+					if status_filt == "🟢 Taranmış Olanlar" and not is_screened:
+						continue
+					if search_kw.strip():
+						kw = search_kw.strip().lower()
+						matches_name = kw in str(s["full_name"]).lower()
+						matches_no = kw in str(s["student_no"] or "").lower()
+						if not (matches_name or matches_no):
+							continue
+					filtered_students.append(s)
 
-					if "hair_screening" in visible_fields:
-						hr_txt = latest_scr.get("hair_screening") or s["hair_screening"]
-						if hr_txt: preview_chips.append(f"💇 Saç: {hr_txt}")
+				st.caption(f"Listelenen: **{len(filtered_students)}** / {len(stu_rows)} öğrenci · Her öğrencinin sağındaki **🩺 Taramayı Gir / Düzenle ✏️** butonuna basarak açılır pencerede taramasını yapabilirsiniz.")
 
-					if any(f in visible_fields for f in ("hearing_right", "hearing_left")):
-						hear_r = latest_scr.get("hearing_right") or s["hearing_right"]
-						hear_l = latest_scr.get("hearing_left") or s["hearing_left"]
-						if hear_r or hear_l:
-							preview_chips.append(f"👂 Kulak: Sağ: {hear_r or '—'} · Sol: {hear_l or '—'}")
+				# Render each student card
+				for s in filtered_students:
+					s_id = int(s["id"])
+					latest_scr = get_student_latest_screening(s_id)
+					m_info = get_person_latest_measurements(s_id)
+					s_age_m = age_in_months(s["birth_date"], date.today()) if s["birth_date"] else None
+					s_age_str = f"{s_age_m // 12}y {s_age_m % 12}a" if s_age_m is not None else "Doğum tarihi yok"
+					s_sex_ico = "♀ Kız" if s["sex"] == "K" else ("♂ Erkek" if s["sex"] == "E" else "—")
+					sno_txt = f"No: {s['student_no']} · " if s["student_no"] else ""
+					is_done = bool(s["last_screened_at"] or latest_scr.get("screening_date"))
 
-					if "health_behavior" in visible_fields:
-						beh_txt = latest_scr.get("health_behavior") or s["health_behavior"]
-						if beh_txt: preview_chips.append(f"🍎 {beh_txt}")
+					with st.container(border=True):
+						row_l, row_r = st.columns([3.2, 1.8])
+						with row_l:
+							st_badge = "<span style='background:#dcfce7;color:#15803d;padding:2px 7px;border-radius:5px;font-size:12px;font-weight:600;'>🟢 Taranmış</span>" if is_done else "<span style='background:#fee2e2;color:#b91c1c;padding:2px 7px;border-radius:5px;font-size:12px;font-weight:600;'>⏳ Bekliyor</span>"
+							st.markdown(f"**👤 {html.escape(s['full_name'])}** &nbsp; {st_badge}", unsafe_allow_html=True)
+							st.caption(f"{sno_txt}{s_sex_ico} · Doğum: {s['birth_date'] or '—'} ({s_age_str}) &nbsp;·&nbsp; Son Tarama: **{latest_scr.get('screening_date') or s['last_screened_at'] or 'Yapılmadı'}**")
 
-					if "harmful_habits" in visible_fields:
-						harm_txt = latest_scr.get("harmful_habits") or s["harmful_habits"]
-						if harm_txt: preview_chips.append(f"⚠️ {harm_txt}")
+							preview_chips = []
+							if "height_cm" in visible_fields or "weight_kg" in visible_fields:
+								h_v = latest_scr.get("height_cm") or m_info["height_cm"]
+								w_v = latest_scr.get("weight_kg") or m_info["weight_kg"]
+								bmi_v = m_info["bmi"]
+								hw_parts = []
+								if "height_cm" in visible_fields and h_v: hw_parts.append(f"{h_v:.1f} cm")
+								if "weight_kg" in visible_fields and w_v: hw_parts.append(f"{w_v:.1f} kg")
+								if bmi_v: hw_parts.append(f"VKİ: {bmi_v:.1f}")
+								if hw_parts:
+									preview_chips.append(f"📏 {' / '.join(hw_parts)}")
 
-					if "psychosocial_status" in visible_fields:
-						psy_txt = latest_scr.get("psychosocial_status") or s["psychosocial_status"]
-						if psy_txt: preview_chips.append(f"🧠 {psy_txt}")
+							if "head_circ_cm" in visible_fields:
+								hc_v = latest_scr.get("head_circ_cm") or m_info["head_circ_cm"]
+								if hc_v: preview_chips.append(f"👶 Baş Çevresi: {hc_v:.1f} cm")
 
-					if preview_chips:
-						chip_html = "".join([f"<span style='background:#f1f5f9;color:#334155;border:1px solid #cbd5e1;padding:2px 7px;border-radius:4px;font-size:11px;margin-right:6px;display:inline-block;margin-top:4px;'>{html.escape(c)}</span>" for c in preview_chips])
-						st.markdown(chip_html, unsafe_allow_html=True)
-					else:
-						st.caption("Tarama verisi henüz girilmedi.")
+							if any(f in visible_fields for f in ("temperature_c", "pulse_bpm", "spo2_pct")):
+								vit_parts = []
+								if "temperature_c" in visible_fields and latest_scr.get("temperature_c"):
+									vit_parts.append(f"🌡️ {latest_scr['temperature_c']:.1f}°C")
+								if "pulse_bpm" in visible_fields and latest_scr.get("pulse_bpm"):
+									vit_parts.append(f"💓 {latest_scr['pulse_bpm']:.0f}/dk")
+								if "spo2_pct" in visible_fields and latest_scr.get("spo2_pct"):
+									vit_parts.append(f"🫁 %{latest_scr['spo2_pct']:.0f}")
+								if vit_parts:
+									preview_chips.append(" · ".join(vit_parts))
 
-				with row_r:
-					st.write("")
-					if st.button("🩺 Taramayı Gir / Düzenle ✏️", key=f"btn_open_scr_dialog_{s_id}", type="primary", use_container_width=True):
-						open_screening_dialog(s_id, selected_class)
-					if st.button("📂 Kişi Dosyası", key=f"btn_open_dossier_from_scr_{s_id}", use_container_width=True):
-						open_person_dossier_dialog(s_id)
+							if any(f in visible_fields for f in ("wears_glasses", "vision_right", "vision_left")):
+								gl_txt = latest_scr.get("wears_glasses") or s["wears_glasses"]
+								vr_txt = latest_scr.get("vision_right") or s["vision_right"]
+								vl_txt = latest_scr.get("vision_left") or s["vision_left"]
+								vis_parts = []
+								if "wears_glasses" in visible_fields and gl_txt: vis_parts.append(f"Gözlük: {gl_txt}")
+								if "vision_right" in visible_fields and vr_txt: vis_parts.append(f"Sağ: {vr_txt}")
+								if "vision_left" in visible_fields and vl_txt: vis_parts.append(f"Sol: {vl_txt}")
+								if vis_parts:
+									preview_chips.append(f"👓 {' · '.join(vis_parts)}")
+
+							if "hair_screening" in visible_fields:
+								hr_txt = latest_scr.get("hair_screening") or s["hair_screening"]
+								if hr_txt: preview_chips.append(f"💇 Saç: {hr_txt}")
+
+							if any(f in visible_fields for f in ("hearing_right", "hearing_left")):
+								hear_r = latest_scr.get("hearing_right") or s["hearing_right"]
+								hear_l = latest_scr.get("hearing_left") or s["hearing_left"]
+								if hear_r or hear_l:
+									preview_chips.append(f"👂 Kulak: Sağ: {hear_r or '—'} · Sol: {hear_l or '—'}")
+
+							if "health_behavior" in visible_fields:
+								beh_txt = latest_scr.get("health_behavior") or s["health_behavior"]
+								if beh_txt: preview_chips.append(f"🍎 {beh_txt}")
+
+							if "harmful_habits" in visible_fields:
+								harm_txt = latest_scr.get("harmful_habits") or s["harmful_habits"]
+								if harm_txt: preview_chips.append(f"⚠️ {harm_txt}")
+
+							if "psychosocial_status" in visible_fields:
+								psy_txt = latest_scr.get("psychosocial_status") or s["psychosocial_status"]
+								if psy_txt: preview_chips.append(f"🧠 {psy_txt}")
+
+							if preview_chips:
+								chip_html = "".join([f"<span style='background:#f1f5f9;color:#334155;border:1px solid #cbd5e1;padding:2px 7px;border-radius:4px;font-size:11px;margin-right:6px;display:inline-block;margin-top:4px;'>{html.escape(c)}</span>" for c in preview_chips])
+								st.markdown(chip_html, unsafe_allow_html=True)
+							else:
+								st.caption("Tarama verisi henüz girilmedi.")
+
+						with row_r:
+							st.write("")
+							if st.button("🩺 Taramayı Gir / Düzenle ✏️", key=f"btn_open_scr_dialog_{s_id}", type="primary", use_container_width=True):
+								_close_dyn_report_builder_dialog()
+								open_screening_dialog(s_id, selected_class)
+							if st.button("📂 Kişi Dosyası", key=f"btn_open_dossier_from_scr_{s_id}", use_container_width=True):
+								_close_dyn_report_builder_dialog()
+								open_person_dossier_dialog(s_id)
+
+				st.markdown("---")
+				with st.expander(f"📥 {selected_class} İçin Toplu Tarama Verisi İçe Aktar (Excel / CSV / Resim-OCR)", expanded=False):
+					render_screening_import_section(target_class=selected_class)
+
+		with tab_bulk_cls:
+			render_bulk_class_screening_tab(default_class=selected_class, key_ctx=f"cls_{selected_class}")
+
+	dlg_state_scr = st.session_state.get("_dyn_rep_dialog_open")
+	if isinstance(dlg_state_scr, dict) and dlg_state_scr.get("owner_page") == "🏫 Okul Taraması":
+		open_report_config_dialog(
+			default_classes=dlg_state_scr.get("default_classes"),
+			default_dates=dlg_state_scr.get("default_dates"),
+		)
 
 
 # ==============================================================================
@@ -13823,6 +19939,2878 @@ def open_report_settings_dialog() -> None:
 		save_report_settings(new_saved)
 		st.success("Rapor çıktı ayarları başarıyla kaydedildi!")
 		st.rerun()
+
+
+# ==============================================================================
+# ==============================================================================
+# DİNAMİK, TARİH SEÇİMLİ & AKILLI OKUL TARAMASI RAPORLAMA MOTORU
+# ==============================================================================
+
+CUSTOM_REPORT_COLS: list[dict[str, Any]] = [
+	# Kimlik & Sınıf Bilgileri
+	{"key": "okul_no", "label": "Okul No", "cat": "identity", "required": False, "keep_empty": True, "sensitive": False},
+	{"key": "ad_soyad", "label": "Ad Soyad", "cat": "identity", "required": True, "keep_empty": True, "sensitive": False},
+	{"key": "sinif", "label": "Sınıf / Şube", "cat": "identity", "required": False, "keep_empty": True, "sensitive": False},
+	{"key": "cinsiyet", "label": "Cinsiyet", "cat": "identity", "required": False, "keep_empty": False, "sensitive": False},
+	{"key": "dogum_tarihi", "label": "Doğum Tarihi", "cat": "identity", "required": False, "keep_empty": False, "sensitive": False},
+	{"key": "yas_str", "label": "Yaş (Yıl/Ay)", "cat": "identity", "required": False, "keep_empty": False, "sensitive": False},
+	# Antropometri, Persantil & Z-Skoru
+	{"key": "boy_cm", "label": "Boy (cm)", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False, "numeric": True, "num_fmt": "0.0"},
+	{"key": "boy_p", "label": "Boy Persantil (%)", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False, "numeric": True, "num_fmt": "0.0"},
+	{"key": "boy_z", "label": "Boy Z-Skoru (SDS)", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False, "numeric": True, "num_fmt": "+0.00;-0.00;0.00"},
+	{"key": "boy_dilim", "label": "Boy Persentil Dilimi", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False},
+	{"key": "kilo_kg", "label": "Kilo (kg)", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False, "numeric": True, "num_fmt": "0.0"},
+	{"key": "kilo_p", "label": "Kilo Persantil (%)", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False, "numeric": True, "num_fmt": "0.0"},
+	{"key": "kilo_z", "label": "Kilo Z-Skoru (SDS)", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False, "numeric": True, "num_fmt": "+0.00;-0.00;0.00"},
+	{"key": "kilo_dilim", "label": "Kilo Persentil Dilimi", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False},
+	{"key": "vki", "label": "VKİ (BMI)", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False, "numeric": True, "num_fmt": "0.0"},
+	{"key": "vki_p", "label": "VKİ Persantil (%)", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False, "numeric": True, "num_fmt": "0.0"},
+	{"key": "vki_z", "label": "VKİ Z-Skoru (SDS)", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False, "numeric": True, "num_fmt": "+0.00;-0.00;0.00"},
+	{"key": "vki_dilim", "label": "VKİ Persentil Dilimi", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False},
+	{"key": "ideal_kilo_araligi", "label": "İdeal Kilo Aralığı (kg)", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False},
+	{"key": "ideal_kilo_fark", "label": "İdeal Kiloya Fark (kg)", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False, "numeric": True, "num_fmt": "+0.0;-0.0;0.0"},
+	{"key": "bas_cevresi_cm", "label": "Baş Çevresi (cm)", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False, "numeric": True, "num_fmt": "0.0"},
+	{"key": "bas_cevresi_p", "label": "Baş Çevresi Persantil (%)", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False, "numeric": True, "num_fmt": "0.0"},
+	{"key": "bas_cevresi_z", "label": "Baş Çevresi Z-Skoru (SDS)", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False, "numeric": True, "num_fmt": "+0.00;-0.00;0.00"},
+	{"key": "klinik_gelisim_yorumu", "label": "Klinik Gelişim Değerlendirmesi", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False},
+	# Okul Taraması & Klinik Bulgular
+	{"key": "gozluk", "label": "Gözlük Kullanımı", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": False},
+	{"key": "sag_goz", "label": "Sağ Göz Görme", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": False},
+	{"key": "sol_goz", "label": "Sol Göz Görme", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": False},
+	{"key": "sag_kulak", "label": "Sağ Kulak İşitme", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": False},
+	{"key": "sol_kulak", "label": "Sol Kulak İşitme", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": False},
+	{"key": "sac_taramasi", "label": "Saç Taraması / Pediküloz", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": True},
+	{"key": "ates_c", "label": "Ateş (°C)", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": True, "numeric": True, "num_fmt": "0.0"},
+	{"key": "nabiz", "label": "Nabız (/dk)", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": True, "numeric": True, "num_fmt": "0"},
+	{"key": "spo2", "label": "SpO2 (%)", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": True, "numeric": True, "num_fmt": "0"},
+	{"key": "tansiyon", "label": "Tansiyon (mmHg)", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": True},
+	{"key": "saglik_davranisi", "label": "Sağlık Davranışı & Alışkanlıklar", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": True},
+	{"key": "zararli_aliskanlik", "label": "Zararlı Alışkanlıklar & Riskler", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": True},
+	{"key": "psikososyal", "label": "Genel Psikososyal Durum", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": True},
+	{"key": "kan_grubu", "label": "Kan Grubu", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": True},
+	{"key": "alerji_kronik", "label": "Alerjiler & Kronik Hastalıklar", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": True},
+	{"key": "tarama_notu", "label": "Tarama Notu / Açıklama", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": True},
+	{"key": "tarama_tarihi", "label": "İşlem Tarihi", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": False},
+]
+
+# Eski İngilizce anahtarlarla tam geriye dönük uyumluluk için desteklenen sütun kataloğu
+DYN_SCREENING_REPORT_COLS: list[dict[str, Any]] = [
+	{"key": "student_no", "label": "Okul No", "cat": "identity", "required": False, "keep_empty": True, "sensitive": False},
+	{"key": "full_name", "label": "Ad Soyad", "cat": "identity", "required": True, "keep_empty": True, "sensitive": False},
+	{"key": "class_name", "label": "Sınıf / Şube", "cat": "identity", "required": False, "keep_empty": True, "sensitive": False},
+	{"key": "sex", "label": "Cinsiyet", "cat": "identity", "required": False, "keep_empty": False, "sensitive": False},
+	{"key": "birth_date", "label": "Doğum Tarihi", "cat": "identity", "required": False, "keep_empty": False, "sensitive": False},
+	{"key": "age_ym", "label": "Yaş (Yıl/Ay)", "cat": "identity", "required": False, "keep_empty": False, "sensitive": False},
+	{"key": "screening_date", "label": "Tarama Tarihi", "cat": "identity", "required": False, "keep_empty": False, "sensitive": False},
+	{"key": "height_cm", "label": "Boy (cm)", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False, "numeric": True, "num_fmt": "0.0"},
+	{"key": "height_pct", "label": "Boy Persantil (%)", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False, "numeric": True, "num_fmt": "0.0"},
+	{"key": "height_z", "label": "Boy Z-Skoru (SDS)", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False, "numeric": True, "num_fmt": "+0.00;-0.00;0.00"},
+	{"key": "height_band", "label": "Boy Persentil Dilimi", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False},
+	{"key": "weight_kg", "label": "Kilo (kg)", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False, "numeric": True, "num_fmt": "0.0"},
+	{"key": "weight_pct", "label": "Kilo Persantil (%)", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False, "numeric": True, "num_fmt": "0.0"},
+	{"key": "weight_z", "label": "Kilo Z-Skoru (SDS)", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False, "numeric": True, "num_fmt": "+0.00;-0.00;0.00"},
+	{"key": "weight_band", "label": "Kilo Persentil Dilimi", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False},
+	{"key": "bmi", "label": "VKİ (BMI)", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False, "numeric": True, "num_fmt": "0.0"},
+	{"key": "bmi_pct", "label": "VKİ Persantil (%)", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False, "numeric": True, "num_fmt": "0.0"},
+	{"key": "bmi_z", "label": "VKİ Z-Skoru (SDS)", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False, "numeric": True, "num_fmt": "+0.00;-0.00;0.00"},
+	{"key": "bmi_band", "label": "VKİ Persentil Dilimi", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False},
+	{"key": "ideal_weight_range", "label": "İdeal Kilo Aralığı (kg)", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False},
+	{"key": "head_circ_full", "label": "Baş Çevresi (cm, Persantil & Z-Skoru)", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False},
+	{"key": "clinical_growth_eval", "label": "Klinik Gelişim Değerlendirmesi", "cat": "anthro", "required": False, "keep_empty": False, "sensitive": False},
+	{"key": "wears_glasses", "label": "Gözlük Kullanımı", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": False},
+	{"key": "vision_right", "label": "Sağ Göz Görme", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": False},
+	{"key": "vision_left", "label": "Sol Göz Görme", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": False},
+	{"key": "hearing_right", "label": "Sağ Kulak İşitme", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": False},
+	{"key": "hearing_left", "label": "Sol Kulak İşitme", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": False},
+	{"key": "hair_screening", "label": "Saç Taraması / Pediküloz", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": True},
+	{"key": "vital_summary", "label": "Vital Bulgular (Ateş, Nabız, SpO2, Tansiyon)", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": True},
+	{"key": "health_behavior", "label": "Sağlık Davranışı & Alışkanlıklar", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": True},
+	{"key": "harmful_habits", "label": "Zararlı Alışkanlıklar & Riskler", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": True},
+	{"key": "psychosocial_status", "label": "Genel Psikososyal Durum", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": True},
+	{"key": "blood_group", "label": "Kan Grubu", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": True},
+	{"key": "allergies_chronic", "label": "Alerjiler & Kronik Hastalıklar", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": True},
+	{"key": "screening_notes", "label": "Tarama Notu / Açıklama", "cat": "clinical", "required": False, "keep_empty": False, "sensitive": True},
+]
+
+CUSTOM_REPORT_COL_BY_KEY: dict[str, dict[str, Any]] = {c["key"]: c for c in CUSTOM_REPORT_COLS}
+DYN_SCREENING_COL_BY_KEY: dict[str, dict[str, Any]] = {c["key"]: c for c in DYN_SCREENING_REPORT_COLS}
+ALL_REPORT_COL_SPECS: list[dict[str, Any]] = CUSTOM_REPORT_COLS + [
+	c for c in DYN_SCREENING_REPORT_COLS if c["key"] not in CUSTOM_REPORT_COL_BY_KEY
+]
+ALL_REPORT_COL_BY_KEY: dict[str, dict[str, Any]] = {c["key"]: c for c in ALL_REPORT_COL_SPECS}
+ALL_REPORT_NUMERIC_FMTS: dict[str, str] = {
+	c["label"]: c.get("num_fmt", "0.0")
+	for c in ALL_REPORT_COL_SPECS
+	if c.get("numeric")
+}
+
+CUSTOM_IDENTITY_KEYS: list[str] = [c["key"] for c in CUSTOM_REPORT_COLS if c["cat"] == "identity"]
+CUSTOM_ANTHRO_KEYS: list[str] = [c["key"] for c in CUSTOM_REPORT_COLS if c["cat"] == "anthro"]
+CUSTOM_CLINICAL_KEYS: list[str] = [c["key"] for c in CUSTOM_REPORT_COLS if c["cat"] == "clinical"]
+
+_LEGACY_TO_CUSTOM_COL_MAP: dict[str, list[str]] = {
+	"student_no": ["okul_no"],
+	"full_name": ["ad_soyad"],
+	"class_name": ["sinif"],
+	"sex": ["cinsiyet"],
+	"birth_date": ["dogum_tarihi"],
+	"age_ym": ["yas_str"],
+	"screening_date": ["tarama_tarihi"],
+	"height_cm": ["boy_cm"],
+	"height_pct": ["boy_p"],
+	"height_z": ["boy_z"],
+	"height_band": ["boy_dilim"],
+	"weight_kg": ["kilo_kg"],
+	"weight_pct": ["kilo_p"],
+	"weight_z": ["kilo_z"],
+	"weight_band": ["kilo_dilim"],
+	"bmi": ["vki"],
+	"bmi_pct": ["vki_p"],
+	"bmi_z": ["vki_z"],
+	"bmi_band": ["vki_dilim"],
+	"ideal_weight_range": ["ideal_kilo_araligi"],
+	"head_circ_full": ["bas_cevresi_cm", "bas_cevresi_p", "bas_cevresi_z"],
+	"clinical_growth_eval": ["klinik_gelisim_yorumu"],
+	"wears_glasses": ["gozluk"],
+	"vision_right": ["sag_goz"],
+	"vision_left": ["sol_goz"],
+	"hearing_right": ["sag_kulak"],
+	"hearing_left": ["sol_kulak"],
+	"hair_screening": ["sac_taramasi"],
+	"vital_summary": ["ates_c", "nabiz", "spo2", "tansiyon"],
+	"health_behavior": ["saglik_davranisi"],
+	"harmful_habits": ["zararli_aliskanlik"],
+	"psychosocial_status": ["psikososyal"],
+	"blood_group": ["kan_grubu"],
+	"allergies_chronic": ["alerji_kronik"],
+	"screening_notes": ["tarama_notu"],
+}
+
+_CUSTOM_TO_LEGACY_COL_MAP: dict[str, list[str]] = {
+	"okul_no": ["student_no"],
+	"ad_soyad": ["full_name"],
+	"sinif": ["class_name"],
+	"cinsiyet": ["sex"],
+	"dogum_tarihi": ["birth_date"],
+	"yas_str": ["age_ym"],
+	"tarama_tarihi": ["screening_date"],
+	"boy_cm": ["height_cm"],
+	"boy_p": ["height_pct"],
+	"boy_z": ["height_z"],
+	"boy_dilim": ["height_band"],
+	"kilo_kg": ["weight_kg"],
+	"kilo_p": ["weight_pct"],
+	"kilo_z": ["weight_z"],
+	"kilo_dilim": ["weight_band"],
+	"vki": ["bmi"],
+	"vki_p": ["bmi_pct"],
+	"vki_z": ["bmi_z"],
+	"vki_dilim": ["bmi_dilim"],
+	"ideal_kilo_araligi": ["ideal_weight_range"],
+	"bas_cevresi_cm": ["head_circ_full"],
+	"bas_cevresi_p": ["head_circ_full"],
+	"bas_cevresi_z": ["head_circ_full"],
+	"klinik_gelisim_yorumu": ["clinical_growth_eval"],
+	"gozluk": ["wears_glasses"],
+	"sag_goz": ["vision_right"],
+	"sol_goz": ["vision_left"],
+	"sag_kulak": ["hearing_right"],
+	"sol_kulak": ["hearing_left"],
+	"sac_taramasi": ["hair_screening"],
+	"ates_c": ["vital_summary"],
+	"nabiz": ["vital_summary"],
+	"spo2": ["vital_summary"],
+	"tansiyon": ["vital_summary"],
+	"saglik_davranisi": ["health_behavior"],
+	"zararli_aliskanlik": ["harmful_habits"],
+	"psikososyal": ["psychosocial_status"],
+	"kan_grubu": ["blood_group"],
+	"alerji_kronik": ["allergies_chronic"],
+	"tarama_notu": ["screening_notes"],
+}
+
+SCOPE_OPT_MEASURED = "Sadece Seçilen Tarihte Verisi Girilen Öğrencileri Listele"
+SCOPE_OPT_ALL_CLASS = "Tam Sınıf Listesini Göster (Verisi girilmeyenlere 'Ölçülmedi / Gelmedi' yaz)"
+SCOPE_OPT_RISKY = "Yalnızca Risk / Sınır Dışı Bulgusu Olan Öğrencileri Listele"
+
+ORIENT_OPT_AUTO = "Otomatik (<=6 Sütun Dikey, >6 Sütun Yatay A4)"
+ORIENT_OPT_LANDSCAPE = "Yatay A4 (Landscape)"
+ORIENT_OPT_PORTRAIT = "Dikey A4 (Portrait)"
+
+SIG_LABEL_NURSE = "Okul Revir Sorumlusu / Hemşire"
+SIG_LABEL_TEACHER = "Sınıf Öğretmeni"
+SIG_LABEL_PRINCIPAL = "Okul Müdürü"
+
+DEFAULT_CUSTOM_REPORT_CONFIG: dict[str, Any] = {
+	"preset_name": "Kapsamlı Okul Taraması Raporu",
+	"selected_cols": [c["key"] for c in CUSTOM_REPORT_COLS if c["key"] != "kan_grubu"],
+	"auto_prune_empty_cols": True,
+	"only_nonempty_cols": True,
+	"student_scope": SCOPE_OPT_MEASURED,
+	"only_risky": False,
+	"hide_sensitive_medical": False,
+	"page_orientation": ORIENT_OPT_AUTO,
+	"group_by_class_pagebreak": True,
+	"page_break_between_classes": True,
+	"signatures": [SIG_LABEL_NURSE, SIG_LABEL_TEACHER, SIG_LABEL_PRINCIPAL],
+	"report_title": "OKUL SAĞLIK TARAMASI VE GELİŞİM RAPORU",
+}
+
+CUSTOM_REPORT_PRESETS: dict[str, dict[str, Any]] = {
+	"growth_summary": {
+		"preset_name": "Boy-Kilo-Persantil-Z Skoru Özeti",
+		"selected_cols": [
+			"okul_no", "ad_soyad", "sinif", "cinsiyet", "yas_str",
+			"boy_cm", "boy_p", "boy_z", "boy_dilim",
+			"kilo_kg", "kilo_p", "kilo_z", "kilo_dilim",
+			"vki", "vki_p", "vki_z", "vki_dilim",
+			"ideal_kilo_araligi", "ideal_kilo_fark",
+			"bas_cevresi_cm", "bas_cevresi_p", "bas_cevresi_z",
+			"klinik_gelisim_yorumu", "tarama_tarihi",
+		],
+		"auto_prune_empty_cols": True,
+		"only_nonempty_cols": True,
+		"student_scope": SCOPE_OPT_MEASURED,
+		"only_risky": False,
+		"hide_sensitive_medical": False,
+		"page_orientation": ORIENT_OPT_AUTO,
+		"group_by_class_pagebreak": True,
+		"signatures": [SIG_LABEL_NURSE, SIG_LABEL_TEACHER, SIG_LABEL_PRINCIPAL],
+		"report_title": "BOY-KİLO-PERSANTİL VE GELİŞİM ÖZET RAPORU",
+	},
+	"full_screening": {
+		"preset_name": "Kapsamlı Okul Taraması Raporu",
+		"selected_cols": [c["key"] for c in CUSTOM_REPORT_COLS],
+		"auto_prune_empty_cols": True,
+		"only_nonempty_cols": True,
+		"student_scope": SCOPE_OPT_MEASURED,
+		"only_risky": False,
+		"hide_sensitive_medical": False,
+		"page_orientation": ORIENT_OPT_AUTO,
+		"group_by_class_pagebreak": True,
+		"signatures": [SIG_LABEL_NURSE, SIG_LABEL_TEACHER, SIG_LABEL_PRINCIPAL],
+		"report_title": "KAPSAMLI OKUL SAĞLIK TARAMASI RAPORU",
+	},
+	"risky_only": {
+		"preset_name": "Sadece Riskli / Sevk Edilen Öğrenciler",
+		"selected_cols": [
+			"okul_no", "ad_soyad", "sinif", "yas_str",
+			"boy_cm", "boy_p", "boy_z",
+			"kilo_kg", "kilo_p", "kilo_z",
+			"vki", "vki_p", "vki_z", "ideal_kilo_fark",
+			"bas_cevresi_cm", "bas_cevresi_p", "bas_cevresi_z",
+			"klinik_gelisim_yorumu",
+			"gozluk", "sag_goz", "sol_goz",
+			"sag_kulak", "sol_kulak", "sac_taramasi",
+			"ates_c", "nabiz", "spo2", "tansiyon",
+			"zararli_aliskanlik", "psikososyal", "alerji_kronik", "tarama_notu", "tarama_tarihi",
+		],
+		"auto_prune_empty_cols": True,
+		"only_nonempty_cols": True,
+		"student_scope": SCOPE_OPT_RISKY,
+		"only_risky": True,
+		"hide_sensitive_medical": False,
+		"page_orientation": ORIENT_OPT_AUTO,
+		"group_by_class_pagebreak": True,
+		"signatures": [SIG_LABEL_NURSE, SIG_LABEL_TEACHER, SIG_LABEL_PRINCIPAL],
+		"report_title": "RİSKLİ VE SEVK GEREKTİREN ÖĞRENCİLER İZLEM RAPORU",
+	},
+	"admin_teacher": {
+		"preset_name": "İdare & Sınıf Öğretmeni Özeti (Gizlilik Korumalı)",
+		"selected_cols": [
+			"okul_no", "ad_soyad", "sinif", "yas_str",
+			"boy_cm", "kilo_kg", "gozluk", "tarama_tarihi",
+		],
+		"auto_prune_empty_cols": True,
+		"only_nonempty_cols": True,
+		"student_scope": SCOPE_OPT_ALL_CLASS,
+		"only_risky": False,
+		"hide_sensitive_medical": True,
+		"page_orientation": ORIENT_OPT_AUTO,
+		"group_by_class_pagebreak": True,
+		"signatures": [SIG_LABEL_NURSE, SIG_LABEL_TEACHER, SIG_LABEL_PRINCIPAL],
+		"report_title": "İDARE VE SINIF ÖĞRETMENİ BİLGİLENDİRME ÖZET LİSTESİ",
+	},
+}
+
+# Geriye dönük test ve çağrı uyumluluğu için eski isimler
+DYN_SCREENING_PRESETS: dict[str, dict[str, Any]] = {
+	"growth_summary": {
+		"preset_name": "Boy-Kilo-Persantil-Z Skoru Özeti",
+		"selected_cols": [
+			"student_no", "full_name", "class_name", "sex", "age_ym", "screening_date",
+			"height_cm", "height_pct", "height_z", "height_band",
+			"weight_kg", "weight_pct", "weight_z", "weight_band",
+			"bmi", "bmi_pct", "bmi_z", "ideal_weight_range", "head_circ_full", "clinical_growth_eval",
+		],
+		"only_nonempty_cols": True,
+		"student_scope": "measured_only",
+		"only_risky": False,
+		"hide_sensitive_medical": False,
+		"page_orientation": "auto",
+		"signatures": ["nurse", "teacher", "principal"],
+		"report_title": "BOY-KİLO-PERSANTİL VE GELİŞİM ÖZET RAPORU",
+	},
+	"full_screening": {
+		"preset_name": "Kapsamlı Okul Taraması Raporu",
+		"selected_cols": [c["key"] for c in DYN_SCREENING_REPORT_COLS],
+		"only_nonempty_cols": True,
+		"student_scope": "measured_only",
+		"only_risky": False,
+		"hide_sensitive_medical": False,
+		"page_orientation": "auto",
+		"signatures": ["nurse", "teacher", "principal"],
+		"report_title": "KAPSAMLI OKUL SAĞLIK TARAMASI RAPORU",
+	},
+	"risky_only": {
+		"preset_name": "Riskli / Sevk Edilen Öğrenciler Raporu",
+		"selected_cols": [
+			"student_no", "full_name", "class_name", "age_ym", "screening_date",
+			"height_cm", "height_pct", "height_z",
+			"weight_kg", "weight_pct", "weight_z",
+			"bmi", "bmi_pct", "bmi_z", "head_circ_full", "clinical_growth_eval",
+			"wears_glasses", "vision_right", "vision_left",
+			"hearing_right", "hearing_left", "hair_screening",
+			"vital_summary", "harmful_habits", "psychosocial_status", "allergies_chronic", "screening_notes",
+		],
+		"only_nonempty_cols": True,
+		"student_scope": "measured_only",
+		"only_risky": True,
+		"hide_sensitive_medical": False,
+		"page_orientation": "auto",
+		"signatures": ["nurse", "teacher", "principal"],
+		"report_title": "RİSKLİ VE SEVK GEREKTİREN ÖĞRENCİLER İZLEM RAPORU",
+	},
+	"admin_teacher": {
+		"preset_name": "İdare & Sınıf Öğretmeni Bilgilendirme Listesi",
+		"selected_cols": [
+			"student_no", "full_name", "class_name", "age_ym",
+			"height_cm", "weight_kg", "bmi", "clinical_growth_eval",
+			"wears_glasses", "vision_right", "vision_left",
+			"hearing_right", "hearing_left",
+		],
+		"only_nonempty_cols": True,
+		"student_scope": "all_class",
+		"only_risky": False,
+		"hide_sensitive_medical": True,
+		"page_orientation": "auto",
+		"signatures": ["nurse", "teacher", "principal"],
+		"report_title": "İDARE VE SINIF ÖĞRETMENİ BİLGİLENDİRME ÖZET LİSTESİ",
+	},
+}
+
+
+def _normalize_scope_mode(scope_val: object, only_risky: bool = False) -> tuple[str, bool, str]:
+	"""(canon_code, effective_only_risky, display_label) döndürür."""
+	raw = str(scope_val or "").strip()
+	low = raw.lower()
+	if only_risky or low == "risky_only" or "risk / sınır dışı" in low:
+		return ("risky_only", True, SCOPE_OPT_RISKY)
+	if low == "all_class" or "tam sınıf listesi" in low:
+		return ("all_class", False, SCOPE_OPT_ALL_CLASS)
+	return ("measured_only", False, SCOPE_OPT_MEASURED)
+
+
+def _normalize_orient_value(orient_val: object) -> tuple[str, str]:
+	"""(canon_code, display_label) döndürür."""
+	low = str(orient_val or "").strip().lower()
+	if "otomatik" in low or low == "auto" or not low:
+		return ("auto", ORIENT_OPT_AUTO)
+	if "yatay" in low or low == "landscape":
+		return ("landscape", ORIENT_OPT_LANDSCAPE)
+	if "dikey" in low or low == "portrait":
+		return ("portrait", ORIENT_OPT_PORTRAIT)
+	return ("auto", ORIENT_OPT_AUTO)
+
+
+def _merge_override_config(base_cfg: dict[str, Any], override_cfg: dict[str, Any]) -> dict[str, Any]:
+	merged = copy.deepcopy(base_cfg)
+	if "student_scope" in override_cfg and "only_risky" not in override_cfg:
+		merged["only_risky"] = False
+	merged.update(copy.deepcopy(override_cfg))
+	return merged
+
+
+def _normalize_signatures_list(sigs: object) -> list[str]:
+	if sigs is None:
+		return [SIG_LABEL_NURSE, SIG_LABEL_TEACHER, SIG_LABEL_PRINCIPAL]
+	code_to_lbl = {
+		"nurse": SIG_LABEL_NURSE,
+		"teacher": SIG_LABEL_TEACHER,
+		"principal": SIG_LABEL_PRINCIPAL,
+	}
+	res: list[str] = []
+	for item in sigs:
+		s = str(item or "").strip()
+		if not s:
+			continue
+		lbl = code_to_lbl.get(s.lower(), s)
+		if lbl in {SIG_LABEL_NURSE, SIG_LABEL_TEACHER, SIG_LABEL_PRINCIPAL} and lbl not in res:
+			res.append(lbl)
+	return res
+
+
+def _translate_cols_list(raw_cols: object, target_custom: bool = True) -> list[str]:
+	"""Eski İngilizce ve yeni Türkçe sütun anahtarlarını hedef kataloğa dönüştürür."""
+	mapping = _LEGACY_TO_CUSTOM_COL_MAP if target_custom else _CUSTOM_TO_LEGACY_COL_MAP
+	valid_set = CUSTOM_REPORT_COL_BY_KEY if target_custom else DYN_SCREENING_COL_BY_KEY
+	req_key = "ad_soyad" if target_custom else "full_name"
+	out: list[str] = []
+	for k in (raw_cols or []):
+		ks = str(k or "").strip()
+		if ks in valid_set:
+			if ks not in out:
+				out.append(ks)
+		elif ks in mapping:
+			for mapped_k in mapping[ks]:
+				if mapped_k in valid_set and mapped_k not in out:
+					out.append(mapped_k)
+	if req_key not in out:
+		out.insert(0, req_key)
+	return out
+
+
+def _normalize_report_config(raw_cfg: dict[str, Any] | None, target_custom: bool = True) -> dict[str, Any]:
+	"""Rapor yapılandırma sözlüğünü hem GÖREV 3 hem geriye dönük anahtarlarla normalize eder."""
+	base = copy.deepcopy(DEFAULT_CUSTOM_REPORT_CONFIG)
+	if isinstance(raw_cfg, dict):
+		base.update(copy.deepcopy(raw_cfg))
+
+	prune_val = raw_cfg.get("auto_prune_empty_cols") if isinstance(raw_cfg, dict) and "auto_prune_empty_cols" in raw_cfg else base.get("only_nonempty_cols", True)
+	base["auto_prune_empty_cols"] = bool(prune_val)
+	base["only_nonempty_cols"] = bool(prune_val)
+
+	pb_val = raw_cfg.get("group_by_class_pagebreak") if isinstance(raw_cfg, dict) and "group_by_class_pagebreak" in raw_cfg else base.get("page_break_between_classes", True)
+	base["group_by_class_pagebreak"] = bool(pb_val)
+	base["page_break_between_classes"] = bool(pb_val)
+
+	_, eff_risky, scope_lbl = _normalize_scope_mode(base.get("student_scope"), bool(base.get("only_risky", False)))
+	base["student_scope"] = scope_lbl
+	base["only_risky"] = eff_risky
+
+	_, orient_lbl = _normalize_orient_value(base.get("page_orientation"))
+	base["page_orientation"] = orient_lbl
+
+	base["signatures"] = _normalize_signatures_list(base.get("signatures"))
+	base["hide_sensitive_medical"] = bool(base.get("hide_sensitive_medical", False))
+	base["selected_cols"] = _translate_cols_list(base.get("selected_cols"), target_custom=target_custom)
+	base["report_title"] = str(base.get("report_title") or DEFAULT_CUSTOM_REPORT_CONFIG["report_title"]).strip() or DEFAULT_CUSTOM_REPORT_CONFIG["report_title"]
+	return base
+
+
+def get_active_report_config() -> dict[str, Any]:
+	"""Aktif okul taraması & persantil rapor yapılandırmasını session_state ve app_settings üzerinden okur."""
+	ss_cfg = st.session_state.get("dyn_screening_report_cfg")
+	if isinstance(ss_cfg, dict):
+		norm = _normalize_report_config(ss_cfg, target_custom=True)
+		st.session_state["dyn_screening_report_cfg"] = copy.deepcopy(norm)
+		return norm
+
+	cfg = get_app_settings()
+	raw = cfg.get("dyn_screening_report_settings", "")
+	parsed_cfg: dict[str, Any] = {}
+	if raw and str(raw).strip():
+		try:
+			parsed = json.loads(raw)
+			if isinstance(parsed, dict):
+				parsed_cfg = parsed
+		except Exception:
+			parsed_cfg = {}
+	norm = _normalize_report_config(parsed_cfg, target_custom=True)
+	st.session_state["dyn_screening_report_cfg"] = copy.deepcopy(norm)
+	return norm
+
+
+def save_custom_report_config(new_cfg: dict[str, Any]) -> dict[str, Any]:
+	norm = _normalize_report_config(new_cfg, target_custom=True)
+	st.session_state["dyn_screening_report_cfg"] = copy.deepcopy(norm)
+	try:
+		save_app_settings({"dyn_screening_report_settings": json.dumps(norm, ensure_ascii=False)})
+	except Exception:
+		pass
+	return norm
+
+
+def get_dynamic_screening_report_config() -> dict[str, Any]:
+	return get_active_report_config()
+
+
+def save_dynamic_screening_report_config(new_cfg: dict[str, Any]) -> dict[str, Any]:
+	return save_custom_report_config(new_cfg)
+
+
+def _on_dyn_dlg_scope_change() -> None:
+	scope_val = st.session_state.get("dyn_dlg_scope", SCOPE_OPT_MEASURED)
+	_, eff_risky, _ = _normalize_scope_mode(scope_val, False)
+	st.session_state["dyn_dlg_only_risky"] = bool(eff_risky)
+
+
+def _sync_dyn_dialog_widgets_from_cfg(cfg: dict[str, Any]) -> None:
+	norm = _normalize_report_config(cfg, target_custom=True)
+	cols_set = set(norm.get("selected_cols") or [])
+	cols_set.add("ad_soyad")
+	st.session_state["dyn_dlg_cols_identity"] = [k for k in CUSTOM_IDENTITY_KEYS if k in cols_set and k != "ad_soyad"]
+	st.session_state["dyn_dlg_cols_anthro"] = [k for k in CUSTOM_ANTHRO_KEYS if k in cols_set]
+	st.session_state["dyn_dlg_cols_clinical"] = [k for k in CUSTOM_CLINICAL_KEYS if k in cols_set]
+	st.session_state["dyn_dlg_only_nonempty"] = bool(norm.get("auto_prune_empty_cols", True))
+	st.session_state["dyn_dlg_only_risky"] = bool(norm.get("only_risky", False))
+	st.session_state["dyn_dlg_hide_sens"] = bool(norm.get("hide_sensitive_medical", False))
+	st.session_state["dyn_dlg_scope"] = norm.get("student_scope", SCOPE_OPT_MEASURED)
+	st.session_state["dyn_dlg_orient"] = norm.get("page_orientation", ORIENT_OPT_AUTO)
+	st.session_state["dyn_dlg_sigs"] = list(norm.get("signatures") or [SIG_LABEL_NURSE, SIG_LABEL_TEACHER, SIG_LABEL_PRINCIPAL])
+	st.session_state["dyn_dlg_page_break"] = bool(norm.get("group_by_class_pagebreak", True))
+	st.session_state["dyn_dlg_title"] = norm.get("report_title") or DEFAULT_CUSTOM_REPORT_CONFIG["report_title"]
+
+
+def _apply_dyn_preset_callback(preset_key: str) -> None:
+	preset = CUSTOM_REPORT_PRESETS.get(preset_key)
+	if not preset:
+		return
+	cur = copy.deepcopy(get_active_report_config())
+	cur.update(copy.deepcopy(preset))
+	saved = save_custom_report_config(cur)
+	_sync_dyn_dialog_widgets_from_cfg(saved)
+	st.session_state["dyn_dlg_preset_feedback"] = f"⚡ '{preset['preset_name']}' şablonu sütun ve filtrelere uygulandı."
+
+
+def get_available_screening_and_measurement_dates(class_names: list[str] | None = None) -> list[dict[str, Any]]:
+	"""Veritabanında school_screenings, measurements veya vital_readings kaydı bulunan tarama günlerini (en yeniden eskiye) özetler."""
+	cls_filter = [c for c in (class_names or []) if c and c not in {"Tüm sınıflar", "Tüm Sınıflar", "Sivil / Diğer"}]
+	date_students: dict[str, set[int]] = {}
+	date_classes: dict[str, set[str]] = {}
+
+	with connect_db() as connection:
+		params: list[Any] = []
+		cls_where = "AND c.name != 'Sivil / Diğer' AND COALESCE(s.person_type, 'Öğrenci') = 'Öğrenci'"
+		if cls_filter:
+			ph = ",".join("?" for _ in cls_filter)
+			cls_where += f" AND c.name IN ({ph})"
+			params.extend(cls_filter)
+
+		queries = [
+			f"""SELECT sc.screening_date AS d_str, s.id AS sid, c.name AS cname
+			    FROM school_screenings sc
+			    JOIN students s ON s.id = sc.student_id
+			    JOIN classes c ON c.id = s.class_id
+			    WHERE sc.screening_date IS NOT NULL AND TRIM(sc.screening_date) != '' {cls_where}""",
+			f"""SELECT m.measured_on AS d_str, s.id AS sid, c.name AS cname
+			    FROM measurements m
+			    JOIN students s ON s.id = m.student_id
+			    JOIN classes c ON c.id = s.class_id
+			    WHERE m.measured_on IS NOT NULL AND TRIM(m.measured_on) != '' {cls_where}""",
+			f"""SELECT substr(v.measured_at, 1, 10) AS d_str, s.id AS sid, c.name AS cname
+			    FROM vital_readings v
+			    JOIN students s ON s.id = v.student_id
+			    JOIN classes c ON c.id = s.class_id
+			    WHERE v.measured_at IS NOT NULL AND length(TRIM(v.measured_at)) >= 10 {cls_where}""",
+		]
+		for sql in queries:
+			for row in connection.execute(sql, tuple(params)).fetchall():
+				d_iso = str(row["d_str"]).strip()[:10]
+				if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", d_iso):
+					continue
+				date_students.setdefault(d_iso, set()).add(int(row["sid"]))
+				date_classes.setdefault(d_iso, set()).add(str(row["cname"]))
+
+	results: list[dict[str, Any]] = []
+	for d_iso in sorted(date_students.keys(), reverse=True):
+		try:
+			d_tr = date.fromisoformat(d_iso).strftime("%d.%m.%Y")
+		except ValueError:
+			d_tr = d_iso
+		cls_sorted = sorted(date_classes.get(d_iso, set()))
+		if len(cls_sorted) == 1:
+			cls_txt = cls_sorted[0]
+		elif len(cls_sorted) == 2:
+			cls_txt = f"{cls_sorted[0]}, {cls_sorted[1]}"
+		elif len(cls_sorted) > 2:
+			cls_txt = f"{cls_sorted[0]}, {cls_sorted[1]} +{len(cls_sorted) - 2} şube"
+		else:
+			cls_txt = "Sınıf Yok"
+		cnt = len(date_students[d_iso])
+		results.append({
+			"date": d_iso,
+			"date_iso": d_iso,
+			"date_tr": d_tr,
+			"count": cnt,
+			"student_count": cnt,
+			"classes": cls_sorted,
+			"label": f"📅 {d_tr} — {cnt} Öğrenci ({cls_txt})",
+		})
+	return results
+
+
+def get_available_screening_dates_summary(class_names: list[str] | None = None) -> list[dict[str, Any]]:
+	"""Geriye dönük uyumluluk sarmalayıcısı."""
+	return get_available_screening_and_measurement_dates(class_names=class_names)
+
+
+def _short_percentile_band(pct: float) -> str:
+	if pct < 3.0:
+		return "<3p (Çok Düşük)"
+	if pct < 10.0:
+		return "3-10p (Düşük)"
+	if pct < 25.0:
+		return "10-25p"
+	if pct <= 75.0:
+		return "25-75p (Normal)"
+	if pct <= 90.0:
+		return "75-90p"
+	if pct <= 97.0:
+		return "90-97p (Yüksek)"
+	return ">97p (Çok Yüksek)"
+
+
+def _format_age_ym_tr(months: int | None) -> str:
+	if months is None or months < 0:
+		return ""
+	y, m = divmod(int(months), 12)
+	return f"{y}y {m}a"
+
+
+def _is_cell_value_empty(val: object) -> bool:
+	if val is None:
+		return True
+	try:
+		if pd.isna(val):
+			return True
+	except (TypeError, ValueError):
+		pass
+	s = str(val).strip()
+	return s in {"", "—", "-", "None", "nan", "NaN", "Ölçülmedi / Gelmedi"}
+
+
+def _is_vision_value_abnormal(val: object, is_glasses: bool = False) -> tuple[bool, bool]:
+	"""(hücre_kırmızı_uyarı, görme_özet_kategorisinde_listelensin_mi) döndürür."""
+	if val is None:
+		return (False, False)
+	txt = clean_text(val)
+	if not txt or txt in {"—", "-", "Ölçülmedi / Gelmedi"}:
+		return (False, False)
+	low = txt.lower()
+	if is_glasses:
+		needs_attention = any(k in low for k in ("önerildi", "muayene", "tembell", "kapama", "sevk"))
+		uses_glasses = needs_attention or low.startswith("evet") or low.startswith("bazen")
+		return (needs_attention, uses_glasses)
+	normal_tokens = {
+		"normal", "tam", "tam / normal", "tam / normal (10/10)",
+		"10/10", "sağlam", "saglam", "sorun yok", "iyi", "iyi görüyor",
+	}
+	if low in normal_tokens or ("10/10" in low and "düşük" not in low and "az" not in low and "kayb" not in low):
+		return (False, False)
+	return (True, True)
+
+
+def _is_hearing_value_abnormal(val: object) -> bool:
+	if val is None:
+		return False
+	txt = clean_text(val)
+	if not txt or txt in {"—", "-", "Ölçülmedi / Gelmedi"}:
+		return False
+	low = txt.lower()
+	if low in {"normal", "normal / iyi duyuyor", "iyi duyuyor", "sağlam", "saglam", "sorun yok"}:
+		return False
+	return True
+
+
+def _is_hair_value_abnormal(val: object) -> bool:
+	if val is None:
+		return False
+	txt = clean_text(val)
+	if not txt or txt in {"—", "-", "Ölçülmedi / Gelmedi"}:
+		return False
+	low = txt.lower()
+	parts = [p.strip() for p in low.split(",") if p.strip()]
+	risk_kws = ("bit", "sirke", "pediküloz", "pedikuloz", "tedavi", "yeniden tarama", "kıran", "kiran", "alopesi", "egzama", "seboreik", "kaşıntı")
+	for p in parts:
+		if p in {"temiz / parazit yok", "temiz", "parazit yok", "kişisel hijyen eğitimi verildi"}:
+			continue
+		if any(rk in p for rk in risk_kws):
+			return True
+	return False
+
+
+def _classify_report_cell_state(col_name: str, val_str: str, alert_map: dict[str, bool], is_measured: bool) -> str:
+	"""Hücrenin görsel durumunu döndürür: 'alert', 'ok', 'unmeasured', 'normal'."""
+	if alert_map.get(col_name):
+		return "alert"
+	val_clean = str(val_str or "").strip()
+	if not is_measured and val_clean == "Ölçülmedi / Gelmedi":
+		return "unmeasured"
+	if not val_clean or val_clean in {"—", "-"}:
+		return "normal"
+
+	low = val_clean.lower()
+	if re.search(r"<\s*3\s*p|>\s*97\s*p", low):
+		return "alert"
+	if any(kw in low for kw in ("bodurluk", "zayıflık", "obezite", "bit / sirke", "sevk", "kaybı")):
+		return "alert"
+	col_low = str(col_name or "").lower()
+	if "ateş" in col_low or "vital" in col_low:
+		for m in re.finditer(r"(\d{2}(?:[.,]\d+)?)", val_clean):
+			try:
+				t_num = float(m.group(1).replace(",", "."))
+				if 30.0 <= t_num <= 45.0 and t_num >= 38.0:
+					return "alert"
+			except (TypeError, ValueError):
+				pass
+
+	status_cols = (
+		"gelişim", "göz", "kulak", "saç", "hijyen", "dilimi", "psikososyal", "zararlı", "ateş", "spo2",
+	)
+	if any(sc in col_low for sc in status_cols):
+		if (
+			low in {"normal gelişim", "normal", "normal (yetişkin vki̇)", "normal (yetişkin vki)", "tam / normal", "tam / normal (10/10)", "normal / iyi duyuyor", "temiz / parazit yok", "tespit edilmedi"}
+			or "25-75p" in low
+			or "referans aralığında" in low
+		):
+			return "ok"
+	return "normal"
+
+
+def _derive_clinical_growth_eval(
+	h_ev: dict | None,
+	w_ev: dict | None,
+	b_ev: dict | None,
+	hc_ev: dict | None,
+	age_m: int | None,
+	bmi_val: float | None,
+	person_type: str = "Öğrenci",
+) -> tuple[str, bool]:
+	"""(Klinik değerlendirme metni, kritik_risk_var_mı) üretir."""
+	findings: list[str] = []
+	is_alert = False
+	if b_ev is not None:
+		bz = float(b_ev["z"])
+		if bz < -3.0:
+			findings.append("Ağır Zayıflık")
+			is_alert = True
+		elif bz < -2.0:
+			findings.append("Zayıflık")
+			is_alert = True
+		elif bz > 3.0:
+			findings.append("Ağır Obezite")
+			is_alert = True
+		elif bz > 2.0:
+			findings.append("Obezite")
+			is_alert = True
+		elif bz > 1.0:
+			findings.append("Fazla Kilolu")
+	if h_ev is not None:
+		hz = float(h_ev["z"])
+		if hz < -3.0:
+			findings.append("Ağır Bodurluk (Boy Kısalığı)")
+			is_alert = True
+		elif hz < -2.0:
+			findings.append("Bodurluk Riski (Boy Kısalığı)")
+			is_alert = True
+		elif hz > 2.0:
+			findings.append("Uzun Boy")
+			if float(h_ev["percentile"]) > 97.0:
+				is_alert = True
+	if w_ev is not None:
+		wz = float(w_ev["z"])
+		if wz < -3.0 and "Zayıflık" not in " ".join(findings):
+			findings.append("Ağır Düşük Kilo")
+			is_alert = True
+		elif wz < -2.0 and "Zayıflık" not in " ".join(findings):
+			findings.append("Düşük Kilo")
+			is_alert = True
+		elif wz > 2.0 and "Obezite" not in " ".join(findings):
+			findings.append("Yüksek Kilo (>97p)")
+			is_alert = True
+	if hc_ev is not None and age_m is not None and 0 <= age_m <= 60:
+		hcz = float(hc_ev["z"])
+		if hcz < -2.0:
+			findings.append("Düşük Baş Çevresi (<3p)")
+			is_alert = True
+		elif hcz > 2.0:
+			findings.append("Yüksek Baş Çevresi (>97p)")
+			is_alert = True
+
+	if h_ev is None and w_ev is None and b_ev is None and hc_ev is None:
+		if (age_m is not None and age_m > 228) or str(person_type or "") != "Öğrenci":
+			if bmi_val is not None:
+				if bmi_val < 18.5:
+					return ("Zayıf (Yetişkin VKİ)", True)
+				if bmi_val >= 30.0:
+					return ("Obez (Yetişkin VKİ)", True)
+				if bmi_val >= 25.0:
+					return ("Fazla Kilolu (Yetişkin VKİ)", False)
+				return ("Normal (Yetişkin VKİ)", False)
+		return ("", False)
+
+	if findings:
+		return (" / ".join(findings), is_alert)
+	return ("Normal Gelişim", False)
+
+
+def _to_iso_date_str(val: object) -> str | None:
+	if val is None:
+		return None
+	if isinstance(val, datetime):
+		return val.date().isoformat()
+	if isinstance(val, date):
+		return val.isoformat()
+	s = str(val).strip()[:10]
+	if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+		return s
+	return None
+
+
+def build_custom_screening_report_data(
+	selected_classes: list[str] | tuple[str, ...] | str | None = None,
+	date_mode: str = "Belirli Günler",
+	selected_dates: list[str] | tuple[str, ...] | str | None = None,
+	start_date: date | str | None = None,
+	end_date: date | str | None = None,
+	config: dict[str, Any] | None = None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+	"""
+	Seçilen sınıflar, tarih modu ('Belirli Günler', 'Tarih Aralığı', 'En Güncel Kayıtlar') ve pop-up yapılandırmasına
+	göre dinamik rapor DataFrame'i + zengin istatistik/risk meta sözlüğünü (df, meta) olarak döndürür.
+	- auto_prune_empty_cols: Okul No, Ad Soyad, Sınıf hariç hiçbir öğrenciye girilmemiş boş sütunları kaldırır.
+	- student_scope: Verisi olanlar / Tam Sınıf Listesi ('Ölçülmedi / Gelmedi') / Sadece Riskli Öğrenciler.
+	"""
+	base_cfg = copy.deepcopy(get_active_report_config())
+	if isinstance(config, dict):
+		raw_cols_given = list(config.get("selected_cols") or [])
+		base_cfg = _merge_override_config(base_cfg, config)
+		# Sadece Türkçe ya da sadece İngilizce anahtar isteyen çağrılarda istenen anahtar setini koru
+		has_custom_key = any(k in CUSTOM_REPORT_COL_BY_KEY for k in raw_cols_given)
+		has_legacy_key = any(k in DYN_SCREENING_COL_BY_KEY for k in raw_cols_given)
+	else:
+		has_custom_key = True
+		has_legacy_key = False
+
+	cfg = _normalize_report_config(base_cfg, target_custom=True)
+	if isinstance(config, dict) and config.get("selected_cols"):
+		raw_req_keys = [str(k) for k in config["selected_cols"] if str(k) in ALL_REPORT_COL_BY_KEY]
+	else:
+		raw_req_keys = list(cfg["selected_cols"])
+
+	if "ad_soyad" not in raw_req_keys and "full_name" not in raw_req_keys:
+		raw_req_keys.insert(0, "full_name" if (has_legacy_key and not has_custom_key) else "ad_soyad")
+
+	# Normalize classes
+	if selected_classes is None:
+		cls_norm: list[str] = []
+	elif isinstance(selected_classes, str):
+		cls_norm = [] if selected_classes.strip().lower() in {"", "tüm sınıflar", "tum siniflar"} else [selected_classes.strip()]
+	else:
+		cls_norm = [
+			str(c).strip()
+			for c in selected_classes
+			if c and str(c).strip().lower() not in {"tüm sınıflar", "tum siniflar"}
+		]
+
+	# Determine mode
+	dm_low = str(date_mode or "Belirli Günler").strip().lower()
+	if "güncel" in dm_low or "guncel" in dm_low or "latest" in dm_low or "mod c" in dm_low:
+		canon_dmode = "latest"
+		dmode_label = "En Güncel Kayıtlar"
+	elif "aralı" in dm_low or "arali" in dm_low or "range" in dm_low or "mod b" in dm_low:
+		canon_dmode = "range"
+		dmode_label = "Tarih Aralığı"
+	else:
+		canon_dmode = "specific"
+		dmode_label = "Belirli Günler"
+
+	# Normalize specific dates / range dates
+	if selected_dates is None:
+		dates_norm: list[str] = []
+	elif isinstance(selected_dates, (str, date, datetime)):
+		iso_d = _to_iso_date_str(selected_dates)
+		dates_norm = [iso_d] if iso_d else []
+	else:
+		dates_norm = [d for d in (_to_iso_date_str(x) for x in selected_dates) if d]
+	dates_norm = sorted(set(dates_norm), reverse=True)
+
+	start_iso = _to_iso_date_str(start_date)
+	end_iso = _to_iso_date_str(end_date)
+	if start_iso and end_iso and start_iso > end_iso:
+		start_iso, end_iso = end_iso, start_iso
+
+	prune_empty = bool(
+		config.get("auto_prune_empty_cols", config.get("only_nonempty_cols", True))
+		if isinstance(config, dict)
+		else cfg.get("auto_prune_empty_cols", True)
+	)
+	scope_code, only_risky, _ = _normalize_scope_mode(cfg.get("student_scope"), bool(cfg.get("only_risky", False)))
+	hide_sensitive = bool(cfg.get("hide_sensitive_medical", False))
+
+	ordered_col_specs: list[dict[str, Any]] = []
+	seen_col_keys: set[str] = set()
+	for k in raw_req_keys:
+		spec = ALL_REPORT_COL_BY_KEY.get(k)
+		if not spec or spec["key"] in seen_col_keys:
+			continue
+		if hide_sensitive and spec.get("sensitive", False):
+			continue
+		seen_col_keys.add(spec["key"])
+		ordered_col_specs.append(spec)
+
+	teacher_map = get_class_teacher_map()
+
+	with connect_db() as connection:
+		stu_params: list[Any] = []
+		cls_where = "WHERE c.name != 'Sivil / Diğer' AND COALESCE(s.person_type, 'Öğrenci') = 'Öğrenci'"
+		if cls_norm:
+			ph_cls = ",".join("?" for _ in cls_norm)
+			cls_where += f" AND c.name IN ({ph_cls})"
+			stu_params.extend(cls_norm)
+
+		stu_rows = connection.execute(
+			f"""SELECT s.id, s.student_no, s.full_name, s.sex, s.birth_date, s.person_type,
+			           c.name AS class_name,
+			           hp.blood_group, hp.allergies, hp.chronic_conditions,
+			           hp.last_screened_at, hp.wears_glasses AS hp_wears_glasses,
+			           hp.vision_right AS hp_vision_right, hp.vision_left AS hp_vision_left,
+			           hp.hair_screening AS hp_hair_screening, hp.hearing_right AS hp_hearing_right,
+			           hp.hearing_left AS hp_hearing_left, hp.health_behavior AS hp_health_behavior,
+			           hp.harmful_habits AS hp_harmful_habits, hp.psychosocial_status AS hp_psychosocial_status
+			    FROM students s
+			    JOIN classes c ON c.id = s.class_id
+			    LEFT JOIN health_profiles hp ON hp.student_id = s.id
+			    {cls_where}
+			    ORDER BY c.name, COALESCE(CAST(NULLIF(s.student_no, '') AS INTEGER), 999999), s.student_no, s.full_name""",
+			tuple(stu_params),
+		).fetchall()
+
+		stu_by_id: dict[int, sqlite3.Row] = {int(r["id"]): r for r in stu_rows}
+		stu_ids = list(stu_by_id.keys())
+
+		scr_by_pair: dict[tuple[int, str], sqlite3.Row] = {}
+		meas_by_pair: dict[tuple[int, str], sqlite3.Row] = {}
+		vit_by_pair: dict[tuple[int, str], list[sqlite3.Row]] = {}
+		latest_meas_by_sid: dict[int, sqlite3.Row] = {}
+		latest_scr_by_sid: dict[int, sqlite3.Row] = {}
+		latest_vit_by_sid: dict[int, sqlite3.Row] = {}
+
+		if stu_ids:
+			ph_ids = ",".join("?" for _ in stu_ids)
+			if canon_dmode == "specific":
+				if dates_norm:
+					ph_dates = ",".join("?" for _ in dates_norm)
+					q_params = tuple(stu_ids) + tuple(dates_norm)
+					for r in connection.execute(
+						f"SELECT * FROM school_screenings WHERE student_id IN ({ph_ids}) AND screening_date IN ({ph_dates}) ORDER BY id ASC",
+						q_params,
+					).fetchall():
+						scr_by_pair[(int(r["student_id"]), str(r["screening_date"])[:10])] = r
+					for r in connection.execute(
+						f"SELECT * FROM measurements WHERE student_id IN ({ph_ids}) AND measured_on IN ({ph_dates}) ORDER BY id ASC",
+						q_params,
+					).fetchall():
+						meas_by_pair[(int(r["student_id"]), str(r["measured_on"])[:10])] = r
+					for r in connection.execute(
+						f"SELECT *, substr(measured_at, 1, 10) AS m_day FROM vital_readings WHERE student_id IN ({ph_ids}) AND substr(measured_at, 1, 10) IN ({ph_dates}) ORDER BY measured_at ASC, id ASC",
+						q_params,
+					).fetchall():
+						vit_by_pair.setdefault((int(r["student_id"]), str(r["m_day"])[:10]), []).append(r)
+			elif canon_dmode == "range":
+				cond_scr, cond_meas, cond_vit = [], [], []
+				p_scr: list[Any] = list(stu_ids)
+				p_meas: list[Any] = list(stu_ids)
+				p_vit: list[Any] = list(stu_ids)
+				if start_iso:
+					cond_scr.append("screening_date >= ?")
+					cond_meas.append("measured_on >= ?")
+					cond_vit.append("substr(measured_at, 1, 10) >= ?")
+					p_scr.append(start_iso)
+					p_meas.append(start_iso)
+					p_vit.append(start_iso)
+				if end_iso:
+					cond_scr.append("screening_date <= ?")
+					cond_meas.append("measured_on <= ?")
+					cond_vit.append("substr(measured_at, 1, 10) <= ?")
+					p_scr.append(end_iso)
+					p_meas.append(end_iso)
+					p_vit.append(end_iso)
+				w_scr = (" AND " + " AND ".join(cond_scr)) if cond_scr else ""
+				w_meas = (" AND " + " AND ".join(cond_meas)) if cond_meas else ""
+				w_vit = (" AND " + " AND ".join(cond_vit)) if cond_vit else ""
+				for r in connection.execute(
+					f"SELECT * FROM school_screenings WHERE student_id IN ({ph_ids}){w_scr} ORDER BY screening_date ASC, id ASC",
+					tuple(p_scr),
+				).fetchall():
+					d_k = _to_iso_date_str(r["screening_date"])
+					if d_k:
+						scr_by_pair[(int(r["student_id"]), d_k)] = r
+				for r in connection.execute(
+					f"SELECT * FROM measurements WHERE student_id IN ({ph_ids}){w_meas} ORDER BY measured_on ASC, id ASC",
+					tuple(p_meas),
+				).fetchall():
+					d_k = _to_iso_date_str(r["measured_on"])
+					if d_k:
+						meas_by_pair[(int(r["student_id"]), d_k)] = r
+				for r in connection.execute(
+					f"SELECT *, substr(measured_at, 1, 10) AS m_day FROM vital_readings WHERE student_id IN ({ph_ids}){w_vit} ORDER BY measured_at ASC, id ASC",
+					tuple(p_vit),
+				).fetchall():
+					d_k = _to_iso_date_str(r["m_day"])
+					if d_k:
+						vit_by_pair.setdefault((int(r["student_id"]), d_k), []).append(r)
+			else:  # latest
+				for r in connection.execute(
+					f"SELECT * FROM school_screenings WHERE student_id IN ({ph_ids}) ORDER BY screening_date ASC, id ASC",
+					tuple(stu_ids),
+				).fetchall():
+					d_k = _to_iso_date_str(r["screening_date"])
+					if d_k:
+						sid_i = int(r["student_id"])
+						scr_by_pair[(sid_i, d_k)] = r
+						latest_scr_by_sid[sid_i] = r
+				for r in connection.execute(
+					f"SELECT * FROM measurements WHERE student_id IN ({ph_ids}) ORDER BY measured_on ASC, id ASC",
+					tuple(stu_ids),
+				).fetchall():
+					d_k = _to_iso_date_str(r["measured_on"])
+					if d_k:
+						sid_i = int(r["student_id"])
+						meas_by_pair[(sid_i, d_k)] = r
+						latest_meas_by_sid[sid_i] = r
+				for r in connection.execute(
+					f"SELECT *, substr(measured_at, 1, 10) AS m_day FROM vital_readings WHERE student_id IN ({ph_ids}) ORDER BY measured_at ASC, id ASC",
+					tuple(stu_ids),
+				).fetchall():
+					d_k = _to_iso_date_str(r["m_day"])
+					if d_k:
+						sid_i = int(r["student_id"])
+						vit_by_pair.setdefault((sid_i, d_k), []).append(r)
+						latest_vit_by_sid[sid_i] = r
+
+	class_totals: dict[str, int] = {}
+	class_screened_ids: dict[str, set[int]] = {}
+	for r in stu_rows:
+		cname = str(r["class_name"])
+		class_totals[cname] = class_totals.get(cname, 0) + 1
+		class_screened_ids.setdefault(cname, set())
+
+	active_dates_by_sid: dict[int, list[str]] = {}
+	all_matched_dates: set[str] = set(dates_norm) if canon_dmode == "specific" else set()
+	if canon_dmode == "latest":
+		for sid in stu_ids:
+			cand_dates: set[str] = set()
+			for (k_sid, k_day) in scr_by_pair:
+				if k_sid == sid:
+					cand_dates.add(k_day)
+			for (k_sid, k_day) in meas_by_pair:
+				if k_sid == sid:
+					cand_dates.add(k_day)
+			for (k_sid, k_day) in vit_by_pair:
+				if k_sid == sid:
+					cand_dates.add(k_day)
+			if cand_dates:
+				top_d = max(cand_dates)
+				active_dates_by_sid[sid] = [top_d]
+				all_matched_dates.add(top_d)
+				cname = str(stu_by_id[sid]["class_name"])
+				class_screened_ids.setdefault(cname, set()).add(sid)
+	else:
+		pair_dates_by_sid: dict[int, set[str]] = {}
+		for (k_sid, k_day) in scr_by_pair:
+			pair_dates_by_sid.setdefault(k_sid, set()).add(k_day)
+		for (k_sid, k_day) in meas_by_pair:
+			pair_dates_by_sid.setdefault(k_sid, set()).add(k_day)
+		for (k_sid, k_day) in vit_by_pair:
+			pair_dates_by_sid.setdefault(k_sid, set()).add(k_day)
+		for sid, d_set in pair_dates_by_sid.items():
+			if d_set:
+				active_dates_by_sid[sid] = sorted(d_set, reverse=True)
+				all_matched_dates.update(d_set)
+				cname = str(stu_by_id[sid]["class_name"])
+				class_screened_ids.setdefault(cname, set()).add(sid)
+
+	raw_records: list[dict[str, Any]] = []
+	risk_growth_names: dict[int, str] = {}
+	risk_vision_names: dict[int, str] = {}
+	risk_hearing_names: dict[int, str] = {}
+	risk_hair_names: dict[int, str] = {}
+	risk_vital_names: dict[int, str] = {}
+
+	ref_fallback_iso = dates_norm[0] if dates_norm else (end_iso or start_iso or date.today().isoformat())
+
+	for st_r in stu_rows:
+		sid = int(st_r["id"])
+		cname = str(st_r["class_name"])
+		s_dates = active_dates_by_sid.get(sid, [])
+
+		if not s_dates:
+			if scope_code != "all_class" or only_risky:
+				continue
+			sex_disp = "Kız" if st_r["sex"] == "K" else ("Erkek" if st_r["sex"] == "E" else "")
+			ref_dt = date.fromisoformat(ref_fallback_iso)
+			age_m_un = age_in_months(st_r["birth_date"], ref_dt) if st_r["birth_date"] else None
+			bdate_tr = parse_birth_date(st_r["birth_date"])
+			if bdate_tr:
+				try:
+					bdate_tr = date.fromisoformat(bdate_tr).strftime("%d.%m.%Y")
+				except Exception:
+					pass
+			stu_no_str = str(st_r["student_no"] or "").strip() or "—"
+			full_nm_str = str(st_r["full_name"]).strip()
+			age_str_un = _format_age_ym_tr(age_m_un)
+			row_vals_un: dict[str, Any] = {
+				"okul_no": stu_no_str, "student_no": stu_no_str,
+				"ad_soyad": full_nm_str, "full_name": full_nm_str,
+				"sinif": cname, "class_name": cname,
+				"cinsiyet": sex_disp, "sex": sex_disp,
+				"dogum_tarihi": bdate_tr or "", "birth_date": bdate_tr or "",
+				"yas_str": age_str_un, "age_ym": age_str_un,
+			}
+			raw_records.append({
+				"sid": sid,
+				"class_name": cname,
+				"date_iso": ref_fallback_iso,
+				"is_measured": False,
+				"is_risky": False,
+				"values": row_vals_un,
+				"alerts": {},
+			})
+			continue
+
+		for d_iso in s_dates:
+			pair = (sid, d_iso)
+			sc = scr_by_pair.get(pair)
+			ms = meas_by_pair.get(pair)
+			vits = vit_by_pair.get(pair, [])
+
+			# 'En Güncel Kayıtlar' modunda eksik ekseni öğrencinin en son kaydıyla zenginleştir
+			if canon_dmode == "latest":
+				if sc is None:
+					sc = latest_scr_by_sid.get(sid)
+				if ms is None:
+					ms = latest_meas_by_sid.get(sid)
+				if not vits and sid in latest_vit_by_sid:
+					vits = [latest_vit_by_sid[sid]]
+
+			h_val = numeric_value(ms["height_cm"]) if (ms and ms["height_cm"] is not None) else (numeric_value(sc["height_cm"]) if (sc and sc["height_cm"] is not None) else None)
+			w_val = numeric_value(ms["weight_kg"]) if (ms and ms["weight_kg"] is not None) else (numeric_value(sc["weight_kg"]) if (sc and sc["weight_kg"] is not None) else None)
+			hc_val = numeric_value(ms["head_circ_cm"]) if (ms and ms["head_circ_cm"] is not None) else (numeric_value(sc["head_circ_cm"]) if (sc and sc["head_circ_cm"] is not None) else None)
+			if h_val is not None and h_val <= 0:
+				h_val = None
+			if w_val is not None and w_val <= 0:
+				w_val = None
+			if hc_val is not None and hc_val <= 0:
+				hc_val = None
+
+			bmi_val: float | None = None
+			if h_val and w_val and h_val > 0:
+				bmi_val = round(w_val / ((h_val / 100.0) ** 2), 1)
+			elif ms and ms["bmi"] is not None and numeric_value(ms["bmi"]):
+				bmi_val = round(float(ms["bmi"]), 1)
+
+			try:
+				scr_dt_obj = date.fromisoformat(d_iso)
+				scr_date_tr = scr_dt_obj.strftime("%d.%m.%Y")
+			except Exception:
+				scr_dt_obj = date.today()
+				scr_date_tr = d_iso
+
+			age_m = age_in_months(st_r["birth_date"], scr_dt_obj) if st_r["birth_date"] else None
+			if age_m is None and ms and ms["age_months"] is not None:
+				try:
+					age_m = int(ms["age_months"])
+				except Exception:
+					age_m = None
+
+			sex_code = st_r["sex"] if st_r["sex"] in {"K", "E"} else None
+			h_ev = evaluate_measurement(h_val, "height", sex_code, age_m) if (h_val and sex_code and age_m is not None) else None
+			w_ev = evaluate_measurement(w_val, "weight", sex_code, age_m) if (w_val and sex_code and age_m is not None) else None
+			b_ev = evaluate_measurement(bmi_val, "bmi", sex_code, age_m) if (bmi_val and sex_code and age_m is not None) else None
+			can_hc_eval = (age_m is not None and 0 <= int(age_m) <= 60)
+			hc_ev = evaluate_measurement(hc_val, "head_circ", sex_code, age_m) if (hc_val and sex_code and can_hc_eval) else None
+
+			ideal_res = calculate_ideal_weight(h_val, sex_code, age_m, current_weight_kg=w_val) if (h_val or (w_val and sex_code and age_m is not None and age_m <= 228)) else None
+			growth_eval_str, growth_alert = _derive_clinical_growth_eval(h_ev, w_ev, b_ev, hc_ev, age_m, bmi_val, str(st_r["person_type"] or "Öğrenci"))
+
+			v_last = vits[-1] if vits else None
+			v_temp = numeric_value(v_last["temperature_c"]) if (v_last and v_last["temperature_c"] is not None) else (numeric_value(sc["temperature_c"]) if (sc and sc["temperature_c"] is not None) else None)
+			v_pulse = numeric_value(v_last["pulse_bpm"]) if (v_last and v_last["pulse_bpm"] is not None) else (numeric_value(sc["pulse_bpm"]) if (sc and sc["pulse_bpm"] is not None) else None)
+			v_spo2 = numeric_value(v_last["spo2_pct"]) if (v_last and v_last["spo2_pct"] is not None) else (numeric_value(sc["spo2_pct"]) if (sc and sc["spo2_pct"] is not None) else None)
+			v_sys = numeric_value(v_last["systolic_mmhg"]) if (v_last and v_last["systolic_mmhg"] is not None) else None
+			v_dia = numeric_value(v_last["diastolic_mmhg"]) if (v_last and v_last["diastolic_mmhg"] is not None) else None
+
+			vital_parts: list[str] = []
+			if v_temp is not None:
+				vital_parts.append(f"Ateş: {v_temp:.1f}°C")
+			if v_pulse is not None:
+				vital_parts.append(f"Nabız: {int(round(v_pulse))}/dk")
+			if v_spo2 is not None:
+				vital_parts.append(f"SpO2: %{int(round(v_spo2))}")
+			if v_sys is not None and v_dia is not None:
+				vital_parts.append(f"TA: {int(round(v_sys))}/{int(round(v_dia))}")
+			vital_str = " · ".join(vital_parts)
+
+			temp_alert = bool(v_temp is not None and (v_temp >= 38.0 or v_temp < 35.5))
+			spo2_alert = bool(v_spo2 is not None and v_spo2 < 95.0)
+			pulse_alert = bool(v_pulse is not None and (v_pulse >= 135 or v_pulse <= 45))
+			bp_alert = bool((v_sys is not None and (v_sys >= 130 or v_sys < 75)) or (v_dia is not None and v_dia >= 85))
+			vital_alert = temp_alert or spo2_alert
+
+			use_hp_fallback = (sc is None and str(st_r["last_screened_at"] or "")[:10] == d_iso)
+			wears_gl = clean_text(sc["wears_glasses"]) if sc else (clean_text(st_r["hp_wears_glasses"]) if use_hp_fallback else "")
+			vis_r = clean_text(sc["vision_right"]) if sc else (clean_text(st_r["hp_vision_right"]) if use_hp_fallback else "")
+			vis_l = clean_text(sc["vision_left"]) if sc else (clean_text(st_r["hp_vision_left"]) if use_hp_fallback else "")
+			hear_r = clean_text(sc["hearing_right"]) if sc else (clean_text(st_r["hp_hearing_right"]) if use_hp_fallback else "")
+			hear_l = clean_text(sc["hearing_left"]) if sc else (clean_text(st_r["hp_hearing_left"]) if use_hp_fallback else "")
+			hair_s = clean_text(sc["hair_screening"]) if sc else (clean_text(st_r["hp_hair_screening"]) if use_hp_fallback else "")
+			beh_s = clean_text(sc["health_behavior"]) if sc else (clean_text(st_r["hp_health_behavior"]) if use_hp_fallback else "")
+			harm_s = clean_text(sc["harmful_habits"]) if sc else (clean_text(st_r["hp_harmful_habits"]) if use_hp_fallback else "")
+			psy_s = clean_text(sc["psychosocial_status"]) if sc else (clean_text(st_r["hp_psychosocial_status"]) if use_hp_fallback else "")
+			scr_notes = clean_text(sc["notes"]) if sc else ""
+
+			bg_s = clean_text(st_r["blood_group"])
+			al_parts: list[str] = []
+			if clean_text(st_r["allergies"]) and clean_text(st_r["allergies"]).lower() not in {"yok", "bilinmiyor", "-"}:
+				al_parts.append(f"Alerji: {clean_text(st_r['allergies'])}")
+			if clean_text(st_r["chronic_conditions"]) and clean_text(st_r["chronic_conditions"]).lower() not in {"yok", "bilinmiyor", "-"}:
+				al_parts.append(f"Kronik: {clean_text(st_r['chronic_conditions'])}")
+			al_chron_s = " | ".join(al_parts)
+
+			bdate_tr = parse_birth_date(st_r["birth_date"])
+			if bdate_tr:
+				try:
+					bdate_tr = date.fromisoformat(bdate_tr).strftime("%d.%m.%Y")
+				except Exception:
+					pass
+
+			hc_display = ""
+			if hc_val is not None:
+				if can_hc_eval and hc_ev is not None:
+					hc_display = f"{hc_val:.1f} cm (%{hc_ev['percentile']:.1f} · {hc_ev['z']:+.2f} SDS)"
+				else:
+					hc_display = f"{hc_val:.1f} cm"
+
+			sex_disp = "Kız" if st_r["sex"] == "K" else ("Erkek" if st_r["sex"] == "E" else "")
+			stu_no_str = str(st_r["student_no"] or "").strip() or "—"
+			full_nm_str = str(st_r["full_name"]).strip()
+			age_str = _format_age_ym_tr(age_m)
+
+			ideal_range_str = ideal_res["band_str"] if ideal_res else ""
+			ideal_diff_str = f"{ideal_res['diff_kg']:+.1f}" if (ideal_res and ideal_res.get("diff_kg") is not None) else ""
+			ates_str = f"{v_temp:.1f}" if v_temp is not None else ""
+			nabiz_str = f"{int(round(v_pulse))}" if v_pulse is not None else ""
+			spo2_str = f"{int(round(v_spo2))}" if v_spo2 is not None else ""
+			bp_str = f"{int(round(v_sys))}/{int(round(v_dia))}" if (v_sys is not None and v_dia is not None) else ""
+
+			h_cm_s = f"{h_val:.1f}" if h_val is not None else ""
+			h_p_s = f"{h_ev['percentile']:.1f}" if h_ev else ""
+			h_z_s = f"{h_ev['z']:+.2f}" if h_ev else ""
+			h_d_s = _short_percentile_band(h_ev["percentile"]) if h_ev else ""
+			w_kg_s = f"{w_val:.1f}" if w_val is not None else ""
+			w_p_s = f"{w_ev['percentile']:.1f}" if w_ev else ""
+			w_z_s = f"{w_ev['z']:+.2f}" if w_ev else ""
+			w_d_s = _short_percentile_band(w_ev["percentile"]) if w_ev else ""
+			b_v_s = f"{bmi_val:.1f}" if bmi_val is not None else ""
+			b_p_s = f"{b_ev['percentile']:.1f}" if b_ev else ""
+			b_z_s = f"{b_ev['z']:+.2f}" if b_ev else ""
+			b_d_s = _short_percentile_band(b_ev["percentile"]) if b_ev else ""
+			hc_cm_s = f"{hc_val:.1f}" if hc_val is not None else ""
+			hc_p_s = f"{hc_ev['percentile']:.1f}" if hc_ev else ""
+			hc_z_s = f"{hc_ev['z']:+.2f}" if hc_ev else ""
+
+			row_vals: dict[str, Any] = {
+				# Türkçe kanonik GÖREV 3 anahtarları
+				"okul_no": stu_no_str, "ad_soyad": full_nm_str, "sinif": cname,
+				"cinsiyet": sex_disp, "dogum_tarihi": bdate_tr or "", "yas_str": age_str,
+				"boy_cm": h_cm_s, "boy_p": h_p_s, "boy_z": h_z_s, "boy_dilim": h_d_s,
+				"kilo_kg": w_kg_s, "kilo_p": w_p_s, "kilo_z": w_z_s, "kilo_dilim": w_d_s,
+				"vki": b_v_s, "vki_p": b_p_s, "vki_z": b_z_s, "vki_dilim": b_d_s,
+				"ideal_kilo_araligi": ideal_range_str, "ideal_kilo_fark": ideal_diff_str,
+				"bas_cevresi_cm": hc_cm_s, "bas_cevresi_p": hc_p_s, "bas_cevresi_z": hc_z_s,
+				"klinik_gelisim_yorumu": growth_eval_str,
+				"gozluk": wears_gl, "sag_goz": vis_r, "sol_goz": vis_l,
+				"sag_kulak": hear_r, "sol_kulak": hear_l, "sac_taramasi": hair_s,
+				"ates_c": ates_str, "nabiz": nabiz_str, "spo2": spo2_str, "tansiyon": bp_str,
+				"saglik_davranisi": beh_s, "zararli_aliskanlik": harm_s, "psikososyal": psy_s,
+				"kan_grubu": bg_s, "alerji_kronik": al_chron_s, "tarama_notu": scr_notes,
+				"tarama_tarihi": scr_date_tr,
+				# Eski İngilizce geriye dönük anahtarlar
+				"student_no": stu_no_str, "full_name": full_nm_str, "class_name": cname,
+				"sex": sex_disp, "birth_date": bdate_tr or "", "age_ym": age_str,
+				"screening_date": scr_date_tr,
+				"height_cm": h_cm_s, "height_pct": h_p_s, "height_z": h_z_s, "height_band": h_d_s,
+				"weight_kg": w_kg_s, "weight_pct": w_p_s, "weight_z": w_z_s, "weight_band": w_d_s,
+				"bmi": b_v_s, "bmi_pct": b_p_s, "bmi_z": b_z_s, "bmi_band": b_d_s,
+				"ideal_weight_range": ideal_range_str, "head_circ_full": hc_display,
+				"clinical_growth_eval": growth_eval_str,
+				"wears_glasses": wears_gl, "vision_right": vis_r, "vision_left": vis_l,
+				"hearing_right": hear_r, "hearing_left": hear_l, "hair_screening": hair_s,
+				"vital_summary": vital_str, "health_behavior": beh_s, "harmful_habits": harm_s,
+				"psychosocial_status": psy_s, "blood_group": bg_s, "allergies_chronic": al_chron_s,
+				"screening_notes": scr_notes,
+			}
+
+			alerts_by_key: dict[str, bool] = {}
+			h_risk = bool(h_ev and (h_ev["z"] < -2.0 or h_ev["z"] > 2.0 or h_ev["percentile"] < 3.0 or h_ev["percentile"] > 97.0))
+			w_risk = bool(w_ev and (w_ev["z"] < -2.0 or w_ev["z"] > 2.0 or w_ev["percentile"] < 3.0 or w_ev["percentile"] > 97.0))
+			b_risk = bool(b_ev and (b_ev["z"] < -2.0 or b_ev["z"] > 2.0 or b_ev["percentile"] < 3.0 or b_ev["percentile"] > 97.0))
+			hc_risk = bool(hc_ev and can_hc_eval and (hc_ev["z"] < -2.0 or hc_ev["z"] > 2.0 or hc_ev["percentile"] < 3.0 or hc_ev["percentile"] > 97.0))
+
+			if h_risk:
+				for k in ("boy_p", "boy_z", "boy_dilim", "height_pct", "height_z", "height_band"):
+					alerts_by_key[k] = True
+			if w_risk:
+				for k in ("kilo_p", "kilo_z", "kilo_dilim", "weight_pct", "weight_z", "weight_band"):
+					alerts_by_key[k] = True
+			if w_risk or b_risk:
+				alerts_by_key["ideal_kilo_fark"] = True
+			if b_risk:
+				for k in ("vki_p", "vki_z", "vki_dilim", "bmi_pct", "bmi_z", "bmi_band"):
+					alerts_by_key[k] = True
+			if hc_risk:
+				for k in ("bas_cevresi_p", "bas_cevresi_z", "head_circ_full"):
+					alerts_by_key[k] = True
+			if growth_alert:
+				for k in ("klinik_gelisim_yorumu", "clinical_growth_eval"):
+					alerts_by_key[k] = True
+				if h_ev is None and w_ev is None and b_ev is None and bmi_val is not None:
+					for k in ("vki", "bmi"):
+						alerts_by_key[k] = True
+
+			gl_alert, gl_bucket = _is_vision_value_abnormal(wears_gl, is_glasses=True)
+			vr_alert, vr_bucket = _is_vision_value_abnormal(vis_r, is_glasses=False)
+			vl_alert, vl_bucket = _is_vision_value_abnormal(vis_l, is_glasses=False)
+			if gl_alert:
+				alerts_by_key["gozluk"] = alerts_by_key["wears_glasses"] = True
+			if vr_alert:
+				alerts_by_key["sag_goz"] = alerts_by_key["vision_right"] = True
+			if vl_alert:
+				alerts_by_key["sol_goz"] = alerts_by_key["vision_left"] = True
+
+			hr_alert = _is_hearing_value_abnormal(hear_r)
+			hl_alert = _is_hearing_value_abnormal(hear_l)
+			if hr_alert:
+				alerts_by_key["sag_kulak"] = alerts_by_key["hearing_right"] = True
+			if hl_alert:
+				alerts_by_key["sol_kulak"] = alerts_by_key["hearing_left"] = True
+
+			hair_alert = _is_hair_value_abnormal(hair_s)
+			if hair_alert:
+				alerts_by_key["sac_taramasi"] = alerts_by_key["hair_screening"] = True
+
+			if temp_alert:
+				alerts_by_key["ates_c"] = True
+			if spo2_alert:
+				alerts_by_key["spo2"] = True
+			if pulse_alert:
+				alerts_by_key["nabiz"] = True
+			if bp_alert:
+				alerts_by_key["tansiyon"] = True
+			if vital_alert:
+				alerts_by_key["vital_summary"] = True
+
+			harm_alert = bool(harm_s and "tespit edilmedi" not in harm_s.lower() and harm_s not in {"—", "-"})
+			if harm_alert:
+				alerts_by_key["zararli_aliskanlik"] = alerts_by_key["harmful_habits"] = True
+			psy_alert = bool(psy_s and any(kw in psy_s.lower() for kw in ("kaygı", "öfke", "aşırı", "destek", "çekingen", "iletişim destek", "dikkat")))
+			if psy_alert:
+				alerts_by_key["psikososyal"] = alerts_by_key["psychosocial_status"] = True
+			note_referral = bool(scr_notes and any(kw in scr_notes.lower() for kw in ("sevk", "hastane", "uzman", "kbb", "göz", "endokrin", "takip", "acil")))
+			if note_referral:
+				alerts_by_key["tarama_notu"] = alerts_by_key["screening_notes"] = True
+
+			row_is_risky = any([
+				h_risk, w_risk, b_risk, hc_risk, growth_alert,
+				gl_alert, vr_alert, vl_alert, hr_alert, hl_alert,
+				hair_alert, vital_alert, harm_alert, psy_alert, note_referral,
+			])
+
+			if only_risky and not row_is_risky:
+				continue
+
+			stu_disp_label = f"{st_r['full_name']} ({cname})"
+			if h_risk or w_risk or b_risk or hc_risk or growth_alert:
+				risk_growth_names[sid] = stu_disp_label
+			if gl_bucket or vr_bucket or vl_bucket:
+				risk_vision_names[sid] = stu_disp_label
+			if hr_alert or hl_alert:
+				risk_hearing_names[sid] = stu_disp_label
+			if hair_alert:
+				risk_hair_names[sid] = stu_disp_label
+			if vital_alert:
+				risk_vital_names[sid] = stu_disp_label
+
+			raw_records.append({
+				"sid": sid,
+				"class_name": cname,
+				"date_iso": d_iso,
+				"is_measured": True,
+				"is_risky": row_is_risky,
+				"values": row_vals,
+				"alerts": alerts_by_key,
+			})
+
+	# Boş sütunları otomatik kaldırma (Okul No, Ad Soyad, Sınıf hariç)
+	measured_records = [rec for rec in raw_records if rec["is_measured"]]
+	kept_col_specs: list[dict[str, Any]] = []
+	for spec in ordered_col_specs:
+		ck = spec["key"]
+		if not prune_empty or spec.get("keep_empty", False):
+			kept_col_specs.append(spec)
+			continue
+		if not raw_records:
+			if ck in {"tarama_tarihi", "screening_date", "boy_cm", "height_cm", "kilo_kg", "weight_kg", "klinik_gelisim_yorumu", "clinical_growth_eval"}:
+				kept_col_specs.append(spec)
+			continue
+		if any(not _is_cell_value_empty(rec["values"].get(ck)) for rec in measured_records):
+			kept_col_specs.append(spec)
+
+	if raw_records and not any(not c.get("keep_empty", False) for c in kept_col_specs):
+		fallback_key = "screening_date" if (has_legacy_key and not has_custom_key) else "tarama_tarihi"
+		fallback_spec = ALL_REPORT_COL_BY_KEY[fallback_key]
+		if fallback_spec not in kept_col_specs:
+			kept_col_specs.append(fallback_spec)
+
+	col_labels = [c["label"] for c in kept_col_specs]
+	identity_keys_keep_raw = {
+		"okul_no", "ad_soyad", "sinif", "cinsiyet", "dogum_tarihi", "yas_str",
+		"student_no", "full_name", "class_name", "sex", "birth_date", "age_ym",
+	}
+
+	final_rows: list[dict[str, Any]] = []
+	row_classes: list[str] = []
+	row_alerts: list[dict[str, bool]] = []
+	row_is_measured: list[bool] = []
+
+	for rec in raw_records:
+		out_row: dict[str, Any] = {}
+		out_alerts: dict[str, bool] = {}
+		is_m = rec["is_measured"]
+		for spec in kept_col_specs:
+			ck = spec["key"]
+			lbl = spec["label"]
+			if not is_m and ck not in identity_keys_keep_raw:
+				out_row[lbl] = "Ölçülmedi / Gelmedi"
+				out_alerts[lbl] = False
+			else:
+				val = rec["values"].get(ck, "")
+				out_row[lbl] = val if not _is_cell_value_empty(val) else "—"
+				out_alerts[lbl] = bool(rec["alerts"].get(ck, False))
+		final_rows.append(out_row)
+		row_classes.append(rec["class_name"])
+		row_alerts.append(out_alerts)
+		row_is_measured.append(is_m)
+
+	result_df = pd.DataFrame(final_rows, columns=col_labels)
+
+	class_order = sorted({c for c in row_classes})
+	class_stats: dict[str, dict[str, Any]] = {}
+	for cname in class_order:
+		tot = int(class_totals.get(cname, 0))
+		scr_cnt = len(class_screened_ids.get(cname, set()))
+		eksik_cnt = max(0, tot - scr_cnt)
+		pct_c = round((scr_cnt / tot * 100.0), 1) if tot > 0 else 0.0
+		t_nm = teacher_map.get(cname) or "Belirtilmedi"
+		class_stats[cname] = {
+			# GÖREV 3 anahtarları
+			"mevcut": tot,
+			"taranan": scr_cnt,
+			"eksik": eksik_cnt,
+			"oran": pct_c,
+			"ogretmen": t_nm,
+			# Geriye dönük uyumluluk anahtarları
+			"class_name": cname,
+			"teacher_name": t_nm,
+			"total_students": tot,
+			"screened_count": scr_cnt,
+			"percent": pct_c,
+		}
+
+	def _fmt_names(d: dict[int, str], masked: bool = False) -> str:
+		if not d:
+			return "Tespit edilmedi"
+		if masked:
+			return f"{len(d)} öğrenci (Gizli tıbbi detay nedeniyle isimler revir kaydında tutulmaktadır)"
+		names_sorted = sorted(d.values())
+		if len(names_sorted) > 25:
+			return ", ".join(names_sorted[:25]) + f" (+{len(names_sorted) - 25} öğrenci)"
+		return ", ".join(names_sorted)
+
+	risk_summary_rows = [
+		{
+			"Kategori": "Büyüme / Persantil Riski (<3p veya >97p / |Z| > 2)",
+			"Öğrenci Sayısı": len(risk_growth_names),
+			"Öğrenci İsimleri": _fmt_names(risk_growth_names),
+		},
+		{
+			"Kategori": "Görme Muayenesi / Gözlük Kontrolü Gerekenler",
+			"Öğrenci Sayısı": len(risk_vision_names),
+			"Öğrenci İsimleri": _fmt_names(risk_vision_names),
+		},
+		{
+			"Kategori": "İşitme / KBB Kontrolü Gerekenler",
+			"Öğrenci Sayısı": len(risk_hearing_names),
+			"Öğrenci İsimleri": _fmt_names(risk_hearing_names),
+		},
+		{
+			"Kategori": "Hijyen / Pediküloz Takibi Gerekenler",
+			"Öğrenci Sayısı": len(risk_hair_names),
+			"Öğrenci İsimleri": _fmt_names(risk_hair_names, masked=hide_sensitive),
+		},
+	]
+	if risk_vital_names and not hide_sensitive:
+		risk_summary_rows.append({
+			"Kategori": "Vital Bulgu Uyarısı (Ateş >= 38.0°C veya SpO2 < %95)",
+			"Öğrenci Sayısı": len(risk_vital_names),
+			"Öğrenci İsimleri": _fmt_names(risk_vital_names),
+		})
+
+	sorted_dates_iso = sorted(all_matched_dates)
+	dates_tr_list: list[str] = []
+	for d_iso in sorted_dates_iso:
+		try:
+			dates_tr_list.append(date.fromisoformat(d_iso).strftime("%d.%m.%Y"))
+		except ValueError:
+			dates_tr_list.append(d_iso)
+
+	hijyen_list = (
+		[f"{len(risk_hair_names)} öğrenci (Gizli tıbbi detay nedeniyle maskelendi)"]
+		if (hide_sensitive and risk_hair_names)
+		else sorted(risk_hair_names.values())
+	)
+
+	meta: dict[str, Any] = {
+		"config": cfg,
+		"date_mode": dmode_label,
+		"selected_dates": sorted_dates_iso,
+		"selected_dates_tr": dates_tr_list,
+		"start_date": start_iso,
+		"end_date": end_iso,
+		"selected_classes": class_order,
+		"class_stats": class_stats,
+		"row_classes": row_classes,
+		"row_alerts": row_alerts,
+		"row_is_measured": row_is_measured,
+		"persantil_riski_olanlar": sorted(risk_growth_names.values()),
+		"gorme_riski_olanlar": sorted(risk_vision_names.values()),
+		"isitme_riski_olanlar": sorted(risk_hearing_names.values()),
+		"hijyen_riski_olanlar": hijyen_list,
+		"vital_riski_olanlar": sorted(risk_vital_names.values()) if not hide_sensitive else [],
+		"risk_summary": risk_summary_rows,
+		"total_rows": len(result_df),
+		"col_specs": kept_col_specs,
+	}
+	result_df.attrs["report_meta"] = meta
+	return (result_df, meta)
+
+
+def build_dynamic_screening_report_df(
+	selected_dates: list[str] | tuple[str, ...] | str | None = None,
+	selected_classes: list[str] | tuple[str, ...] | str | None = None,
+	report_config: dict[str, Any] | None = None,
+) -> pd.DataFrame:
+	"""Geriye dönük uyumluluk sarmalayıcısı: build_custom_screening_report_data üzerinde çalışır."""
+	df, _ = build_custom_screening_report_data(
+		selected_classes=selected_classes,
+		date_mode="Belirli Günler",
+		selected_dates=selected_dates,
+		start_date=None,
+		end_date=None,
+		config=report_config,
+	)
+	return df
+
+
+def _resolve_dyn_report_orientation(df: pd.DataFrame, cfg: dict[str, Any]) -> str:
+	orient_code, _ = _normalize_orient_value(cfg.get("page_orientation"))
+	if orient_code in {"landscape", "portrait"}:
+		return orient_code
+	return "landscape" if len(df.columns) > 6 else "portrait"
+
+
+def _build_dynamic_screening_styler(df: pd.DataFrame):
+	"""Ekrandaki önizleme tablosu için D2 renkli klinik vurgulama (kırmızı uyarı / yeşil normal) Styler'ı döndürür."""
+	meta = df.attrs.get("report_meta", {})
+	row_alerts = meta.get("row_alerts", [])
+	row_is_measured = meta.get("row_is_measured", [])
+
+	def _style_df(data: pd.DataFrame) -> pd.DataFrame:
+		styles = pd.DataFrame("", index=data.index, columns=data.columns)
+		for pos_i, idx in enumerate(data.index):
+			al_map = row_alerts[pos_i] if pos_i < len(row_alerts) else {}
+			is_m = row_is_measured[pos_i] if pos_i < len(row_is_measured) else True
+			for col in data.columns:
+				val_s = str(data.loc[idx, col]) if pd.notna(data.loc[idx, col]) else "—"
+				cell_state = _classify_report_cell_state(str(col), val_s, al_map, is_m)
+				if cell_state == "alert":
+					styles.loc[idx, col] = "background-color: #FEE2E2; color: #991B1B; font-weight: 700;"
+				elif cell_state == "ok":
+					styles.loc[idx, col] = "background-color: #ECFDF5; color: #065F46;"
+				elif cell_state == "unmeasured":
+					styles.loc[idx, col] = "color: #64748B; font-style: italic;"
+		return styles
+
+	return df.style.apply(_style_df, axis=None)
+
+
+def _format_dyn_dates_header(meta: dict[str, Any], selected_dates: list[str] | None = None) -> str:
+	if meta.get("date_mode") == "Tarih Aralığı" and (meta.get("start_date") or meta.get("end_date")):
+		try:
+			s_tr = date.fromisoformat(meta["start_date"]).strftime("%d.%m.%Y") if meta.get("start_date") else "Başlangıç"
+			e_tr = date.fromisoformat(meta["end_date"]).strftime("%d.%m.%Y") if meta.get("end_date") else "Bugün"
+			return f"{s_tr} – {e_tr} (Tarih Aralığı)"
+		except Exception:
+			pass
+	if meta.get("date_mode") == "En Güncel Kayıtlar":
+		return f"En Güncel Kayıtlar (Referans: {date.today().strftime('%d.%m.%Y')})"
+	dates_tr = list(meta.get("selected_dates_tr") or [])
+	if not dates_tr and selected_dates:
+		for d in selected_dates:
+			try:
+				dates_tr.append(date.fromisoformat(str(d)[:10]).strftime("%d.%m.%Y"))
+			except Exception:
+				dates_tr.append(str(d))
+	if not dates_tr:
+		return date.today().strftime("%d.%m.%Y")
+	if len(dates_tr) <= 4:
+		return ", ".join(dates_tr)
+	return f"{dates_tr[0]} – {dates_tr[-1]} ({len(dates_tr)} Tarama Günü)"
+
+
+def _get_dyn_signature_columns(meta: dict[str, Any], cfg: dict[str, Any], app_cfg: dict[str, Any]) -> list[tuple[str, str, str]]:
+	sig_labels = _normalize_signatures_list(cfg.get("signatures"))
+	inst_nurse = app_cfg.get("nurse_name") or "Okul Revir Sorumlusu"
+	inst_princ = app_cfg.get("principal_name") or "Okul Müdürü"
+	c_stats = meta.get("class_stats") or {}
+	teachers = [
+		f"{v.get('ogretmen') or v.get('teacher_name')} ({cname})" if len(c_stats) > 1 else (v.get("ogretmen") or v.get("teacher_name"))
+		for cname, v in c_stats.items()
+		if (v.get("ogretmen") or v.get("teacher_name")) and (v.get("ogretmen") or v.get("teacher_name")) != "Belirtilmedi"
+	]
+	if len(teachers) == 1:
+		teacher_line = teachers[0]
+	elif 1 < len(teachers) <= 3:
+		teacher_line = " / ".join(teachers)
+	else:
+		teacher_line = "İlgili Sınıf Öğretmenleri"
+
+	cols: list[tuple[str, str, str]] = []
+	if SIG_LABEL_NURSE in sig_labels:
+		cols.append((inst_nurse, SIG_LABEL_NURSE, "(İmza / Kaşe)"))
+	if SIG_LABEL_TEACHER in sig_labels:
+		cols.append((teacher_line, "Sınıf Rehber Öğretmeni", "(İmza)"))
+	if SIG_LABEL_PRINCIPAL in sig_labels:
+		cols.append((inst_princ, SIG_LABEL_PRINCIPAL, "(Mühür / İmza)"))
+	return cols
+
+
+def _set_grid_table_borders_docx(table, border_hex: str = "CBD5E1") -> None:
+	tblPr = table._element.xpath("w:tblPr")
+	if tblPr:
+		borders = parse_xml(f'''
+			<w:tblBorders {nsdecls("w")}>
+				<w:top w:val="single" w:sz="6" w:space="0" w:color="{border_hex}"/>
+				<w:bottom w:val="single" w:sz="6" w:space="0" w:color="{border_hex}"/>
+				<w:left w:val="single" w:sz="4" w:space="0" w:color="{border_hex}"/>
+				<w:right w:val="single" w:sz="4" w:space="0" w:color="{border_hex}"/>
+				<w:insideH w:val="single" w:sz="4" w:space="0" w:color="{border_hex}"/>
+				<w:insideV w:val="single" w:sz="4" w:space="0" w:color="E2E8F0"/>
+			</w:tblBorders>
+		''')
+		tblPr[0].append(borders)
+
+
+def _merge_export_meta_and_cfg(
+	df: pd.DataFrame,
+	meta: dict[str, Any] | None,
+	config: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+	m = copy.deepcopy(meta if isinstance(meta, dict) and meta else (df.attrs.get("report_meta", {}) or {}))
+	raw_cfg = copy.deepcopy(m.get("config") or get_active_report_config())
+	if isinstance(config, dict):
+		raw_cfg = _merge_override_config(raw_cfg, config)
+	cfg = _normalize_report_config(raw_cfg, target_custom=True)
+	return m, cfg
+
+
+def export_custom_screening_report_docx(
+	df: pd.DataFrame,
+	meta: dict[str, Any] | None = None,
+	config: dict[str, Any] | None = None,
+) -> bytes:
+	"""Dinamik okul taraması raporunu sınıf gruplu, koşullu klinik vurgulu ve resmi imzalı Word (.docx) olarak üretir."""
+	meta, cfg = _merge_export_meta_and_cfg(df, meta, config)
+	app_cfg = get_app_settings()
+	inst_top = app_cfg.get("institution_top_header") or "T.C. MİLLÎ EĞİTİM BAKANLIĞI"
+	inst_school = app_cfg.get("school_name") or ""
+	report_title = cfg.get("report_title") or "OKUL SAĞLIK TARAMASI VE GELİŞİM RAPORU"
+	dates_txt = _format_dyn_dates_header(meta, meta.get("selected_dates"))
+	risk_heading = str(meta.get("_risk_section_title") or "📌 TARAMA VE ÖLÇÜM SONUCU RİSK / YÖNLENDİRME ÖZET TABLOSU")
+
+	doc = docx.Document()
+	section = doc.sections[0]
+	orient = _resolve_dyn_report_orientation(df, cfg)
+	if orient == "landscape":
+		section.orientation = WD_ORIENT.LANDSCAPE
+		section.page_width = Cm(29.7)
+		section.page_height = Cm(21.0)
+	else:
+		section.orientation = WD_ORIENT.PORTRAIT
+		section.page_width = Cm(21.0)
+		section.page_height = Cm(29.7)
+	section.top_margin = Cm(1.1)
+	section.bottom_margin = Cm(1.1)
+	section.left_margin = Cm(1.1)
+	section.right_margin = Cm(1.1)
+
+	def _add_doc_header() -> None:
+		p_t = doc.add_paragraph()
+		p_t.alignment = WD_ALIGN_PARAGRAPH.CENTER
+		p_t.paragraph_format.space_before = Pt(0)
+		p_t.paragraph_format.space_after = Pt(1)
+		rt = p_t.add_run(inst_top)
+		rt.font.name = "Calibri"
+		rt.font.size = Pt(10)
+		rt.font.color.rgb = RGBColor(100, 116, 139)
+
+		if inst_school:
+			p_s = doc.add_paragraph()
+			p_s.alignment = WD_ALIGN_PARAGRAPH.CENTER
+			p_s.paragraph_format.space_before = Pt(0)
+			p_s.paragraph_format.space_after = Pt(2)
+			rs = p_s.add_run(inst_school)
+			rs.font.name = "Calibri"
+			rs.font.size = Pt(13)
+			rs.bold = True
+			rs.font.color.rgb = RGBColor(15, 118, 110)
+
+		p_r = doc.add_paragraph()
+		p_r.alignment = WD_ALIGN_PARAGRAPH.CENTER
+		p_r.paragraph_format.space_before = Pt(2)
+		p_r.paragraph_format.space_after = Pt(2)
+		rr = p_r.add_run(report_title)
+		rr.font.name = "Calibri"
+		rr.font.size = Pt(11.5)
+		rr.bold = True
+		rr.font.color.rgb = RGBColor(30, 41, 59)
+
+		p_d = doc.add_paragraph()
+		p_d.alignment = WD_ALIGN_PARAGRAPH.CENTER
+		p_d.paragraph_format.space_before = Pt(0)
+		p_d.paragraph_format.space_after = Pt(6)
+		rd = p_d.add_run(f"Tarama Tarihi / Dönem: {dates_txt}  |  Düzenlenme: {date.today().strftime('%d.%m.%Y')}  |  Listelenen Kayıt: {len(df)}")
+		rd.font.name = "Calibri"
+		rd.font.size = Pt(9)
+		rd.font.color.rgb = RGBColor(71, 85, 105)
+
+	_add_doc_header()
+
+	if df.empty:
+		p_empty = doc.add_paragraph("Seçili tarih ve filtre kriterlerine uygun öğrenci tarama kaydı bulunamadı.")
+		p_empty.alignment = WD_ALIGN_PARAGRAPH.CENTER
+	else:
+		row_classes = meta.get("row_classes") or [str(df.iloc[i].get("Sınıf / Şube", "Tüm Öğrenciler")) for i in range(len(df))]
+		row_alerts = meta.get("row_alerts") or [{} for _ in range(len(df))]
+		row_is_measured = meta.get("row_is_measured") or [True for _ in range(len(df))]
+		class_stats = meta.get("class_stats") or {}
+
+		grouped_indices: dict[str, list[int]] = {}
+		for idx, cname in enumerate(row_classes):
+			grouped_indices.setdefault(cname, []).append(idx)
+
+		n_cols = len(df.columns)
+		cell_font_pt = 9.0 if n_cols <= 7 else (8.0 if n_cols <= 12 else 7.0)
+		hdr_font_pt = 9.0 if n_cols <= 7 else (8.0 if n_cols <= 12 else 7.5)
+		page_break_cls = bool(cfg.get("group_by_class_pagebreak", True))
+		class_list = list(grouped_indices.keys())
+		teacher_fallback_map = get_class_teacher_map()
+
+		for c_pos, cname in enumerate(class_list):
+			if c_pos > 0 and page_break_cls:
+				doc.add_page_break()
+				_add_doc_header()
+			elif c_pos > 0:
+				doc.add_paragraph().paragraph_format.space_after = Pt(6)
+
+			c_info = class_stats.get(cname, {})
+			t_name = c_info.get("ogretmen") or c_info.get("teacher_name") or teacher_fallback_map.get(cname) or "Belirtilmedi"
+			c_tot = c_info.get("mevcut", c_info.get("total_students", len(grouped_indices[cname])))
+			c_scr = c_info.get("taranan", c_info.get("screened_count", sum(1 for i in grouped_indices[cname] if row_is_measured[i])))
+			c_pct = c_info.get("oran", c_info.get("percent", round((c_scr / c_tot * 100.0), 1) if c_tot else 0.0))
+
+			band_tbl = doc.add_table(rows=1, cols=1)
+			band_tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+			band_cell = band_tbl.cell(0, 0)
+			set_cell_background(band_cell, "E6F4F1")
+			set_cell_margins(band_cell, top=70, bottom=70, left=100, right=100)
+			set_table_borders(band_tbl, color="99F6E4", sz="6")
+			bp = band_cell.paragraphs[0]
+			bp.paragraph_format.space_before = Pt(0)
+			bp.paragraph_format.space_after = Pt(0)
+			br = bp.add_run(f"🏫 Sınıf / Şube: {cname}   |   👩‍🏫 Sınıf Öğretmeni: {t_name}   |   📊 Sınıf Mevcudu: {c_tot} · Raporlanan: {c_scr} (%{c_pct})")
+			br.font.name = "Calibri"
+			br.font.size = Pt(9.5)
+			br.bold = True
+			br.font.color.rgb = RGBColor(15, 118, 110)
+
+			indices = grouped_indices[cname]
+			tbl = doc.add_table(rows=1 + len(indices), cols=n_cols)
+			tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+			tbl.autofit = True
+			_set_grid_table_borders_docx(tbl, "CBD5E1")
+
+			hdr_row = tbl.rows[0]
+			hdr_trPr = hdr_row._element.get_or_add_trPr()
+			hdr_trPr.append(parse_xml(f'<w:tblHeader {nsdecls("w")}/>'))
+			hdr_trPr.append(parse_xml(f'<w:cantSplit {nsdecls("w")}/>'))
+
+			for c_idx, col_name in enumerate(df.columns):
+				cell = hdr_row.cells[c_idx]
+				set_cell_background(cell, "0F766E")
+				set_cell_margins(cell, top=60, bottom=60, left=55, right=55)
+				cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+				cp = cell.paragraphs[0]
+				cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+				cp.paragraph_format.space_before = Pt(0)
+				cp.paragraph_format.space_after = Pt(0)
+				r = cp.add_run(str(col_name))
+				r.font.name = "Calibri"
+				r.font.size = Pt(hdr_font_pt)
+				r.bold = True
+				r.font.color.rgb = RGBColor(255, 255, 255)
+
+			for r_pos, df_idx in enumerate(indices):
+				drow = tbl.rows[r_pos + 1]
+				r_trPr = drow._element.get_or_add_trPr()
+				r_trPr.append(parse_xml(f'<w:cantSplit {nsdecls("w")}/>'))
+				row_bg = "F8FAFC" if (r_pos % 2 == 1) else "FFFFFF"
+				al_map = row_alerts[df_idx] if df_idx < len(row_alerts) else {}
+				is_m = row_is_measured[df_idx] if df_idx < len(row_is_measured) else True
+				series = df.iloc[df_idx]
+
+				for c_idx, col_name in enumerate(df.columns):
+					cell = drow.cells[c_idx]
+					val_str = str(series[col_name]) if pd.notna(series[col_name]) else "—"
+					cell_state = _classify_report_cell_state(str(col_name), val_str, al_map, is_m)
+					bg_hex = "FEE2E2" if cell_state == "alert" else ("ECFDF5" if cell_state == "ok" else row_bg)
+					set_cell_background(cell, bg_hex)
+					set_cell_margins(cell, top=45, bottom=45, left=50, right=50)
+					cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+					cp = cell.paragraphs[0]
+					cp.alignment = WD_ALIGN_PARAGRAPH.LEFT if col_name in {"Ad Soyad", "Klinik Gelişim Değerlendirmesi", "Tarama Notu / Açıklama"} else WD_ALIGN_PARAGRAPH.CENTER
+					cp.paragraph_format.space_before = Pt(0)
+					cp.paragraph_format.space_after = Pt(0)
+					run = cp.add_run(val_str)
+					run.font.name = "Calibri"
+					run.font.size = Pt(cell_font_pt)
+					if cell_state == "alert":
+						run.bold = True
+						run.font.color.rgb = RGBColor(153, 27, 27)
+					elif cell_state == "ok":
+						run.font.color.rgb = RGBColor(6, 95, 70)
+					elif cell_state == "unmeasured":
+						run.italic = True
+						run.font.color.rgb = RGBColor(100, 116, 139)
+					else:
+						run.font.color.rgb = RGBColor(30, 41, 59)
+
+	risk_rows = meta.get("risk_summary") or []
+	if risk_rows:
+		doc.add_paragraph().paragraph_format.space_after = Pt(6)
+		p_rk = doc.add_paragraph()
+		p_rk.paragraph_format.space_before = Pt(4)
+		p_rk.paragraph_format.space_after = Pt(3)
+		rk_r = p_rk.add_run(risk_heading)
+		rk_r.font.name = "Calibri"
+		rk_r.font.size = Pt(10)
+		rk_r.bold = True
+		rk_r.font.color.rgb = RGBColor(15, 118, 110)
+
+		rk_tbl = doc.add_table(rows=1 + len(risk_rows), cols=3)
+		rk_tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+		_set_grid_table_borders_docx(rk_tbl, "CBD5E1")
+		rk_headers = ["Risk / İzlem Kategorisi", "Öğrenci Sayısı", "Öğrenci İsimleri"]
+		rk_hdr = rk_tbl.rows[0]
+		rk_hdr._element.get_or_add_trPr().append(parse_xml(f'<w:tblHeader {nsdecls("w")}/>'))
+		for idx, h_txt in enumerate(rk_headers):
+			c = rk_hdr.cells[idx]
+			set_cell_background(c, "1E293B")
+			set_cell_margins(c, top=55, bottom=55, left=70, right=70)
+			cp = c.paragraphs[0]
+			cp.alignment = WD_ALIGN_PARAGRAPH.CENTER if idx == 1 else WD_ALIGN_PARAGRAPH.LEFT
+			r = cp.add_run(h_txt)
+			r.font.name = "Calibri"
+			r.font.size = Pt(8.5)
+			r.bold = True
+			r.font.color.rgb = RGBColor(255, 255, 255)
+
+		for r_i, r_item in enumerate(risk_rows):
+			row = rk_tbl.rows[r_i + 1]
+			row._element.get_or_add_trPr().append(parse_xml(f'<w:cantSplit {nsdecls("w")}/>'))
+			cnt_val = int(r_item.get("Öğrenci Sayısı", 0))
+			row_bg = "FEF2F2" if cnt_val > 0 else "FFFFFF"
+			vals = [str(r_item.get("Kategori", "")), str(cnt_val), str(r_item.get("Öğrenci İsimleri", ""))]
+			for c_i, txt in enumerate(vals):
+				c = row.cells[c_i]
+				set_cell_background(c, row_bg)
+				set_cell_margins(c, top=45, bottom=45, left=70, right=70)
+				cp = c.paragraphs[0]
+				cp.alignment = WD_ALIGN_PARAGRAPH.CENTER if c_i == 1 else WD_ALIGN_PARAGRAPH.LEFT
+				r = cp.add_run(txt)
+				r.font.name = "Calibri"
+				r.font.size = Pt(8.5)
+				if cnt_val > 0 and c_i in (0, 1):
+					r.bold = True
+					r.font.color.rgb = RGBColor(153, 27, 27)
+				else:
+					r.font.color.rgb = RGBColor(30, 41, 59)
+
+	sig_cols = _get_dyn_signature_columns(meta, cfg, app_cfg)
+	if sig_cols:
+		doc.add_paragraph().paragraph_format.space_after = Pt(10)
+		sig_tbl = doc.add_table(rows=1, cols=len(sig_cols))
+		sig_tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+		sig_tbl.rows[0]._element.get_or_add_trPr().append(parse_xml(f'<w:cantSplit {nsdecls("w")}/>'))
+		for idx, (s_name, s_role, s_note) in enumerate(sig_cols):
+			c = sig_tbl.cell(0, idx)
+			set_cell_margins(c, top=80, bottom=80, left=80, right=80)
+			cp = c.paragraphs[0]
+			cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+			r1 = cp.add_run(f"{s_name}\n")
+			r1.font.name = "Calibri"
+			r1.font.size = Pt(9.5)
+			r1.bold = True
+			r2 = cp.add_run(f"{s_role}\n\n{s_note}")
+			r2.font.name = "Calibri"
+			r2.font.size = Pt(8.5)
+			r2.font.color.rgb = RGBColor(71, 85, 105)
+
+	p_foot = doc.add_paragraph()
+	p_foot.alignment = WD_ALIGN_PARAGRAPH.CENTER
+	p_foot.paragraph_format.space_before = Pt(6)
+	rf = p_foot.add_run("Not: Bu rapor okul reviri kayıtları doğrultusunda sistemden otomatik üretilmiştir. Kesin tıbbi tanı yerine geçmez.")
+	rf.font.name = "Calibri"
+	rf.font.size = Pt(7.5)
+	rf.font.color.rgb = RGBColor(148, 163, 184)
+
+	buf = BytesIO()
+	doc.save(buf)
+	return buf.getvalue()
+
+
+def export_custom_screening_report_excel(
+	df: pd.DataFrame,
+	meta: dict[str, Any] | None = None,
+	config: dict[str, Any] | None = None,
+) -> bytes:
+	"""Dinamik okul taraması raporunu sınıf gruplu, koşullu kırmızı/yeşil dolgulu, özet ve imzalı Excel (.xlsx) olarak üretir."""
+	meta, cfg = _merge_export_meta_and_cfg(df, meta, config)
+	app_cfg = get_app_settings()
+	inst_top = app_cfg.get("institution_top_header") or "T.C. MİLLÎ EĞİTİM BAKANLIĞI"
+	inst_school = app_cfg.get("school_name") or ""
+	report_title = cfg.get("report_title") or "OKUL SAĞLIK TARAMASI VE GELİŞİM RAPORU"
+	dates_txt = _format_dyn_dates_header(meta, meta.get("selected_dates"))
+	risk_heading = str(meta.get("_risk_section_title") or "📌 TARAMA VE ÖLÇÜM SONUCU RİSK / YÖNLENDİRME ÖZET TABLOSU")
+
+	wb = Workbook()
+	ws = wb.active
+	ws.title = "Tarama Raporu"
+
+	orient = _resolve_dyn_report_orientation(df, cfg)
+	ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE if orient == "landscape" else ws.ORIENTATION_PORTRAIT
+	ws.page_setup.paperSize = ws.PAPERSIZE_A4
+	ws.sheet_properties.pageSetUpPr.fitToPage = True
+	ws.page_setup.fitToWidth = 1
+	ws.page_setup.fitToHeight = 0
+
+	max_cols = max(len(df.columns), 4)
+	thin_side = Side(style="thin", color="CBD5E1")
+	cell_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+
+	fill_band = PatternFill("solid", fgColor="E6F4F1")
+	fill_hdr = PatternFill("solid", fgColor="0F766E")
+	fill_zebra = PatternFill("solid", fgColor="F8FAFC")
+	fill_white = PatternFill("solid", fgColor="FFFFFF")
+	fill_alert = PatternFill("solid", fgColor="FEE2E2")
+	fill_ok = PatternFill("solid", fgColor="ECFDF5")
+	fill_rk_hdr = PatternFill("solid", fgColor="1E293B")
+	fill_rk_alert = PatternFill("solid", fgColor="FEF2F2")
+
+	font_top = Font(name="Calibri", size=10, color="64748B")
+	font_sch = Font(name="Calibri", size=13, bold=True, color="0F766E")
+	font_ttl = Font(name="Calibri", size=11, bold=True, color="1E293B")
+	font_sub = Font(name="Calibri", size=9, color="475569")
+	font_band = Font(name="Calibri", size=10, bold=True, color="0F766E")
+	font_hdr = Font(name="Calibri", size=9, bold=True, color="FFFFFF")
+	font_norm = Font(name="Calibri", size=9, color="1E293B")
+	font_alert = Font(name="Calibri", size=9, bold=True, color="991B1B")
+	font_ok = Font(name="Calibri", size=9, color="065F46")
+	font_muted = Font(name="Calibri", size=9, italic=True, color="64748B")
+
+	cur_row = 1
+	ws.merge_cells(start_row=cur_row, start_column=1, end_row=cur_row, end_column=max_cols)
+	c1 = ws.cell(cur_row, 1, inst_top)
+	c1.font = font_top
+	c1.alignment = Alignment(horizontal="center", vertical="center")
+	cur_row += 1
+
+	if inst_school:
+		ws.merge_cells(start_row=cur_row, start_column=1, end_row=cur_row, end_column=max_cols)
+		c2 = ws.cell(cur_row, 1, inst_school)
+		c2.font = font_sch
+		c2.alignment = Alignment(horizontal="center", vertical="center")
+		cur_row += 1
+
+	ws.merge_cells(start_row=cur_row, start_column=1, end_row=cur_row, end_column=max_cols)
+	c3 = ws.cell(cur_row, 1, report_title)
+	c3.font = font_ttl
+	c3.alignment = Alignment(horizontal="center", vertical="center")
+	cur_row += 1
+
+	ws.merge_cells(start_row=cur_row, start_column=1, end_row=cur_row, end_column=max_cols)
+	c4 = ws.cell(cur_row, 1, f"Tarama Tarihi / Dönem: {dates_txt}  |  Düzenlenme: {date.today().strftime('%d.%m.%Y')}  |  Listelenen Kayıt: {len(df)}")
+	c4.font = font_sub
+	c4.alignment = Alignment(horizontal="center", vertical="center")
+	cur_row += 2
+
+	def _write_styled_data_cell(ws_target, r_num: int, c_num: int, col_name: str, raw_val: Any, al_map: dict[str, bool], is_m: bool, default_fill: PatternFill) -> None:
+		val_str = str(raw_val) if pd.notna(raw_val) else "—"
+		write_val: Any = val_str
+		num_fmt = None
+		if col_name in ALL_REPORT_NUMERIC_FMTS and val_str not in {"—", "-", "", "Ölçülmedi / Gelmedi"}:
+			try:
+				write_val = float(val_str.replace(",", "."))
+				num_fmt = ALL_REPORT_NUMERIC_FMTS[col_name]
+			except (TypeError, ValueError):
+				write_val = val_str
+		dcell = ws_target.cell(r_num, c_num, write_val)
+		if num_fmt:
+			dcell.number_format = num_fmt
+		cell_state = _classify_report_cell_state(str(col_name), val_str, al_map, is_m)
+		if cell_state == "alert":
+			dcell.fill = fill_alert
+			dcell.font = font_alert
+		elif cell_state == "ok":
+			dcell.fill = fill_ok
+			dcell.font = font_ok
+		elif cell_state == "unmeasured":
+			dcell.fill = default_fill
+			dcell.font = font_muted
+		else:
+			dcell.fill = default_fill
+			dcell.font = font_norm
+		dcell.border = cell_border
+		h_align = "left" if col_name in {"Ad Soyad", "Klinik Gelişim Değerlendirmesi", "Tarama Notu / Açıklama"} else "center"
+		dcell.alignment = Alignment(horizontal=h_align, vertical="center", wrap_text=True)
+
+	if df.empty:
+		ws.merge_cells(start_row=cur_row, start_column=1, end_row=cur_row, end_column=max_cols)
+		ws.cell(cur_row, 1, "Seçili kriterlere uygun kayıt bulunamadı.").alignment = Alignment(horizontal="center")
+		cur_row += 2
+	else:
+		row_classes = meta.get("row_classes") or [str(df.iloc[i].get("Sınıf / Şube", "Tüm Öğrenciler")) for i in range(len(df))]
+		row_alerts = meta.get("row_alerts") or [{} for _ in range(len(df))]
+		row_is_measured = meta.get("row_is_measured") or [True for _ in range(len(df))]
+		class_stats = meta.get("class_stats") or {}
+
+		grouped_indices: dict[str, list[int]] = {}
+		for idx, cname in enumerate(row_classes):
+			grouped_indices.setdefault(cname, []).append(idx)
+
+		teacher_fallback_map = get_class_teacher_map()
+		for cname, indices in grouped_indices.items():
+			c_info = class_stats.get(cname, {})
+			t_name = c_info.get("ogretmen") or c_info.get("teacher_name") or teacher_fallback_map.get(cname) or "Belirtilmedi"
+			c_tot = c_info.get("mevcut", c_info.get("total_students", len(indices)))
+			c_scr = c_info.get("taranan", c_info.get("screened_count", sum(1 for i in indices if row_is_measured[i])))
+			c_pct = c_info.get("oran", c_info.get("percent", round((c_scr / c_tot * 100.0), 1) if c_tot else 0.0))
+
+			ws.merge_cells(start_row=cur_row, start_column=1, end_row=cur_row, end_column=len(df.columns))
+			bcell = ws.cell(cur_row, 1, f"🏫 Sınıf / Şube: {cname}   |   👩‍🏫 Sınıf Öğretmeni: {t_name}   |   📊 Sınıf Mevcudu: {c_tot} · Raporlanan: {c_scr} (%{c_pct})")
+			bcell.font = font_band
+			bcell.fill = fill_band
+			bcell.alignment = Alignment(horizontal="left", vertical="center")
+			for ci in range(1, len(df.columns) + 1):
+				ws.cell(cur_row, ci).border = cell_border
+				ws.cell(cur_row, ci).fill = fill_band
+			ws.row_dimensions[cur_row].height = 22
+			cur_row += 1
+
+			for ci, col_name in enumerate(df.columns, 1):
+				hcell = ws.cell(cur_row, ci, str(col_name))
+				hcell.font = font_hdr
+				hcell.fill = fill_hdr
+				hcell.border = cell_border
+				hcell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+			ws.row_dimensions[cur_row].height = 26
+			cur_row += 1
+
+			for r_pos, df_idx in enumerate(indices):
+				z_fill = fill_zebra if (r_pos % 2 == 1) else fill_white
+				al_map = row_alerts[df_idx] if df_idx < len(row_alerts) else {}
+				is_m = row_is_measured[df_idx] if df_idx < len(row_is_measured) else True
+				series = df.iloc[df_idx]
+				for ci, col_name in enumerate(df.columns, 1):
+					_write_styled_data_cell(ws, cur_row, ci, str(col_name), series[col_name], al_map, is_m, z_fill)
+				cur_row += 1
+			cur_row += 1
+
+	risk_rows = meta.get("risk_summary") or []
+	if risk_rows:
+		ws.merge_cells(start_row=cur_row, start_column=1, end_row=cur_row, end_column=max_cols)
+		rk_ttl = ws.cell(cur_row, 1, risk_heading)
+		rk_ttl.font = font_band
+		cur_row += 1
+
+		ws.merge_cells(start_row=cur_row, start_column=3, end_row=cur_row, end_column=max_cols)
+		for ci, h_txt in [(1, "Risk / İzlem Kategorisi"), (2, "Öğrenci Sayısı"), (3, "Öğrenci İsimleri")]:
+			hc = ws.cell(cur_row, ci, h_txt)
+			hc.font = font_hdr
+			hc.fill = fill_rk_hdr
+			hc.alignment = Alignment(horizontal="center" if ci == 2 else "left", vertical="center")
+		for ci in range(1, max_cols + 1):
+			ws.cell(cur_row, ci).fill = fill_rk_hdr
+			ws.cell(cur_row, ci).border = cell_border
+		cur_row += 1
+
+		for rk in risk_rows:
+			cnt_v = int(rk.get("Öğrenci Sayısı", 0))
+			r_fill = fill_rk_alert if cnt_v > 0 else fill_white
+			ws.merge_cells(start_row=cur_row, start_column=3, end_row=cur_row, end_column=max_cols)
+			c_cat = ws.cell(cur_row, 1, str(rk.get("Kategori", "")))
+			c_cnt = ws.cell(cur_row, 2, cnt_v)
+			c_nms = ws.cell(cur_row, 3, str(rk.get("Öğrenci İsimleri", "")))
+			c_cat.font = font_alert if cnt_v > 0 else font_norm
+			c_cnt.font = font_alert if cnt_v > 0 else font_norm
+			c_nms.font = font_norm
+			c_cat.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+			c_cnt.alignment = Alignment(horizontal="center", vertical="center")
+			c_nms.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+			for ci in range(1, max_cols + 1):
+				ws.cell(cur_row, ci).fill = r_fill
+				ws.cell(cur_row, ci).border = cell_border
+			cur_row += 1
+		cur_row += 1
+
+	sig_cols = _get_dyn_signature_columns(meta, cfg, app_cfg)
+	if sig_cols:
+		span = max(1, max_cols // len(sig_cols))
+		for s_i, (s_name, s_role, s_note) in enumerate(sig_cols):
+			start_c = 1 + s_i * span
+			end_c = max_cols if (s_i == len(sig_cols) - 1) else min(max_cols, start_c + span - 1)
+			if end_c > start_c:
+				ws.merge_cells(start_row=cur_row, start_column=start_c, end_row=cur_row, end_column=end_c)
+			scell = ws.cell(cur_row, start_c, f"{s_name}\n{s_role}\n\n{s_note}")
+			scell.font = font_norm
+			scell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+		ws.row_dimensions[cur_row].height = 54
+
+	for ci in range(1, max_cols + 1):
+		max_len = 12
+		col_letter = get_column_letter(ci)
+		for row_idx in range(1, ws.max_row + 1):
+			cell_obj = ws.cell(row_idx, ci)
+			if any(cell_obj.coordinate in rng for rng in ws.merged_cells.ranges):
+				continue
+			val_s = str(cell_obj.value or "")
+			if len(val_s) > max_len:
+				max_len = len(val_s)
+		ws.column_dimensions[col_letter].width = min(max(max_len + 3, 12), 34)
+
+	ws_flat = wb.create_sheet("Veri Listesi (Düz Tablo)")
+	if not df.empty:
+		for ci, col_name in enumerate(df.columns, 1):
+			hc = ws_flat.cell(1, ci, str(col_name))
+			hc.font = font_hdr
+			hc.fill = fill_hdr
+			hc.border = cell_border
+			hc.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+		row_alerts = meta.get("row_alerts") or [{} for _ in range(len(df))]
+		row_is_measured = meta.get("row_is_measured") or [True for _ in range(len(df))]
+		for r_idx in range(len(df)):
+			al_map = row_alerts[r_idx] if r_idx < len(row_alerts) else {}
+			is_m = row_is_measured[r_idx] if r_idx < len(row_is_measured) else True
+			z_fill = fill_zebra if (r_idx % 2 == 1) else fill_white
+			series = df.iloc[r_idx]
+			for ci, col_name in enumerate(df.columns, 1):
+				_write_styled_data_cell(ws_flat, r_idx + 2, ci, str(col_name), series[col_name], al_map, is_m, z_fill)
+		ws_flat.freeze_panes = "A2"
+		ws_flat.auto_filter.ref = ws_flat.dimensions
+		for col_cells in ws_flat.columns:
+			w = min(max(max(len(str(c.value or "")) for c in col_cells) + 3, 12), 34)
+			ws_flat.column_dimensions[get_column_letter(col_cells[0].column)].width = w
+
+	out = BytesIO()
+	wb.save(out)
+	return out.getvalue()
+
+
+def export_custom_screening_report_html(
+	df: pd.DataFrame,
+	meta: dict[str, Any] | None = None,
+	config: dict[str, Any] | None = None,
+) -> str:
+	"""Dinamik okul taraması raporunu yazdırılabilir (@page A4, renkli hücre vurgulu, sınıf gruplu & imzalı) HTML olarak üretir."""
+	meta, cfg = _merge_export_meta_and_cfg(df, meta, config)
+	app_cfg = get_app_settings()
+	inst_top = html.escape(app_cfg.get("institution_top_header") or "T.C. MİLLÎ EĞİTİM BAKANLIĞI")
+	inst_school = html.escape(app_cfg.get("school_name") or "")
+	report_title = html.escape(cfg.get("report_title") or "OKUL SAĞLIK TARAMASI VE GELİŞİM RAPORU")
+	dates_txt = html.escape(_format_dyn_dates_header(meta, meta.get("selected_dates")))
+	risk_heading = html.escape(str(meta.get("_risk_section_title") or "📌 TARAMA VE ÖLÇÜM SONUCU RİSK / YÖNLENDİRME ÖZET TABLOSU"))
+	orient = _resolve_dyn_report_orientation(df, cfg)
+	page_break_cls = bool(cfg.get("group_by_class_pagebreak", True))
+
+	class_sections_html: list[str] = []
+	if df.empty:
+		class_sections_html.append("<p style='text-align:center; padding:24px; color:#64748b;'>Seçili tarih ve filtre kriterlerine uygun kayıt bulunamadı.</p>")
+	else:
+		row_classes = meta.get("row_classes") or [str(df.iloc[i].get("Sınıf / Şube", "Tüm Öğrenciler")) for i in range(len(df))]
+		row_alerts = meta.get("row_alerts") or [{} for _ in range(len(df))]
+		row_is_measured = meta.get("row_is_measured") or [True for _ in range(len(df))]
+		class_stats = meta.get("class_stats") or {}
+		teacher_fallback_map = get_class_teacher_map()
+
+		grouped_indices: dict[str, list[int]] = {}
+		for idx, cname in enumerate(row_classes):
+			grouped_indices.setdefault(cname, []).append(idx)
+
+		thead_html = "".join(f"<th>{html.escape(str(c))}</th>" for c in df.columns)
+
+		for c_pos, (cname, indices) in enumerate(grouped_indices.items()):
+			c_info = class_stats.get(cname, {})
+			t_name = html.escape(str(c_info.get("ogretmen") or c_info.get("teacher_name") or teacher_fallback_map.get(cname) or "Belirtilmedi"))
+			c_tot = c_info.get("mevcut", c_info.get("total_students", len(indices)))
+			c_scr = c_info.get("taranan", c_info.get("screened_count", sum(1 for i in indices if row_is_measured[i])))
+			c_pct = c_info.get("oran", c_info.get("percent", round((c_scr / c_tot * 100.0), 1) if c_tot else 0.0))
+
+			tbody_parts: list[str] = []
+			for df_idx in indices:
+				al_map = row_alerts[df_idx] if df_idx < len(row_alerts) else {}
+				is_m = row_is_measured[df_idx] if df_idx < len(row_is_measured) else True
+				series = df.iloc[df_idx]
+				tds: list[str] = []
+				for col_name in df.columns:
+					v_str = str(series[col_name]) if pd.notna(series[col_name]) else "—"
+					cell_state = _classify_report_cell_state(str(col_name), v_str, al_map, is_m)
+					if cell_state == "alert":
+						cls_attr = " class='alert-cell'"
+					elif cell_state == "ok":
+						cls_attr = " class='ok-cell'"
+					elif cell_state == "unmeasured":
+						cls_attr = " class='unmeasured-cell'"
+					else:
+						cls_attr = ""
+					tds.append(f"<td{cls_attr}>{html.escape(v_str)}</td>")
+				tbody_parts.append(f"<tr>{''.join(tds)}</tr>")
+
+			pb_class = " class-section-break" if (c_pos > 0 and page_break_cls) else ""
+			class_sections_html.append(f"""
+			<div class="class-block{pb_class}">
+				<div class="class-band">
+					<span>🏫 <b>Sınıf / Şube:</b> {html.escape(cname)}</span>
+					<span>👩‍🏫 <b>Sınıf Öğretmeni:</b> {t_name}</span>
+					<span>📊 <b>Sınıf Mevcudu:</b> {c_tot} · <b>Raporlanan:</b> {c_scr} (%{c_pct})</span>
+				</div>
+				<table>
+					<thead><tr>{thead_html}</tr></thead>
+					<tbody>{''.join(tbody_parts)}</tbody>
+				</table>
+			</div>
+			""")
+
+	risk_html = ""
+	risk_rows = meta.get("risk_summary") or []
+	if risk_rows:
+		rk_trs: list[str] = []
+		for rk in risk_rows:
+			cnt_v = int(rk.get("Öğrenci Sayısı", 0))
+			tr_cls = " class='rk-alert-row'" if cnt_v > 0 else ""
+			rk_trs.append(
+				f"<tr{tr_cls}><td>{html.escape(str(rk.get('Kategori', '')))}</td>"
+				f"<td style='text-align:center; font-weight:700;'>{cnt_v}</td>"
+				f"<td>{html.escape(str(rk.get('Öğrenci İsimleri', '')))}</td></tr>"
+			)
+		risk_html = f"""
+		<div class="risk-summary-box">
+			<h3>{risk_heading}</h3>
+			<table>
+				<thead><tr><th>Risk / İzlem Kategorisi</th><th style="text-align:center;">Öğrenci Sayısı</th><th>Öğrenci İsimleri</th></tr></thead>
+				<tbody>{''.join(rk_trs)}</tbody>
+			</table>
+		</div>
+		"""
+
+	sig_cols = _get_dyn_signature_columns(meta, cfg, app_cfg)
+	sig_html = ""
+	if sig_cols:
+		boxes = "".join(
+			f"<div class='sig-box'><b>{html.escape(s_name)}</b><br>{html.escape(s_role)}<br><br>{html.escape(s_note)}</div>"
+			for s_name, s_role, s_note in sig_cols
+		)
+		sig_html = f"<div class='signature-section'>{boxes}</div>"
+
+	font_tbl = "10.5px" if len(df.columns) > 10 else "11.5px"
+	return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset='utf-8'>
+<title>{report_title}</title>
+<style>
+@page {{ size: A4 {orient}; margin: 10mm; }}
+body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1e293b; padding: 18px; line-height: 1.4; font-size: 12px; }}
+.print-btn {{ padding: 10px 18px; background: #0f766e; color: #ffffff; border: none; border-radius: 6px; font-weight: 600; cursor: pointer; margin-bottom: 14px; }}
+.header-box {{ border-bottom: 2px solid #0f766e; padding-bottom: 10px; margin-bottom: 14px; text-align: center; }}
+.header-box h4 {{ margin: 0; color: #64748b; font-size: 12px; font-weight: 600; }}
+.header-box h1 {{ margin: 2px 0; color: #0f766e; font-size: 18px; text-transform: uppercase; }}
+.header-box h3 {{ margin: 2px 0; color: #1e293b; font-size: 14px; }}
+.header-meta {{ font-size: 11.5px; color: #475569; margin-top: 4px; }}
+.class-band {{ display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px; background: #e6f4f1; border: 1px solid #99f6e4; color: #0f766e; padding: 8px 12px; border-radius: 6px 6px 0 0; font-size: 12px; margin-top: 12px; }}
+table {{ width: 100%; border-collapse: collapse; margin-bottom: 14px; font-size: {font_tbl}; }}
+th, td {{ border: 1px solid #cbd5e1; padding: 5px 7px; text-align: center; }}
+th {{ background-color: #0f766e; color: #ffffff; font-weight: 700; }}
+td:first-child, th:first-child {{ white-space: nowrap; }}
+tbody tr:nth-child(even) {{ background-color: #f8fafc; }}
+.alert-cell {{ background-color: #FEE2E2 !important; color: #991B1B !important; font-weight: 700 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+.ok-cell {{ background-color: #ECFDF5 !important; color: #065F46 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+.unmeasured-cell {{ color: #64748b; font-style: italic; }}
+.risk-summary-box {{ margin-top: 18px; page-break-inside: avoid; }}
+.risk-summary-box h3 {{ color: #0f766e; font-size: 13px; margin-bottom: 6px; }}
+.risk-summary-box td {{ text-align: left; }}
+.rk-alert-row {{ background-color: #FEF2F2 !important; color: #991B1B; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+.signature-section {{ display: flex; justify-content: space-between; gap: 16px; margin-top: 28px; page-break-inside: avoid; }}
+.sig-box {{ flex: 1; text-align: center; border-top: 1px solid #94a3b8; padding-top: 8px; font-size: 11.5px; color: #334155; }}
+.footer-note {{ margin-top: 20px; font-size: 10px; color: #94a3b8; text-align: center; }}
+@media print {{
+	.print-btn {{ display: none; }}
+	body {{ padding: 0; }}
+	.class-section-break {{ page-break-before: always; break-before: page; }}
+}}
+</style>
+</head>
+<body>
+<button class="print-btn" onclick="window.print()">🖨️ Yazdır / PDF Olarak Kaydet</button>
+<div class="header-box">
+	<h4>{inst_top}</h4>
+	{f"<h1>{inst_school}</h1>" if inst_school else ""}
+	<h3>{report_title}</h3>
+	<div class="header-meta">Tarama Tarihi / Dönem: <b>{dates_txt}</b> · Düzenlenme: <b>{date.today().strftime('%d.%m.%Y')}</b> · Listelenen Kayıt: <b>{len(df)}</b></div>
+</div>
+{''.join(class_sections_html)}
+{risk_html}
+{sig_html}
+<p class="footer-note">Bu rapor okul reviri kayıtları doğrultusunda sistemden otomatik üretilmiştir. Kesin tıbbi tanı ve kurul raporu yerine geçmez.</p>
+</body>
+</html>"""
+
+
+def _prepare_legacy_export_meta(df: pd.DataFrame, selected_dates: list[str] | None) -> dict[str, Any]:
+	meta_use = copy.deepcopy(df.attrs.get("report_meta", {}) or {})
+	meta_use.setdefault("_risk_section_title", "📌 TARAMA SONUCU RİSK VE YÖNLENDİRME ÖZETİ")
+	if selected_dates and not meta_use.get("selected_dates"):
+		meta_use["selected_dates"] = list(selected_dates)
+	return meta_use
+
+
+def build_dynamic_screening_docx(
+	df: pd.DataFrame,
+	report_config: dict[str, Any] | None = None,
+	selected_dates: list[str] | None = None,
+) -> bytes:
+	"""Geriye dönük uyumluluk sarmalayıcısı: export_custom_screening_report_docx'i çağırır."""
+	return export_custom_screening_report_docx(df, _prepare_legacy_export_meta(df, selected_dates), report_config)
+
+
+def build_dynamic_screening_excel(
+	df: pd.DataFrame,
+	report_config: dict[str, Any] | None = None,
+	selected_dates: list[str] | None = None,
+) -> bytes:
+	"""Geriye dönük uyumluluk sarmalayıcısı: export_custom_screening_report_excel'i çağırır."""
+	return export_custom_screening_report_excel(df, _prepare_legacy_export_meta(df, selected_dates), report_config)
+
+
+def build_dynamic_screening_html(
+	df: pd.DataFrame,
+	report_config: dict[str, Any] | None = None,
+	selected_dates: list[str] | None = None,
+) -> str:
+	"""Geriye dönük uyumluluk sarmalayıcısı: export_custom_screening_report_html'i çağırır."""
+	return export_custom_screening_report_html(df, _prepare_legacy_export_meta(df, selected_dates), report_config)
+
+
+def _close_dyn_report_builder_dialog() -> None:
+	"""Pop-up X/ESC ile kapatıldığında veya Uygula'ya basıldığında geçici diyalog durumunu temizler."""
+	st.session_state.pop("_dyn_rep_dialog_open", None)
+	for _dk in (
+		"dyn_dlg_cols_identity", "dyn_dlg_cols_anthro", "dyn_dlg_cols_clinical",
+		"dyn_dlg_only_nonempty", "dyn_dlg_only_risky", "dyn_dlg_hide_sens",
+		"dyn_dlg_scope", "dyn_dlg_orient", "dyn_dlg_sigs", "dyn_dlg_page_break", "dyn_dlg_title",
+		"dyn_dlg_quick_dates", "dyn_dlg_quick_cls", "dyn_dlg_preset_feedback", "dyn_dlg_quick_mode",
+	):
+		st.session_state.pop(_dk, None)
+
+
+def _trigger_open_report_builder(
+	owner_page: str,
+	default_classes: list[str] | None = None,
+	default_dates: list[str] | None = None,
+) -> None:
+	"""Rapor yapılandırma pop-up penceresini oturum durumu üzerinden başlatır."""
+	_close_dyn_report_builder_dialog()
+	st.session_state["_dyn_rep_dialog_open"] = {
+		"owner_page": owner_page,
+		"default_classes": list(default_classes) if default_classes else None,
+		"default_dates": list(default_dates) if default_dates else None,
+	}
+
+
+@st.dialog("⚙️ Rapor İçeriği, Sütun ve Çıktı Ayarları", width="large", on_dismiss=_close_dyn_report_builder_dialog)
+def open_report_config_dialog(
+	default_classes: list[str] | None = None,
+	default_dates: list[str] | None = None,
+) -> None:
+	cur_cfg = get_active_report_config()
+	id_opts = [k for k in CUSTOM_IDENTITY_KEYS if k != "ad_soyad"]
+	anthro_opts = list(CUSTOM_ANTHRO_KEYS)
+	clin_opts = list(CUSTOM_CLINICAL_KEYS)
+	sig_opts = [SIG_LABEL_NURSE, SIG_LABEL_TEACHER, SIG_LABEL_PRINCIPAL]
+	scope_opts = [SCOPE_OPT_MEASURED, SCOPE_OPT_ALL_CLASS, SCOPE_OPT_RISKY]
+	orient_opts = [ORIENT_OPT_AUTO, ORIENT_OPT_LANDSCAPE, ORIENT_OPT_PORTRAIT]
+
+	if "dyn_dlg_cols_identity" not in st.session_state:
+		_sync_dyn_dialog_widgets_from_cfg(cur_cfg)
+	else:
+		# Geçmiş oturumlardan kalan anahtarları temizle
+		st.session_state["dyn_dlg_cols_identity"] = [k for k in (st.session_state.get("dyn_dlg_cols_identity") or []) if k in id_opts]
+		st.session_state["dyn_dlg_cols_anthro"] = [k for k in (st.session_state.get("dyn_dlg_cols_anthro") or []) if k in anthro_opts]
+		st.session_state["dyn_dlg_cols_clinical"] = [k for k in (st.session_state.get("dyn_dlg_cols_clinical") or []) if k in clin_opts]
+		if st.session_state.get("dyn_dlg_scope") not in scope_opts:
+			st.session_state["dyn_dlg_scope"] = cur_cfg["student_scope"]
+		if st.session_state.get("dyn_dlg_orient") not in orient_opts:
+			st.session_state["dyn_dlg_orient"] = cur_cfg["page_orientation"]
+		st.session_state["dyn_dlg_sigs"] = [s for s in (st.session_state.get("dyn_dlg_sigs") or sig_opts) if s in sig_opts]
+
+	fb_msg = st.session_state.pop("dyn_dlg_preset_feedback", None)
+	if fb_msg:
+		st.success(fb_msg)
+
+	st.markdown("##### ⚡ Hızlı Rapor Şablonları (Tek Tıkla Seçim)")
+	st.caption("Şablon butonlarından birine bastığınızda aşağıdaki tüm sütun ve filtre kutucukları otomatik güncellenir; ardından istediğiniz ince ayarları yapabilirsiniz.")
+	p_c1, p_c2 = st.columns(2)
+	with p_c1:
+		st.button(
+			"📏 Boy-Kilo-Persantil-Z Skoru Özeti",
+			key="dyn_preset_btn_growth",
+			use_container_width=True,
+			on_click=_apply_dyn_preset_callback,
+			args=("growth_summary",),
+		)
+		st.button(
+			"⚠️ Sadece Riskli / Sevk Edilen Öğrenciler",
+			key="dyn_preset_btn_risky",
+			use_container_width=True,
+			on_click=_apply_dyn_preset_callback,
+			args=("risky_only",),
+		)
+	with p_c2:
+		st.button(
+			"🏫 Kapsamlı Okul Taraması Raporu",
+			key="dyn_preset_btn_full",
+			use_container_width=True,
+			on_click=_apply_dyn_preset_callback,
+			args=("full_screening",),
+		)
+		st.button(
+			"📋 İdare & Sınıf Öğretmeni Özeti (Gizlilik Korumalı)",
+			key="dyn_preset_btn_admin",
+			use_container_width=True,
+			on_click=_apply_dyn_preset_callback,
+			args=("admin_teacher",),
+		)
+
+	st.divider()
+	st.markdown("##### 🔍 Kategorik Sütun ve Metrik Seçici")
+	st.caption("📌 **Ad Soyad** sütunu zorunlu olarak her raporda yer alır. Diğer sütunları kategori bazlı seçebilirsiniz.")
+
+	sel_id_cols = st.multiselect(
+		"👤 Kimlik & Sınıf (Ad Soyad otomatik eklenir)",
+		options=id_opts,
+		format_func=lambda k: CUSTOM_REPORT_COL_BY_KEY[k]["label"],
+		key="dyn_dlg_cols_identity",
+	)
+	sel_anthro_cols = st.multiselect(
+		"📏 Antropometri, Persantil & Z-Skoru",
+		options=anthro_opts,
+		format_func=lambda k: CUSTOM_REPORT_COL_BY_KEY[k]["label"],
+		key="dyn_dlg_cols_anthro",
+	)
+	sel_clin_cols = st.multiselect(
+		"🩺 Okul Taraması & Klinik Bulgular (Göz, Kulak, Saç, Vital, Davranış)",
+		options=clin_opts,
+		format_func=lambda k: CUSTOM_REPORT_COL_BY_KEY[k]["label"],
+		key="dyn_dlg_cols_clinical",
+	)
+
+	st.divider()
+	st.markdown("##### ⚙️ Akıllı Filtreleme ve Sayfa Düzeni Ayarları")
+	f_c1, f_c2 = st.columns(2)
+	with f_c1:
+		chk_nonempty = st.checkbox(
+			"Sadece Girilen Verilere Göre Sütun Oluştur (Hiçbir öğrenciye girilmemiş boş sütunları rapordan otomatik kaldır)",
+			key="dyn_dlg_only_nonempty",
+		)
+		chk_hide_sens = st.checkbox(
+			"🔒 Kişisel Tıbbi Detayları Gizle (Kan grubu, alerji/kronik, pediküloz, vital, zararlı alışkanlık/psikososyal hariç)",
+			key="dyn_dlg_hide_sens",
+		)
+		chk_page_break = st.checkbox(
+			"Çoklu sınıf raporlarında her sınıfı kendi öğretmeni ve özet istatistiğiyle ayrı tabloda/sayfada başlat",
+			key="dyn_dlg_page_break",
+		)
+		sel_orient = st.selectbox(
+			"📐 Sayfa Yönü (Word / HTML Yazdırma / Excel)",
+			options=orient_opts,
+			key="dyn_dlg_orient",
+		)
+	with f_c2:
+		sel_scope = st.radio(
+			"👥 Öğrenci Kapsamı",
+			options=scope_opts,
+			key="dyn_dlg_scope",
+			on_change=_on_dyn_dlg_scope_change,
+		)
+		sel_sigs = st.multiselect(
+			"✍️ Resmi İmza Bloğu Seçimi",
+			options=sig_opts,
+			key="dyn_dlg_sigs",
+		)
+
+	custom_title = st.text_input("📄 Rapor Başlığı", key="dyn_dlg_title")
+
+	_, is_risky_scope, _ = _normalize_scope_mode(sel_scope, False)
+	st.session_state["dyn_dlg_only_risky"] = bool(is_risky_scope)
+
+	merged_selected = ["ad_soyad"] + list(sel_id_cols) + list(sel_anthro_cols) + list(sel_clin_cols)
+	draft_cfg = _normalize_report_config({
+		"preset_name": cur_cfg.get("preset_name", "Özel Ayar"),
+		"selected_cols": merged_selected,
+		"auto_prune_empty_cols": chk_nonempty,
+		"only_nonempty_cols": chk_nonempty,
+		"student_scope": sel_scope,
+		"only_risky": is_risky_scope,
+		"hide_sensitive_medical": chk_hide_sens,
+		"page_orientation": sel_orient,
+		"signatures": sel_sigs,
+		"group_by_class_pagebreak": chk_page_break,
+		"page_break_between_classes": chk_page_break,
+		"report_title": (custom_title or "").strip() or DEFAULT_CUSTOM_REPORT_CONFIG["report_title"],
+	}, target_custom=True)
+
+	st.markdown("---")
+	act_c1, act_c2 = st.columns([1.6, 1.4])
+	with act_c1:
+		if st.button("✅ Ayarları Kaydet & Raporu Güncelle", type="primary", use_container_width=True, key="dyn_dlg_btn_apply"):
+			save_custom_report_config(draft_cfg)
+			_close_dyn_report_builder_dialog()
+			st.rerun()
+	with act_c2:
+		if default_classes and st.button("🖨️ Tarih Bazlı Raporlar Sayfasında Aç", use_container_width=True, key="dyn_dlg_btn_goto_rep"):
+			save_custom_report_config(draft_cfg)
+			_close_dyn_report_builder_dialog()
+			st.session_state["dyn_rep_pref_classes"] = list(default_classes)
+			st.session_state["target_page"] = "🖨️ Raporlar"
+			st.rerun()
+
+	with st.expander("📥 Pop-up İçinden Hemen Çıktı Al (.docx / .xlsx / .html)", expanded=bool(default_classes)):
+		avail_dates = get_available_screening_and_measurement_dates(default_classes)
+		quick_mode = st.radio(
+			"Tarih Kapsamı",
+			["Belirli Günler", "En Güncel Kayıtlar"],
+			horizontal=True,
+			key="dyn_dlg_quick_mode",
+		)
+		dlg_dates: list[str] = []
+		if quick_mode == "Belirli Günler":
+			if avail_dates:
+				date_lbl_map = {d["date"]: d["label"] for d in avail_dates}
+				date_opts_dlg = [d["date"] for d in avail_dates]
+				init_d = default_dates if default_dates else [date_opts_dlg[0]]
+				init_d = [d for d in init_d if d in date_lbl_map] or [date_opts_dlg[0]]
+				if "dyn_dlg_quick_dates" in st.session_state:
+					cleaned_d = [x for x in (st.session_state.get("dyn_dlg_quick_dates") or []) if x in date_lbl_map]
+					st.session_state["dyn_dlg_quick_dates"] = cleaned_d or init_d
+				else:
+					st.session_state["dyn_dlg_quick_dates"] = init_d
+				dlg_dates = st.multiselect(
+					"Tarama Günü Seçin",
+					options=date_opts_dlg,
+					format_func=lambda d: date_lbl_map.get(d, d),
+					key="dyn_dlg_quick_dates",
+				)
+			else:
+				dlg_dates = [date.today().isoformat()]
+				st.info("Kayıtlı tarama günü henüz yok; bugün baz alınıyor.")
+
+		all_cls = [c for c in get_classes() if c != "Sivil / Diğer"]
+		if "dyn_dlg_quick_cls" in st.session_state:
+			st.session_state["dyn_dlg_quick_cls"] = [x for x in (st.session_state.get("dyn_dlg_quick_cls") or []) if x in all_cls]
+		dlg_cls_mode = default_classes if default_classes else st.multiselect(
+			"Sınıflar (Boş bırakılırsa Tüm Sınıflar)",
+			options=all_cls,
+			key="dyn_dlg_quick_cls",
+		)
+		quick_df, quick_meta = build_custom_screening_report_data(
+			selected_classes=dlg_cls_mode,
+			date_mode=quick_mode,
+			selected_dates=dlg_dates,
+			start_date=None,
+			end_date=None,
+			config=draft_cfg,
+		)
+		st.caption(f"Önizleme: **{len(quick_df)}** satır · **{len(quick_df.columns)}** aktif sütun (boş sütunlar otomatik filtrelendi).")
+		if not quick_df.empty:
+			st.dataframe(quick_df.head(8), width="stretch", hide_index=True)
+		dl_c1, dl_c2, dl_c3 = st.columns(3)
+		slug_cls = re.sub(r"[^A-Za-z0-9_-]+", "_", "_".join(dlg_cls_mode) if dlg_cls_mode else "tum_siniflar").strip("_") or "tarama"
+		with dl_c1:
+			st.download_button(
+				"📥 Word (.docx) İndir",
+				data=export_custom_screening_report_docx(quick_df, quick_meta, draft_cfg),
+				file_name=f"okul_tarama_raporu_{slug_cls}_{date.today().isoformat()}.docx",
+				mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+				use_container_width=True,
+				key="dyn_dlg_dl_docx",
+			)
+		with dl_c2:
+			st.download_button(
+				"📊 Excel (.xlsx) İndir",
+				data=export_custom_screening_report_excel(quick_df, quick_meta, draft_cfg),
+				file_name=f"okul_tarama_raporu_{slug_cls}_{date.today().isoformat()}.xlsx",
+				mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+				use_container_width=True,
+				key="dyn_dlg_dl_xlsx",
+			)
+		with dl_c3:
+			st.download_button(
+				"🖨️ Yazdırılabilir HTML İndir",
+				data=export_custom_screening_report_html(quick_df, quick_meta, draft_cfg).encode("utf-8"),
+				file_name=f"okul_tarama_raporu_{slug_cls}_{date.today().isoformat()}.html",
+				mime="text/html",
+				use_container_width=True,
+				key="dyn_dlg_dl_html",
+			)
+
+
+open_report_builder_dialog = open_report_config_dialog
+
+
+def _render_screening_report_workspace(
+	owner_page: str,
+	key_prefix: str,
+	fixed_classes: list[str] | None = None,
+	compact: bool = False,
+	show_config_button: bool = True,
+) -> None:
+	"""🖨️ Raporlar ve 🏫 Okul Taraması ekranlarında ortak kullanılan dinamik tarih seçimli rapor çalışma alanı."""
+	cfg = get_active_report_config()
+	all_classes = [c for c in get_classes() if c != "Sivil / Diğer"]
+	scope_code, _, _ = _normalize_scope_mode(cfg.get("student_scope"), bool(cfg.get("only_risky", False)))
+
+	if show_config_button:
+		top_c1, top_c2 = st.columns([3.2, 1.8])
+		with top_c1:
+			st.markdown("### 🏫 Tarih Bazlı Toplu Tarama & Persantil Raporu")
+			st.caption(
+				f"Aktif Şablon: **{cfg.get('preset_name', 'Özel')}** · "
+				f"Boş Sütun Gizleme: **{'Açık' if cfg.get('auto_prune_empty_cols', True) else 'Kapalı'}** · "
+				f"Kapsam: **{'Sadece Riskliler' if scope_code == 'risky_only' else ('Tam Sınıf Listesi' if scope_code == 'all_class' else 'Sadece Verisi Olanlar')}**"
+			)
+		with top_c2:
+			open_btn_key = "btn_dyn_rep_open_builder" if key_prefix == "dyn_rep" else f"{key_prefix}_open_cfg"
+			if st.button("⚙️ Rapor İçeriği & Sütun Ayarları (Pop-up)", type="primary", use_container_width=True, key=open_btn_key):
+				pref_c = fixed_classes if fixed_classes else st.session_state.get(f"{key_prefix}_cls_select")
+				_trigger_open_report_builder(owner_page, default_classes=pref_c if pref_c else None)
+	else:
+		st.caption(
+			f"Aktif Şablon: **{cfg.get('preset_name', 'Özel')}** · "
+			f"Boş Sütun Gizleme: **{'Açık' if cfg.get('auto_prune_empty_cols', True) else 'Kapalı'}** · "
+			f"Kapsam: **{'Sadece Riskliler' if scope_code == 'risky_only' else ('Tam Sınıf Listesi' if scope_code == 'all_class' else 'Sadece Verisi Olanlar')}**"
+		)
+
+	# Sınıf seçici
+	if fixed_classes:
+		selected_classes = [c for c in fixed_classes if c in all_classes]
+	else:
+		pref_classes = st.session_state.pop("dyn_rep_pref_classes", None) if key_prefix == "dyn_rep" else None
+		if pref_classes:
+			valid_pref = [c for c in pref_classes if c in all_classes]
+			if valid_pref:
+				st.session_state[f"{key_prefix}_cls_mode"] = "Belirli Sınıfları Seç"
+				st.session_state[f"{key_prefix}_cls_select"] = valid_pref
+		if f"{key_prefix}_cls_select" in st.session_state:
+			st.session_state[f"{key_prefix}_cls_select"] = [x for x in (st.session_state.get(f"{key_prefix}_cls_select") or []) if x in all_classes]
+
+		f_c1, f_c2 = st.columns([1.4, 2.0])
+		with f_c1:
+			cls_mode = st.radio(
+				"Sınıf / Şube Kapsamı",
+				["Tüm Sınıflar (Sınıf Bazlı Grupla)", "Belirli Sınıfları Seç"],
+				horizontal=True,
+				key=f"{key_prefix}_cls_mode",
+			)
+		with f_c2:
+			if cls_mode == "Belirli Sınıfları Seç":
+				selected_classes = st.multiselect(
+					"Raporlanacak Sınıflar / Şubeler",
+					options=all_classes,
+					default=[all_classes[0]] if (all_classes and f"{key_prefix}_cls_select" not in st.session_state) else None,
+					key=f"{key_prefix}_cls_select",
+				)
+			else:
+				selected_classes = []
+				st.info("Tüm aktif şubeler **Sınıf Bazlı Gruplama** ve sınıf öğretmenleriyle raporlanacaktır.")
+
+	# Tarih / Dönem seçici (3 Mod: Belirli Günler, Tarih Aralığı, En Güncel Kayıtlar)
+	avail_dates = get_available_screening_and_measurement_dates(selected_classes)
+	date_mode_choice = st.radio(
+		"Tarama Tarihi / Dönem Modu",
+		["📅 Belirli Günler", "📆 Tarih Aralığı", "✨ En Güncel Kayıtlar"],
+		horizontal=True,
+		key=f"{key_prefix}_date_mode",
+	)
+
+	selected_dates: list[str] = []
+	d_start: date | None = None
+	d_end: date | None = None
+	date_mode_param = "Belirli Günler"
+
+	if date_mode_choice.endswith("Belirli Günler"):
+		date_mode_param = "Belirli Günler"
+		if not avail_dates:
+			st.warning("Seçili sınıf(lar) için kayıtlı okul taraması, ölçüm veya vital verisi bulunamadı.")
+			return
+		date_lbl_map = {d["date"]: d["label"] for d in avail_dates}
+		date_opts = [d["date"] for d in avail_dates]
+		mod_a_key = "dyn_rep_mod_a_dates" if key_prefix == "dyn_rep" else f"{key_prefix}_mod_a_dates"
+		if mod_a_key in st.session_state:
+			cleaned_mod_a = [x for x in (st.session_state.get(mod_a_key) or []) if x in date_lbl_map]
+			st.session_state[mod_a_key] = cleaned_mod_a or ([date_opts[0]] if date_opts else [])
+		else:
+			st.session_state[mod_a_key] = [date_opts[0]] if date_opts else []
+		selected_dates = st.multiselect(
+			"Kayıtlı Tarama / Ölçüm Günleri",
+			options=date_opts,
+			format_func=lambda d: date_lbl_map.get(d, d),
+			key=mod_a_key,
+		)
+		if not selected_dates:
+			st.info("👆 Rapor oluşturmak için en az bir tarama günü seçin.")
+			return
+	elif date_mode_choice.endswith("Tarih Aralığı"):
+		date_mode_param = "Tarih Aralığı"
+		min_d = date.fromisoformat(avail_dates[-1]["date"]) if avail_dates else (date.today() - timedelta(days=30))
+		max_d = date.fromisoformat(avail_dates[0]["date"]) if avail_dates else date.today()
+		dc1, dc2 = st.columns(2)
+		with dc1:
+			d_start = st.date_input("Başlangıç Tarihi", value=min_d, key=f"{key_prefix}_mod_b_start")
+		with dc2:
+			d_end = st.date_input("Bitiş Tarihi", value=max_d, key=f"{key_prefix}_mod_b_end")
+		if d_start > d_end:
+			st.error("Başlangıç tarihi bitiş tarihinden büyük olamaz.")
+			return
+		selected_dates = [
+			d["date"]
+			for d in avail_dates
+			if d_start.isoformat() <= d["date"] <= d_end.isoformat()
+		]
+	else:
+		date_mode_param = "En Güncel Kayıtlar"
+		st.info("Her öğrencinin sistemde kayıtlı **en güncel** ölçüm ve tarama verisi otomatik olarak bir araya getirilir.")
+
+	report_df, meta = build_custom_screening_report_data(
+		selected_classes=selected_classes,
+		date_mode=date_mode_param,
+		selected_dates=selected_dates,
+		start_date=d_start,
+		end_date=d_end,
+		config=cfg,
+	)
+
+	risk_rows = meta.get("risk_summary") or []
+	total_risks = sum(int(r.get("Öğrenci Sayısı", 0)) for r in risk_rows)
+
+	m_c1, m_c2, m_c3, m_c4 = st.columns(4)
+	m_c1.metric("Listelenen Kayıt", len(report_df))
+	m_c2.metric("Sınıf Sayısı", len(meta.get("selected_classes") or []))
+	m_c3.metric("Aktif Sütun Sayısı", len(report_df.columns))
+	m_c4.metric("Risk / İzlem İşareti", total_risks)
+
+	if report_df.empty:
+		st.warning("Seçilen tarih ve filtre kriterlerine göre görüntülenecek öğrenci kaydı bulunamadı.")
+		return
+
+	st.markdown("#### 📋 Dinamik Rapor Önizlemesi (Boş Sütunlar Otomatik Kaldırıldı · Riskli Hücreler Renkli)")
+	max_h = 360 if compact else 540
+	tbl_h = min(max_h, max(200, 48 + len(report_df) * 35))
+	try:
+		styled_preview = _build_dynamic_screening_styler(report_df)
+		st.dataframe(styled_preview, width="stretch", hide_index=True, height=tbl_h)
+	except Exception:
+		st.dataframe(report_df, width="stretch", hide_index=True, height=tbl_h)
+
+	if risk_rows and not compact:
+		with st.expander("📌 Tarama ve Ölçüm Sonucu Risk / Yönlendirme Özeti", expanded=total_risks > 0):
+			st.dataframe(pd.DataFrame(risk_rows), width="stretch", hide_index=True)
+
+	docx_bytes = export_custom_screening_report_docx(report_df, meta, cfg)
+	xlsx_bytes = export_custom_screening_report_excel(report_df, meta, cfg)
+	html_str = export_custom_screening_report_html(report_df, meta, cfg)
+
+	cls_slug = re.sub(r"[^A-Za-z0-9_-]+", "_", "_".join(selected_classes) if selected_classes else "tum_siniflar").strip("_") or "tarama"
+	if selected_dates:
+		date_slug = selected_dates[-1] if len(selected_dates) == 1 else f"{selected_dates[-1]}_{selected_dates[0]}"
+	else:
+		date_slug = date.today().isoformat()
+
+	dl1, dl2, dl3 = st.columns(3)
+	with dl1:
+		st.download_button(
+			"📥 Word (.docx) İndir",
+			data=docx_bytes,
+			file_name=f"okul_taramasi_rapor_{cls_slug}_{date_slug}.docx",
+			mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+			type="primary",
+			use_container_width=True,
+			key=f"{key_prefix}_dl_docx",
+		)
+	with dl2:
+		st.download_button(
+			"📊 Excel (.xlsx) İndir",
+			data=xlsx_bytes,
+			file_name=f"okul_taramasi_rapor_{cls_slug}_{date_slug}.xlsx",
+			mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+			type="primary",
+			use_container_width=True,
+			key=f"{key_prefix}_dl_xlsx",
+		)
+	with dl3:
+		st.download_button(
+			"🖨️ Yazdırılabilir HTML İndir",
+			data=html_str.encode("utf-8"),
+			file_name=f"okul_taramasi_rapor_{cls_slug}_{date_slug}.html",
+			mime="text/html",
+			use_container_width=True,
+			key=f"{key_prefix}_dl_html",
+		)
+
+	if not compact:
+		with st.expander("🖨️ Yazdırılabilir A4 Rapor Önizleme (Tarayıcıdan Yazdır / PDF)", expanded=False):
+			st.components.v1.html(html_str, height=760, scrolling=True)
+
+
+def render_dynamic_screening_reports_tab() -> None:
+	"""🖨️ Raporlar > 🏫 Tarih Bazlı Toplu Tarama & Persantil Raporu sekmesini çizer."""
+	_render_screening_report_workspace(
+		owner_page="🖨️ Raporlar",
+		key_prefix="dyn_rep",
+		fixed_classes=None,
+		compact=False,
+		show_config_button=True,
+	)
 
 
 def append_student_report_docx_section(doc: docx.Document, student_id: int, is_multi: bool = False, report_cfg: dict | None = None) -> None:
@@ -14456,19 +23444,809 @@ def build_student_report_section_html(student: sqlite3.Row, inst_top: str, inst_
 """
 
 
+def _coerce_meb_date_range(start_date: date | str, end_date: date | str) -> tuple[date, date, str, str]:
+	def _to_d(val: object, fallback: date) -> date:
+		if isinstance(val, datetime):
+			return val.date()
+		if isinstance(val, date):
+			return val
+		parsed = parse_birth_date(val) if val is not None else None
+		if parsed:
+			try:
+				return date.fromisoformat(parsed[:10])
+			except ValueError:
+				pass
+		try:
+			return date.fromisoformat(str(val)[:10])
+		except (TypeError, ValueError):
+			return fallback
+
+	s_d = _to_d(start_date, date.today() - timedelta(days=90))
+	e_d = _to_d(end_date, date.today())
+	if s_d > e_d:
+		s_d, e_d = e_d, s_d
+	return s_d, e_d, s_d.isoformat(), e_d.isoformat()
+
+
+def _is_nonempty_clinical_flag(val: object, ignore_tokens: tuple[str, ...]) -> bool:
+	txt = _normalize_tr_search(val)
+	if not txt or txt in {"—", "-", "yok", "none"}:
+		return False
+	return not any(tok in txt for tok in ignore_tokens)
+
+
+def collect_meb_annual_activity_stats(start_date: date | str, end_date: date | str) -> dict[str, Any]:
+	"""MEB Dönem / Yıl Sonu Resmi Faaliyet Raporu için tüm kurum, revir, tarama, WHO ve stok/soğuk zincir istatistiklerini hesaplar."""
+	s_d, e_d, s_iso, e_iso = _coerce_meb_date_range(start_date, end_date)
+	active_ay = get_active_academic_year()
+
+	with connect_db() as connection:
+		stu_rows = [
+			dict(r)
+			for r in connection.execute(
+				"""SELECT s.id, s.person_type, s.sex, s.birth_date,
+						  COALESCE(c.name, 'Sivil / Diğer') AS class_name,
+						  hp.allergies, hp.chronic_conditions, hp.special_needs_codes,
+						  hp.medical_devices, hp.wears_glasses, hp.vision_right,
+						  hp.vision_left, hp.hair_screening, hp.hearing_right,
+						  hp.hearing_left, hp.last_screened_at
+				   FROM students s
+				   LEFT JOIN classes c ON c.id = s.class_id
+				   LEFT JOIN health_profiles hp ON hp.student_id = s.id"""
+			).fetchall()
+		]
+		cls_names = [
+			str(r["name"])
+			for r in connection.execute("SELECT name FROM classes WHERE name != 'Sivil / Diğer' ORDER BY name").fetchall()
+		]
+		med_plan_rows = [
+			dict(r)
+			for r in connection.execute("SELECT id, student_id, status FROM student_medications").fetchall()
+		]
+		med_log_rows = [
+			dict(r)
+			for r in connection.execute(
+				"SELECT id, student_id, status FROM medication_logs WHERE log_date >= ? AND log_date <= ?",
+				(s_iso, e_iso),
+			).fetchall()
+		]
+		visit_rows = [
+			dict(r)
+			for r in connection.execute(
+				"""SELECT v.id, v.student_id, v.visit_date, v.complaint,
+						  v.guardian_contacted, v.referral, v.follow_up_status,
+						  COALESCE(c.name, 'Belirtilmedi') AS class_name,
+						  COALESCE(s.person_type, 'Öğrenci') AS person_type
+				   FROM visits v
+				   LEFT JOIN students s ON s.id = v.student_id
+				   LEFT JOIN classes c ON c.id = s.class_id
+				   WHERE v.visit_date >= ? AND v.visit_date <= ?""",
+				(s_iso, e_iso),
+			).fetchall()
+		]
+		meas_rows = [
+			dict(r)
+			for r in connection.execute(
+				"""SELECT student_id, measured_on, height_cm, weight_kg, head_circ_cm, age_months, bmi
+				   FROM measurements
+				   WHERE measured_on >= ? AND measured_on <= ?
+				   ORDER BY measured_on DESC, id DESC""",
+				(s_iso, e_iso),
+			).fetchall()
+		]
+		meas_fallback_rows = [
+			dict(r)
+			for r in connection.execute(
+				"""SELECT student_id, measured_on, height_cm, weight_kg, head_circ_cm, age_months, bmi
+				   FROM measurements
+				   WHERE measured_on <= ?
+				   ORDER BY measured_on DESC, id DESC""",
+				(e_iso,),
+			).fetchall()
+		]
+		scr_period_rows = [
+			dict(r)
+			for r in connection.execute(
+				"""SELECT sc.*, COALESCE(c.name, '—') AS class_name
+				   FROM school_screenings sc
+				   JOIN students s ON s.id = sc.student_id
+				   LEFT JOIN classes c ON c.id = s.class_id
+				   WHERE sc.screening_date >= ? AND sc.screening_date <= ?
+				   ORDER BY sc.screening_date DESC, sc.id DESC""",
+				(s_iso, e_iso),
+			).fetchall()
+		]
+		scr_upto_rows = [
+			dict(r)
+			for r in connection.execute(
+				"""SELECT * FROM school_screenings
+				   WHERE screening_date <= ?
+				   ORDER BY screening_date DESC, id DESC""",
+				(e_iso,),
+			).fetchall()
+		]
+		cp_period_cnt = int(
+			connection.execute(
+				"SELECT COUNT(*) FROM care_plans WHERE SUBSTR(created_at, 1, 10) >= ? AND SUBSTR(created_at, 1, 10) <= ?",
+				(s_iso, e_iso),
+			).fetchone()[0]
+		)
+		cp_total_cnt = int(connection.execute("SELECT COUNT(*) FROM care_plans").fetchone()[0])
+		vax_rows = [
+			dict(r)
+			for r in connection.execute("SELECT student_id, is_done FROM student_vaccinations").fetchall()
+		]
+		iso_period_rows = [
+			dict(r)
+			for r in connection.execute(
+				"SELECT id, status FROM isolation_records WHERE detected_date >= ? AND detected_date <= ?",
+				(s_iso, e_iso),
+			).fetchall()
+		]
+		seizure_period_cnt = int(
+			connection.execute(
+				"SELECT COUNT(*) FROM seizure_logs WHERE seizure_date >= ? AND seizure_date <= ?",
+				(s_iso, e_iso),
+			).fetchone()[0]
+		)
+		fridge_period_rows = [
+			dict(r)
+			for r in connection.execute(
+				"SELECT fridge_temp_c, room_temp_c FROM fridge_temp_logs WHERE log_date >= ? AND log_date <= ?",
+				(s_iso, e_iso),
+			).fetchall()
+		]
+
+	# 1. Profile counts
+	student_list = [r for r in stu_rows if clean_text(r.get("person_type") or "Öğrenci") == "Öğrenci"]
+	adult_list = [r for r in stu_rows if clean_text(r.get("person_type") or "Öğrenci") != "Öğrenci"]
+	stu_by_id = {int(r["id"]): r for r in student_list}
+
+	chronic_cnt = sum(1 for r in student_list if _is_nonempty_clinical_flag(r.get("chronic_conditions"), ("kronik hastalık yok", "bilinen hastalık yok")))
+	allergy_cnt = sum(1 for r in student_list if _is_nonempty_clinical_flag(r.get("allergies"), ("alerji yok", "bilinen alerji yok")))
+	special_needs_cnt = sum(
+		1
+		for r in student_list
+		if (
+			_is_nonempty_clinical_flag(r.get("special_needs_codes"), ("özel gereksinim yok",))
+			or _is_nonempty_clinical_flag(r.get("medical_devices"), ("tıbbi cihaz / protez yok", "cihaz yok"))
+		)
+	)
+
+	regular_med_students = {int(m["student_id"]) for m in med_plan_rows}
+	active_med_plans = sum(1 for m in med_plan_rows if clean_text(m.get("status") or "Aktif") == "Aktif")
+	doses_given_cnt = sum(1 for lg in med_log_rows if clean_text(lg.get("status") or "Verildi") == "Verildi")
+
+	# 2. Visits stats
+	total_visits = len(visit_rows)
+	guardian_notified_cnt = sum(1 for v in visit_rows if int(v.get("guardian_contacted") or 0) == 1)
+	referral_cnt = 0
+	closed_followup_cnt = 0
+	open_followup_cnt = 0
+	complaint_counts: dict[str, int] = {}
+	class_visit_counts: dict[str, int] = {}
+
+	for v in visit_rows:
+		comp = clean_text(v.get("complaint")) or "Belirtilmedi"
+		complaint_counts[comp] = complaint_counts.get(comp, 0) + 1
+		cls_v = clean_text(v.get("class_name")) or "Belirtilmedi"
+		class_visit_counts[cls_v] = class_visit_counts.get(cls_v, 0) + 1
+
+		ref_norm = _normalize_tr_search(v.get("referral"))
+		if ref_norm and ref_norm not in {"—", "-", "yok", "gerekmedi", "sevk yok", "ayakta takip"}:
+			if any(k in ref_norm for k in ("sevk", "hastane", "112", "acil", "hekim", "doktor", "poliklinik", "uzman", "sağlık ocağı", "asm")):
+				referral_cnt += 1
+			elif len(ref_norm) >= 3:
+				referral_cnt += 1
+
+		f_st = clean_text(v.get("follow_up_status") or "")
+		if f_st == "Tamamlandı":
+			closed_followup_cnt += 1
+		elif f_st == "Açık" and (clean_text(v.get("referral")) or clean_text(v.get("follow_up"))):
+			open_followup_cnt += 1
+
+	complaint_sorted = sorted(complaint_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+	class_visit_sorted = sorted(class_visit_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+
+	# 3. Class Screening Completion
+	period_scr_students_by_cls: dict[str, set[int]] = {}
+	latest_scr_by_stu: dict[int, dict[str, Any]] = {}
+	for sc in scr_period_rows:
+		sid = int(sc["student_id"])
+		c_nm = clean_text(sc.get("class_name")) or "—"
+		period_scr_students_by_cls.setdefault(c_nm, set()).add(sid)
+	for sc in scr_upto_rows:
+		sid = int(sc["student_id"])
+		if sid not in latest_scr_by_stu:
+			latest_scr_by_stu[sid] = sc
+
+	class_completion_rows: list[dict[str, Any]] = []
+	for cname in cls_names:
+		c_st = get_class_screening_stats(cname)
+		p_cnt = len(period_scr_students_by_cls.get(cname, set()))
+		class_completion_rows.append({
+			"class_name": cname,
+			"total": int(c_st["total"]),
+			"screened": int(c_st["screened"]),
+			"period_screened": int(p_cnt),
+			"pending": int(c_st["pending"]),
+			"percent": float(c_st["percent"]),
+		})
+
+	# 4. Anthropometric WHO Percentile Distribution (prefer in-period measurement, else latest <= end_date)
+	latest_meas_by_stu: dict[int, dict[str, Any]] = {}
+	for mr in meas_rows:
+		sid = int(mr["student_id"])
+		if sid in stu_by_id and sid not in latest_meas_by_stu:
+			latest_meas_by_stu[sid] = mr
+	if not latest_meas_by_stu:
+		for mr in meas_fallback_rows:
+			sid = int(mr["student_id"])
+			if sid in stu_by_id and sid not in latest_meas_by_stu:
+				latest_meas_by_stu[sid] = mr
+
+	bmi_eval_total = 0
+	bmi_normal = 0      # 3p - 85p
+	bmi_underweight = 0 # < 3p
+	bmi_overweight = 0  # 85p - 97p
+	bmi_obese = 0       # > 97p
+	height_eval_total = 0
+	height_stunted = 0  # < 3p
+
+	for sid, mr in latest_meas_by_stu.items():
+		st_rec = stu_by_id.get(sid)
+		if not st_rec:
+			continue
+		sex = st_rec.get("sex")
+		bdate = st_rec.get("birth_date")
+		age_m = mr.get("age_months")
+		if age_m is None and bdate and mr.get("measured_on"):
+			try:
+				age_m = age_in_months(bdate, date.fromisoformat(str(mr["measured_on"])[:10]))
+			except Exception:
+				age_m = None
+		if not sex or age_m is None:
+			continue
+
+		h_v = numeric_value(mr.get("height_cm"))
+		w_v = numeric_value(mr.get("weight_kg"))
+		b_v = numeric_value(mr.get("bmi"))
+		if b_v is None and h_v and w_v and h_v > 0:
+			b_v = round(w_v / ((h_v / 100.0) ** 2), 2)
+
+		if h_v is not None:
+			h_eval = evaluate_measurement(h_v, "height", sex, int(age_m))
+			if h_eval is not None:
+				height_eval_total += 1
+				if float(h_eval["percentile"]) < 3.0:
+					height_stunted += 1
+
+		if b_v is not None:
+			b_eval = evaluate_measurement(b_v, "bmi", sex, int(age_m))
+			if b_eval is not None:
+				bmi_eval_total += 1
+				bpct = float(b_eval["percentile"])
+				if bpct < 3.0:
+					bmi_underweight += 1
+				elif bpct <= 85.0:
+					bmi_normal += 1
+				elif bpct <= 97.0:
+					bmi_overweight += 1
+				else:
+					bmi_obese += 1
+
+	# 5. Vision / Hearing / Hair Findings across cohort (latest screening or health_profile)
+	screened_cohort_cnt = 0
+	glasses_cnt = 0
+	vision_suspect_cnt = 0
+	hearing_finding_cnt = 0
+	hair_finding_cnt = 0
+
+	for sid, st_rec in stu_by_id.items():
+		sc = latest_scr_by_stu.get(sid, {})
+		wears_g = clean_text(sc.get("wears_glasses") or st_rec.get("wears_glasses"))
+		vr = clean_text(sc.get("vision_right") or st_rec.get("vision_right"))
+		vl = clean_text(sc.get("vision_left") or st_rec.get("vision_left"))
+		hr = clean_text(sc.get("hearing_right") or st_rec.get("hearing_right"))
+		hl = clean_text(sc.get("hearing_left") or st_rec.get("hearing_left"))
+		hair = clean_text(sc.get("hair_screening") or st_rec.get("hair_screening"))
+
+		if any((wears_g, vr, vl, hr, hl, hair, sc.get("screening_date"), st_rec.get("last_screened_at"))):
+			screened_cohort_cnt += 1
+
+		wg_low = _normalize_tr_search(wears_g)
+		if wg_low and any(tok in wg_low for tok in ("evet", "bazen", "önerildi", "bekleniyor")):
+			glasses_cnt += 1
+
+		def _is_vision_issue(v_txt: str) -> bool:
+			vt = _normalize_tr_search(v_txt)
+			if not vt or vt in {"—", "-", "yapılmadı"}:
+				return False
+			if any(ok_t in vt for ok_t in ("tam", "normal", "10/10", "1.0", "iyi")):
+				return any(bad_t in vt for bad_t in ("kusur", "sevk", "az", "bulanık", "şaşı"))
+			return True
+
+		if _is_vision_issue(vr) or _is_vision_issue(vl):
+			vision_suspect_cnt += 1
+
+		def _is_hearing_issue(h_txt: str) -> bool:
+			ht = _normalize_tr_search(h_txt)
+			if not ht or ht in {"—", "-"}:
+				return False
+			return not ("normal" in ht and "iyi duyuyor" in ht)
+
+		if _is_hearing_issue(hr) or _is_hearing_issue(hl):
+			hearing_finding_cnt += 1
+
+		hair_low = _normalize_tr_search(hair)
+		if hair_low and hair_low not in {"—", "-"} and "temiz / parazit yok" not in hair_low:
+			hair_finding_cnt += 1
+
+	# 6. Care plans, Vaccines, Supply & Cold Chain
+	vax_done_cnt = sum(1 for vx in vax_rows if int(vx.get("is_done") or 0) == 1)
+	vax_pending_cnt = sum(1 for vx in vax_rows if int(vx.get("is_done") or 0) == 0)
+	vax_students_cnt = len({int(vx["student_id"]) for vx in vax_rows})
+
+	inv_items = get_infirmary_inventory()
+	inv_alerts = get_infirmary_inventory_alerts(days_horizon=30)
+	fridge_total_cnt = len(fridge_period_rows)
+	fridge_alert_cnt = sum(1 for fr in fridge_period_rows if is_fridge_temp_alert(fr.get("fridge_temp_c")))
+
+	return {
+		"start_date": s_d,
+		"end_date": e_d,
+		"start_iso": s_iso,
+		"end_iso": e_iso,
+		"academic_year": active_ay,
+		"students_total": len(student_list),
+		"adults_total": len(adult_list),
+		"classes_total": len(cls_names),
+		"chronic_cnt": chronic_cnt,
+		"allergy_cnt": allergy_cnt,
+		"special_needs_cnt": special_needs_cnt,
+		"regular_med_students": len(regular_med_students),
+		"active_med_plans": active_med_plans,
+		"total_med_plans": len(med_plan_rows),
+		"doses_given_cnt": doses_given_cnt,
+		"visits_total": total_visits,
+		"guardian_notified_cnt": guardian_notified_cnt,
+		"referral_cnt": referral_cnt,
+		"closed_followup_cnt": closed_followup_cnt,
+		"open_followup_cnt": open_followup_cnt,
+		"complaint_distribution": complaint_sorted,
+		"class_visit_distribution": class_visit_sorted,
+		"class_completion": class_completion_rows,
+		"period_measurements_cnt": len(meas_rows),
+		"bmi_eval_total": bmi_eval_total,
+		"bmi_normal": bmi_normal,
+		"bmi_underweight": bmi_underweight,
+		"bmi_overweight": bmi_overweight,
+		"bmi_obese": bmi_obese,
+		"height_eval_total": height_eval_total,
+		"height_stunted": height_stunted,
+		"screened_cohort_cnt": screened_cohort_cnt,
+		"glasses_cnt": glasses_cnt,
+		"vision_suspect_cnt": vision_suspect_cnt,
+		"hearing_finding_cnt": hearing_finding_cnt,
+		"hair_finding_cnt": hair_finding_cnt,
+		"care_plans_period": cp_period_cnt,
+		"care_plans_total": cp_total_cnt,
+		"vax_done_cnt": vax_done_cnt,
+		"vax_pending_cnt": vax_pending_cnt,
+		"vax_students_cnt": vax_students_cnt,
+		"isolation_period_cnt": len(iso_period_rows),
+		"seizure_period_cnt": seizure_period_cnt,
+		"inventory_total_items": len(inv_items),
+		"inventory_critical_cnt": len(inv_alerts["critical_stock"]),
+		"inventory_expired_cnt": len(inv_alerts["expired"]),
+		"inventory_expiring_soon_cnt": len(inv_alerts["expiring_soon"]),
+		"fridge_logs_cnt": fridge_total_cnt,
+		"fridge_alerts_cnt": fridge_alert_cnt,
+	}
+
+
+def _add_meb_grid_table(
+	doc: docx.Document,
+	sub_title: str,
+	headers: list[str],
+	rows: list[list[str]],
+	widths_cm: list[float],
+	center_cols: set[int] | None = None,
+) -> None:
+	if sub_title:
+		p_sub = doc.add_paragraph()
+		p_sub.paragraph_format.space_before = Pt(6)
+		p_sub.paragraph_format.space_after = Pt(2)
+		r_sub = p_sub.add_run(sub_title)
+		r_sub.font.name = "Calibri"
+		r_sub.font.size = Pt(9.5)
+		r_sub.bold = True
+		r_sub.font.color.rgb = RGBColor(30, 41, 59)
+
+	tbl = doc.add_table(rows=max(1, len(rows)) + 1, cols=len(headers))
+	tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+	tbl.autofit = False
+	set_table_borders(tbl, color="CBD5E1", sz="4", val="single")
+	center_set = center_cols or set()
+
+	for c_idx, h_txt in enumerate(headers):
+		cell = tbl.cell(0, c_idx)
+		cell.width = Cm(widths_cm[c_idx])
+		set_cell_background(cell, "0F766E")
+		set_cell_margins(cell, top=45, bottom=45, left=60, right=60)
+		cp = cell.paragraphs[0]
+		cp.paragraph_format.space_after = Pt(0)
+		if c_idx in center_set:
+			cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+		rr = cp.add_run(h_txt)
+		rr.font.name = "Calibri"
+		rr.font.size = Pt(8.5)
+		rr.bold = True
+		rr.font.color.rgb = RGBColor(255, 255, 255)
+
+	if rows:
+		for r_idx, row_vals in enumerate(rows, start=1):
+			bg_hex = "FFFFFF" if r_idx % 2 == 1 else "F8FAFC"
+			for c_idx, val in enumerate(row_vals):
+				cell = tbl.cell(r_idx, c_idx)
+				cell.width = Cm(widths_cm[c_idx])
+				set_cell_background(cell, bg_hex)
+				set_cell_margins(cell, top=40, bottom=40, left=60, right=60)
+				cp = cell.paragraphs[0]
+				cp.paragraph_format.space_after = Pt(0)
+				if c_idx in center_set:
+					cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+				cr = cp.add_run(str(val))
+				cr.font.name = "Calibri"
+				cr.font.size = Pt(8.5)
+				cr.font.color.rgb = RGBColor(15, 23, 42)
+	else:
+		cell = tbl.cell(1, 0)
+		cell.merge(tbl.cell(1, len(headers) - 1))
+		set_cell_margins(cell, top=50, bottom=50, left=60, right=60)
+		cp = cell.paragraphs[0]
+		cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+		cr = cp.add_run("Bu dönem aralığında kayıt bulunmamaktadır.")
+		cr.font.name = "Calibri"
+		cr.font.size = Pt(8.5)
+		cr.italic = True
+		cr.font.color.rgb = RGBColor(100, 116, 139)
+
+
+def build_meb_annual_activity_report_docx(
+	start_date: date | str,
+	end_date: date | str,
+	extra_notes: str = "",
+) -> bytes:
+	"""MEB ve Okul İdaresi için Dönem / Yıl Sonu Resmi Okul Sağlığı ve Revir Hizmetleri Faaliyet Raporunu (.docx) üretir."""
+	if not HAS_DOCX or docx is None:
+		raise RuntimeError("Word belge oluşturucu (python-docx) yüklü değil.")
+
+	stats = collect_meb_annual_activity_stats(start_date, end_date)
+	app_cfg = get_app_settings()
+	school_name = clean_text(app_cfg.get("school_name")) or "Okul / Kurum Reviri"
+	nurse_name = clean_text(app_cfg.get("nurse_name")) or "Okul Revir Sorumlusu"
+	principal_name = clean_text(app_cfg.get("principal_name")) or "Okul Müdürü"
+	ay_name = clean_text(stats["academic_year"].get("name")) or "Aktif Eğitim-Öğretim Yılı"
+
+	s_tr = stats["start_date"].strftime("%d.%m.%Y")
+	e_tr = stats["end_date"].strftime("%d.%m.%Y")
+
+	doc = docx.Document()
+	sec = doc.sections[0]
+	sec.orientation = WD_ORIENT.PORTRAIT
+	sec.page_width = Cm(21.0)
+	sec.page_height = Cm(29.7)
+	sec.top_margin = Cm(1.3)
+	sec.bottom_margin = Cm(1.3)
+	sec.left_margin = Cm(1.4)
+	sec.right_margin = Cm(1.4)
+
+	# 0. Resmi Başlık Anteti
+	p_top = doc.add_paragraph()
+	p_top.alignment = WD_ALIGN_PARAGRAPH.CENTER
+	p_top.paragraph_format.space_before = Pt(0)
+	p_top.paragraph_format.space_after = Pt(1)
+	r_top = p_top.add_run("T.C. MİLLÎ EĞİTİM BAKANLIĞI")
+	r_top.font.name = "Calibri"
+	r_top.font.size = Pt(10.5)
+	r_top.bold = True
+	r_top.font.color.rgb = RGBColor(71, 85, 105)
+
+	p_sch = doc.add_paragraph()
+	p_sch.alignment = WD_ALIGN_PARAGRAPH.CENTER
+	p_sch.paragraph_format.space_before = Pt(0)
+	p_sch.paragraph_format.space_after = Pt(2)
+	r_sch = p_sch.add_run(school_name.upper())
+	r_sch.font.name = "Calibri"
+	r_sch.font.size = Pt(13)
+	r_sch.bold = True
+	r_sch.font.color.rgb = RGBColor(15, 118, 110)
+
+	p_ttl = doc.add_paragraph()
+	p_ttl.alignment = WD_ALIGN_PARAGRAPH.CENTER
+	p_ttl.paragraph_format.space_before = Pt(2)
+	p_ttl.paragraph_format.space_after = Pt(2)
+	r_ttl = p_ttl.add_run("OKUL SAĞLIĞI VE REVİR HİZMETLERİ FAALİYET RAPORU")
+	r_ttl.font.name = "Calibri"
+	r_ttl.font.size = Pt(12)
+	r_ttl.bold = True
+	r_ttl.font.color.rgb = RGBColor(15, 23, 42)
+
+	p_meta = doc.add_paragraph()
+	p_meta.alignment = WD_ALIGN_PARAGRAPH.CENTER
+	p_meta.paragraph_format.space_before = Pt(0)
+	p_meta.paragraph_format.space_after = Pt(8)
+	r_meta = p_meta.add_run(
+		f"Eğitim-Öğretim Yılı: {ay_name}  |  Rapor Dönemi: {s_tr} – {e_tr}  |  Düzenleme: {date.today().strftime('%d.%m.%Y')}"
+	)
+	r_meta.font.name = "Calibri"
+	r_meta.font.size = Pt(9)
+	r_meta.font.color.rgb = RGBColor(71, 85, 105)
+
+	def _pct_str(part: int, whole: int) -> str:
+		if whole <= 0:
+			return "%0.0"
+		return f"%{(part / whole * 100.0):.1f}"
+
+	# Bölüm 1 - Kurum Sağlık Profili Özeti
+	_add_kv_docx_section_table(
+		doc,
+		"BÖLÜM 1 - KURUM SAĞLIK PROFİLİ ÖZETİ",
+		[
+			("Kayıtlı Öğrenci Sayısı", f"{stats['students_total']} öğrenci"),
+			("Kayıtlı Yetişkin / Personel Sayısı", f"{stats['adults_total']} kişi"),
+			("Aktif Sınıf / Şube Sayısı", f"{stats['classes_total']} şube"),
+			("Bilinen Kronik Hastalığı Olan Öğrenci", f"{stats['chronic_cnt']} öğrenci ({_pct_str(stats['chronic_cnt'], stats['students_total'])})"),
+			("Alerjisi Bulunan Öğrenci", f"{stats['allergy_cnt']} öğrenci ({_pct_str(stats['allergy_cnt'], stats['students_total'])})"),
+			("Özel Gereksinimli / Tıbbi Cihaz Kullanan Öğrenci", f"{stats['special_needs_cnt']} öğrenci ({_pct_str(stats['special_needs_cnt'], stats['students_total'])})"),
+			("Düzenli İlaç Takibi Yapılan Öğrenci", f"{stats['regular_med_students']} öğrenci ({stats['active_med_plans']} aktif / {stats['total_med_plans']} toplam plan)"),
+			("Dönem İçi Uygulanan Toplam İlaç Dozu", f"{stats['doses_given_cnt']} doz uygulaması"),
+		],
+	)
+
+	# Bölüm 2 - Revir Başvuru, Müdahale ve Sevk İstatistikleri
+	_add_kv_docx_section_table(
+		doc,
+		"BÖLÜM 2 - REVİR BAŞVURU, MÜDAHALE VE SEVK İSTATİSTİKLERİ",
+		[
+			("Dönem İçi Toplam Revir Başvurusu", f"{stats['visits_total']} başvuru"),
+			("Veli Bilgilendirme Yapılan Vaka Sayısı", f"{stats['guardian_notified_cnt']} vaka ({_pct_str(stats['guardian_notified_cnt'], stats['visits_total'])})"),
+			("Sağlık Kuruluşuna / 112'ye Sevk Edilen Vaka", f"{stats['referral_cnt']} sevk ({_pct_str(stats['referral_cnt'], stats['visits_total'])})"),
+			("Tamamlanan İzlem / Açık İzlem Durumu", f"{stats['closed_followup_cnt']} tamamlandı · {stats['open_followup_cnt']} açık izlem"),
+		],
+	)
+
+	comp_rows = [
+		[c_name, str(cnt), _pct_str(cnt, stats["visits_total"])]
+		for c_name, cnt in stats["complaint_distribution"][:15]
+	]
+	_add_meb_grid_table(
+		doc,
+		"2.1. En Sık Görülen Revir Başvuru Nedenleri Dağılımı",
+		["Başvuru Nedeni / Şikayet", "Başvuru Sayısı", "Oran (%)"],
+		comp_rows,
+		[11.2, 3.5, 3.5],
+		center_cols={1, 2},
+	)
+
+	cls_v_rows = [
+		[c_name, str(cnt), _pct_str(cnt, stats["visits_total"])]
+		for c_name, cnt in stats["class_visit_distribution"]
+	]
+	_add_meb_grid_table(
+		doc,
+		"2.2. Sınıflara / Şubelere Göre Revir Başvuru Sayıları",
+		["Sınıf / Şube / Birim", "Başvuru Sayısı", "Oran (%)"],
+		cls_v_rows,
+		[11.2, 3.5, 3.5],
+		center_cols={1, 2},
+	)
+
+	# Bölüm 3 - Okul Sağlık Taramaları ve WHO Persantil Gelişim Analizi (Anonim İstatistik)
+	p_b3 = doc.add_paragraph()
+	p_b3.paragraph_format.space_before = Pt(8)
+	p_b3.paragraph_format.space_after = Pt(2)
+	r_b3 = p_b3.add_run("BÖLÜM 3 - OKUL SAĞLIK TARAMALARI VE WHO PERSANTİL GELİŞİM ANALİZİ (ANONİM)")
+	r_b3.font.name = "Calibri"
+	r_b3.font.size = Pt(10.5)
+	r_b3.bold = True
+	r_b3.font.color.rgb = RGBColor(15, 118, 110)
+
+	cls_comp_rows = [
+		[r["class_name"], str(r["total"]), str(r["screened"]), str(r["period_screened"]), f"%{r['percent']:.1f}"]
+		for r in stats["class_completion"]
+	]
+	_add_meb_grid_table(
+		doc,
+		"3.1. Sınıf Bazında Sağlık Taraması Tamamlanma Oranları",
+		["Sınıf / Şube", "Mevcut", "Taranan (Genel)", "Dönem İçi Tarama", "Tamamlanma %"],
+		cls_comp_rows,
+		[6.4, 2.5, 3.1, 3.2, 3.0],
+		center_cols={1, 2, 3, 4},
+	)
+
+	b_tot = stats["bmi_eval_total"]
+	h_tot = stats["height_eval_total"]
+	who_rows = [
+		["Normal Gelişim (VKİ 3p–85p)", str(stats["bmi_normal"]), _pct_str(stats["bmi_normal"], b_tot)],
+		["Zayıflık (<3p VKİ)", str(stats["bmi_underweight"]), _pct_str(stats["bmi_underweight"], b_tot)],
+		["Fazla Kilolu (VKİ 85p–97p)", str(stats["bmi_overweight"]), _pct_str(stats["bmi_overweight"], b_tot)],
+		["Obezite (>97p VKİ)", str(stats["bmi_obese"]), _pct_str(stats["bmi_obese"], b_tot)],
+		["Boy Kısalığı / Bodurluk (<3p Boy)", str(stats["height_stunted"]), _pct_str(stats["height_stunted"], h_tot)],
+	]
+	_add_meb_grid_table(
+		doc,
+		f"3.2. Antropometrik WHO Persantil Dağılımı (Değerlendirilen Öğrenci: VKİ={b_tot}, Boy={h_tot})",
+		["WHO Persantil Kategorisi", "Öğrenci Sayısı", "Oran (%)"],
+		who_rows,
+		[11.2, 3.5, 3.5],
+		center_cols={1, 2},
+	)
+
+	scr_den = stats["screened_cohort_cnt"] or stats["students_total"]
+	scr_finding_rows = [
+		["Gözlük Kullanan / Gözlük Önerilen Öğrenci", str(stats["glasses_cnt"]), _pct_str(stats["glasses_cnt"], scr_den)],
+		["Görme Taraması Kusur Şüphesi / Sevk", str(stats["vision_suspect_cnt"]), _pct_str(stats["vision_suspect_cnt"], scr_den)],
+		["İşitme Taraması Bulgusu / Sevk / Cihaz", str(stats["hearing_finding_cnt"]), _pct_str(stats["hearing_finding_cnt"], scr_den)],
+		["Saç / Pediküloz / Hijyen Taraması Bulgusu", str(stats["hair_finding_cnt"]), _pct_str(stats["hair_finding_cnt"], scr_den)],
+	]
+	_add_meb_grid_table(
+		doc,
+		f"3.3. Görme, İşitme ve Saç / Hijyen Taraması Bulgu Özeti (Taranan Öğrenci: {stats['screened_cohort_cnt']})",
+		["Tarama Parametresi", "Bulgu / Kişi Sayısı", "Oran (%)"],
+		scr_finding_rows,
+		[11.2, 3.5, 3.5],
+		center_cols={1, 2},
+	)
+
+	# Bölüm 4 - Hemşirelik Bakım Planları, Bağışıklama ve Revir İşleyişi
+	_add_kv_docx_section_table(
+		doc,
+		"BÖLÜM 4 - HEMŞİRELİK BAKIM PLANLARI, BAĞIŞIKLAMA VE REVİR İŞLEYİŞİ",
+		[
+			("NANDA-I Hemşirelik Bakım Planı Sayısı", f"Dönem içi: {stats['care_plans_period']} · Kümülatif toplam: {stats['care_plans_total']}"),
+			("Aşı Takvimi İzlem Özeti", f"{stats['vax_students_cnt']} öğrenci izleniyor · Tamamlanan doz: {stats['vax_done_cnt']} · Bekleyen doz: {stats['vax_pending_cnt']}"),
+			("Bulaşıcı Hastalık İzolasyon & Nöbet İzlemi", f"Dönem içi izolasyon kaydı: {stats['isolation_period_cnt']} · Epilepsi nöbet kaydı: {stats['seizure_period_cnt']}"),
+			("Revir Sarf Malzeme & Stok/SKT Durumu", f"Toplam {stats['inventory_total_items']} kalem · Kritik stok: {stats['inventory_critical_cnt']} · Miadı geçmiş/yaklaşan: {stats['inventory_expired_cnt']}/{stats['inventory_expiring_soon_cnt']}"),
+			("Soğuk Zincir Buzdolabı Isı Takibi", f"Dönem içi {stats['fridge_logs_cnt']} kontrol · 2.0–8.0 °C dışı sapma uyarısı: {stats['fridge_alerts_cnt']}"),
+		],
+	)
+
+	# Bölüm 5 - Hemşire Değerlendirme Notu ve Resmi İmza Bloğu
+	p_b5 = doc.add_paragraph()
+	p_b5.paragraph_format.space_before = Pt(8)
+	p_b5.paragraph_format.space_after = Pt(3)
+	r_b5 = p_b5.add_run("BÖLÜM 5 - HEMŞİRE DEĞERLENDİRME NOTU VE RESMİ ONAY")
+	r_b5.font.name = "Calibri"
+	r_b5.font.size = Pt(10.5)
+	r_b5.bold = True
+	r_b5.font.color.rgb = RGBColor(15, 118, 110)
+
+	note_body = clean_text(extra_notes) or (
+		"Dönem içerisinde planlanan genel okul sağlığı taramaları, kronik hastalık ve düzenli ilaç izlemleri, "
+		"acil ilk yardım müdahaleleri, bulaşıcı hastalık erken uyarı ve veli bilgilendirme çalışmaları düzenli olarak yürütülmüştür."
+	)
+	note_tbl = doc.add_table(rows=1, cols=1)
+	note_tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+	note_tbl.autofit = False
+	set_table_borders(note_tbl, color="CBD5E1", sz="4", val="single")
+	n_cell = note_tbl.cell(0, 0)
+	n_cell.width = Cm(18.2)
+	set_cell_background(n_cell, "F8FAFC")
+	set_cell_margins(n_cell, top=80, bottom=80, left=100, right=100)
+	np = n_cell.paragraphs[0]
+	np.paragraph_format.space_after = Pt(0)
+	nr = np.add_run(note_body)
+	nr.font.name = "Calibri"
+	nr.font.size = Pt(9.5)
+	nr.font.color.rgb = RGBColor(15, 23, 42)
+
+	_add_signature_docx_block(
+		doc,
+		[
+			("Okul Sağlığı Hemşiresi / Revir Sorumlusu", nurse_name),
+			("Okul Müdürü (Onay - İmza - Mühür)", principal_name),
+		],
+	)
+
+	buf = io.BytesIO()
+	doc.save(buf)
+	return buf.getvalue()
+
+
+def _render_meb_activity_report_tab() -> None:
+	st.markdown("#### 🏛️ MEB & Okul İdaresi Dönem / Yıl Sonu Resmi Faaliyet Raporu")
+	st.caption(
+		"Seçilen tarih aralığı için tüm kurum sağlık profili, revir başvuru/sevk dağılımı, sınıf tarama tamamlanma oranları, WHO persantil gelişim istatistikleri, bakım planları ve stok/soğuk zincir özetini tek A4 Word (.docx) faaliyet raporuna dönüştürür."
+	)
+
+	active_ay = get_active_academic_year()
+	try:
+		def_start = date.fromisoformat(str(active_ay.get("start_date") or "")[:10])
+	except Exception:
+		def_start = date(date.today().year, 9, 1)
+	try:
+		ay_end = date.fromisoformat(str(active_ay.get("end_date") or "")[:10])
+		def_end = min(date.today(), ay_end) if ay_end >= def_start else date.today()
+	except Exception:
+		def_end = date.today()
+	if def_start > def_end:
+		def_start = def_end - timedelta(days=90)
+
+	dc1, dc2 = st.columns(2)
+	with dc1:
+		meb_start = st.date_input("Rapor Başlangıç Tarihi", value=def_start, key="meb_rep_start_date")
+	with dc2:
+		meb_end = st.date_input("Rapor Bitiş Tarihi", value=def_end, key="meb_rep_end_date")
+
+	meb_notes = st.text_area(
+		"📝 Dönem İçi Yapılan Sağlık Eğitimleri, Projeler ve Genel Değerlendirme Notu",
+		value="",
+		height=110,
+		placeholder="Örn: 1. Dönem içinde tüm sınıflara el hijyeni ve ağız-diş sağlığı eğitimi verildi, diyabet/epilepsi acil eylem planları öğretmenlerle paylaşıldı...",
+		key="meb_rep_extra_notes",
+	)
+
+	stats = collect_meb_annual_activity_stats(meb_start, meb_end)
+	mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+	mc1.metric("Kayıtlı Öğrenci", stats["students_total"])
+	mc2.metric("Dönem Başvurusu", stats["visits_total"])
+	mc3.metric("Kurum/112 Sevk", stats["referral_cnt"])
+	mc4.metric("WHO Değerlendirilen", stats["bmi_eval_total"])
+	mc5.metric("Bakım Planı (Toplam)", stats["care_plans_total"])
+
+	st.download_button(
+		"📥 MEB Dönem / Yıl Sonu Resmi Faaliyet Raporunu İndir (.docx)",
+		data=build_meb_annual_activity_report_docx(meb_start, meb_end, extra_notes=meb_notes),
+		file_name=f"MEB_Revir_Faaliyet_Raporu_{meb_start.isoformat()}_{meb_end.isoformat()}.docx",
+		mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		type="primary",
+		use_container_width=True,
+		key="btn_dl_meb_activity_docx",
+	)
+
+
 def render_reports() -> None:
-	hdr_col1, hdr_col2 = st.columns([3.8, 1.4])
+	hdr_col1, hdr_col2, hdr_col3 = st.columns([2.6, 1.7, 1.3])
 	with hdr_col1:
 		st.markdown("## 🖨️ Kişi ve Sınıf Raporları (Yazdırma & İndirme)")
-		st.caption("Resmi kurum antetli, Word (.docx) veya yazdırılabilir formatta bireysel öğrenci ve tüm sınıf sağlık raporları oluşturun.")
+		st.caption("Resmi kurum antetli, tarih bazlı toplu tarama & persantil raporları (Word, Excel, HTML) veya bireysel öğrenci sağlık dosyası çıktıları oluşturun.")
 	with hdr_col2:
 		st.markdown("<div style='height: 4px'></div>", unsafe_allow_html=True)
-		if st.button("⚙️ Rapor Çıktı Ayarları", key="btn_open_report_settings_modal", type="secondary", use_container_width=True, help="Raporda hangi bölümlerin ve alanların yer alacağını özelleştirin"):
+		if st.button("⚙️ Rapor İçeriği & Sütun Ayarları (Pop-up)", key="btn_open_dyn_report_builder_top", type="primary", use_container_width=True, help="Okul taraması ve persantil raporlarının sütunlarını, şablonunu ve imzalarını pop-up içinden özelleştirin"):
+			pref_c = st.session_state.get("dyn_rep_cls_select")
+			_trigger_open_report_builder("🖨️ Raporlar", default_classes=pref_c if pref_c else None)
+	with hdr_col3:
+		st.markdown("<div style='height: 4px'></div>", unsafe_allow_html=True)
+		if st.button("⚙️ Kişi Raporu Ayarları", key="btn_open_report_settings_modal", type="secondary", use_container_width=True, help="Bireysel ve klasik sınıf dosyası raporlarında hangi bölümlerin yer alacağını özelleştirin"):
+			_close_dyn_report_builder_dialog()
 			open_report_settings_dialog()
 
 	report_cfg = get_report_settings()
 	all_classes = [c for c in get_classes() if c != "Sivil / Diğer"]
 
+	tab_dyn_scr, tab_meb_annual, tab_classic = st.tabs([
+		"🏫 Tarih Bazlı Toplu Tarama & Persantil Raporu",
+		"🏛️ MEB Dönem / Yıl Sonu Resmi Faaliyet Raporu",
+		"👤 Kişi & Sınıf Sağlık Dosyası Raporları",
+	])
+	with tab_dyn_scr:
+		render_dynamic_screening_reports_tab()
+	with tab_meb_annual:
+		_render_meb_activity_report_tab()
+	with tab_classic:
+		_render_classic_reports_content(all_classes, report_cfg)
+
+	dlg_state_rep = st.session_state.get("_dyn_rep_dialog_open")
+	if isinstance(dlg_state_rep, dict) and dlg_state_rep.get("owner_page") == "🖨️ Raporlar":
+		open_report_config_dialog(
+			default_classes=dlg_state_rep.get("default_classes"),
+			default_dates=dlg_state_rep.get("default_dates"),
+		)
+
+
+def _render_classic_reports_content(all_classes: list[str], report_cfg: dict) -> None:
 	# Report mode selection: Single Person or Whole Class
 	col_m1, col_m2 = st.columns([1.2, 2.5])
 	with col_m1:
@@ -16868,7 +26646,7 @@ def render_settings() -> None:
 											connection.execute("UPDATE classes SET name=?, teacher_name=? WHERE id=?", (target_name, target_teacher, old_row["id"]))
 									else:
 										connection.execute("UPDATE classes SET teacher_name=? WHERE id=?", (target_teacher, old_row["id"]))
-							clear_all_data_caches()
+							sync_all_person_data_files()
 							st.success(f"'{sel_old_grp}' bilgileri güncellendi.")
 							st.rerun()
 					with b_del:
@@ -16880,6 +26658,7 @@ def render_settings() -> None:
 								if old_row:
 									connection.execute("UPDATE OR IGNORE students SET class_id=? WHERE class_id=?", (unassigned_id, old_row["id"]))
 									connection.execute("DELETE FROM classes WHERE id=?", (old_row["id"],))
+							sync_all_person_data_files()
 							st.success(f"'{sel_old_grp}' sınıfı çıkarıldı.")
 							st.rerun()
 
@@ -16980,6 +26759,70 @@ def render_settings() -> None:
 
 			st.info(f"📌 **Aktif Çalışma Yılı:** `{active_ay['name']}` · **Veritabanı Dosyası:** `{curr_db.name}` · **Kişi Dosyaları:** `{pfile_count} adet` · **Depo Evrakları:** `{evrak_count} adet`")
 
+			# Otomatik Yedekleme & Veri Kurtarma Merkezi
+			with st.container(border=True):
+				st.markdown("#### 💾 Otomatik Yedekleme & Veri Kurtarma Merkezi")
+				st.caption(
+					f"Uygulama her gün ilk açılışta `{AUTO_BACKUP_DIR.name}/` klasörüne SQLite `backup()` API'siyle otomatik yedek alır (en fazla 15 güncel yedek saklanır)."
+				)
+				bkp_flash = st.session_state.pop("_auto_backup_flash", None)
+				if isinstance(bkp_flash, str) and bkp_flash:
+					st.success(bkp_flash)
+				bkp_rows = list_auto_backups()
+				act_bkp_c1, act_bkp_c2 = st.columns([1.4, 2.2])
+				with act_bkp_c1:
+					if st.button("⚡ Şimdi Manuel Yedek Oluştur", type="primary", key="btn_manual_auto_backup", use_container_width=True):
+						created_bkp = run_daily_auto_backup(max_backups=15, force=True)
+						if created_bkp:
+							st.session_state["_auto_backup_flash"] = f"✅ Yeni veritabanı yedeği oluşturuldu: `{created_bkp.name}` ({format_file_size(created_bkp.stat().st_size)})"
+							st.rerun()
+						else:
+							st.warning("⚠️ Aktif veritabanı dosyası bulunamadığı için yedek oluşturulamadı.")
+				with act_bkp_c2:
+					st.caption(f"📁 Yedek Klasörü: `{AUTO_BACKUP_DIR}` · Toplam Saklanan Yedek: **{len(bkp_rows)} / 15**")
+
+				if bkp_rows:
+					bkp_table = pd.DataFrame([
+						{
+							"Yedek Dosyası": r["name"],
+							"Tarih / Saat": r["modified_at"],
+							"Boyut": r["size_str"],
+						}
+						for r in bkp_rows
+					])
+					st.dataframe(bkp_table, width="stretch", hide_index=True, height=min(240, max(120, 48 + len(bkp_rows) * 35)))
+
+					bkp_map = {f"{r['name']} ({r['modified_at']} · {r['size_str']})": r for r in bkp_rows}
+					sel_bkp_lbl = st.selectbox("İşlem Yapılacak Yedeği Seçin", list(bkp_map.keys()), key="sel_auto_backup_file")
+					sel_bkp = bkp_map[sel_bkp_lbl]
+					sel_bkp_path: Path = sel_bkp["path"]
+
+					bkp_btn1, bkp_btn2 = st.columns(2)
+					with bkp_btn1:
+						st.download_button(
+							"📥 Seçili Yedeği Bilgisayara İndir",
+							data=sel_bkp_path.read_bytes() if sel_bkp_path.exists() else b"",
+							file_name=sel_bkp_path.name,
+							mime="application/octet-stream",
+							type="secondary",
+							key="btn_dl_selected_auto_backup",
+							use_container_width=True,
+						)
+					with bkp_btn2:
+						if st.button("⏪ Seçili Yedeği Geri Yükle (Restore)", type="secondary", key="btn_restore_selected_auto_backup", use_container_width=True):
+							try:
+								ok_rst = restore_auto_backup_file(sel_bkp_path)
+								if ok_rst:
+									st.session_state["_auto_backup_flash"] = f"✅ `{sel_bkp_path.name}` yedeği başarıyla geri yüklendi! Tüm önbellekler temizlendi."
+									st.rerun()
+								else:
+									st.error("Yedek dosyası bulunamadı.")
+							except Exception as rst_exc:
+								st.error(f"Geri yükleme hatası: {rst_exc}")
+				else:
+					st.info("Henüz `oto_yedekler` klasöründe kayıtlı otomatik yedek yok. Yukarıdan hemen oluşturabilirsiniz.")
+
+			st.markdown("")
 			# 1. BÜYÜK TAM SİSTEM YEDEĞİ (.ZIP)
 			with st.container(border=True):
 				st.markdown("#### 📦 Eksiksiz Sistem Yedeği (.ZIP İndir)")
@@ -17215,6 +27058,7 @@ def main() -> None:
 
 	app_style_tag = build_app_css(font_css, font_url, base_fsize, pad_top, theme, theme_name, dark_mode_mode)
 	st.markdown(app_style_tag, unsafe_allow_html=True)
+	inject_smart_input_ux()
 
 	school_title = app_cfg.get("school_name", "")
 	nurse_title = app_cfg.get("nurse_name", "")
@@ -17255,7 +27099,7 @@ def main() -> None:
 				pass
 		if active_person:
 			st.markdown("<hr style='margin:8px 0 6px 0; border:none; border-top:1px solid var(--line);'>", unsafe_allow_html=True)
-			st.caption(f"📌 **Seçili Kişi:** {active_person['full_name']}")
+			st.caption(f"📌 **Seçili Kişi:** {mask_kvkk_value(active_person['full_name'], 'name')}")
 			if st.button("📂 Kişi Dosyası", key="fab_dossier_btn", use_container_width=True):
 				open_person_dossier_dialog(active_person["id"])
 
@@ -17275,13 +27119,20 @@ def main() -> None:
 		if nurse_title:
 			st.caption(f"👩‍⚕️ **Revir:** {nurse_title}")
 
+		st.toggle(
+			"🛡️ KVKK Gizlilik Modu",
+			key="kvkk_privacy_mode",
+			value=False,
+			help="Açıldığında tablolardaki isimler, telefonlar ve tıbbi tanılar yıldızlanarak maskelenir.",
+		)
+
 		cur_idx = PAGES.index(cur_page_val)
 		page = st.radio("Menü", PAGES, index=cur_idx, key="main_menu_page", label_visibility="collapsed")
 		st.divider()
 		if active_person:
 			with st.container(border=True):
 				st.caption("📌 **Aktif Seçili Kişi**")
-				st.markdown(f"**{active_person['full_name']}**")
+				st.markdown(f"**{mask_kvkk_value(active_person['full_name'], 'name')}**")
 				sno_txt = f" · No: {active_person['student_no']}" if active_person['student_no'] else ""
 				st.caption(f"{active_person['class_name']}{sno_txt}")
 			sb_c1, sb_c2 = st.columns([1.5, 1])

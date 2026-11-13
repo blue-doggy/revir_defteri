@@ -20,6 +20,7 @@ egitim_yillari/
 
 # Otomatik ve Manuel Yedek Dosyalari
 otomatik_guncelleme_yedekleri/
+oto_yedekler/
 *.zip
 *.bak
 
