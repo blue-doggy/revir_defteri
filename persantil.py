@@ -1,5 +1,6 @@
 from __future__ import annotations
 import mimetypes
+import os
 
 import copy
 import sys
@@ -20,37 +21,128 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, Iterator
 
-import altair as alt
 import pandas as pd
 import streamlit as st
-from openpyxl import Workbook
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
-try:
-	import docx
-	from docx.shared import Inches, Pt, RGBColor, Cm
-	from docx.enum.text import WD_ALIGN_PARAGRAPH
-	from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
-	from docx.enum.section import WD_ORIENT
-	from docx.oxml import parse_xml
-	from docx.oxml.ns import nsdecls
-	HAS_DOCX = True
-except ImportError:
-	docx = None
-	Inches = Pt = RGBColor = Cm = None
-	WD_ALIGN_PARAGRAPH = WD_TABLE_ALIGNMENT = WD_ALIGN_VERTICAL = WD_ORIENT = None
-	parse_xml = nsdecls = None
-	HAS_DOCX = False
+
+# Ağır kütüphaneler (altair, openpyxl, python-docx) açılışta değil, ilk kullanıldıklarında tembel yüklenir.
+docx = None
+Inches = Pt = RGBColor = Cm = None
+WD_ALIGN_PARAGRAPH = WD_TABLE_ALIGNMENT = WD_ALIGN_VERTICAL = WD_ORIENT = None
+parse_xml = nsdecls = None
+HAS_DOCX: bool | None = None
+
+Workbook = None
+Alignment = Border = Font = PatternFill = Side = None
+get_column_letter = None
+HAS_OPENPYXL: bool | None = None
 
 
-APP_DIR = Path(__file__).resolve().parent
-APP_VERSION = "1.0.0"
-APP_ICON_PATH = APP_DIR / "app_icon.png"
-APP_ICON_ICO = APP_DIR / "app_icon.ico"
+def _ensure_docx_loaded() -> bool:
+	"""python-docx paketini yalnızca Word çıktısı veya önizlemesi gerektiğinde yükler."""
+	global docx, Inches, Pt, RGBColor, Cm
+	global WD_ALIGN_PARAGRAPH, WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL, WD_ORIENT
+	global parse_xml, nsdecls, HAS_DOCX
+	if HAS_DOCX is not None and (not HAS_DOCX or docx is not None):
+		return bool(HAS_DOCX)
+	try:
+		import docx as _docx
+		from docx.shared import Inches as _Inches, Pt as _Pt, RGBColor as _RGBColor, Cm as _Cm
+		from docx.enum.text import WD_ALIGN_PARAGRAPH as _WD_ALIGN_PARAGRAPH
+		from docx.enum.table import WD_TABLE_ALIGNMENT as _WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL as _WD_ALIGN_VERTICAL
+		from docx.enum.section import WD_ORIENT as _WD_ORIENT
+		from docx.oxml import parse_xml as _parse_xml
+		from docx.oxml.ns import nsdecls as _nsdecls
+		docx = _docx
+		Inches, Pt, RGBColor, Cm = _Inches, _Pt, _RGBColor, _Cm
+		WD_ALIGN_PARAGRAPH = _WD_ALIGN_PARAGRAPH
+		WD_TABLE_ALIGNMENT = _WD_TABLE_ALIGNMENT
+		WD_ALIGN_VERTICAL = _WD_ALIGN_VERTICAL
+		WD_ORIENT = _WD_ORIENT
+		parse_xml, nsdecls = _parse_xml, _nsdecls
+		HAS_DOCX = True
+	except ImportError:
+		docx = None
+		Inches = Pt = RGBColor = Cm = None
+		WD_ALIGN_PARAGRAPH = WD_TABLE_ALIGNMENT = WD_ALIGN_VERTICAL = WD_ORIENT = None
+		parse_xml = nsdecls = None
+		HAS_DOCX = False
+	return bool(HAS_DOCX)
+
+
+def _ensure_openpyxl_loaded() -> bool:
+	"""openpyxl paketini yalnızca Excel şablonu/raporu oluşturulduğunda yükler."""
+	global Workbook, Alignment, Border, Font, PatternFill, Side, get_column_letter, HAS_OPENPYXL
+	if HAS_OPENPYXL is not None and (not HAS_OPENPYXL or Workbook is not None):
+		return bool(HAS_OPENPYXL)
+	try:
+		from openpyxl import Workbook as _Workbook
+		from openpyxl.styles import (
+			Alignment as _Alignment,
+			Border as _Border,
+			Font as _Font,
+			PatternFill as _PatternFill,
+			Side as _Side,
+		)
+		from openpyxl.utils import get_column_letter as _get_column_letter
+		Workbook = _Workbook
+		Alignment = _Alignment
+		Border = _Border
+		Font = _Font
+		PatternFill = _PatternFill
+		Side = _Side
+		get_column_letter = _get_column_letter
+		HAS_OPENPYXL = True
+	except ImportError:
+		Workbook = None
+		Alignment = Border = Font = PatternFill = Side = None
+		get_column_letter = None
+		HAS_OPENPYXL = False
+	return bool(HAS_OPENPYXL)
+
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", os.environ.get("REVIR_RESOURCE_DIR") or _SCRIPT_DIR))
+_DATA_DIR_ENV = os.environ.get("REVIR_DATA_DIR", "").strip()
+if _DATA_DIR_ENV:
+	_RESOLVED_APP_DIR = Path(_DATA_DIR_ENV).resolve()
+elif getattr(sys, "frozen", False):
+	_RESOLVED_APP_DIR = Path(sys.executable).resolve().parent
+else:
+	_RESOLVED_APP_DIR = _SCRIPT_DIR
+
+
+def _resolve_bundled_asset(rel_name: str) -> Path:
+	"""Paketli (.exe) modda sabit varlıkları önce uygulama klasöründe, yoksa PyInstaller kaynak dizininde bulur."""
+	for base_dir in (_RESOLVED_APP_DIR, _BUNDLE_DIR, _SCRIPT_DIR):
+		candidate = base_dir / rel_name
+		if candidate.exists():
+			return candidate
+	return _BUNDLE_DIR / rel_name
+
+
+_DEFAULT_APP_VERSION = "1.2.0"
+
+
+def _load_app_version() -> str:
+	v_path = _resolve_bundled_asset("VERSION")
+	try:
+		if v_path.exists():
+			txt = v_path.read_text(encoding="utf-8").strip()
+			if txt:
+				return txt
+	except Exception:
+		pass
+	return _DEFAULT_APP_VERSION
+
+
+APP_DIR = _RESOLVED_APP_DIR
+APP_VERSION = _load_app_version()
+APP_ICON_PATH = _resolve_bundled_asset("app_icon.png")
+APP_ICON_ICO = _resolve_bundled_asset("app_icon.ico")
 DB_PATH = APP_DIR / "revir_defteri.db"
 PERSON_DATA_DIR = APP_DIR / "kisi_verileri"
-PERSANTIL_DATA_DIR = APP_DIR / "persantil veriler" 
-TR_LOCATIONS_PATH = APP_DIR / "turkiye-il-ilce-mahalle-koy.json"
+PERSANTIL_DATA_DIR = _resolve_bundled_asset("persantil veriler")
+TR_LOCATIONS_PATH = _resolve_bundled_asset("turkiye-il-ilce-mahalle-koy.json")
 EVRAKLAR_DIR = APP_DIR / "revir_evraklari"
 EGITIM_YILLARI_DIR = APP_DIR / "egitim_yillari"
 AUTO_BACKUP_DIR = APP_DIR / "oto_yedekler"
@@ -249,14 +341,15 @@ def is_dark_mode_active(app_cfg: dict | None = None) -> bool:
 	return "Dark" in theme_name or "Koyu" in theme_name
 
 
+@st.cache_data(show_spinner=False)
 def build_app_css(font_css: str, font_url: str, base_fsize: str, pad_top: str, theme: dict[str, str], theme_name: str, dark_mode_mode: str) -> str:
 	is_theme_dark = "Dark" in theme_name or "Koyu" in theme_name
 	is_forced_dark = (dark_mode_mode == "Açık (Daima Karanlık Mod - Yüksek Kontrastlı Koyu)") or is_theme_dark
 	is_forced_light = (dark_mode_mode == "Kapalı (Dark Mode'a Adapte Olma - Sabit Aydınlık)") and not is_theme_dark
 	is_glass = ("Glass" in theme_name) or ("Cam" in theme_name)
+	effective_font_css = font_css or "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
 
 	base_rules = f"""
-	@import url('{font_url}');
 	:root {{
 		--ink: {theme['ink']};
 		--teal: {theme['teal']};
@@ -273,8 +366,8 @@ def build_app_css(font_css: str, font_url: str, base_fsize: str, pad_top: str, t
 		--text-heading: {theme['ink']};
 		--text-muted: #475569;
 	}}
-	html, body, [class*="css"] {{ font-family: {font_css}; color: var(--text-main); font-size: {base_fsize}; }}
-	h1, h2, h3, h4, h5, h6 {{ font-family: {font_css}; letter-spacing: 0; color: var(--text-heading); font-weight: 700; }}
+	html, body, [class*="css"] {{ font-family: {effective_font_css}; color: var(--text-main); font-size: {base_fsize}; }}
+	h1, h2, h3, h4, h5, h6 {{ font-family: {effective_font_css}; letter-spacing: 0; color: var(--text-heading); font-weight: 700; }}
 	.stApp {{ background: var(--bg-page); }}
 	.block-container {{ padding-top: {pad_top} !important; padding-bottom: 2rem !important; }}
 	[data-testid="stSidebar"] {{ background: var(--sidebar-bg); border-right: 1px solid var(--line); }}
@@ -736,9 +829,13 @@ def build_app_css(font_css: str, font_url: str, base_fsize: str, pad_top: str, t
 	}
 	"""
 
-	preconnect_tags = '<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
+	async_font_tag = (
+		f'<link rel="stylesheet" href="{html.escape(font_url, quote=True)}" media="print" onload="this.media=\'all\'">'
+		if font_url
+		else ""
+	)
 	if is_forced_dark:
-		return f"{preconnect_tags}<style>{base_rules}{dark_rules}</style>"
+		return f"{async_font_tag}<style>{base_rules}{dark_rules}</style>"
 	elif is_forced_light:
 		light_lock = f"""
 		:root, .stApp {{
@@ -776,7 +873,7 @@ def build_app_css(font_css: str, font_url: str, base_fsize: str, pad_top: str, t
 			color: #0f172a !important;
 		}}
 		"""
-		return f"{preconnect_tags}<style>{base_rules}{light_lock}</style>"
+		return f"{async_font_tag}<style>{base_rules}{light_lock}</style>"
 	else:
 		# Otomatik (Sistem Temasına ve Dark Mode'a Uyarla)
 		auto_rules = f"""
@@ -787,7 +884,7 @@ def build_app_css(font_css: str, font_url: str, base_fsize: str, pad_top: str, t
 			{dark_rules}
 		}}
 		"""
-		return f"{preconnect_tags}<style>{base_rules}{auto_rules}</style>"
+		return f"{async_font_tag}<style>{base_rules}{auto_rules}</style>"
 
 
 FONT_OPTIONS: dict[str, tuple[str, str]] = {
@@ -1247,8 +1344,11 @@ def get_tr_provinces() -> list[str]:
 	if rows:
 		return [r["province"] for r in rows]
 	if TR_LOCATIONS_PATH.exists():
-		data = json.loads(TR_LOCATIONS_PATH.read_text(encoding="utf-8"))
-		return sorted(data.keys())
+		import_tr_locations_to_db()
+		with connect_db() as connection:
+			rows = connection.execute("SELECT DISTINCT province FROM tr_locations ORDER BY province").fetchall()
+		if rows:
+			return [r["province"] for r in rows]
 	return ["Amasya", "Ankara", "İstanbul", "İzmir"]
 
 
@@ -1264,8 +1364,14 @@ def get_tr_districts(province: str) -> list[str]:
 	if rows:
 		return [r["district"] for r in rows]
 	if TR_LOCATIONS_PATH.exists():
-		data = json.loads(TR_LOCATIONS_PATH.read_text(encoding="utf-8"))
-		return sorted(data.get(province, {}).keys())
+		import_tr_locations_to_db()
+		with connect_db() as connection:
+			rows = connection.execute(
+				"SELECT DISTINCT district FROM tr_locations WHERE province=? ORDER BY district",
+				(province,),
+			).fetchall()
+		if rows:
+			return [r["district"] for r in rows]
 	return ["Merkez"]
 
 
@@ -1281,8 +1387,17 @@ def get_tr_villages(province: str, district: str) -> list[str]:
 	if rows:
 		return [r["village"] for r in rows]
 	if TR_LOCATIONS_PATH.exists():
-		data = json.loads(TR_LOCATIONS_PATH.read_text(encoding="utf-8"))
-		return sorted(data.get(province, {}).get(district, []))
+		with connect_db() as connection:
+			has_any = connection.execute("SELECT 1 FROM tr_locations LIMIT 1").fetchone()
+		if not has_any:
+			import_tr_locations_to_db()
+			with connect_db() as connection:
+				rows = connection.execute(
+					"SELECT village FROM tr_locations WHERE province=? AND district=? ORDER BY village",
+					(province, district),
+				).fetchall()
+			if rows:
+				return [r["village"] for r in rows]
 	return []
 
 
@@ -1699,11 +1814,36 @@ def initialize_db() -> None:
 
 		# Resilient person_type normalization
 		connection.execute("UPDATE students SET person_type='Öğrenci' WHERE person_type LIKE '%renci%'")
+		connection.execute(
+			"INSERT INTO app_settings(key, value) VALUES ('db_schema_version', '1.2') "
+			"ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+		)
+
 
 @st.cache_resource(show_spinner=False)
 def ensure_db_initialized() -> bool:
-	"""Tek seferlik veritabanı şema ve başlangıç kontrolü (Uygulama açılışında 1 kere çalışır, rerun'larda atlanır)."""
-	initialize_db()
+	"""Tek seferlik veritabanı şema ve başlangıç kontrolü (Hızlı başlangıç: db_schema_version == '1.2' ise tam taramayı atlar)."""
+	db_path = get_current_db_path()
+	needs_init = True
+	if db_path and db_path.exists() and db_path.stat().st_size > 0:
+		check_conn = None
+		try:
+			check_conn = sqlite3.connect(db_path, timeout=5)
+			row = check_conn.execute(
+				"SELECT value FROM app_settings WHERE key='db_schema_version'"
+			).fetchone()
+			if row and str(row[0]) == "1.2":
+				needs_init = False
+		except Exception:
+			needs_init = True
+		finally:
+			if check_conn is not None:
+				try:
+					check_conn.close()
+				except Exception:
+					pass
+	if needs_init:
+		initialize_db()
 	try:
 		run_daily_auto_backup()
 	except Exception:
@@ -1800,6 +1940,10 @@ def set_active_academic_year(year_id: int) -> None:
 			if not year_db.exists() and DB_PATH.exists():
 				import shutil
 				shutil.copy2(DB_PATH, year_db)
+	try:
+		ensure_db_initialized.clear()
+	except Exception:
+		pass
 	clear_all_data_caches()
 
 
@@ -4598,12 +4742,14 @@ def build_vaccination_matrix_html(student_id: int, birth_date: str | None = None
 
 
 def set_cell_background(cell, fill_hex: str) -> None:
+	_ensure_docx_loaded()
 	tcPr = cell._element.get_or_add_tcPr()
 	shd = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{fill_hex}"/>')
 	tcPr.append(shd)
 
 
 def set_cell_margins(cell, top: int = 80, bottom: int = 80, left: int = 100, right: int = 100) -> None:
+	_ensure_docx_loaded()
 	tcPr = cell._element.get_or_add_tcPr()
 	tcMar = parse_xml(f'''
 		<w:tcMar {nsdecls("w")}>
@@ -4617,6 +4763,7 @@ def set_cell_margins(cell, top: int = 80, bottom: int = 80, left: int = 100, rig
 
 
 def set_table_borders(table, color: str = "CBD5E1", sz: str = "4", val: str = "single") -> None:
+	_ensure_docx_loaded()
 	tblPr = table._element.xpath('w:tblPr')
 	if tblPr:
 		borders = parse_xml(f'''
@@ -4633,6 +4780,7 @@ def set_table_borders(table, color: str = "CBD5E1", sz: str = "4", val: str = "s
 
 
 def add_styled_df_table(doc: docx.Document, df: pd.DataFrame | None, title: str | None = None, empty_msg: str = "Kayıt bulunmuyor.") -> None:
+	_ensure_docx_loaded()
 	if title:
 		p_t = doc.add_paragraph()
 		p_t.paragraph_format.space_before = Pt(8)
@@ -4697,6 +4845,8 @@ def add_styled_df_table(doc: docx.Document, df: pd.DataFrame | None, title: str 
 
 
 def build_vaccination_card_docx(student_id: int) -> bytes:
+	if not _ensure_docx_loaded() or docx is None:
+		raise RuntimeError("Word belge oluşturucu (python-docx) yüklü değil.")
 	app_cfg = get_app_settings()
 	inst_top = app_cfg.get("institution_top_header") or "T.C. MİLLÎ EĞİTİM BAKANLIĞI"
 	inst_school = app_cfg.get("school_name") or ""
@@ -5869,6 +6019,8 @@ def set_class_teacher(class_name: str, teacher_name: str) -> None:
 
 
 def make_eokul_dogum_ve_yas_template() -> bytes:
+	if not _ensure_openpyxl_loaded() or Workbook is None:
+		raise RuntimeError("Excel oluşturucu (openpyxl) yüklü değil.")
 	wb = Workbook()
 	ws = wb.active
 	ws.title = "e-Okul Şube Doğum Tarihleri"
@@ -7040,10 +7192,13 @@ def extract_pdf_text(content: bytes) -> str:
 		for page in document:
 			page_text = page.get_text("text")
 			if len(re.sub(r"\s", "", page_text)) < 30:
-				pixmap = page.get_pixmap(dpi=240, alpha=False)
-				image = np.asarray(Image.open(BytesIO(pixmap.tobytes("png"))).convert("RGB"))
-				ocr_lines = get_ocr_reader().readtext(image, detail=0, paragraph=False)
-				page_text = "\n".join(ocr_lines)
+				try:
+					pixmap = page.get_pixmap(dpi=240, alpha=False)
+					image = np.asarray(Image.open(BytesIO(pixmap.tobytes("png"))).convert("RGB"))
+					ocr_lines = get_ocr_reader().readtext(image, detail=0, paragraph=False)
+					page_text = "\n".join(ocr_lines)
+				except ImportError:
+					pass
 			pages.append(page_text)
 			widgets = page.widgets()
 			if widgets:
@@ -7301,6 +7456,8 @@ def vital_assessment(indicator: str, value: float, student: sqlite3.Row, on_date
 
 
 def make_vital_reference_template() -> bytes:
+	if not _ensure_openpyxl_loaded() or Workbook is None:
+		raise RuntimeError("Excel oluşturucu (openpyxl) yüklü değil.")
 	workbook = Workbook()
 	sheet = workbook.active
 	sheet.title = "Vital Referansları"
@@ -7359,28 +7516,50 @@ def get_builtin_hcfa_lms_rows() -> list[tuple[str, str, int, float, float, float
 
 
 _LMS_CACHE: dict[tuple[str, str, int], dict] = {}
+_LMS_CACHE_DB_KEY: list[str | None] = [None]
 
 
-def _ensure_lms_cache() -> None:
-	if _LMS_CACHE:
-		return
+@st.cache_resource(show_spinner=False)
+def _load_lms_reference_cache(db_key: str) -> dict[tuple[str, str, int], dict]:
+	"""WHO LMS referans tablosunu disk/Excel okumadan tek SQL sorgusuyla RAM'de önbelleğe alır."""
+	cache: dict[tuple[str, str, int], dict] = {}
 	with connect_db() as connection:
-		rows = connection.execute("SELECT indicator, sex, age_months, l, m, s FROM lms_reference").fetchall()
-		if len(rows) < 100:
+		cnt_row = connection.execute("SELECT COUNT(*) FROM lms_reference").fetchone()
+		ref_cnt = int(cnt_row[0]) if cnt_row else 0
+		if ref_cnt <= 1000:
 			try:
 				import_builtin_who_references()
-				rows = connection.execute("SELECT indicator, sex, age_months, l, m, s FROM lms_reference").fetchall()
 			except Exception:
 				pass
+		rows = connection.execute(
+			"SELECT indicator, sex, age_months, l, m, s FROM lms_reference"
+		).fetchall()
 	for r in rows:
-		_LMS_CACHE[(r["indicator"], r["sex"], int(r["age_months"]))] = {
+		cache[(r["indicator"], r["sex"], int(r["age_months"]))] = {
 			"l": float(r["l"]),
 			"m": float(r["m"]),
 			"s": float(r["s"]),
 			"age_months": int(r["age_months"]),
 		}
 	for ind, sex, mo, l_v, m_v, s_v in get_builtin_hcfa_lms_rows():
-		_LMS_CACHE.setdefault((ind, sex, mo), {"l": l_v, "m": m_v, "s": s_v, "age_months": mo})
+		cache.setdefault((ind, sex, mo), {"l": l_v, "m": m_v, "s": s_v, "age_months": mo})
+	return cache
+
+
+def _ensure_lms_cache() -> dict[tuple[str, str, int], dict]:
+	db_key = str(get_current_db_path())
+	if _LMS_CACHE and _LMS_CACHE_DB_KEY[0] == db_key:
+		return _LMS_CACHE
+	if not _LMS_CACHE and _LMS_CACHE_DB_KEY[0] == db_key:
+		try:
+			_load_lms_reference_cache.clear()
+		except Exception:
+			pass
+	loaded = _load_lms_reference_cache(db_key)
+	_LMS_CACHE.clear()
+	_LMS_CACHE.update(loaded)
+	_LMS_CACHE_DB_KEY[0] = db_key
+	return _LMS_CACHE
 
 
 def get_lms_row(indicator: str, sex: str, months: int) -> dict | None:
@@ -8033,6 +8212,10 @@ def parse_lms_file(uploaded_file) -> tuple[int, list[str]]:
 			)
 			inserted += 1
 	_LMS_CACHE.clear()
+	try:
+		_load_lms_reference_cache.clear()
+	except Exception:
+		pass
 	return inserted, issues
 
 
@@ -8132,6 +8315,10 @@ def import_builtin_who_references() -> tuple[int, int]:
 		)
 		inserted_lms += len(hc_rows)
 	_LMS_CACHE.clear()
+	try:
+		_load_lms_reference_cache.clear()
+	except Exception:
+		pass
 	inserted_wfa = 0
 	try:
 		inserted_wfa = import_who_wfa_reference_files()
@@ -8141,6 +8328,8 @@ def import_builtin_who_references() -> tuple[int, int]:
 
 
 def make_roster_template() -> bytes:
+	if not _ensure_openpyxl_loaded() or Workbook is None:
+		raise RuntimeError("Excel oluşturucu (openpyxl) yüklü değil.")
 	workbook = Workbook()
 	sheet = workbook.active
 	sheet.title = "Öğrenciler"
@@ -8179,6 +8368,8 @@ def make_roster_template() -> bytes:
 def workbook_download(students: pd.DataFrame, visits: pd.DataFrame, measurements: pd.DataFrame,
 					  vitals: pd.DataFrame | None = None, lab_results: pd.DataFrame | None = None,
 					  health_profiles: pd.DataFrame | None = None, care_plans: pd.DataFrame | None = None) -> bytes:
+	if not _ensure_openpyxl_loaded():
+		raise RuntimeError("Excel oluşturucu (openpyxl) yüklü değil.")
 	output = BytesIO()
 	with pd.ExcelWriter(output, engine="openpyxl") as writer:
 		students.drop(columns=["id"], errors="ignore").to_excel(writer, sheet_name="Öğrenciler", index=False)
@@ -8470,11 +8661,12 @@ def get_students_enriched(class_name: str | None = None, person_type: str | None
 	if df.empty:
 		return df
 
+	_ensure_lms_cache()
 	today = date.today()
 	out_rows = []
-	for _, r in df.iterrows():
-		sex = r["cinsiyet"]
-		b_date = r["dogum_tarihi"]
+	for r in df.to_dict("records"):
+		sex = r["cinsiyet"] if pd.notna(r["cinsiyet"]) else None
+		b_date = r["dogum_tarihi"] if pd.notna(r["dogum_tarihi"]) else None
 		cur_age_mo = age_in_months(b_date, today) if b_date else None
 		m_age_mo = int(r["olcum_yas_ay"]) if pd.notna(r["olcum_yas_ay"]) else None
 		if m_age_mo is None and b_date and pd.notna(r["son_olcum_tarihi"]):
@@ -8522,8 +8714,8 @@ def get_students_enriched(class_name: str | None = None, person_type: str | None
 			"Görev / Statü": clean_text(r["notlar"]) or "—",
 			"Okul No": clean_text(r["okul_no"]) or "—",
 			"Ad Soyad": clean_text(r["ad_soyad"]),
-			"Cinsiyet": clean_text(r["cinsiyet"]) or "—",
-			"Doğum Tarihi": clean_text(r["dogum_tarihi"]) or "—",
+			"Cinsiyet": clean_text(sex) or "—",
+			"Doğum Tarihi": clean_text(b_date) or "—",
 			"Yaş (Ay)": cur_age_mo,
 			"Boy (cm)": h_val,
 			"Boy Z-Skor": h_eval["z"] if h_eval else None,
@@ -8540,7 +8732,7 @@ def get_students_enriched(class_name: str | None = None, person_type: str | None
 			"Alerji / Kronik": alert_summary,
 			"İl / İlçe / Köy": loc_summary,
 			"Adres / Mahalle": clean_text(r["notlar"]) or "—",
-			"Başvuru": int(r["basvuru_sayisi"] or 0),
+			"Başvuru": int(r["basvuru_sayisi"]) if pd.notna(r["basvuru_sayisi"]) else 0,
 			"Veli": clean_text(r["veli"]) or "—",
 			"Telefon": clean_text(r["veli_telefon"]) or "—",
 		})
@@ -10234,6 +10426,7 @@ def render_clinical_growth_curve(enriched_records: pd.DataFrame, person: dict | 
 		st.info(f"'{title}' için WHO referans verisi bulunamadı.")
 		return
 
+	import altair as alt
 	color_scale = alt.Scale(
 		domain=["3p (Kritik Alt)", "15p (Alt Normal)", "50p (Medyan / Ortalama)", "85p (Üst Normal)", "97p (Kritik Üst)"],
 		range=["#ef4444", "#f59e0b", "#10b981", "#f59e0b", "#ef4444"],
@@ -10483,6 +10676,7 @@ def _render_dossier_tab_measurements(person: sqlite3.Row, person_id: int) -> Non
 				p_long["Gösterge"] = p_long["Gösterge"].map({
 					"Boy_Persantil": "📏 Boy (%p)", "Kilo_Persantil": "⚖️ Kilo (%p)", "BMI_Persantil": "🧬 VKİ (%p)", "Bas_Cevresi_Persantil": "🧠 Baş Çevresi (%p)"
 				})
+				import altair as alt
 				p_chart = alt.Chart(p_long).mark_line(point=True).encode(
 					x=alt.X("Tarih:T", title="Tarih"),
 					y=alt.Y("Persantil:Q", title="Persantil (%)", scale=alt.Scale(domain=[0, 100])),
@@ -11558,7 +11752,7 @@ def delete_seizure_log(log_id: int) -> None:
 
 def build_seizure_log_docx(student_id: int) -> bytes:
 	"""Öğrencinin özel gereksinim/acil protokol özeti ve epilepsi nöbet izlem çizelgesini (.docx) üretir."""
-	if not HAS_DOCX or docx is None:
+	if not _ensure_docx_loaded() or docx is None:
 		raise RuntimeError("Word belge oluşturucu (python-docx) yüklü değil.")
 	pid = int(student_id)
 	with connect_db() as connection:
@@ -12078,6 +12272,7 @@ def _get_visit_day_clinical_summary(connection: sqlite3.Connection, student_id: 
 
 
 def _add_official_docx_antet(doc: docx.Document, title_text: str, meta_text: str) -> dict[str, str]:
+	_ensure_docx_loaded()
 	app_cfg = get_app_settings()
 	inst_top = app_cfg.get("institution_top_header") or "T.C. MİLLÎ EĞİTİM BAKANLIĞI"
 	school_name = app_cfg.get("school_name") or "Okul / Kurum Reviri"
@@ -12134,6 +12329,7 @@ def _add_official_docx_antet(doc: docx.Document, title_text: str, meta_text: str
 
 
 def _add_kv_docx_section_table(doc: docx.Document, section_title: str, rows_kv: list[tuple[str, str]]) -> None:
+	_ensure_docx_loaded()
 	if section_title:
 		p_sec = doc.add_paragraph()
 		p_sec.paragraph_format.space_before = Pt(7)
@@ -12176,6 +12372,7 @@ def _add_kv_docx_section_table(doc: docx.Document, section_title: str, rows_kv: 
 
 
 def _add_signature_docx_block(doc: docx.Document, signers: list[tuple[str, str]]) -> None:
+	_ensure_docx_loaded()
 	p_sp = doc.add_paragraph()
 	p_sp.paragraph_format.space_before = Pt(10)
 	p_sp.paragraph_format.space_after = Pt(2)
@@ -12202,7 +12399,7 @@ def _add_signature_docx_block(doc: docx.Document, signers: list[tuple[str, str]]
 
 def build_visit_official_document_docx(visit_id: int, doc_mode: str = "tutanak") -> bytes:
 	"""Seçili revir başvurusu için resmi Kaza/İlk Müdahale Tutanağı veya Veli Bilgilendirme Fişi (.docx) üretir."""
-	if not HAS_DOCX or docx is None:
+	if not _ensure_docx_loaded() or docx is None:
 		raise RuntimeError("Word belge oluşturucu (python-docx) yüklü değil.")
 
 	with connect_db() as connection:
@@ -12439,7 +12636,7 @@ def build_medication_consent_docx(
 	med_override: dict[str, Any] | None = None,
 ) -> bytes:
 	"""Okulda İlaç Uygulama Veli İzin ve Teslim Tutanağı (.docx) oluşturur."""
-	if not HAS_DOCX or docx is None:
+	if not _ensure_docx_loaded() or docx is None:
 		raise RuntimeError("Word belge oluşturucu (python-docx) yüklü değil.")
 
 	med_data: dict[str, Any] = {}
@@ -15914,7 +16111,7 @@ def _inventory_row_status_label(item: dict, ref_date: date | None = None) -> tup
 
 def build_infirmary_inventory_docx() -> bytes:
 	"""Revir Sarf Malzeme İstem / Depo Sayım Tutanağı (.docx) oluşturur."""
-	if not HAS_DOCX or docx is None:
+	if not _ensure_docx_loaded() or docx is None:
 		raise RuntimeError("Word belge oluşturucu (python-docx) yüklü değil.")
 	items = get_infirmary_inventory()
 	alerts = get_infirmary_inventory_alerts(days_horizon=30)
@@ -16092,7 +16289,7 @@ def delete_fridge_temp_log(log_id: int) -> None:
 
 def build_fridge_temp_monthly_docx(year_month: str | None = None) -> bytes:
 	"""Aylık Soğuk Zincir ve Revir Ortam Isı Takip Çizelgesi (.docx) oluşturur."""
-	if not HAS_DOCX or docx is None:
+	if not _ensure_docx_loaded() or docx is None:
 		raise RuntimeError("Word belge oluşturucu (python-docx) yüklü değil.")
 	ym = clean_text(year_month)[:7] or date.today().strftime("%Y-%m")
 	logs = sorted(
@@ -17746,6 +17943,7 @@ def render_measurements() -> None:
 					})
 
 					# Reference rule lines at 3, 15, 50, 85, 97 percentiles
+					import altair as alt
 					ref_rules = pd.DataFrame([
 						{"Persantil": 3, "Band": "3p Kritik Alt Sınır"},
 						{"Persantil": 15, "Band": "15p Alt Normal Sınır"},
@@ -18040,6 +18238,8 @@ def open_screening_dialog(student_id: int, class_name: str | None = None) -> Non
 
 
 def build_class_screening_report_docx(class_name: str) -> bytes:
+	if not _ensure_docx_loaded() or docx is None:
+		raise RuntimeError("Word belge oluşturucu (python-docx) yüklü değil.")
 	app_cfg = get_app_settings()
 	inst_top = app_cfg.get("institution_top_header") or "T.C. MİLLÎ EĞİTİM BAKANLIĞI"
 	inst_school = app_cfg.get("school_name") or ""
@@ -18443,6 +18643,8 @@ tr:nth-child(even) {{ background-color: #f8fafc; }}
 
 
 def make_screening_import_template() -> bytes:
+	if not _ensure_openpyxl_loaded() or Workbook is None:
+		raise RuntimeError("Excel oluşturucu (openpyxl) yüklü değil.")
 	wb = Workbook()
 	ws = wb.active
 	ws.title = "Sağlık Taraması"
@@ -21598,6 +21800,7 @@ def _get_dyn_signature_columns(meta: dict[str, Any], cfg: dict[str, Any], app_cf
 
 
 def _set_grid_table_borders_docx(table, border_hex: str = "CBD5E1") -> None:
+	_ensure_docx_loaded()
 	tblPr = table._element.xpath("w:tblPr")
 	if tblPr:
 		borders = parse_xml(f'''
@@ -21632,6 +21835,8 @@ def export_custom_screening_report_docx(
 	config: dict[str, Any] | None = None,
 ) -> bytes:
 	"""Dinamik okul taraması raporunu sınıf gruplu, koşullu klinik vurgulu ve resmi imzalı Word (.docx) olarak üretir."""
+	if not _ensure_docx_loaded() or docx is None:
+		raise RuntimeError("Word belge oluşturucu (python-docx) yüklü değil.")
 	meta, cfg = _merge_export_meta_and_cfg(df, meta, config)
 	app_cfg = get_app_settings()
 	inst_top = app_cfg.get("institution_top_header") or "T.C. MİLLÎ EĞİTİM BAKANLIĞI"
@@ -21897,6 +22102,8 @@ def export_custom_screening_report_excel(
 	config: dict[str, Any] | None = None,
 ) -> bytes:
 	"""Dinamik okul taraması raporunu sınıf gruplu, koşullu kırmızı/yeşil dolgulu, özet ve imzalı Excel (.xlsx) olarak üretir."""
+	if not _ensure_openpyxl_loaded() or Workbook is None:
+		raise RuntimeError("Excel oluşturucu (openpyxl) yüklü değil.")
 	meta, cfg = _merge_export_meta_and_cfg(df, meta, config)
 	app_cfg = get_app_settings()
 	inst_top = app_cfg.get("institution_top_header") or "T.C. MİLLÎ EĞİTİM BAKANLIĞI"
@@ -22814,6 +23021,7 @@ def render_dynamic_screening_reports_tab() -> None:
 
 
 def append_student_report_docx_section(doc: docx.Document, student_id: int, is_multi: bool = False, report_cfg: dict | None = None) -> None:
+	_ensure_docx_loaded()
 	if report_cfg is None:
 		report_cfg = get_report_settings()
 
@@ -23138,6 +23346,8 @@ def append_student_report_docx_section(doc: docx.Document, student_id: int, is_m
 
 
 def build_student_report_docx(student_or_id: int | sqlite3.Row | dict, report_cfg: dict | None = None) -> bytes:
+	if not _ensure_docx_loaded() or docx is None:
+		raise RuntimeError("Word belge oluşturucu (python-docx) yüklü değil.")
 	stu_id = student_or_id["id"] if isinstance(student_or_id, (sqlite3.Row, dict)) else int(student_or_id)
 	if report_cfg is None:
 		report_cfg = get_report_settings()
@@ -23159,6 +23369,8 @@ def build_student_report_docx(student_or_id: int | sqlite3.Row | dict, report_cf
 
 
 def build_class_batch_report_docx(class_name: str, report_cfg: dict | None = None) -> bytes:
+	if not _ensure_docx_loaded() or docx is None:
+		raise RuntimeError("Word belge oluşturucu (python-docx) yüklü değil.")
 	class_students = student_options(class_name, person_type="Öğrenci")
 	if report_cfg is None:
 		report_cfg = get_report_settings()
@@ -23853,6 +24065,7 @@ def _add_meb_grid_table(
 	widths_cm: list[float],
 	center_cols: set[int] | None = None,
 ) -> None:
+	_ensure_docx_loaded()
 	if sub_title:
 		p_sub = doc.add_paragraph()
 		p_sub.paragraph_format.space_before = Pt(6)
@@ -23919,7 +24132,7 @@ def build_meb_annual_activity_report_docx(
 	extra_notes: str = "",
 ) -> bytes:
 	"""MEB ve Okul İdaresi için Dönem / Yıl Sonu Resmi Okul Sağlığı ve Revir Hizmetleri Faaliyet Raporunu (.docx) üretir."""
-	if not HAS_DOCX or docx is None:
+	if not _ensure_docx_loaded() or docx is None:
 		raise RuntimeError("Word belge oluşturucu (python-docx) yüklü değil.")
 
 	stats = collect_meb_annual_activity_stats(start_date, end_date)
@@ -24956,6 +25169,8 @@ def get_or_create_document_cover(file_path: Path, force: bool = False) -> Path |
 
 				content_lines = []
 				try:
+					if not _ensure_docx_loaded() or docx is None:
+						raise ImportError("python-docx")
 					d = docx.Document(file_path)
 					for p in d.paragraphs:
 						t = p.text.strip()
@@ -25150,6 +25365,8 @@ def open_document_preview_dialog(file_path: Path) -> None:
 
 	elif ext == ".docx":
 		try:
+			if not _ensure_docx_loaded() or docx is None:
+				raise ImportError("python-docx")
 			d = docx.Document(file_path)
 			st.markdown("##### 📝 Belge İçeriği Metin Önizlemesi:")
 			with st.container(border=True, height=420):
@@ -25589,6 +25806,9 @@ def check_for_git_updates() -> dict[str, Any]:
 		"commits": [],
 		"message": "",
 	}
+	if getattr(sys, "frozen", False) or not (APP_DIR / ".git").exists():
+		res["message"] = "Bağımsız masaüstü (.exe) sürümünde güncellemeler kurulum paketi (Setup) üzerinden yapılır."
+		return res
 	import subprocess
 	ensure_official_git_remote()
 
@@ -25629,6 +25849,8 @@ def check_for_git_updates() -> dict[str, Any]:
 
 
 def perform_system_update() -> tuple[bool, str]:
+	if getattr(sys, "frozen", False) or not (APP_DIR / ".git").exists():
+		return False, f"Bağımsız masaüstü (.exe) sürümünde git üzerinden güncelleme yerine yeni kurulum paketi (RevirDefteri_Kurulum_v{APP_VERSION}.exe) çalıştırılmalıdır."
 	import subprocess
 	import shutil
 
@@ -25674,22 +25896,31 @@ def create_or_refresh_desktop_launcher() -> Path:
 		desktop_dir = Path.home() / "Desktop"
 	desktop_dir.mkdir(parents=True, exist_ok=True)
 
-	pythonw_exe = Path(sys.executable).parent / "pythonw.exe"
-	if not pythonw_exe.exists():
-		pythonw_exe = Path(sys.executable)
+	is_frozen = getattr(sys, "frozen", False)
+	if is_frozen:
+		target_path = Path(sys.executable).resolve()
+		target_args = ""
+		work_dir = target_path.parent
+	else:
+		pythonw_exe = Path(sys.executable).parent / "pythonw.exe"
+		if not pythonw_exe.exists():
+			pythonw_exe = Path(sys.executable)
+		desktop_py = APP_DIR / "desktop_launcher.py"
+		launch_script = desktop_py if desktop_py.exists() else (APP_DIR / "baslat.pyw")
+		target_path = pythonw_exe
+		target_args = f'`"{launch_script}`"'
+		work_dir = APP_DIR
 
-	baslat_pyw = APP_DIR / "baslat.pyw"
-
-	# Create or refresh desktop .lnk shortcut with custom icon and pythonw (NO black screen, standalone window)
+	# Create or refresh desktop .lnk shortcut with custom icon and NO console window
 	lnk_path = desktop_dir / "Revir Defteri.lnk"
 	try:
 		import subprocess
 		ps_cmd = f"""
 $WshShell = New-Object -ComObject WScript.Shell
 $Shortcut = $WshShell.CreateShortcut('{lnk_path}')
-$Shortcut.TargetPath = '{pythonw_exe}'
-$Shortcut.Arguments = '`"{baslat_pyw}`"'
-$Shortcut.WorkingDirectory = '{APP_DIR}'
+$Shortcut.TargetPath = '{target_path}'
+$Shortcut.Arguments = '{target_args}'
+$Shortcut.WorkingDirectory = '{work_dir}'
 $Shortcut.IconLocation = '{APP_ICON_ICO}, 0'
 $Shortcut.Description = 'Revir Defteri - Okul Saglik Takip Sistemi'
 $Shortcut.WindowStyle = 1

@@ -28,6 +28,11 @@ oto_yedekler/
 __pycache__/
 *.py[cod]
 *$py.class
+build/
+dist/
+installer/
+Kurulum_Paketleri/
+.revir_server.log
 scratch/
 .app_profile/
 .vscode/
