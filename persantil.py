@@ -120,7 +120,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.2.0"
+_DEFAULT_APP_VERSION = "1.2.3"
 
 
 def _load_app_version() -> str:
@@ -431,31 +431,31 @@ def build_app_css(font_css: str, font_url: str, base_fsize: str, pad_top: str, t
 	div[data-baseweb="select"] ul li[aria-selected="true"]::before {{ content: "📂 "; font-size: 14px; }}
 
 	/* Streamlit Header, Menü, Deploy, GitHub Profil Badge ve Footer Gizleme */
-	#MainMenu, 
-	button[data-testid="stMainMenu"], 
+	#MainMenu,
+	button[data-testid="stMainMenu"],
 	[data-testid="stMainMenu"],
-	.stDeployButton, 
-	[data-testid="stDeployButton"], 
+	.stDeployButton,
+	[data-testid="stDeployButton"],
 	button[data-testid="stDeployButton"],
 	div[data-testid="stToolbarActions"],
-	[data-testid="stToolbar"],
-	header [data-testid="stToolbar"],
+	[data-testid="stToolbarActions"],
 	header [data-testid="stHeaderActionElements"],
+	[data-testid="stHeaderActionElements"],
 	[data-testid="stStatusWidget"],
 	[data-testid="manage-app-button"],
 	div[data-testid="stDecoration"],
-	footer, 
+	footer,
 	[data-testid="stFooter"],
-	footer:after, 
+	footer:after,
 	footer:before,
-	div[class*="viewerBadge"], 
-	a[class*="viewerBadge"], 
+	div[class*="viewerBadge"],
+	a[class*="viewerBadge"],
 	div[class*="ProfileBadge"],
 	a[class*="ProfileBadge"],
 	img[class*="ProfileBadge"],
 	a[href*="streamlit.io/cloud"],
 	a[href*="streamlit.io"],
-	header img,
+	header a[href*="github.com"] img,
 	header a[href*="github.com"] {{
 		display: none !important;
 		visibility: hidden !important;
@@ -464,113 +464,127 @@ def build_app_css(font_css: str, font_url: str, base_fsize: str, pad_top: str, t
 		opacity: 0 !important;
 		pointer-events: none !important;
 	}}
-	header[data-testid="stHeader"] {{
+	header[data-testid="stHeader"],
+	[data-testid="stToolbar"] {{
 		background: transparent !important;
+		border: none !important;
+		box-shadow: none !important;
+		pointer-events: none !important;
 	}}
 
-	/* 1. Streamlit Orijinal Menü Açma Düğmesi (Sol Üst) - Asla Gizlenemez */
+	/* Yan Menü Kapandığında Sol Üst Köşede Çıkan Sağa Bakan Çentik (❯) */
 	div[data-testid="collapsedControl"],
 	[data-testid="collapsedControl"],
-	[data-testid="stSidebarCollapsedControl"] {{
+	[data-testid="stSidebarCollapsedControl"],
+	button[data-testid="stExpandSidebarButton"],
+	[data-testid="stHeader"] button[kind="header"]:not([data-testid*="MainMenu"]):not([aria-label*="menu" i]),
+	[data-testid="stHeader"] button[kind="headerNoPadding"]:not([data-testid*="MainMenu"]):not([aria-label*="menu" i]) {{
 		display: flex !important;
 		visibility: visible !important;
 		opacity: 1 !important;
 		pointer-events: auto !important;
 		position: fixed !important;
-		top: 12px !important;
-		left: 12px !important;
+		top: 14px !important;
+		left: 14px !important;
 		bottom: auto !important;
-		z-index: 999999 !important;
-		background: #0d9488 !important;
-		color: #ffffff !important;
-		padding: 8px 14px !important;
-		border-radius: 8px !important;
-		box-shadow: 0 2px 10px rgba(0,0,0,0.2) !important;
-		border: 1px solid rgba(255,255,255,0.3) !important;
+		z-index: 9999999 !important;
+		width: 38px !important;
+		height: 38px !important;
+		min-width: 38px !important;
+		margin: 0 !important;
+		padding: 0 !important;
+		align-items: center !important;
+		justify-content: center !important;
+		background: var(--card-bg, #ffffff) !important;
+		color: var(--teal, #0d9488) !important;
+		border: 1.5px solid var(--teal, #0d9488) !important;
+		border-radius: 10px !important;
+		box-shadow: 0 3px 12px rgba(0, 0, 0, 0.12) !important;
 		cursor: pointer !important;
+		transition: all 0.2s ease !important;
+	}}
+	div[data-testid="collapsedControl"]:hover,
+	[data-testid="stSidebarCollapsedControl"]:hover,
+	button[data-testid="stExpandSidebarButton"]:hover,
+	[data-testid="stHeader"] button[kind="header"]:not([data-testid*="MainMenu"]):not([aria-label*="menu" i]):hover,
+	[data-testid="stHeader"] button[kind="headerNoPadding"]:not([data-testid*="MainMenu"]):not([aria-label*="menu" i]):hover {{
+		background: var(--teal, #0d9488) !important;
+		color: #ffffff !important;
+		transform: translateX(2px) !important;
 	}}
 	div[data-testid="collapsedControl"] button,
 	[data-testid="collapsedControl"] button,
 	[data-testid="stSidebarCollapsedControl"] button {{
 		background: transparent !important;
 		border: none !important;
-		color: #ffffff !important;
+		color: inherit !important;
+		width: 100% !important;
+		height: 100% !important;
 		padding: 0 !important;
 		margin: 0 !important;
 		display: flex !important;
 		align-items: center !important;
-		gap: 6px !important;
-		font-size: 13.5px !important;
-		font-weight: 700 !important;
+		justify-content: center !important;
 		cursor: pointer !important;
 	}}
 	div[data-testid="collapsedControl"] svg,
-	[data-testid="collapsedControl"] svg,
-	[data-testid="stSidebarCollapsedControl"] svg {{
-		color: #ffffff !important;
-		fill: #ffffff !important;
-		stroke: #ffffff !important;
-		width: 18px !important;
-		height: 18px !important;
+	[data-testid="stSidebarCollapsedControl"] svg,
+	button[data-testid="stExpandSidebarButton"] svg {{
+		width: 20px !important;
+		height: 20px !important;
+		fill: currentColor !important;
+		stroke: currentColor !important;
+		color: inherit !important;
 	}}
-	div[data-testid="collapsedControl"] button::after,
-	[data-testid="collapsedControl"] button::after {{
-		content: " Menü";
-		color: #ffffff !important;
-		font-weight: 700 !important;
-	}}
-
-	/* 2. Sol Alt Köşe - Bağımsız Kayan Menü Düğmesi (Popover) */
-	div.st-key-fab_menu_popover {{
-		position: fixed !important;
-		bottom: 24px !important;
-		left: 24px !important;
-		z-index: 9999999 !important;
-		width: auto !important;
-		margin: 0 !important;
-		padding: 0 !important;
-	}}
-	div.st-key-fab_menu_popover > div {{
-		width: auto !important;
-	}}
-	div.st-key-fab_menu_popover button[data-testid="stPopoverButton"],
-	div.st-key-fab_menu_popover button {{
-		background: #0d9488 !important;
-		color: #ffffff !important;
-		border: 2px solid rgba(255, 255, 255, 0.45) !important;
-		border-radius: 50px !important;
-		padding: 10px 22px !important;
-		box-shadow: 0 4px 20px rgba(13, 148, 136, 0.5) !important;
-		cursor: pointer !important;
+	button[data-testid="stExpandSidebarButton"] span[data-testid="stIconMaterial"],
+	button[data-testid="stExpandSidebarButton"] span,
+	[data-testid="stHeader"] button[kind="headerNoPadding"]:not([data-testid*="MainMenu"]) span[data-testid="stIconMaterial"] {{
+		color: inherit !important;
+		font-size: 20px !important;
+		width: 20px !important;
+		height: 20px !important;
+		line-height: 20px !important;
 		display: inline-flex !important;
 		align-items: center !important;
 		justify-content: center !important;
-		gap: 8px !important;
-		font-family: inherit !important;
-		font-size: 14.5px !important;
-		font-weight: 700 !important;
-		letter-spacing: 0.3px !important;
-		transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
 	}}
-	div.st-key-fab_menu_popover button:hover {{
-		background: #0f766e !important;
-		transform: translateY(-2px) scale(1.05) !important;
-		box-shadow: 0 6px 26px rgba(13, 148, 136, 0.7) !important;
-	}}
-	div.st-key-fab_menu_popover button:active {{
-		transform: translateY(0) scale(0.98) !important;
-	}}
-	div.st-key-fab_menu_popover button p,
-	div.st-key-fab_menu_popover button span,
-	div.st-key-fab_menu_popover button div {{
+	button[data-testid="stExpandSidebarButton"]:hover span[data-testid="stIconMaterial"],
+	button[data-testid="stExpandSidebarButton"]:hover span {{
 		color: #ffffff !important;
-		font-size: 14.5px !important;
-		font-weight: 700 !important;
 	}}
-	div.st-key-fab_menu_popover button svg {{
-		color: #ffffff !important;
-		stroke: #ffffff !important;
-		fill: #ffffff !important;
+	/* Önceki "::after {{ content: ' Menü' }}" yazısını kaldır, sadece sağa bakan çentik ikonu kalsın */
+	div[data-testid="collapsedControl"]::after,
+	[data-testid="collapsedControl"]::after,
+	[data-testid="stSidebarCollapsedControl"]::after,
+	div[data-testid="collapsedControl"] button::after,
+	[data-testid="collapsedControl"] button::after,
+	[data-testid="stSidebarCollapsedControl"] button::after,
+	button[data-testid="stExpandSidebarButton"]::after {{
+		content: none !important;
+	}}
+
+	/* Yan Menü Altındaki Kapatma Tuşu */
+	.revir-sidebar-close-btn {{
+		display: flex !important;
+		align-items: center !important;
+		justify-content: center !important;
+		gap: 6px !important;
+		padding: 7px 10px !important;
+		margin-top: 8px !important;
+		border-radius: 8px !important;
+		border: 1px solid var(--line) !important;
+		background: var(--card-bg) !important;
+		color: var(--text-muted) !important;
+		font-size: 12.5px !important;
+		font-weight: 600 !important;
+		cursor: pointer !important;
+		user-select: none !important;
+		transition: all 0.2s ease !important;
+	}}
+	.revir-sidebar-close-btn:hover {{
+		background: var(--mint) !important;
+		border-color: var(--teal) !important;
+		color: var(--teal) !important;
 	}}
 
 	/* Popover Açılır Menü Penceresi Tasarımı */
@@ -636,13 +650,6 @@ def build_app_css(font_css: str, font_url: str, base_fsize: str, pad_top: str, t
 		-webkit-backdrop-filter: blur(25px) saturate(190%) !important;
 		border: 1px solid rgba(255, 255, 255, 0.8) !important;
 		box-shadow: 0 16px 45px rgba(31, 38, 135, 0.16) !important;
-	}}
-	div.st-key-fab_menu_popover button {{
-		background: linear-gradient(135deg, rgba(14, 165, 233, 0.92), rgba(13, 148, 136, 0.92)) !important;
-		backdrop-filter: blur(16px) saturate(180%) !important;
-		-webkit-backdrop-filter: blur(16px) saturate(180%) !important;
-		border: 2px solid rgba(255, 255, 255, 0.65) !important;
-		box-shadow: 0 8px 25px rgba(14, 165, 233, 0.45) !important;
 	}}
 	""" if is_glass else ""
 	base_rules += glass_rules
@@ -7109,21 +7116,146 @@ def inject_smart_input_ux() -> None:
 			}
 		}
 
+		if (!pWin.__revirSidebarToggleBound) {
+			pWin.__revirSidebarToggleBound = true;
+			function triggerSidebarCollapse() {
+				var closeBtn = pDoc.querySelector('[data-testid="stSidebarCollapseButton"] button')
+							|| pDoc.querySelector('[data-testid="stSidebarCollapseButton"]')
+							|| pDoc.querySelector('[data-testid="stSidebarHeader"] button')
+							|| pDoc.querySelector('section[data-testid="stSidebar"] button[kind="headerNoPadding"]')
+							|| pDoc.querySelector('section[data-testid="stSidebar"] button[aria-label*="close" i]')
+							|| pDoc.querySelector('section[data-testid="stSidebar"] button[aria-label*="collapse" i]');
+				if (closeBtn) closeBtn.click();
+			}
+			pDoc.addEventListener("click", function(ev) {
+				var btn = ev.target && ev.target.closest ? ev.target.closest(".revir-sidebar-close-btn") : null;
+				if (btn) triggerSidebarCollapse();
+			});
+			pDoc.addEventListener("keydown", function(ev) {
+				if (ev.key !== "Enter" && ev.key !== " ") return;
+				var btn = ev.target && ev.target.closest ? ev.target.closest(".revir-sidebar-close-btn") : null;
+				if (btn) {
+					ev.preventDefault();
+					triggerSidebarCollapse();
+				}
+			});
+		}
+
+		function ensureCustomSidebarChevron() {
+			var existing = pDoc.getElementById("custom-sidebar-open-chevron");
+			if (existing) return existing;
+			var btn = pDoc.createElement("button");
+			btn.id = "custom-sidebar-open-chevron";
+			btn.type = "button";
+			btn.title = "Men\u00fcy\u00fc A\u00e7";
+			btn.setAttribute("aria-label", "Men\u00fcy\u00fc A\u00e7");
+			btn.textContent = "\u276f";
+			btn.style.cssText = [
+				"position: fixed",
+				"top: 14px",
+				"left: 14px",
+				"z-index: 9999999",
+				"width: 38px",
+				"height: 38px",
+				"border-radius: 10px",
+				"border: 1.5px solid var(--teal, #0d9488)",
+				"background: var(--card-bg, rgba(255, 255, 255, 0.96))",
+				"color: var(--teal, #0d9488)",
+				"font-size: 18px",
+				"font-weight: 700",
+				"line-height: 1",
+				"display: none",
+				"align-items: center",
+				"justify-content: center",
+				"cursor: pointer",
+				"box-shadow: 0 3px 12px rgba(0, 0, 0, 0.12)",
+				"padding: 0"
+			].join(";");
+			btn.addEventListener("click", function() {
+				var nativeExpand = pDoc.querySelector('[data-testid="stExpandSidebarButton"]')
+								|| pDoc.querySelector('[data-testid="stSidebarCollapsedControl"] button')
+								|| pDoc.querySelector('div[data-testid="collapsedControl"] button')
+								|| pDoc.querySelector('[data-testid="stSidebarCollapsedControl"]')
+								|| pDoc.querySelector('div[data-testid="collapsedControl"]');
+				if (nativeExpand) nativeExpand.click();
+			});
+			if (pDoc.body) pDoc.body.appendChild(btn);
+			return btn;
+		}
+
+		function syncCustomSidebarChevron() {
+			var chevron = ensureCustomSidebarChevron();
+			if (!chevron) return;
+			var sb = pDoc.querySelector('section[data-testid="stSidebar"]') || pDoc.querySelector('[data-testid="stSidebar"]');
+			if (!sb) {
+				if (chevron.style.display !== "none") chevron.style.display = "none";
+				return;
+			}
+			var sbRect = sb.getBoundingClientRect();
+			var sbCs = pWin.getComputedStyle(sb);
+			var ariaExpanded = sb.getAttribute("aria-expanded");
+			var isCollapsed = (ariaExpanded === "false")
+							|| (sbRect.width < 50)
+							|| (sbRect.right <= 20)
+							|| (sbCs.display === "none")
+							|| (sbCs.visibility === "hidden");
+
+			var nativeExpand = pDoc.querySelector('[data-testid="stExpandSidebarButton"], [data-testid="stSidebarCollapsedControl"] button, div[data-testid="collapsedControl"] button');
+			var nativeVisible = false;
+			if (nativeExpand) {
+				var nCs = pWin.getComputedStyle(nativeExpand);
+				var nRect = nativeExpand.getBoundingClientRect();
+				if (nCs.display !== "none" && nCs.visibility !== "hidden" && parseFloat(nCs.opacity || "1") > 0.05 && nRect.width >= 10 && nRect.height >= 10) {
+					nativeVisible = true;
+				}
+			}
+
+			var targetDisplay = (isCollapsed && !nativeVisible) ? "flex" : "none";
+			if (chevron.style.display !== targetDisplay) {
+				chevron.style.display = targetDisplay;
+			}
+
+			if (pWin.ResizeObserver && pWin.__revirSidebarResizeObs && pWin.__revirSidebarResizeEl !== sb) {
+				pWin.__revirSidebarResizeObs.disconnect();
+				pWin.__revirSidebarResizeObs.observe(sb);
+				pWin.__revirSidebarResizeEl = sb;
+			}
+		}
+
+		pWin.__revirSyncSidebarChevron = syncCustomSidebarChevron;
 		scanInputs(pDoc.body);
 
 		if (!pWin.__revirSmartUxObserver) {
 			var obs = new pWin.MutationObserver(function(mutations) {
+				var needSync = false;
 				for (var m = 0; m < mutations.length; m++) {
+					var target = mutations[m].target;
+					if (target && target.id === "custom-sidebar-open-chevron") continue;
+					needSync = true;
 					var added = mutations[m].addedNodes;
 					for (var j = 0; j < added.length; j++) {
 						var node = added[j];
 						if (node && node.nodeType === 1) scanInputs(node);
 					}
 				}
+				if (needSync && pWin.__revirSyncSidebarChevron) pWin.__revirSyncSidebarChevron();
 			});
-			obs.observe(pDoc.body, { childList: true, subtree: true });
+			obs.observe(pDoc.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["aria-expanded", "style", "class"] });
 			pWin.__revirSmartUxObserver = obs;
 		}
+
+		if (!pWin.__revirSidebarObserverBound) {
+			pWin.__revirSidebarObserverBound = true;
+			if (pWin.ResizeObserver) {
+				pWin.__revirSidebarResizeObs = new pWin.ResizeObserver(function() {
+					if (pWin.__revirSyncSidebarChevron) pWin.__revirSyncSidebarChevron();
+				});
+			}
+			pWin.addEventListener("resize", function() {
+				if (pWin.__revirSyncSidebarChevron) pWin.__revirSyncSidebarChevron();
+			});
+		}
+		syncCustomSidebarChevron();
 	})();
 	</script>
 	"""
@@ -27308,32 +27440,6 @@ def main() -> None:
 	active_id = st.session_state.get("active_person_id")
 	active_person = get_person_by_id(active_id) if active_id else None
 
-	def _on_nav_page_selected(target_page_name: str) -> None:
-		st.session_state["target_page"] = target_page_name
-
-	# Sol Alt Köşe - PAGES Menü Butonu (Açılır Popover Menü)
-	with st.popover("🧭 Menü", key="fab_menu_popover"):
-		st.markdown("<div style='font-size:15px; font-weight:800; color:#0d9488; margin-bottom:4px; display:flex; align-items:center; gap:6px;'><span>✚</span> <span>Revir Defteri Menü</span></div>", unsafe_allow_html=True)
-		if school_title:
-			st.caption(f"🏫 {school_title}")
-		st.markdown("<hr style='margin:4px 0 8px 0; border:none; border-top:1px solid var(--line);'>", unsafe_allow_html=True)
-		for p in PAGES:
-			is_selected = (p == cur_page_val)
-			if st.button(
-				p,
-				key=f"fab_p_{p}",
-				use_container_width=True,
-				type="primary" if is_selected else "secondary",
-				on_click=_on_nav_page_selected,
-				args=(p,)
-			):
-				pass
-		if active_person:
-			st.markdown("<hr style='margin:8px 0 6px 0; border:none; border-top:1px solid var(--line);'>", unsafe_allow_html=True)
-			st.caption(f"📌 **Seçili Kişi:** {mask_kvkk_value(active_person['full_name'], 'name')}")
-			if st.button("📂 Kişi Dosyası", key="fab_dossier_btn", use_container_width=True):
-				open_person_dossier_dialog(active_person["id"])
-
 	with st.sidebar:
 		if APP_ICON_PATH.exists():
 			col_logo, col_ttl = st.columns([1, 2.7])
@@ -27378,32 +27484,10 @@ def main() -> None:
 		st.caption(f"🚀 **Sürüm:** v{APP_VERSION}")
 
 		# Sidebar Kapatma Butonu
-		st.markdown("""
-		<div onclick="(function(){
-			var closeBtn = document.querySelector('[data-testid=\'stSidebarCollapseButton\'] button')
-						|| document.querySelector('[data-testid=\'stSidebarCollapseButton\']')
-						|| document.querySelector('section[data-testid=\'stSidebar\'] button[aria-label*=\'close\' i]')
-						|| document.querySelector('section[data-testid=\'stSidebar\'] button[aria-label*=\'collapse\' i]');
-			if (closeBtn) closeBtn.click();
-		})()" style="
-			display: flex;
-			align-items: center;
-			justify-content: center;
-			gap: 6px;
-			padding: 6px 10px;
-			margin-top: 8px;
-			border-radius: 6px;
-			border: 1px solid var(--line);
-			background: var(--card-bg);
-			color: var(--text-muted);
-			font-size: 12.5px;
-			font-weight: 600;
-			cursor: pointer;
-			transition: all 0.2s ease;
-		" onmouseover="this.style.background='var(--mint)'; this.style.color='var(--teal)';" onmouseout="this.style.background='var(--card-bg)'; this.style.color='var(--text-muted)';">
-			<span>◀</span> <span>Menüyü Kapat</span>
-		</div>
-		""", unsafe_allow_html=True)
+		st.markdown(
+			'<div class="revir-sidebar-close-btn" role="button" tabindex="0"><span>◀</span> <span>Menüyü Kapat</span></div>',
+			unsafe_allow_html=True,
+		)
 
 	# Extract clean page name regardless of emoji prefix
 	page = st.session_state.get("main_menu_page", page)

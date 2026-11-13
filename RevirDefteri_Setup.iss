@@ -1,7 +1,7 @@
 ; ============================================================================
 ; Okul Revir Defteri ve Sağlık Takip Sistemi - Akıllı Güncelleme Destekli Kurulum Scripti
 ; Sabit Kurulum Dizini: C:\RevirDefteri
-; Çıktı: installer\RevirDefteri_Kurulum_v1.2.0.exe
+; Çıktı: installer\RevirDefteri_Kurulum_v1.2.3.exe
 ; ============================================================================
 
 #define MyAppName "Okul Revir Defteri ve Sağlık Takip Sistemi"
@@ -16,7 +16,7 @@
   #define MyAppVersion Trim(FileRead(MyAppVersionFile))
   #expr FileClose(MyAppVersionFile)
 #else
-  #define MyAppVersion "1.2.0"
+  #define MyAppVersion "1.2.3"
 #endif
 
 [Setup]
@@ -205,7 +205,7 @@ begin
           begin
             if not RenameFile(SrcPath, DstPath) then
             begin
-              if FileCopy(SrcPath, DstPath, False) then
+              if CopyFile(SrcPath, DstPath, False) then
                 DeleteFile(SrcPath)
               else
                 Result := False;
@@ -228,7 +228,7 @@ begin
   begin
     if not RenameFile(SrcFile, DstFile) then
     begin
-      if FileCopy(SrcFile, DstFile, False) then
+      if CopyFile(SrcFile, DstFile, False) then
         DeleteFile(SrcFile);
     end;
   end;
@@ -359,18 +359,18 @@ begin
     AppDirPath := ExpandConstant('{app}');
     DbFilePath := AddBackslash(AppDirPath) + 'revir_defteri.db';
     BackupDirPath := AddBackslash(AppDirPath) + 'oto_yedekler';
-    TimeStamp := GetDateTimeString('yyyymmdd_hhnnss', '', '');
+    TimeStamp := GetDateTimeString('yyyymmdd_hhnnss', '-', ':');
 
     // 1. Güncelleme / Kurulum başlamadan önce mevcut veritabanının yedeğini al
     if AutoBackupCheckBox.Checked and FileExists(DbFilePath) then
     begin
       ForceDirectories(BackupDirPath);
       BackupFilePath := AddBackslash(BackupDirPath) + 'kurulum_oncesi_yedek_' + TimeStamp + '.db';
-      FileCopy(DbFilePath, BackupFilePath, False);
+      CopyFile(DbFilePath, BackupFilePath, False);
       if FileExists(DbFilePath + '-wal') then
-        FileCopy(DbFilePath + '-wal', BackupFilePath + '-wal', False);
+        CopyFile(DbFilePath + '-wal', BackupFilePath + '-wal', False);
       if FileExists(DbFilePath + '-shm') then
-        FileCopy(DbFilePath + '-shm', BackupFilePath + '-shm', False);
+        CopyFile(DbFilePath + '-shm', BackupFilePath + '-shm', False);
     end;
 
     // 2. Seçenek 2 seçildiyse: eski verileri silmek yerine oto_yedekler\Arsiv_<Tarih> altına taşı
