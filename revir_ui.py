@@ -3949,29 +3949,39 @@ html, body {
 			btn.textContent = chatTtsEnabled ? "🔊" : "🔇";
 			btn.classList.toggle("active", chatTtsEnabled);
 		}
-		if (!chatTtsEnabled && window.speechSynthesis) {
-			try { window.speechSynthesis.cancel(); } catch (e) {}
+		if (!chatTtsEnabled) {
+			if (window.speechSynthesis) {
+				try { window.speechSynthesis.cancel(); } catch (e) {}
+			}
+			fetch("/api/tts_stop", {
+				method: "POST",
+				headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
+				body: "{}"
+			}).catch(function(){});
 		}
 		showToast(chatTtsEnabled ? "🔊 Sesli yanıt okuma açıldı" : "🔇 Sesli yanıt okuma kapatıldı");
 	};
 
 	window.__revirSpeakText = function(txt) {
-		if (!window.speechSynthesis || !txt) return;
-		try {
-			window.speechSynthesis.cancel();
-			var clean = String(txt).replace(/[*#_`~>-]+/g, " ").replace(/\s+/g, " ").trim();
-			var utt = new SpeechSynthesisUtterance(clean);
-			utt.lang = "tr-TR";
-			utt.rate = 1.04;
-			var voices = window.speechSynthesis.getVoices() || [];
-			for (var i = 0; i < voices.length; i++) {
-				if (voices[i].lang && voices[i].lang.toLowerCase().indexOf("tr") === 0) {
-					utt.voice = voices[i];
-					break;
+		if (!txt) return;
+		var clean = String(txt).replace(/[*#_`~>-]+/g, " ").replace(/\s+/g, " ").trim();
+		fetch("/api/tts_speak", {
+			method: "POST",
+			headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
+			body: JSON.stringify({ text: clean })
+		}).then(function(r) { return r.json(); }).then(function(res) {
+			if (!res || !res.handled) {
+				if (window.speechSynthesis) {
+					try {
+						window.speechSynthesis.cancel();
+						var utt = new SpeechSynthesisUtterance(clean);
+						utt.lang = "tr-TR";
+						utt.rate = 1.04;
+						window.speechSynthesis.speak(utt);
+					} catch (e) {}
 				}
 			}
-			window.speechSynthesis.speak(utt);
-		} catch (e) {}
+		}).catch(function() {});
 	};
 
 	function renderChatFileChips() {
@@ -4128,65 +4138,41 @@ html, body {
 		});
 	};
 
-	// Sesli Konuşma: Web Speech API + MediaRecorder (Gemini Multimodal Audio) Çift Motorlu
+	// Sesli Konuşma: Doğrudan Python Yerel Mikrofon Kaydedicisi (CoreAudio / WASAPI) + Tarayıcı Yedeği
 	window.__revirToggleVoiceMic = function() {
 		var micBtn = document.getElementById("revir-chat-mic-btn");
 		if (isRecordingVoice) {
 			stopVoiceCapture();
 			return;
 		}
-		var SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
-		if (SpeechRec && !window.__revirForceMediaRecorder) {
-			try {
-				voiceRec = new SpeechRec();
-				voiceRec.lang = "tr-TR";
-				voiceRec.interimResults = true;
-				voiceRec.continuous = false;
-				var finalTranscript = "";
+		// Önce Python yerel mikrofon kaydını başlat (WebView izin kısıtlamasına takılmaz)
+		fetch("/api/voice_start", {
+			method: "POST",
+			headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
+			body: "{}"
+		})
+		.then(function(r) { return r.json(); })
+		.then(function(res) {
+			if (res && res.ok) {
+				window.__revirUsingNativeMic = true;
 				isRecordingVoice = true;
 				if (micBtn) { micBtn.classList.add("recording"); micBtn.textContent = "⏹️"; }
-				showToast("🎙️ Dinleniyor... Konuşmanız bitince ⏹️ tuşuna basın.");
-
-				voiceRec.onresult = function(ev) {
-					var interim = "";
-					for (var i = ev.resultIndex; i < ev.results.length; i++) {
-						if (ev.results[i].isFinal) finalTranscript += ev.results[i][0].transcript;
-						else interim += ev.results[i][0].transcript;
-					}
-					var inp = document.getElementById("revir-chat-inp");
-					if (inp) inp.value = (finalTranscript + " " + interim).trim();
-				};
-				voiceRec.onerror = function() {
-					window.__revirForceMediaRecorder = true;
-					isRecordingVoice = false;
-					if (micBtn) { micBtn.classList.remove("recording"); micBtn.textContent = "🎙️"; }
-					startMediaRecorderCapture();
-				};
-				voiceRec.onend = function() {
-					var wasRec = isRecordingVoice;
-					isRecordingVoice = false;
-					if (micBtn) { micBtn.classList.remove("recording"); micBtn.textContent = "🎙️"; }
-					var inp = document.getElementById("revir-chat-inp");
-					if (wasRec && inp && inp.value.trim()) {
-						chatTtsEnabled = true;
-						var ttsBtn = document.getElementById("revir-chat-tts-btn");
-						if (ttsBtn) { ttsBtn.textContent = "🔊"; ttsBtn.classList.add("active"); }
-						window.__revirSendChat();
-					}
-				};
-				voiceRec.start();
-				return;
-			} catch (e) {
-				window.__revirForceMediaRecorder = true;
+				showToast("🎙️ Mikrofon dinleniyor (" + (res.device || "Varsayılan") + ")... Göndermek için ⏹️ tuşuna basın.");
+			} else {
+				window.__revirUsingNativeMic = false;
+				startBrowserMediaCapture(res && res.error ? res.error : "");
 			}
-		}
-		startMediaRecorderCapture();
+		})
+		.catch(function() {
+			window.__revirUsingNativeMic = false;
+			startBrowserMediaCapture("");
+		});
 	};
 
-	function startMediaRecorderCapture() {
+	function startBrowserMediaCapture(nativeErr) {
 		var micBtn = document.getElementById("revir-chat-mic-btn");
 		if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-			showToast("⚠️ Bu cihazda mikrofon erişimi desteklenmiyor.");
+			showToast("⚠️ Mikrofon başlatılamadı: " + (nativeErr || "Ses aygıtı bulunamadı."));
 			return;
 		}
 		navigator.mediaDevices.getUserMedia({ audio: true }).then(function(stream) {
@@ -4233,6 +4219,34 @@ html, body {
 
 	function stopVoiceCapture() {
 		var micBtn = document.getElementById("revir-chat-mic-btn");
+		isRecordingVoice = false;
+		if (micBtn) { micBtn.classList.remove("recording"); micBtn.textContent = "🎙️"; }
+
+		if (window.__revirUsingNativeMic) {
+			window.__revirUsingNativeMic = false;
+			showToast("⏳ Ses kaydı işleniyor...");
+			fetch("/api/voice_stop", {
+				method: "POST",
+				headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
+				body: "{}"
+			})
+			.then(function(r) { return r.json(); })
+			.then(function(res) {
+				if (res && res.ok && res.data_b64) {
+					chatTtsEnabled = true;
+					var ttsBtn = document.getElementById("revir-chat-tts-btn");
+					if (ttsBtn) { ttsBtn.textContent = "🔊"; ttsBtn.classList.add("active"); }
+					window.__revirSendChat({ data_b64: res.data_b64, mime: res.mime || "audio/wav" });
+				} else {
+					showToast("⚠️ " + ((res && res.error) || "Ses kaydı çok kısa veya boş."));
+				}
+			})
+			.catch(function(err) {
+				showToast("❌ Ses kaydı durdurma hatası: " + err);
+			});
+			return;
+		}
+
 		if (voiceRec) {
 			try { voiceRec.stop(); } catch (e) {}
 			voiceRec = null;
@@ -4241,8 +4255,6 @@ html, body {
 			try { mediaRecorder.stop(); } catch (e) {}
 			mediaRecorder = null;
 		}
-		isRecordingVoice = false;
-		if (micBtn) { micBtn.classList.remove("recording"); micBtn.textContent = "🎙️"; }
 	}
 
 	var INITIAL_DATA = __REVIR_INITIAL_JSON__;
@@ -4266,8 +4278,99 @@ html, body {
 
 
 # ==============================================================================
-# 10. GÖMÜLÜ YEREL HTTP SUNUCUSU (Sadece 127.0.0.1)
+# 10. YEREL MİKROFON KAYDEDİCİSİ & SESLİ OKUMA (TTS) VE HTTP SUNUCUSU
 # ==============================================================================
+
+class _NativeAudioController:
+	"""WebView tarayıcı kısıtlamalarına takılmadan doğrudan Python üzerinden mikrofon kaydı ve Türkçe sesli okuma sağlar."""
+	def __init__(self) -> None:
+		self._lock = threading.Lock()
+		self._stream: Any = None
+		self._chunks: list[Any] = []
+		self._samplerate: int = 16000
+		self._tts_proc: Any = None
+
+	def start_recording(self) -> tuple[bool, str]:
+		with self._lock:
+			self._stop_stream_unlocked()
+			try:
+				import sounddevice as sd
+				self._chunks = []
+				self._samplerate = 16000
+
+				def _cb(indata, _frames, _time_info, _status):
+					self._chunks.append(indata.copy())
+
+				dev_info = sd.query_devices(kind="input")
+				dev_name = str(dev_info.get("name") or "Mikrofon") if isinstance(dev_info, dict) else "Mikrofon"
+				self._stream = sd.InputStream(samplerate=self._samplerate, channels=1, dtype="int16", callback=_cb)
+				self._stream.start()
+				return True, dev_name
+			except Exception as exc:
+				self._stream = None
+				return False, str(exc)
+
+	def _stop_stream_unlocked(self) -> None:
+		if self._stream is not None:
+			try:
+				self._stream.stop()
+				self._stream.close()
+			except Exception:
+				pass
+			self._stream = None
+
+	def stop_recording(self) -> tuple[bool, bytes, str]:
+		with self._lock:
+			self._stop_stream_unlocked()
+			if not self._chunks:
+				return False, b"", "Ses verisi yakalanamadı."
+			try:
+				import numpy as np
+				import wave
+				pcm = np.concatenate(self._chunks, axis=0)
+				self._chunks = []
+				if len(pcm) < int(self._samplerate * 0.25):
+					return False, b"", "Ses kaydı çok kısa (en az 1 saniye konuşun)."
+				buf = io.BytesIO()
+				with wave.open(buf, "wb") as wf:
+					wf.setnchannels(1)
+					wf.setsampwidth(2)
+					wf.setframerate(self._samplerate)
+					wf.writeframes(pcm.tobytes())
+				return True, buf.getvalue(), ""
+			except Exception as exc:
+				self._chunks = []
+				return False, b"", str(exc)
+
+	def speak_text(self, text: str) -> bool:
+		self.stop_speaking()
+		clean = (text or "").strip()
+		if not clean:
+			return False
+		import sys, subprocess, shutil
+		if sys.platform == "darwin" and shutil.which("say"):
+			try:
+				self._tts_proc = subprocess.Popen(
+					["/usr/bin/say", "-v", "Yelda", "-r", "195", clean[:2500]],
+					stdout=subprocess.DEVNULL,
+					stderr=subprocess.DEVNULL,
+				)
+				return True
+			except Exception:
+				pass
+		return False
+
+	def stop_speaking(self) -> None:
+		if self._tts_proc is not None:
+			try:
+				self._tts_proc.terminate()
+			except Exception:
+				pass
+			self._tts_proc = None
+
+
+_AUDIO_CTRL = _NativeAudioController()
+
 
 class LocalUIServer:
 	"""Python süreç içi yerel arayüz sunucusu (alt süreç veya harici çerçeve gerektirmez)."""
@@ -4436,6 +4539,35 @@ class LocalUIServer:
 				if path == "/api/gemini_chat_clear":
 					with server_ref.session.lock:
 						server_ref.session.chat_history.clear()
+					_AUDIO_CTRL.stop_speaking()
+					self._send_bytes(HTTPStatus.OK, "application/json", b'{"ok":true}')
+					return
+
+				if path == "/api/voice_start":
+					ok_v, info_v = _AUDIO_CTRL.start_recording()
+					if ok_v:
+						self._send_bytes(HTTPStatus.OK, "application/json", json.dumps({"ok": True, "device": info_v}, ensure_ascii=False).encode("utf-8"))
+					else:
+						self._send_bytes(HTTPStatus.OK, "application/json", json.dumps({"ok": False, "error": info_v}, ensure_ascii=False).encode("utf-8"))
+					return
+
+				if path == "/api/voice_stop":
+					ok_s, wav_bytes, err_s = _AUDIO_CTRL.stop_recording()
+					if ok_s and wav_bytes:
+						b64_wav = base64.b64encode(wav_bytes).decode("ascii")
+						self._send_bytes(HTTPStatus.OK, "application/json", json.dumps({"ok": True, "data_b64": b64_wav, "mime": "audio/wav"}).encode("utf-8"))
+					else:
+						self._send_bytes(HTTPStatus.OK, "application/json", json.dumps({"ok": False, "error": err_s or "Ses kaydı alınamadı."}, ensure_ascii=False).encode("utf-8"))
+					return
+
+				if path == "/api/tts_speak":
+					payload = self._read_json()
+					handled = _AUDIO_CTRL.speak_text(str(payload.get("text") or ""))
+					self._send_bytes(HTTPStatus.OK, "application/json", json.dumps({"ok": True, "handled": handled}).encode("utf-8"))
+					return
+
+				if path == "/api/tts_stop":
+					_AUDIO_CTRL.stop_speaking()
 					self._send_bytes(HTTPStatus.OK, "application/json", b'{"ok":true}')
 					return
 
