@@ -115,6 +115,7 @@ class _ActiveDialog:
 	func: Callable
 	args: tuple
 	kwargs: dict
+	mode: str = "modal"
 
 
 # ==============================================================================
@@ -851,7 +852,7 @@ class _AppSession:
 		self.active_tabs: dict[str, int] = {}
 		self.open_expanders: dict[str, bool] = {}
 		self.sidebar_collapsed: bool = False
-		self.active_dialog: _ActiveDialog | None = None
+		self.dialog_stack: list[_ActiveDialog] = []
 		self.uploaded_files: dict[str, list[UploadedFile]] = {}
 		self.downloads: OrderedDict[str, tuple[bytes, str, str]] = OrderedDict()
 		self.media: OrderedDict[str, tuple[bytes, str]] = OrderedDict()
@@ -865,6 +866,30 @@ class _AppSession:
 		self.floating_chat_label: str = "KVKK Korumalı"
 		self.floating_chat_handler: Callable | None = None
 		self.chat_history: list[dict[str, str]] = []
+		self.topbar_html: str = ""
+		self.topbar_action_handler: Callable | None = None
+		self.cmd_search_handler: Callable | None = None
+		self.cmd_exec_handler: Callable | None = None
+
+	@property
+	def active_dialog(self) -> _ActiveDialog | None:
+		return self.dialog_stack[-1] if self.dialog_stack else None
+
+	@active_dialog.setter
+	def active_dialog(self, value: _ActiveDialog | None) -> None:
+		if value is None:
+			self.dialog_stack.clear()
+		else:
+			self.push_dialog(value)
+
+	def push_dialog(self, dlg: _ActiveDialog) -> None:
+		if self.dialog_stack and self.dialog_stack[-1].func is dlg.func:
+			self.dialog_stack[-1] = dlg
+		else:
+			self.dialog_stack.append(dlg)
+
+	def pop_dialog(self) -> _ActiveDialog | None:
+		return self.dialog_stack.pop() if self.dialog_stack else None
 
 	def register_download(self, data: bytes, file_name: str, mime: str) -> str:
 		h = hashlib.sha1(data[:2048] + file_name.encode("utf-8", errors="ignore") + str(len(data)).encode()).hexdigest()[:16]
@@ -1144,7 +1169,7 @@ class _UIContainer:
 		ctx = _get_ctx()
 		ctx.session.page_title = str(page_title or "Revir Defteri")
 
-	def columns(self, spec: int | Sequence[int | float], *, gap: str = "small", vertical_alignment: str = "top") -> list[_UIContainer]:
+	def columns(self, spec: int | Sequence[int | float], *, gap: str = "small", vertical_alignment: str = "top", sticky_first_col: bool = False) -> list[_UIContainer]:
 		ctx = _get_ctx()
 		if isinstance(spec, int):
 			weights = [1.0] * max(1, spec)
@@ -1156,7 +1181,7 @@ class _UIContainer:
 		align_css = {"top": "start", "center": "center", "bottom": "end"}.get(vertical_alignment, "start")
 
 		# Yer tutucu liste; render sırasında son HTML birleştirilir
-		placeholder = _LazyColumnsNode(col_lists, grid_tpl, gap_px, align_css)
+		placeholder = _LazyColumnsNode(col_lists, grid_tpl, gap_px, align_css, sticky_first_col=sticky_first_col)
 		ctx.current_nodes().append(placeholder)  # type: ignore[arg-type]
 		return [_UIContainer(target_list=cl) for cl in col_lists]
 
@@ -1195,18 +1220,71 @@ class _UIContainer:
 			wrapper_close="</div></div>",
 		)
 
-	def tabs(self, tab_labels: Sequence[str]) -> list[_UIContainer]:
+	def tabs(self, tab_labels: Sequence[str], *, orientation: str = "horizontal") -> list[_UIContainer]:
 		ctx = _get_ctx()
 		labels = [str(x) for x in tab_labels]
-		tab_sig = "|".join(labels)
+		tab_sig = f"{orientation}|" + "|".join(labels)
 		tab_id = ctx.next_auto_id("tabs", tab_sig)
 		active_idx = ctx.session.active_tabs.get(tab_id, 0)
 		if active_idx < 0 or active_idx >= len(labels):
 			active_idx = 0
 		pane_lists: list[list[str]] = [[] for _ in labels]
-		node = _LazyTabsNode(tab_id, labels, active_idx, pane_lists)
+		node = _LazyTabsNode(tab_id, labels, active_idx, pane_lists, orientation=orientation)
 		ctx.current_nodes().append(node)  # type: ignore[arg-type]
 		return [_UIContainer(target_list=pl) for pl in pane_lists]
+
+	def sidebar_nav_groups(
+		self,
+		groups: Sequence[tuple[str, Sequence[dict[str, Any]]]],
+		*,
+		key: str = "main_menu_page",
+		default_value: str | None = None,
+	) -> str:
+		"""Gruplanmış ve ikon-rayı (rail) moduna daraltılabilen yan menü navigasyonu."""
+		if self._target_list is not None or self._is_sidebar:
+			with self:
+				return _root.sidebar_nav_groups(groups, key=key, default_value=default_value)
+		ctx = _get_ctx()
+		flat_opts: list[str] = []
+		for _g_title, items in groups:
+			for it in items:
+				flat_opts.append(str(it["value"]))
+		wid = str(key)
+		cur = ctx.session.session_state.get(wid)
+		if cur not in flat_opts:
+			cur = default_value if (default_value in flat_opts) else (flat_opts[0] if flat_opts else "")
+			ctx.session.session_state[wid] = cur
+		sel_idx = flat_opts.index(cur) if cur in flat_opts else 0
+		self._register_widget_meta(wid, True, {"kind": "radio", "options": flat_opts})
+		esc_wid = html_lib.escape(wid, quote=True)
+
+		chunks: list[str] = [f'<div class="revir-nav-grouped" data-key="{esc_wid}" data-kind="radio" data-value="{sel_idx}">']
+		running_idx = 0
+		for g_title, items in groups:
+			chunks.append(f'<div class="revir-nav-sec-hdr">{html_lib.escape(str(g_title))}</div>')
+			for it in items:
+				val = str(it["value"])
+				ico = str(it.get("icon") or "•")
+				lbl = str(it.get("label") or val)
+				badge = it.get("badge")
+				act_cls = " active" if running_idx == sel_idx else ""
+				tip = html_lib.escape(lbl, quote=True)
+				badge_html = (
+					f'<span class="revir-nav-badge">{html_lib.escape(str(badge))}</span>'
+					if badge is not None and str(badge) != "" and str(badge) != "0"
+					else ""
+				)
+				chunks.append(
+					f'<button type="button" class="revir-nav-item revir-nav-rail-item{act_cls}" title="{tip}" '
+					f'onclick="window.__revirRadioPick(\'{esc_wid}\', {running_idx}, this)">'
+					f'<span class="revir-nav-ico">{html_lib.escape(ico)}</span>'
+					f'<span class="revir-nav-txt">{html_lib.escape(lbl)}</span>'
+					f'{badge_html}</button>'
+				)
+				running_idx += 1
+		chunks.append("</div>")
+		ctx.emit("".join(chunks))
+		return str(cur)
 
 	def form(self, key: str, *, clear_on_submit: bool = False, border: bool = True) -> _UIContainer:
 		ctx = _get_ctx()
@@ -2262,23 +2340,28 @@ class _UIContainer:
 
 
 class _LazyColumnsNode:
-	def __init__(self, col_lists: list[list[str]], grid_tpl: str, gap_px: str, align_css: str) -> None:
+	def __init__(self, col_lists: list[list[str]], grid_tpl: str, gap_px: str, align_css: str, *, sticky_first_col: bool = False) -> None:
 		self.col_lists = col_lists
 		self.grid_tpl = grid_tpl
 		self.gap_px = gap_px
 		self.align_css = align_css
+		self.sticky_first_col = sticky_first_col
 
 	def render(self) -> str:
-		cols_html = "".join(f'<div class="revir-col">{_flatten_nodes(cl)}</div>' for cl in self.col_lists)
-		return f'<div class="revir-cols" style="grid-template-columns:{self.grid_tpl}; gap:{self.gap_px}; align-items:{self.align_css};">{cols_html}</div>'
+		col_parts: list[str] = []
+		for idx, cl in enumerate(self.col_lists):
+			cls = "revir-col revir-sticky-col" if (self.sticky_first_col and idx == 0) else "revir-col"
+			col_parts.append(f'<div class="{cls}">{_flatten_nodes(cl)}</div>')
+		return f'<div class="revir-cols" style="grid-template-columns:{self.grid_tpl}; gap:{self.gap_px}; align-items:{self.align_css};">{"".join(col_parts)}</div>'
 
 
 class _LazyTabsNode:
-	def __init__(self, tab_id: str, labels: list[str], active_idx: int, pane_lists: list[list[str]]) -> None:
+	def __init__(self, tab_id: str, labels: list[str], active_idx: int, pane_lists: list[list[str]], *, orientation: str = "horizontal") -> None:
 		self.tab_id = tab_id
 		self.labels = labels
 		self.active_idx = active_idx
 		self.pane_lists = pane_lists
+		self.orientation = orientation
 
 	def render(self) -> str:
 		btns = []
@@ -2290,6 +2373,18 @@ class _LazyTabsNode:
 				f'onclick="window.__revirSwitchTab(\'{self.tab_id}\', {i})">{html_lib.escape(lbl)}</button>'
 			)
 			panes.append(f'<div class="revir-tab-pane{act}" data-tab-group="{self.tab_id}" data-tab-idx="{i}">{_flatten_nodes(pl)}</div>')
+		if self.orientation == "vertical":
+			return (
+				f'<div class="revir-tabs revir-tabs-vertical">'
+				f'<div class="revir-tab-bar-v">{"".join(btns)}</div>'
+				f'<div class="revir-tab-content-v">{"".join(panes)}</div></div>'
+			)
+		if self.orientation == "segmented":
+			return (
+				f'<div class="revir-tabs revir-tabs-seg">'
+				f'<div class="revir-tab-bar-seg">{"".join(btns)}</div>'
+				f'<div class="revir-tab-content">{"".join(panes)}</div></div>'
+			)
 		return f'<div class="revir-tabs"><div class="revir-tab-bar">{"".join(btns)}</div><div class="revir-tab-content">{"".join(panes)}</div></div>'
 
 
@@ -2333,19 +2428,20 @@ class _ComponentsNamespace:
 components = _ComponentsNamespace()
 
 
-def dialog(title: str, *, width: str = "small", on_dismiss: Callable | None = None):
+def dialog(title: str, *, width: str = "small", mode: str = "modal", on_dismiss: Callable | None = None):
 	def _decorator(func: Callable) -> Callable:
 		@functools.wraps(func)
 		def _wrapper(*args, **kwargs):
 			ctx = _get_ctx()
-			ctx.session.active_dialog = _ActiveDialog(
+			ctx.session.push_dialog(_ActiveDialog(
 				title=title,
 				width=width,
 				on_dismiss=on_dismiss,
 				func=func,
 				args=args,
 				kwargs=kwargs,
-			)
+				mode=mode,
+			))
 			ctx.dialog_rendered_this_pass = True
 			ctx.dialog_nodes = []
 			prev_dlg = ctx.in_dialog
@@ -2366,6 +2462,14 @@ def dialog(title: str, *, width: str = "small", on_dismiss: Callable | None = No
 	return _decorator
 
 
+def close_dialog(*, all_dialogs: bool = False) -> None:
+	ctx = _get_ctx()
+	if all_dialogs:
+		ctx.session.dialog_stack.clear()
+	else:
+		ctx.session.pop_dialog()
+
+
 def rerun(*, scope: str = "app") -> None:
 	raise _RerunException(scope=scope)
 
@@ -2378,6 +2482,21 @@ def configure_floating_chat(enabled: bool, label: str = "KVKK Korumalı", handle
 		ctx.session.floating_chat_handler = handler
 
 
+def configure_topbar(html_str: str, action_handler: Callable | None = None) -> None:
+	ctx = _get_ctx()
+	ctx.session.topbar_html = str(html_str or "")
+	if action_handler is not None:
+		ctx.session.topbar_action_handler = action_handler
+
+
+def configure_command_palette(search_handler: Callable | None = None, exec_handler: Callable | None = None) -> None:
+	ctx = _get_ctx()
+	if search_handler is not None:
+		ctx.session.cmd_search_handler = search_handler
+	if exec_handler is not None:
+		ctx.session.cmd_exec_handler = exec_handler
+
+
 # Kök konteyner ve modül düzeyinde API dışa aktarımları
 _root = _UIContainer()
 sidebar = _UIContainer(is_sidebar=True)
@@ -2388,6 +2507,7 @@ container = _root.container
 expander = _root.expander
 popover = _root.popover
 tabs = _root.tabs
+sidebar_nav_groups = _root.sidebar_nav_groups
 form = _root.form
 spinner = _root.spinner
 markdown = _root.markdown
@@ -2607,11 +2727,34 @@ def _execute_render_cycle(app_fn: Callable[[], None], session: _AppSession, payl
 				}
 
 		elif action == "close_dialog":
-			old_dlg = session.active_dialog
-			session.active_dialog = None
-			if old_dlg is not None and callable(old_dlg.on_dismiss):
+			close_all = bool(payload.get("all"))
+			if close_all:
+				while session.dialog_stack:
+					old_dlg = session.pop_dialog()
+					if old_dlg is not None and callable(old_dlg.on_dismiss):
+						try:
+							old_dlg.on_dismiss()
+						except _RerunException:
+							pass
+			else:
+				old_dlg = session.pop_dialog()
+				if old_dlg is not None and callable(old_dlg.on_dismiss):
+					try:
+						old_dlg.on_dismiss()
+					except _RerunException:
+						pass
+
+		elif action == "topbar_action":
+			if callable(session.topbar_action_handler):
 				try:
-					old_dlg.on_dismiss()
+					session.topbar_action_handler(str(act_key or ""), act_val)
+				except _RerunException:
+					pass
+
+		elif action == "cmd_exec":
+			if callable(session.cmd_exec_handler):
+				try:
+					session.cmd_exec_handler(payload.get("item") or {})
 				except _RerunException:
 					pass
 
@@ -2673,14 +2816,15 @@ def _execute_render_cycle(app_fn: Callable[[], None], session: _AppSession, payl
 				clicked_button = None
 				submitted_form = None
 				if rerun_req.scope != "fragment":
-					session.active_dialog = None
+					session.pop_dialog()
 				continue
 			break
 
 		assert last_ctx is not None
 		main_html = _flatten_nodes(last_ctx.main_nodes)
 		sidebar_html = _flatten_nodes(last_ctx.sidebar_nodes)
-		dialog_html = _flatten_nodes(last_ctx.dialog_nodes) if session.active_dialog is not None else None
+		top_dlg = session.active_dialog
+		dialog_html = _flatten_nodes(last_ctx.dialog_nodes) if top_dlg is not None else None
 		if error_trace:
 			main_html += (
 				'<div class="revir-alert revir-alert-error"><span class="revir-alert-icon">❌</span>'
@@ -2689,11 +2833,14 @@ def _execute_render_cycle(app_fn: Callable[[], None], session: _AppSession, payl
 
 		result = {
 			"title": session.page_title,
+			"topbar_html": session.topbar_html,
 			"sidebar_html": sidebar_html,
 			"main_html": main_html,
 			"dialog_html": dialog_html,
-			"dialog_title": session.active_dialog.title if session.active_dialog else None,
-			"dialog_width": session.active_dialog.width if session.active_dialog else "large",
+			"dialog_title": top_dlg.title if top_dlg else None,
+			"dialog_width": top_dlg.width if top_dlg else "large",
+			"dialog_mode": top_dlg.mode if top_dlg else "modal",
+			"dialog_depth": len(session.dialog_stack),
 			"sidebar_collapsed": session.sidebar_collapsed,
 			"balloons": last_ctx.balloons_triggered,
 			"styles_html": "\n".join(last_ctx.styles_parts),
@@ -2744,38 +2891,104 @@ html, body {
 	background: var(--bg-page);
 }
 .revir-sidebar {
-	width: 280px; min-width: 280px; max-width: 280px;
+	width: 268px; min-width: 268px; max-width: 268px;
 	height: 100vh; overflow-y: auto; overflow-x: hidden;
 	background: var(--sidebar-bg);
 	border-right: 1px solid var(--line);
-	padding: 18px 16px 24px 16px;
-	transition: margin-left 0.22s ease, opacity 0.2s ease;
+	padding: 14px 13px 22px 13px;
+	transition: width 0.2s ease, min-width 0.2s ease, max-width 0.2s ease, padding 0.2s ease;
 	z-index: 20;
 	flex-shrink: 0;
 }
 .revir-sidebar.collapsed {
-	margin-left: -280px;
-	opacity: 0;
-	pointer-events: none;
+	width: 66px; min-width: 66px; max-width: 66px;
+	padding: 12px 7px 18px 7px;
 }
-.revir-sidebar-open-btn {
-	position: fixed; top: 14px; left: 14px; z-index: 500;
-	width: 38px; height: 38px; border-radius: 10px;
-	border: 1.5px solid var(--teal); background: var(--card-bg); color: var(--teal);
-	font-size: 18px; font-weight: 700; display: none;
-	align-items: center; justify-content: center; cursor: pointer;
-	box-shadow: 0 3px 12px rgba(0,0,0,0.12);
-	transition: all 0.18s ease;
+.revir-sidebar.collapsed .revir-sb-expanded-only,
+.revir-sidebar.collapsed .revir-nav-sec-hdr,
+.revir-sidebar.collapsed .revir-nav-txt,
+.revir-sidebar.collapsed .revir-nav-badge,
+.revir-sidebar.collapsed .revir-caption,
+.revir-sidebar.collapsed .revir-hr,
+.revir-sidebar.collapsed .revir-toggle-wrap,
+.revir-sidebar.collapsed .revir-card,
+.revir-sidebar.collapsed .revir-cols,
+.revir-sidebar.collapsed .revir-widget-row {
+	display: none !important;
 }
-.revir-sidebar-open-btn:hover { background: var(--teal); color: #ffffff; transform: translateX(2px); }
-.revir-sidebar-open-btn.visible { display: flex; }
+.revir-sidebar.collapsed .revir-nav-rail-item {
+	justify-content: center;
+	padding: 10px 0;
+}
+.revir-sidebar.collapsed .revir-nav-ico {
+	font-size: 19px;
+	margin: 0;
+}
+.revir-sidebar.collapsed .revir-sidebar-close-btn span:last-child { display: none; }
+.revir-sidebar.collapsed .revir-sidebar-close-btn { padding: 8px 4px; }
+.revir-sidebar-open-btn { display: none !important; }
+
+.revir-workspace {
+	flex: 1; min-width: 0; height: 100vh;
+	display: flex; flex-direction: column; overflow: hidden;
+}
+.revir-topbar {
+	height: 52px; min-height: 52px; flex-shrink: 0;
+	display: flex; align-items: center; justify-content: space-between; gap: 12px;
+	padding: 0 22px;
+	background: var(--card-bg);
+	border-bottom: 1px solid var(--line);
+	z-index: 30;
+	box-shadow: 0 1px 4px rgba(15, 23, 42, 0.04);
+}
+.revir-tb-left, .revir-tb-right { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.revir-tb-center { flex: 1; display: flex; justify-content: center; max-width: 440px; min-width: 160px; }
+.revir-tb-icon-btn {
+	width: 34px; height: 34px; border-radius: 9px;
+	border: 1px solid var(--line); background: var(--sidebar-bg); color: var(--text-main);
+	cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
+	font-size: 15px; transition: all 0.15s; flex-shrink: 0;
+}
+.revir-tb-icon-btn:hover { border-color: var(--teal); color: var(--teal); background: var(--mint); }
+.revir-tb-crumb {
+	font-size: 0.92rem; font-weight: 700; color: var(--text-heading);
+	white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.revir-tb-crumb small { color: var(--text-muted); font-weight: 500; margin-left: 4px; }
+.revir-tb-pill {
+	display: inline-flex; align-items: center; gap: 5px;
+	padding: 5px 10px; border-radius: 999px;
+	border: 1px solid var(--line); background: var(--sidebar-bg); color: var(--text-main);
+	font-size: 12px; font-weight: 700; cursor: pointer; font-family: inherit;
+	white-space: nowrap; transition: all 0.15s;
+}
+.revir-tb-pill:hover { border-color: var(--teal); color: var(--teal); background: var(--mint); }
+.revir-tb-pill.active { background: var(--teal); color: #ffffff !important; border-color: var(--teal); }
+.revir-tb-pill.archive { background: #fef3c7; color: #92400e !important; border-color: #f59e0b; }
+.revir-tb-pill.kvkk-on { background: #ecfdf5; color: #047857 !important; border-color: #10b981; }
+.revir-tb-search-btn {
+	width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+	padding: 6px 12px; border-radius: 10px;
+	border: 1px solid var(--line); background: var(--sidebar-bg); color: var(--text-muted);
+	font-size: 13px; font-weight: 500; cursor: pointer; font-family: inherit;
+	transition: all 0.15s;
+}
+.revir-tb-search-btn:hover { border-color: var(--teal); color: var(--text-main); background: var(--card-bg); box-shadow: 0 2px 8px rgba(13,148,136,0.1); }
+.revir-kbd {
+	font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 5px;
+	border: 1px solid var(--line); background: var(--card-bg); color: var(--text-muted);
+}
 
 .revir-main {
-	flex: 1; height: 100vh; overflow-y: auto; overflow-x: hidden;
-	padding: 24px 32px 48px 32px;
+	flex: 1; overflow-y: auto; overflow-x: hidden;
+	padding: 20px 28px 64px 28px;
 	scroll-behavior: auto;
 }
 .revir-main-inner { max-width: 1480px; margin: 0 auto; }
+.revir-sticky-col {
+	position: sticky; top: 8px; align-self: start;
+	max-height: calc(100vh - 104px); overflow-y: auto;
+}
 
 /* Tipografi & Markdown */
 .revir-md p { margin: 0 0 8px 0; }
@@ -2849,16 +3062,29 @@ html, body {
 .revir-btn-sm { padding: 5px 10px; font-size: 0.82rem; }
 .revir-w-full { width: 100%; }
 
-/* Yan Menü Navigasyonu */
-.revir-nav-group { display: flex; flex-direction: column; gap: 3px; margin: 8px 0; }
-.revir-nav-item {
-	width: 100%; text-align: left; padding: 9px 12px; border-radius: 9px;
-	border: 1px solid transparent; background: transparent; color: var(--text-main);
-	font-size: 0.92rem; font-weight: 600; cursor: pointer; font-family: inherit;
-	transition: all 0.15s ease;
+/* Yan Menü Navigasyonu (Gruplu & İkon Rayı Destekli) */
+.revir-nav-group, .revir-nav-grouped { display: flex; flex-direction: column; gap: 2px; margin: 6px 0; }
+.revir-nav-sec-hdr {
+	font-size: 10.5px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase;
+	color: var(--text-muted); padding: 10px 10px 4px 10px; user-select: none;
 }
+.revir-nav-sec-hdr:first-child { padding-top: 2px; }
+.revir-nav-item {
+	width: 100%; text-align: left; padding: 8px 10px; border-radius: 9px;
+	border: 1px solid transparent; background: transparent; color: var(--text-main);
+	font-size: 0.89rem; font-weight: 600; cursor: pointer; font-family: inherit;
+	transition: all 0.15s ease; display: flex; align-items: center; gap: 9px;
+}
+.revir-nav-ico { font-size: 16px; line-height: 1; flex-shrink: 0; width: 20px; text-align: center; }
+.revir-nav-txt { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.revir-nav-badge {
+	font-size: 11px; font-weight: 800; padding: 1px 7px; border-radius: 999px;
+	background: rgba(13,148,136,0.14); color: var(--teal); flex-shrink: 0;
+}
+.revir-nav-item.active .revir-nav-badge { background: rgba(255,255,255,0.24); color: #ffffff !important; }
 .revir-nav-item:hover { background: rgba(13,148,136,0.10); color: var(--teal); }
 .revir-nav-item.active { background: var(--teal); color: #ffffff !important; box-shadow: 0 2px 8px rgba(13,148,136,0.28); }
+.revir-nav-item.active * { color: #ffffff !important; }
 .revir-sidebar-close-btn {
 	display: flex; align-items: center; justify-content: center; gap: 6px;
 	padding: 8px 10px; margin-top: 10px; border-radius: 8px;
@@ -2948,19 +3174,59 @@ html, body {
 }
 .revir-chip-x { border: none; background: transparent; color: inherit; cursor: pointer; font-weight: 800; padding: 0 2px; font-size: 14px; line-height: 1; }
 
-/* Sekmeler */
+/* Sekmeler (Yatay, Dikey & Segmented Hap) */
 .revir-tabs { margin: 8px 0 14px 0; }
 .revir-tab-bar { display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1.5px solid var(--line); margin-bottom: 14px; }
 .revir-tab-btn {
-	padding: 8px 15px; border: none; border-bottom: 2.5px solid transparent;
+	padding: 8px 14px; border: none; border-bottom: 2.5px solid transparent;
 	background: transparent; color: var(--text-muted); font-family: inherit;
-	font-size: 0.9rem; font-weight: 600; cursor: pointer; border-radius: 8px 8px 0 0;
+	font-size: 0.89rem; font-weight: 600; cursor: pointer; border-radius: 8px 8px 0 0;
 	margin-bottom: -1.5px; transition: all 0.15s;
 }
 .revir-tab-btn:hover { color: var(--teal); background: rgba(13,148,136,0.06); }
 .revir-tab-btn.active { color: var(--teal); border-bottom-color: var(--teal); background: rgba(13,148,136,0.08); font-weight: 700; }
 .revir-tab-pane { display: none; }
 .revir-tab-pane.active { display: block; }
+
+.revir-tabs-seg .revir-tab-bar-seg {
+	display: inline-flex; flex-wrap: wrap; gap: 4px;
+	padding: 4px; border-radius: 11px;
+	background: var(--sidebar-bg); border: 1px solid var(--line);
+	margin-bottom: 14px;
+}
+.revir-tabs-seg .revir-tab-btn {
+	border: none; border-radius: 8px; margin-bottom: 0; padding: 6px 13px;
+	font-size: 0.85rem; color: var(--text-muted);
+}
+.revir-tabs-seg .revir-tab-btn.active {
+	background: var(--card-bg); color: var(--teal);
+	box-shadow: 0 2px 6px rgba(15,23,42,0.08); font-weight: 700;
+}
+
+.revir-tabs-vertical {
+	display: grid; grid-template-columns: 215px minmax(0, 1fr); gap: 18px; align-items: start;
+}
+.revir-tab-bar-v {
+	display: flex; flex-direction: column; gap: 3px;
+	position: sticky; top: 0;
+	background: var(--sidebar-bg); border: 1px solid var(--line);
+	border-radius: 12px; padding: 7px;
+}
+.revir-tab-bar-v .revir-tab-btn {
+	width: 100%; text-align: left; border: none; border-radius: 8px;
+	margin-bottom: 0; padding: 8px 11px; font-size: 0.86rem;
+	display: flex; align-items: center; gap: 6px;
+}
+.revir-tab-bar-v .revir-tab-btn.active {
+	background: var(--teal); color: #ffffff !important;
+	box-shadow: 0 2px 8px rgba(13,148,136,0.24);
+}
+.revir-tab-content-v { min-width: 0; }
+@media (max-width: 900px) {
+	.revir-tabs-vertical { grid-template-columns: 1fr; }
+	.revir-tab-bar-v { flex-direction: row; flex-wrap: wrap; position: static; }
+	.revir-tab-bar-v .revir-tab-btn { width: auto; }
+}
 
 /* Expander */
 .revir-expander {
@@ -3073,34 +3339,123 @@ html, body {
 	box-shadow: 0 8px 24px rgba(0,0,0,0.28);
 }
 
-/* Modal Diyalog */
+/* Modal Diyalog & Sağdan Açılan Çekmece (Slide-Over Drawer) */
 .revir-modal-backdrop {
 	position: fixed; inset: 0; z-index: 2000;
 	background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(4px);
 	display: none; align-items: center; justify-content: center; padding: 20px;
 }
 .revir-modal-backdrop.open { display: flex; }
+.revir-modal-backdrop.drawer-mode { justify-content: flex-end; align-items: stretch; padding: 0; }
 .revir-modal-card {
 	background: var(--card-bg); color: var(--text-main);
 	border: 1px solid var(--line); border-radius: 16px;
 	box-shadow: 0 24px 64px rgba(0,0,0,0.34);
-	width: 92vw; max-width: 1160px; max-height: 90vh;
+	width: 93vw; max-width: 1220px; max-height: 92vh;
 	display: flex; flex-direction: column; overflow: hidden;
+	transition: width 0.2s ease, max-width 0.2s ease, height 0.2s ease, max-height 0.2s ease;
 }
 .revir-modal-card.small { max-width: 640px; }
+.revir-modal-card.drawer {
+	width: 640px; max-width: 94vw; height: 100vh; max-height: 100vh;
+	border-radius: 16px 0 0 16px; border-right: none;
+	animation: revirSlideInRight 0.2s ease;
+}
+.revir-modal-card.fullscreen {
+	width: 98vw !important; max-width: 98vw !important;
+	height: 96vh !important; max-height: 96vh !important;
+	border-radius: 12px !important;
+}
+@keyframes revirSlideInRight {
+	from { transform: translateX(36px); opacity: 0.6; }
+	to { transform: translateX(0); opacity: 1; }
+}
 .revir-modal-header {
-	display: flex; align-items: center; justify-content: space-between;
-	padding: 14px 20px; border-bottom: 1px solid var(--line);
+	display: flex; align-items: center; justify-content: space-between; gap: 10px;
+	padding: 12px 18px; border-bottom: 1px solid var(--line);
 	background: var(--sidebar-bg); flex-shrink: 0;
 }
-.revir-modal-title { font-size: 1.08rem; font-weight: 800; color: var(--text-heading); margin: 0; }
-.revir-modal-close {
+.revir-modal-hdr-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.revir-modal-hdr-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.revir-modal-title { font-size: 1.05rem; font-weight: 800; color: var(--text-heading); margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.revir-modal-back {
+	display: none; align-items: center; gap: 4px;
+	padding: 4px 10px; border-radius: 7px; border: 1px solid var(--teal);
+	background: var(--mint); color: var(--teal); font-size: 12px; font-weight: 700; cursor: pointer;
+}
+.revir-modal-back.visible { display: inline-flex; }
+.revir-modal-back:hover { background: var(--teal); color: #ffffff; }
+.revir-modal-hbtn, .revir-modal-close {
 	width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--line);
-	background: var(--card-bg); color: var(--text-main); font-size: 18px;
+	background: var(--card-bg); color: var(--text-main); font-size: 16px;
 	cursor: pointer; display: flex; align-items: center; justify-content: center;
 }
+.revir-modal-hbtn:hover { background: var(--mint); color: var(--teal); border-color: var(--teal); }
 .revir-modal-close:hover { background: #fee2e2; color: #b91c1c; border-color: #fca5a5; }
-.revir-modal-body { padding: 18px 22px 24px 22px; overflow-y: auto; flex: 1; }
+.revir-modal-body { padding: 16px 22px 68px 22px; overflow-y: auto; flex: 1; }
+body.modal-open #revir-fab-btn {
+	padding: 0; width: 46px; height: 46px; min-width: 46px; opacity: 0.85;
+}
+body.modal-open #revir-fab-btn span:not(.revir-fab-icon) { display: none; }
+body.modal-open #revir-fab-btn:hover { opacity: 1; }
+
+/* Global Komut & Kişi Arama Paleti (Cmd/Ctrl+K) */
+#revir-cmd-backdrop {
+	position: fixed; inset: 0; z-index: 4200;
+	background: rgba(15, 23, 42, 0.52); backdrop-filter: blur(5px);
+	display: none; align-items: flex-start; justify-content: center; padding-top: 9vh;
+}
+#revir-cmd-backdrop.open { display: flex; }
+#revir-cmd-card {
+	width: 620px; max-width: 94vw; max-height: 74vh;
+	background: var(--card-bg); color: var(--text-main);
+	border: 1px solid var(--line); border-radius: 16px;
+	box-shadow: 0 24px 64px rgba(15,23,42,0.38);
+	display: flex; flex-direction: column; overflow: hidden;
+}
+.revir-cmd-top {
+	display: flex; align-items: center; gap: 10px;
+	padding: 13px 16px; border-bottom: 1px solid var(--line);
+	background: var(--sidebar-bg);
+}
+#revir-cmd-input {
+	flex: 1; border: none; outline: none; background: transparent;
+	color: var(--text-heading); font-family: inherit; font-size: 15.5px; font-weight: 500;
+}
+#revir-cmd-results {
+	flex: 1; overflow-y: auto; padding: 8px;
+}
+.revir-cmd-group {
+	font-size: 11px; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase;
+	color: var(--text-muted); padding: 8px 10px 4px 10px;
+}
+.revir-cmd-item {
+	display: flex; align-items: center; justify-content: space-between; gap: 10px;
+	padding: 9px 12px; border-radius: 10px; cursor: pointer;
+	transition: background 0.12s;
+}
+.revir-cmd-item:hover, .revir-cmd-item.active { background: var(--mint); }
+.revir-cmd-item-l { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.revir-cmd-item-ico { font-size: 18px; flex-shrink: 0; }
+.revir-cmd-item-title { font-size: 13.8px; font-weight: 700; color: var(--text-heading); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.revir-cmd-item-sub { font-size: 12px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.revir-cmd-item-tag {
+	font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 6px;
+	background: var(--sidebar-bg); border: 1px solid var(--line); color: var(--teal); flex-shrink: 0;
+}
+.revir-cmd-footer {
+	display: flex; align-items: center; justify-content: space-between;
+	padding: 8px 14px; border-top: 1px solid var(--line);
+	background: var(--sidebar-bg); font-size: 11.5px; color: var(--text-muted);
+}
+
+/* Tema Swatch Kartları & Kişi Dosyası Sabit Şerit */
+.revir-sticky-alert-bar {
+	position: sticky; top: 0; z-index: 10;
+	background: var(--card-bg); border: 1px solid var(--line);
+	border-radius: 12px; padding: 11px 15px; margin-bottom: 12px;
+	box-shadow: 0 4px 14px rgba(15,23,42,0.06);
+}
 
 /* Bildirim Toast & Yükleme Çubuğu */
 #revir-busy-bar {
@@ -3273,17 +3628,40 @@ html, body {
 <button id="revir-sidebar-open" class="revir-sidebar-open-btn" type="button" title="Menüyü Aç" onclick="window.__revirSetSidebar(false)">❯</button>
 <div class="revir-app">
 	<aside id="revir-sidebar" class="revir-sidebar">__REVIR_INIT_SIDEBAR__</aside>
-	<main id="revir-main" class="revir-main">
-		<div id="revir-main-inner" class="revir-main-inner">__REVIR_INIT_MAIN__</div>
-	</main>
+	<div class="revir-workspace">
+		<header id="revir-topbar" class="revir-topbar">__REVIR_INIT_TOPBAR__</header>
+		<main id="revir-main" class="revir-main">
+			<div id="revir-main-inner" class="revir-main-inner">__REVIR_INIT_MAIN__</div>
+		</main>
+	</div>
 </div>
-<div id="revir-modal-backdrop" class="revir-modal-backdrop" onclick="if(event.target===this) window.__revirCloseDialog()">
+<div id="revir-modal-backdrop" class="revir-modal-backdrop" onclick="if(event.target===this) window.__revirTryBackdropClose()">
 	<div id="revir-modal-card" class="revir-modal-card" role="dialog" aria-modal="true">
 		<div class="revir-modal-header">
-			<h3 id="revir-modal-title" class="revir-modal-title"></h3>
-			<button type="button" class="revir-modal-close" title="Kapat" onclick="window.__revirCloseDialog()">✕</button>
+			<div class="revir-modal-hdr-left">
+				<button id="revir-modal-back" type="button" class="revir-modal-back" title="Önceki Pencereye Dön" onclick="window.__revirCloseDialog()">← Geri</button>
+				<h3 id="revir-modal-title" class="revir-modal-title"></h3>
+			</div>
+			<div class="revir-modal-hdr-actions">
+				<button id="revir-modal-fs-btn" type="button" class="revir-modal-hbtn" title="Tam Ekran Büyüt / Küçült" onclick="window.__revirToggleModalFullscreen()">⤢</button>
+				<button type="button" class="revir-modal-close" title="Kapat (ESC)" onclick="window.__revirCloseDialog(true)">✕</button>
+			</div>
 		</div>
 		<div id="revir-modal-body" class="revir-modal-body"></div>
+	</div>
+</div>
+<div id="revir-cmd-backdrop" onclick="if(event.target===this) window.__revirCloseCmdPalette()">
+	<div id="revir-cmd-card" role="dialog" aria-modal="true">
+		<div class="revir-cmd-top">
+			<span style="font-size:17px;">🔍</span>
+			<input id="revir-cmd-input" type="text" placeholder="Öğrenci adı, okul no, sayfa veya ayar ara... (Örn: Ahmet, yedek, tema, aşı)" autocomplete="off" oninput="window.__revirCmdSearch(this.value)" onkeydown="window.__revirCmdKey(event)"/>
+			<span class="revir-kbd">ESC</span>
+		</div>
+		<div id="revir-cmd-results"></div>
+		<div class="revir-cmd-footer">
+			<span>↑↓ Gezin · ↵ Seç · ESC Kapat</span>
+			<span>Kısayollar: ⌘K Ara · Alt+V Yeni Vizit · Alt+B Menü</span>
+		</div>
 	</div>
 </div>
 <div id="revir-chart-tooltip"></div>
@@ -3343,6 +3721,12 @@ html, body {
 	var inflight = false;
 	var queuedReq = null;
 	var lastFocusedEditorId = null;
+	var modalDirty = false;
+	var modalBackdropWarned = false;
+	var lastDialogSig = "";
+	var cmdItems = [];
+	var cmdActiveIdx = 0;
+	var cmdTimer = null;
 
 	function showToast(msg) {
 		var el = document.getElementById("revir-toast");
@@ -3414,6 +3798,11 @@ html, body {
 			dynStyles.dataset.hash = String((data.styles_html || "").length) + ":" + (data.styles_html || "").slice(0, 64);
 		}
 
+		var tb = document.getElementById("revir-topbar");
+		if (tb && data.topbar_html !== undefined) {
+			tb.innerHTML = data.topbar_html || "";
+		}
+
 		var sb = document.getElementById("revir-sidebar");
 		var sbBtn = document.getElementById("revir-sidebar-open");
 		if (sb) {
@@ -3438,19 +3827,47 @@ html, body {
 		var card = document.getElementById("revir-modal-card");
 		var mTitle = document.getElementById("revir-modal-title");
 		var mBody = document.getElementById("revir-modal-body");
+		var mBack = document.getElementById("revir-modal-back");
+		var mFs = document.getElementById("revir-modal-fs-btn");
 		if (data.dialog_html !== null && data.dialog_html !== undefined) {
+			var curSig = String(data.dialog_title || "") + "|" + String(data.dialog_depth || 1) + "|" + String(data.dialog_mode || "modal");
+			if (curSig !== lastDialogSig) {
+				modalDirty = false;
+				modalBackdropWarned = false;
+				if (card) card.classList.remove("fullscreen");
+				lastDialogSig = curSig;
+			}
 			if (mTitle) mTitle.textContent = data.dialog_title || "";
 			if (mBody) {
 				mBody.innerHTML = data.dialog_html;
 				mBody.scrollTop = dlgScroll;
 			}
-			if (card) {
-				card.classList.toggle("small", data.dialog_width === "small");
+			var isDrawer = (data.dialog_mode === "drawer");
+			if (backdrop) {
+				backdrop.classList.add("open");
+				backdrop.classList.toggle("drawer-mode", isDrawer);
 			}
-			if (backdrop) backdrop.classList.add("open");
+			if (card) {
+				card.classList.toggle("small", !isDrawer && data.dialog_width === "small");
+				card.classList.toggle("drawer", isDrawer);
+			}
+			if (mBack) mBack.classList.toggle("visible", Number(data.dialog_depth || 0) > 1);
+			if (mFs) mFs.style.display = isDrawer ? "none" : "flex";
+			document.body.classList.add("modal-open");
 		} else {
-			if (backdrop) backdrop.classList.remove("open");
+			if (backdrop) {
+				backdrop.classList.remove("open");
+				backdrop.classList.remove("drawer-mode");
+			}
+			if (card) {
+				card.classList.remove("drawer");
+				card.classList.remove("fullscreen");
+			}
 			if (mBody) mBody.innerHTML = "";
+			modalDirty = false;
+			modalBackdropWarned = false;
+			lastDialogSig = "";
+			document.body.classList.remove("modal-open");
 		}
 
 		// Expander durumlarını dinle
@@ -3547,6 +3964,8 @@ html, body {
 	};
 
 	window.__revirSubmitForm = function(formId) {
+		modalDirty = false;
+		modalBackdropWarned = false;
 		var form = document.querySelector('form[data-form-id="' + CSS.escape(formId) + '"]');
 		var vals = {};
 		if (form) {
@@ -3863,9 +4282,36 @@ html, body {
 		}).catch(function(){});
 	};
 
-	// Diyalog & Yan Menü
-	window.__revirCloseDialog = function() {
-		sendAction({ action: "close_dialog" });
+	// Diyalog, Üst Bar, Komut Paleti & Yan Menü
+	window.__revirCloseDialog = function(force) {
+		modalDirty = false;
+		modalBackdropWarned = false;
+		sendAction({ action: "close_dialog", all: false });
+	};
+
+	window.__revirTryBackdropClose = function() {
+		if (modalDirty && !modalBackdropWarned) {
+			modalBackdropWarned = true;
+			showToast("⚠️ Kaydedilmemiş değişiklikler var — kapatmak için ✕ tuşuna veya dışarı tekrar tıklayın.");
+			return;
+		}
+		window.__revirCloseDialog(true);
+	};
+
+	window.__revirToggleModalFullscreen = function() {
+		var card = document.getElementById("revir-modal-card");
+		if (!card) return;
+		card.classList.toggle("fullscreen");
+	};
+
+	window.__revirTopbarAction = function(actKey, actVal) {
+		sendAction({ action: "topbar_action", key: actKey, value: actVal });
+	};
+
+	window.__revirToggleSidebar = function() {
+		var sb = document.getElementById("revir-sidebar");
+		var isCol = sb ? sb.classList.contains("collapsed") : false;
+		window.__revirSetSidebar(!isCol);
 	};
 
 	window.__revirSetSidebar = function(collapsed) {
@@ -3880,24 +4326,161 @@ html, body {
 		}).catch(function(){});
 	};
 
+	// Global Komut & Kişi Arama Paleti (Cmd/Ctrl+K)
+	window.__revirOpenCmdPalette = function() {
+		var bd = document.getElementById("revir-cmd-backdrop");
+		var inp = document.getElementById("revir-cmd-input");
+		if (!bd) return;
+		bd.classList.add("open");
+		if (inp) {
+			inp.value = "";
+			setTimeout(function() { inp.focus(); }, 30);
+		}
+		window.__revirCmdSearch("");
+	};
+
+	window.__revirCloseCmdPalette = function() {
+		var bd = document.getElementById("revir-cmd-backdrop");
+		if (bd) bd.classList.remove("open");
+	};
+
+	function renderCmdList() {
+		var box = document.getElementById("revir-cmd-results");
+		if (!box) return;
+		if (!cmdItems.length) {
+			box.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-muted);font-size:13.5px;">Eşleşen öğrenci, sayfa veya ayar bulunamadı.</div>';
+			return;
+		}
+		var html = [];
+		var lastGrp = "";
+		for (var i = 0; i < cmdItems.length; i++) {
+			var it = cmdItems[i];
+			if (it.group && it.group !== lastGrp) {
+				lastGrp = it.group;
+				html.push('<div class="revir-cmd-group">' + escHtml(lastGrp) + '</div>');
+			}
+			var act = (i === cmdActiveIdx) ? " active" : "";
+			html.push(
+				'<div class="revir-cmd-item' + act + '" data-cmd-idx="' + i + '" onmouseenter="window.__revirCmdHover(' + i + ')" onclick="window.__revirCmdPick(' + i + ')">'
+				+ '<div class="revir-cmd-item-l">'
+				+ '<span class="revir-cmd-item-ico">' + escHtml(it.icon || "•") + '</span>'
+				+ '<div style="min-width:0;">'
+				+ '<div class="revir-cmd-item-title">' + escHtml(it.title || "") + '</div>'
+				+ (it.subtitle ? '<div class="revir-cmd-item-sub">' + escHtml(it.subtitle) + '</div>' : '')
+				+ '</div></div>'
+				+ (it.tag ? '<span class="revir-cmd-item-tag">' + escHtml(it.tag) + '</span>' : '')
+				+ '</div>'
+			);
+		}
+		box.innerHTML = html.join("");
+		var activeEl = box.querySelector(".revir-cmd-item.active");
+		if (activeEl && activeEl.scrollIntoView) {
+			try { activeEl.scrollIntoView({ block: "nearest" }); } catch (e) {}
+		}
+	}
+
+	window.__revirCmdHover = function(idx) {
+		cmdActiveIdx = idx;
+		document.querySelectorAll(".revir-cmd-item").forEach(function(el) {
+			el.classList.toggle("active", parseInt(el.dataset.cmdIdx, 10) === idx);
+		});
+	};
+
+	window.__revirCmdPick = function(idx) {
+		var it = cmdItems[idx];
+		if (!it) return;
+		window.__revirCloseCmdPalette();
+		if (it.kind === "open_chat") {
+			window.__revirToggleChatBubble();
+			return;
+		}
+		sendAction({ action: "cmd_exec", item: it });
+	};
+
+	window.__revirCmdSearch = function(q) {
+		clearTimeout(cmdTimer);
+		cmdTimer = setTimeout(function() {
+			fetch("/api/cmd_search", {
+				method: "POST",
+				headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
+				body: JSON.stringify({ q: String(q || "") })
+			})
+			.then(function(r) { return r.json(); })
+			.then(function(res) {
+				cmdItems = (res && Array.isArray(res.items)) ? res.items : [];
+				cmdActiveIdx = 0;
+				renderCmdList();
+			})
+			.catch(function() {});
+		}, 70);
+	};
+
+	window.__revirCmdKey = function(ev) {
+		if (ev.key === "ArrowDown") {
+			ev.preventDefault();
+			if (cmdItems.length) {
+				cmdActiveIdx = (cmdActiveIdx + 1) % cmdItems.length;
+				renderCmdList();
+			}
+		} else if (ev.key === "ArrowUp") {
+			ev.preventDefault();
+			if (cmdItems.length) {
+				cmdActiveIdx = (cmdActiveIdx - 1 + cmdItems.length) % cmdItems.length;
+				renderCmdList();
+			}
+		} else if (ev.key === "Enter") {
+			ev.preventDefault();
+			window.__revirCmdPick(cmdActiveIdx);
+		}
+	};
+
 	function escHtml(s) {
 		return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 	}
 
+	// Modal içi kirli form takibi
+	document.addEventListener("input", function(ev) {
+		if (ev.target && ev.target.closest && ev.target.closest("#revir-modal-body")) {
+			modalDirty = true;
+			modalBackdropWarned = false;
+		}
+	});
+
 	// Genel tıklama & klavye delegasyonu
 	document.addEventListener("click", function(ev) {
 		var closeSb = ev.target && ev.target.closest ? ev.target.closest(".revir-sidebar-close-btn") : null;
-		if (closeSb) { window.__revirSetSidebar(true); return; }
+		if (closeSb) { window.__revirToggleSidebar(); return; }
 		if (!ev.target.closest(".revir-combo") && !ev.target.closest(".revir-multi") && !ev.target.closest(".revir-popover-wrap")) {
 			closeAllMenus();
 		}
 	});
 
 	document.addEventListener("keydown", function(ev) {
+		if ((ev.metaKey || ev.ctrlKey) && (ev.key === "k" || ev.key === "K")) {
+			ev.preventDefault();
+			var cmdBd = document.getElementById("revir-cmd-backdrop");
+			if (cmdBd && cmdBd.classList.contains("open")) window.__revirCloseCmdPalette();
+			else window.__revirOpenCmdPalette();
+			return;
+		}
+		if (ev.altKey && (ev.key === "b" || ev.key === "B")) {
+			ev.preventDefault();
+			window.__revirToggleSidebar();
+			return;
+		}
+		if (ev.altKey && (ev.key === "v" || ev.key === "V")) {
+			ev.preventDefault();
+			window.__revirTopbarAction("goto_page", "🩺 Revir Kaydı");
+			return;
+		}
 		if (ev.key === "Escape") {
 			closeAllMenus();
+			var cmdBd2 = document.getElementById("revir-cmd-backdrop");
+			if (cmdBd2 && cmdBd2.classList.contains("open")) { window.__revirCloseCmdPalette(); return; }
 			var bd = document.getElementById("revir-modal-backdrop");
-			if (bd && bd.classList.contains("open")) window.__revirCloseDialog();
+			if (bd && bd.classList.contains("open")) { window.__revirCloseDialog(); return; }
+			var cb = document.getElementById("revir-chat-bubble");
+			if (cb && cb.classList.contains("open")) { window.__revirToggleChatBubble(); return; }
 		}
 	});
 
@@ -4423,17 +5006,20 @@ class LocalUIServer:
 						init_json = json.dumps(init_res, ensure_ascii=False).replace("</", "<\\/")
 						init_styles = init_res.get("styles_html") or ""
 						init_sb = init_res.get("sidebar_html") or ""
+						init_tb = init_res.get("topbar_html") or ""
 						init_main = init_res.get("main_html") or ""
 					except Exception:
 						init_json = "null"
 						init_styles = ""
 						init_sb = ""
+						init_tb = ""
 						init_main = ""
 					page_html = (
 						_SHELL_HTML
 						.replace("__REVIR_CSRF__", server_ref.csrf_token)
-						.replace("__REVIR_Init_STYLES__" if False else "__REVIR_INIT_STYLES__", init_styles)
+						.replace("__REVIR_INIT_STYLES__", init_styles)
 						.replace("__REVIR_INIT_SIDEBAR__", init_sb)
+						.replace("__REVIR_INIT_TOPBAR__", init_tb)
 						.replace("__REVIR_INIT_MAIN__", init_main)
 						.replace("__REVIR_INITIAL_JSON__", init_json)
 					)
@@ -4534,6 +5120,17 @@ class LocalUIServer:
 						self._send_bytes(HTTPStatus.OK, "application/json", b'{"ok":true}')
 					except Exception:
 						self._send_bytes(HTTPStatus.BAD_REQUEST, "application/json", b'{"ok":false}')
+					return
+
+				if path == "/api/cmd_search":
+					try:
+						payload = self._read_json()
+						q_str = str(payload.get("q") or "")
+						handler = server_ref.session.cmd_search_handler
+						items = handler(q_str) if callable(handler) else []
+						self._send_bytes(HTTPStatus.OK, "application/json; charset=utf-8", json.dumps({"ok": True, "items": items}, ensure_ascii=False).encode("utf-8"))
+					except Exception as exc:
+						self._send_bytes(HTTPStatus.OK, "application/json; charset=utf-8", json.dumps({"ok": False, "items": [], "error": str(exc)}, ensure_ascii=False).encode("utf-8"))
 					return
 
 				if path == "/api/gemini_chat_clear":

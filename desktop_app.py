@@ -11,6 +11,7 @@ Okul Revir Defteri ve Sağlık Takip Sistemi - Saf Python Masaüstü Yöneticisi
 from __future__ import annotations
 
 import atexit
+import json
 import os
 import signal
 import sys
@@ -33,7 +34,7 @@ def _ensure_standard_streams() -> None:
 
 _ensure_standard_streams()
 
-_DEFAULT_APP_VERSION = "1.5.2"
+_DEFAULT_APP_VERSION = "1.6.0"
 
 
 def _load_app_version() -> str:
@@ -255,6 +256,53 @@ class _RevirDesktopBridge:
 			return {"saved": False, "error": str(exc)}
 
 
+def _load_window_state(data_dir: Path) -> dict[str, int]:
+	"""Son kullanılan pencere boyutunu ve konumunu yerel dosyadan yükler."""
+	st_path = data_dir / ".window_state.json"
+	if not st_path.exists():
+		return {}
+	try:
+		raw = json.loads(st_path.read_text(encoding="utf-8"))
+		if not isinstance(raw, dict):
+			return {}
+		out: dict[str, int] = {}
+		w = int(raw.get("width", 0))
+		h = int(raw.get("height", 0))
+		if MIN_WINDOW_WIDTH <= w <= 3840:
+			out["width"] = w
+		if MIN_WINDOW_HEIGHT <= h <= 2160:
+			out["height"] = h
+		if "x" in raw and "y" in raw:
+			x = int(raw["x"])
+			y = int(raw["y"])
+			if -100 <= x <= 3200 and 0 <= y <= 1800:
+				out["x"] = x
+				out["y"] = y
+		return out
+	except Exception:
+		return {}
+
+
+def _save_window_state(data_dir: Path, win) -> None:
+	"""Geçerli pencere boyutunu ve konumunu yerel dosyaya kaydeder."""
+	if win is None:
+		return
+	try:
+		w = int(getattr(win, "width", 0) or 0)
+		h = int(getattr(win, "height", 0) or 0)
+		if w < MIN_WINDOW_WIDTH or h < MIN_WINDOW_HEIGHT:
+			return
+		payload: dict[str, int] = {"width": w, "height": h}
+		x = getattr(win, "x", None)
+		y = getattr(win, "y", None)
+		if x is not None and y is not None:
+			payload["x"] = int(x)
+			payload["y"] = int(y)
+		(data_dir / ".window_state.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+	except Exception:
+		pass
+
+
 def launch_desktop_app() -> int:
 	paths = resolve_runtime_paths()
 	data_dir = paths["data_dir"]
@@ -276,6 +324,7 @@ def launch_desktop_app() -> int:
 	server = revir_ui.LocalUIServer(persantil.main, host="127.0.0.1", port=0)
 	app_url = server.start()
 
+	window_holder: dict = {"window": None}
 	cleanup_lock = threading.Lock()
 	cleaned = {"done": False}
 
@@ -284,6 +333,7 @@ def launch_desktop_app() -> int:
 			if cleaned["done"]:
 				return
 			cleaned["done"] = True
+		_save_window_state(data_dir, window_holder.get("window"))
 		server.stop()
 		release_single_instance_lock()
 
@@ -300,24 +350,33 @@ def launch_desktop_app() -> int:
 
 	webview.settings["ALLOW_DOWNLOADS"] = True
 
-	window_holder: dict = {"window": None}
 	bridge = _RevirDesktopBridge(server, window_holder)
+	saved_win = _load_window_state(data_dir)
 
 	create_kwargs = dict(
 		title=APP_TITLE,
 		url=app_url,
 		js_api=bridge,
-		width=WINDOW_WIDTH,
-		height=WINDOW_HEIGHT,
+		width=saved_win.get("width", WINDOW_WIDTH),
+		height=saved_win.get("height", WINDOW_HEIGHT),
 		min_size=(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT),
 		resizable=True,
 	)
-	if sys.platform == "win32":
+	if "x" in saved_win and "y" in saved_win:
+		create_kwargs["x"] = saved_win["x"]
+		create_kwargs["y"] = saved_win["y"]
+	if sys.platform == "win32" and not saved_win:
 		create_kwargs["maximized"] = True
 
 	window = webview.create_window(**create_kwargs)
 	window_holder["window"] = window
+	window.events.closing += lambda: _save_window_state(data_dir, window)
 	window.events.closed += _cleanup
+	try:
+		window.events.resized += lambda _w, _h: _save_window_state(data_dir, window)
+		window.events.moved += lambda _x, _y: _save_window_state(data_dir, window)
+	except Exception:
+		pass
 
 	start_kwargs: dict = {"private_mode": False}
 	if sys.platform == "win32":
