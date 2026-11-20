@@ -98,7 +98,7 @@ def is_ai_enabled(app_cfg: dict[str, Any] | None = None, app_dir: Path | None = 
 	return bool(get_api_key(app_cfg, app_dir))
 
 
-_PHONE_RE = re.compile(r"(?:\+?90|0)?\s*5\d{2}[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}")
+_PHONE_RE = re.compile(r"(?:\+?90|0)?\s*\(?5\d{2}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}")
 _TC_RE = re.compile(r"\b[1-9]\d{10}\b")
 
 
@@ -170,12 +170,22 @@ def build_anonymous_clinical_context(
 			parts.append("Kayıtlı Alerjiler: Bilinen alerji yok")
 		if hp.get("chronic_conditions"):
 			parts.append(f"Kronik Rahatsızlıklar: {anonymize_free_text(str(hp['chronic_conditions']), sensitive)}")
-		if hp.get("regular_medications"):
-			parts.append(f"Sürekli İlaçlar: {anonymize_free_text(str(hp['regular_medications']), sensitive)}")
+		if hp.get("medical_history"):
+			parts.append(f"Tıbbi Öykü: {anonymize_free_text(str(hp['medical_history']), sensitive)}")
+		reg_meds = hp.get("medications") or hp.get("regular_medications")
+		if reg_meds:
+			parts.append(f"Sürekli İlaçlar: {anonymize_free_text(str(reg_meds), sensitive)}")
 		if hp.get("emergency_notes"):
 			parts.append(f"Acil Klinik Not: {anonymize_free_text(str(hp['emergency_notes']), sensitive)}")
-		if hp.get("special_needs"):
-			parts.append(f"Özel Gereksinim/Cihaz: {anonymize_free_text(str(hp['special_needs']), sensitive)}")
+		sn_val = hp.get("special_needs_codes") or hp.get("special_needs")
+		if sn_val:
+			parts.append(f"Özel Gereksinim/Tanı: {anonymize_free_text(str(sn_val), sensitive)}")
+		if hp.get("medical_devices"):
+			parts.append(f"Tıbbi Cihaz/Protez: {anonymize_free_text(str(hp['medical_devices']), sensitive)}")
+		if hp.get("dietary_swallowing_notes"):
+			parts.append(f"Beslenme/Yutma Güvenliği: {anonymize_free_text(str(hp['dietary_swallowing_notes']), sensitive)}")
+		if hp.get("seizure_emergency_protocol"):
+			parts.append(f"Acil Nöbet Protokolü: {anonymize_free_text(str(hp['seizure_emergency_protocol']), sensitive)}")
 
 	if latest_measurement:
 		lm = dict(latest_measurement)
@@ -210,7 +220,7 @@ def call_gemini(
 	prompt: str,
 	*,
 	api_key: str,
-	model: str = "gemini-3-flash-preview",
+	model: str = "gemini-3.1-flash-lite",
 	system_instruction: str | None = None,
 	expect_json: bool = False,
 	inline_files: list[tuple[bytes, str]] | None = None,
@@ -225,7 +235,7 @@ def call_gemini(
 	if not clean_key:
 		return False, "Gemini API anahtarı tanımlanmamış. Ayarlar > Yapay Zekâ (Gemini API) menüsünden anahtarınızı kaydedin.", ""
 
-	preferred = (model or "gemini-3-flash-preview").strip().replace("models/", "")
+	preferred = (model or "gemini-3.1-flash-lite").strip().replace("models/", "")
 	models_to_try = [preferred] + [m for m in _FALLBACK_MODELS if m != preferred]
 
 	parts: list[dict[str, Any]] = []
@@ -320,7 +330,7 @@ def _parse_json_response(raw_text: str) -> dict[str, Any]:
 	return {}
 
 
-def test_gemini_connection(api_key: str, model: str = "gemini-3-flash-preview") -> tuple[bool, str, str]:
+def test_gemini_connection(api_key: str, model: str = "gemini-3.1-flash-lite") -> tuple[bool, str, str]:
 	ok, txt, used_model = call_gemini(
 		"Merhaba! Okul revir sistemi bağlantı testi için tek cümleyle Türkçe 'Gemini Klinik Asistan bağlantısı başarılı.' yaz.",
 		api_key=api_key,
@@ -691,15 +701,19 @@ Kurumsal, resmi ve akıcı bir Türkçe ile (yaklaşık 2-3 paragraf halinde):
 _DB_SCHEMA_HINT = """
 Tablolar:
 - classes(id, name, teacher_name)
-- students(id, person_type, full_name, class_id, sex, birth_date, student_no, guardian_name, guardian_phone, notes, province, district, village)
-- health_profiles(student_id, blood_group, allergies, chronic_conditions, regular_medications, emergency_notes, special_needs)
-- visits(id, student_id, visit_date, visit_time, complaint, symptoms, observation, action, guardian_contacted, referral, follow_up, temperature_c, spo2_pct, pulse_bpm, systolic_mmhg, diastolic_mmhg, incident_location)
+- students(id, class_id, person_type, student_no, full_name, sex, birth_date, guardian_name, guardian_phone, notes, country, province, district, village)
+- health_profiles(student_id, guardian_name, guardian_phone, allergies, chronic_conditions, medical_history, medications, blood_group, emergency_notes, special_needs_codes, medical_devices, dietary_swallowing_notes, seizure_emergency_protocol, wears_glasses, vision_right, vision_left, hair_screening, hearing_right, hearing_left, health_behavior, harmful_habits, psychosocial_status, last_screened_at)
+- visits(id, student_id, visit_date, visit_time, complaint, symptoms, observation, action, guardian_contacted, referral, follow_up, follow_up_status, follow_up_result, incident_location, witness_teacher)
+- vital_readings(id, student_id, measured_at, systolic_mmhg, diastolic_mmhg, pulse_bpm, temperature_c, spo2_pct, glucose_mg_dl, glucose_context, notes)
 - measurements(id, student_id, measured_on, height_cm, weight_kg, head_circ_cm, age_months, bmi)
-- school_screenings(id, student_id, screening_date, height_cm, weight_kg, wears_glasses, vision_right, vision_left, hearing_right, hearing_left, hair_screening, health_behavior, psychosocial_status, referral_needed, notes)
-- student_medications(id, student_id, medication_name, med_type, route, dosage_pattern, status, remaining_volume, expiry_date)
-- care_plans(id, student_id, nursing_diagnosis, observed_facts, goals, interventions, status, updated_at)
-- isolation_records(id, student_id, condition_name, detected_date, expected_return_date, status)
-- infirmary_inventory(id, item_name, category, quantity, unit, min_threshold, expiry_date)
+- school_screenings(id, student_id, screening_date, height_cm, weight_kg, head_circ_cm, temperature_c, pulse_bpm, spo2_pct, wears_glasses, vision_right, vision_left, hair_screening, hearing_right, hearing_left, health_behavior, harmful_habits, psychosocial_status, notes)
+- student_medications(id, student_id, medication_name, med_type, route, dosage_pattern, dose_amount, dose_unit, meal_relation, remaining_volume, start_date, end_date, expiry_date, status)
+- medication_logs(id, medication_id, student_id, log_date, scheduled_time, given_time, dose_given, dose_unit, status, administered_by, notes)
+- care_plans(id, student_id, created_at, reviewed_by, nursing_diagnosis, observed_facts, goals, interventions, monitoring, escalation, status)
+- isolation_records(id, student_id, disease_name, detected_date, expected_return_date, actual_return_date, status, notes)
+- infirmary_inventory(id, item_name, category, quantity, unit, min_threshold, expiry_date, storage_location, notes)
+- lab_reports(id, student_id, report_date, file_name, extracted_text)
+- lab_results(id, report_id, test_name, value, unit, ref_low, ref_high, lab_flag)
 """
 
 _FORBIDDEN_SQL_RE = re.compile(
@@ -730,7 +744,8 @@ Kurallar:
 1. Yalnızca `SELECT` sorgusu yaz. Asla veri değiştiren komut kullanma.
 2. Sütun adlarını Türkçe ve anlaşılır `AS "Ad Soyad"`, `AS "Sınıf"` gibi takma adlarla döndür.
 3. `students` tablosunu `LEFT JOIN classes c ON c.id = students.class_id` ile bağla.
-4. En fazla `LIMIT 100` satır döndür.
+4. Vital ölçümler (`temperature_c`, `spo2_pct`, `pulse_bpm`, `systolic_mmhg`, `diastolic_mmhg`, `glucose_mg_dl`) `vital_readings` tablosundadır (`visits` tablosunda `temperature_c` sütunu yoktur; `visits.observation` metin sütunudur). Ateş veya vital ölçüm sorgularında `vital_readings` tablosunu kullan.
+5. En fazla `LIMIT 100` satır döndür.
 
 Yanıtı yalnızca şu JSON formatında ver:
 {{

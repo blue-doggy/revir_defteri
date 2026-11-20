@@ -121,7 +121,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.5.1"
+_DEFAULT_APP_VERSION = "1.5.2"
 
 
 def _load_app_version() -> str:
@@ -10124,8 +10124,7 @@ def render_gemini_nanda_ai_bar(person_id: int, prefix: str, compiled_facts: str,
 					ui.session_state[k_interv] = parsed.get("interventions", "")
 					ui.session_state[k_mon] = parsed.get("monitoring", "")
 					ui.session_state[k_esc] = parsed.get("escalation", "")
-					ui.success(f"✅ NANDA-I bakım planı Gemini AI ({used_m}) tarafından oluşturuldu ve form alanlarına aktarıldı!")
-					ui.rerun(scope="fragment")
+					ui.success(f"✅ NANDA-I bakım planı Gemini AI ({used_m}) tarafından oluşturuldu ve aşağıdaki form alanlarına aktarıldı!")
 				else:
 					ui.error(f"Gemini AI hatası: {parsed.get('error', 'Yanıt alınamadı')}")
 
@@ -10288,16 +10287,20 @@ def render_gemini_overview_command_center(s_date: str, e_date: str) -> None:
 		])
 		with tab_nlq:
 			ui.caption("Türkçe soru yazarak veya hazır sorulardan birine tıklayarak veritabanını anında sorgulayın (yalnızca güvenli salt-okunur `SELECT` çalıştırılır):")
+			preset_triggered = False
 			q_c1, q_c2, q_c3 = ui.columns(3)
 			with q_c1:
 				if ui.button("🚨 Alerjisi veya Kronik Hastalığı Olanlar", key="gai_q_preset_1", use_container_width=True):
 					ui.session_state["gai_nlq_input"] = "Alerjisi veya kronik rahatsızlığı kayıtlı olan öğrencileri sınıfı, alerjisi ve kronik durumu ile listele"
+					preset_triggered = True
 			with q_c2:
-				if ui.button("🌡️ Ateşi 37.8°C Üstü Başvurular", key="gai_q_preset_2", use_container_width=True):
-					ui.session_state["gai_nlq_input"] = "Ateşi 37.8 derece ve üzerinde olan revir başvurularını tarih, sınıf, öğrenci adı, ateş ve yapılan işlem ile en yeniden eskiye listele"
+				if ui.button("🌡️ Ateşi 37.8°C Üstü Ölçümler", key="gai_q_preset_2", use_container_width=True):
+					ui.session_state["gai_nlq_input"] = "Vital ölçümlerinde (vital_readings) ateşi 37.8 derece ve üzerinde olan kişileri ölçüm zamanı, sınıfı, adı soyadı, ateş değeri ve notları ile en yeniden eskiye listele"
+					preset_triggered = True
 			with q_c3:
 				if ui.button("📊 En Çok Revire Gelen 15 Kişi", key="gai_q_preset_3", use_container_width=True):
 					ui.session_state["gai_nlq_input"] = "En çok revir başvurusu yapan ilk 15 kişiyi sınıfı ve toplam başvuru sayısı ile birlikte listele"
+					preset_triggered = True
 
 			in_col, btn_col = ui.columns([3.4, 1.1])
 			with in_col:
@@ -10305,7 +10308,7 @@ def render_gemini_overview_command_center(s_date: str, e_date: str) -> None:
 			with btn_col:
 				run_q = ui.button("🔍 Gemini ile Sorgula", key="btn_run_gai_nlq", type="primary", use_container_width=True)
 
-			if run_q and str(q_text or "").strip():
+			if (run_q or preset_triggered) and str(q_text or "").strip():
 				with connect_db() as conn:
 					ok, expl, df_res, sql_str = gai.natural_language_db_query(
 						api_key=api_key,
@@ -10334,7 +10337,10 @@ def render_gemini_overview_command_center(s_date: str, e_date: str) -> None:
 				cutoff = (date.today() - timedelta(days=14)).isoformat()
 				with connect_db() as conn:
 					rows = conn.execute(
-						"""SELECT v.visit_date, c.name AS class_name, v.complaint, v.symptoms, v.temperature_c, v.referral
+						"""SELECT v.visit_date, c.name AS class_name, v.complaint, v.symptoms, v.observation, v.referral,
+								  (SELECT vr.temperature_c FROM vital_readings vr
+								   WHERE vr.student_id = v.student_id AND substr(vr.measured_at, 1, 10) = v.visit_date
+								   ORDER BY vr.id DESC LIMIT 1) AS temperature_c
 						   FROM visits v
 						   JOIN students s ON s.id = v.student_id
 						   LEFT JOIN classes c ON c.id = s.class_id
@@ -10349,6 +10355,7 @@ def render_gemini_overview_command_center(s_date: str, e_date: str) -> None:
 						"sinif": r["class_name"] or "Belirtilmedi",
 						"neden": r["complaint"],
 						"belirtiler": gai.anonymize_free_text(str(r["symptoms"] or "")),
+						"gozlem": gai.anonymize_free_text(str(r["observation"] or "")),
 						"ates": r["temperature_c"],
 						"sevk": r["referral"],
 					}
@@ -10446,9 +10453,9 @@ def render_gemini_ai_settings_panel(current_cfg: dict[str, str]) -> None:
 	cur_enabled = str(current_cfg.get("gemini_enabled", "1")).strip() != "0"
 	cur_float = str(current_cfg.get("gemini_floating_chat", "1")).strip() != "0"
 	cur_key = gai.get_api_key(current_cfg, APP_DIR)
-	cur_model = str(current_cfg.get("gemini_model") or "gemini-3-flash-preview").strip()
+	cur_model = str(current_cfg.get("gemini_model") or "gemini-3.1-flash-lite").strip()
 	if cur_model not in gai.GEMINI_MODEL_OPTIONS:
-		cur_model = "gemini-3-flash-preview"
+		cur_model = "gemini-3.1-flash-lite"
 
 	def _on_quick_toggle_change() -> None:
 		en_v = bool(ui.session_state.get("cfg_gemini_enabled_toggle", True))
@@ -17447,8 +17454,8 @@ def render_vital_tracking() -> None:
 							if ok_l:
 								if not g_df.empty:
 									ui.session_state[session_key] = g_df
+									ui.session_state.pop(f"lab_editor_{student['id']}", None)
 								ui.session_state[f"gai_lab_summary_{student['id']}"] = f"🤖 **Gemini Vision ({used_m}) Değerlendirmesi:** {g_sum}"
-								ui.rerun()
 							else:
 								ui.error(f"Gemini Vision hatası: {g_sum}")
 						if ui.session_state.get(f"gai_lab_summary_{student['id']}"):
@@ -24493,6 +24500,9 @@ def _render_meb_activity_report_tab() -> None:
 	stats = collect_meb_annual_activity_stats(meb_start, meb_end)
 	is_gai_on, gai_key, gai_model = _get_active_gemini_config()
 	if is_gai_on:
+		flash_meb = ui.session_state.pop("_gai_meb_flash", None)
+		if flash_meb:
+			ui.success(flash_meb)
 		if ui.button("✨ Gemini AI ile Resmi MEB Dönem Değerlendirme Metni Oluştur", key="btn_gai_meb_narrative", use_container_width=True):
 			cfg_meb = get_app_settings()
 			ok_m, narrative_txt, used_m = gai.generate_meb_activity_narrative(
@@ -24505,7 +24515,7 @@ def _render_meb_activity_report_tab() -> None:
 			)
 			if ok_m:
 				ui.session_state["meb_rep_extra_notes"] = narrative_txt
-				ui.success(f"✅ Resmi MEB değerlendirme metni Gemini AI ({used_m}) ile oluşturuldu ve yukarıdaki alana aktarıldı!")
+				ui.session_state["_gai_meb_flash"] = f"✅ Resmi MEB değerlendirme metni Gemini AI ({used_m}) ile oluşturuldu ve yukarıdaki alana aktarıldı!"
 				ui.rerun()
 			else:
 				ui.error(f"Gemini AI hatası: {narrative_txt}")
