@@ -2695,7 +2695,7 @@ def _execute_render_cycle(app_fn: Callable[[], None], session: _AppSession, payl
 # 9. YEREL KABUK HTML / CSS / JS (Sıfır Harici Bağımlılık, Çevrimdışı)
 # ==============================================================================
 
-_SHELL_HTML = """<!DOCTYPE html>
+_SHELL_HTML = r"""<!DOCTYPE html>
 <html lang="tr">
 <head>
 <meta charset="utf-8"/>
@@ -3102,17 +3102,15 @@ html, body {
 	display: none;
 }
 </style>
-<div id="revir-dynamic-styles"></div>
+<div id="revir-dynamic-styles">__REVIR_INIT_STYLES__</div>
 </head>
 <body>
 <div id="revir-busy-bar"></div>
 <button id="revir-sidebar-open" class="revir-sidebar-open-btn" type="button" title="Menüyü Aç" onclick="window.__revirSetSidebar(false)">❯</button>
 <div class="revir-app">
-	<aside id="revir-sidebar" class="revir-sidebar"></aside>
+	<aside id="revir-sidebar" class="revir-sidebar">__REVIR_INIT_SIDEBAR__</aside>
 	<main id="revir-main" class="revir-main">
-		<div id="revir-main-inner" class="revir-main-inner">
-			<div style="padding:48px;text-align:center;color:#64748b;">Yükleniyor...</div>
-		</div>
+		<div id="revir-main-inner" class="revir-main-inner">__REVIR_INIT_MAIN__</div>
 	</main>
 </div>
 <div id="revir-modal-backdrop" class="revir-modal-backdrop" onclick="if(event.target===this) window.__revirCloseDialog()">
@@ -3694,10 +3692,20 @@ html, body {
 		}
 	});
 
-	// İlk yükleme
-	document.addEventListener("DOMContentLoaded", function() {
-		sendAction({ action: "init" });
-	});
+	// İlk yükleme (Sunucu tarafından önceden işlenmiş veri varsa anında uygula)
+	var INITIAL_DATA = __REVIR_INITIAL_JSON__;
+	function bootInitial() {
+		if (INITIAL_DATA && INITIAL_DATA.main_html) {
+			applyRender(INITIAL_DATA, 0, 0, 0);
+		} else {
+			sendAction({ action: "init" });
+		}
+	}
+	if (document.readyState === "loading") {
+		document.addEventListener("DOMContentLoaded", bootInitial);
+	} else {
+		bootInitial();
+	}
 })();
 </script>
 </body>
@@ -3755,7 +3763,26 @@ class LocalUIServer:
 				parsed = urllib.parse.urlparse(self.path)
 				path = parsed.path
 				if path == "/" or path == "/index.html":
-					self._send_bytes(HTTPStatus.OK, "text/html; charset=utf-8", server_ref._shell_bytes)
+					try:
+						init_res = _execute_render_cycle(server_ref.app_fn, server_ref.session, {"action": "init"})
+						init_json = json.dumps(init_res, ensure_ascii=False).replace("</", "<\\/")
+						init_styles = init_res.get("styles_html") or ""
+						init_sb = init_res.get("sidebar_html") or ""
+						init_main = init_res.get("main_html") or ""
+					except Exception:
+						init_json = "null"
+						init_styles = ""
+						init_sb = ""
+						init_main = ""
+					page_html = (
+						_SHELL_HTML
+						.replace("__REVIR_CSRF__", server_ref.csrf_token)
+						.replace("__REVIR_Init_STYLES__" if False else "__REVIR_INIT_STYLES__", init_styles)
+						.replace("__REVIR_INIT_SIDEBAR__", init_sb)
+						.replace("__REVIR_INIT_MAIN__", init_main)
+						.replace("__REVIR_INITIAL_JSON__", init_json)
+					)
+					self._send_bytes(HTTPStatus.OK, "text/html; charset=utf-8", page_html.encode("utf-8"))
 					return
 				if path == "/health":
 					self._send_bytes(HTTPStatus.OK, "text/plain; charset=utf-8", b"ok")
