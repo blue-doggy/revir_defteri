@@ -23,6 +23,7 @@ from typing import Any, Iterator
 
 import pandas as pd
 import revir_ui as ui
+import gemini_assistant as gai
 
 # Ağır kütüphaneler (altair, openpyxl, python-docx) açılışta değil, ilk kullanıldıklarında tembel yüklenir.
 docx = None
@@ -120,7 +121,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.3.1"
+_DEFAULT_APP_VERSION = "1.4.0"
 
 
 def _load_app_version() -> str:
@@ -282,6 +283,9 @@ DEFAULT_APP_SETTINGS: dict[str, str] = {
 	"custom_class_templates": "{}",
 	"medication_visible_fields": "med_route,dosage_pattern,dose_unit,meal_relation,total_volume,duration_days,active_days,storage_condition,guardian_consent,expiry_date,special_notes",
 	"page_sections_visibility": "{}",
+	"gemini_enabled": "1",
+	"gemini_model": "gemini-3-flash-preview",
+	"gemini_api_key": "",
 }
 
 INCIDENT_LOCATIONS = [
@@ -10018,6 +10022,412 @@ def render_clinical_growth_curve(enriched_records: pd.DataFrame, person: dict | 
 
 	ui.altair_chart(final_chart, use_container_width=True)
 	ui.caption(f"📌 **Grafik Rehberi ({sex_label}):** Yeşil kalın çizgi **50. persentil (ortalama / medyan)**, sarı çizgiler **15p ve 85p (normal referans sınırları)**, kırmızı çizgiler ise **3p ve 97p (klinik alt/üst kritik sınırlar)** değerleridir. Kırmızı noktalı çizgi öğrencinin kendi büyüme izidir.")
+	render_gemini_growth_ai_panel(enriched_records, person, indicator_name, title)
+
+
+# ==============================================================================
+# GEMINI KLİNİK YAPAY ZEKÂ ASİSTANI ARAYÜZ BİLEŞENLERİ (KVKK KORUMALI)
+# ==============================================================================
+
+def _get_active_gemini_config() -> tuple[bool, str, str]:
+	cfg = get_app_settings()
+	enabled = str(cfg.get("gemini_enabled", "1")).strip() != "0"
+	key = gai.get_api_key(cfg, APP_DIR)
+	model = str(cfg.get("gemini_model") or "gemini-3-flash-preview").strip()
+	if model not in gai.GEMINI_MODEL_OPTIONS:
+		model = "gemini-3-flash-preview"
+	return (enabled and bool(key)), key, model
+
+
+def _build_person_anon_bundle(person_id: int) -> tuple[str, list[str], str]:
+	person = get_person_by_id(person_id)
+	if not person:
+		return "Kişi Profili: Belirtilmedi", [], "Öğrenci"
+	p_dict = dict(person)
+	full_name = str(p_dict.get("full_name") or "Öğrenci")
+	sensitive = [full_name, str(p_dict.get("guardian_name") or "")]
+	with connect_db() as conn:
+		hp_row = conn.execute("SELECT * FROM health_profiles WHERE student_id=?", (person_id,)).fetchone()
+		m_row = conn.execute("SELECT * FROM measurements WHERE student_id=? ORDER BY measured_on DESC, id DESC LIMIT 1", (person_id,)).fetchone()
+		meds = conn.execute("SELECT medication_name, dosage_pattern FROM student_medications WHERE student_id=? AND status='Aktif'", (person_id,)).fetchall()
+	anon_ctx = gai.build_anonymous_clinical_context(
+		person=p_dict,
+		health_profile=dict(hp_row) if hp_row else None,
+		latest_measurement=dict(m_row) if m_row else None,
+		active_medications=[dict(x) for x in meds] if meds else None,
+	)
+	return anon_ctx, sensitive, full_name
+
+
+def render_gemini_growth_ai_panel(enriched_records: pd.DataFrame, person: dict | sqlite3.Row, indicator_name: str, title: str) -> None:
+	is_on, api_key, model = _get_active_gemini_config()
+	if not is_on or enriched_records.empty:
+		return
+	p_dict = dict(person)
+	pid = int(p_dict.get("id") or 0)
+	res_key = f"gai_growth_{pid}_{indicator_name}"
+	btn_col, _ = ui.columns([1.8, 2.2])
+	with btn_col:
+		if ui.button(f"✨ Gemini AI ile {title} Persantil Seyrini Yorumla", key=f"btn_gai_growth_{pid}_{indicator_name}", use_container_width=True):
+			anon_ctx, _, _ = _build_person_anon_bundle(pid)
+			cfg = get_app_settings()
+			ok, parsed, used_m = gai.interpret_growth_trajectory(
+				api_key=api_key,
+				model=model,
+				anon_context=anon_ctx,
+				measurements_df=enriched_records,
+				school_name=cfg.get("school_name", "Okul Reviri"),
+				nurse_name=cfg.get("nurse_name", "Okul Revir Sorumlusu"),
+			)
+			ui.session_state[res_key] = {"ok": ok, "data": parsed, "model": used_m}
+	saved = ui.session_state.get(res_key)
+	if isinstance(saved, dict):
+		if not saved.get("ok"):
+			ui.error(f"Gemini AI hatası: {saved.get('data', {}).get('error', 'Bilinmeyen hata')}")
+		else:
+			d = saved["data"]
+			full_name = mask_kvkk_value(str(p_dict.get("full_name") or "Öğrenci"), "name")
+			letter = str(d.get("guardian_letter") or "").replace("[ÖĞRENCİ_ADI]", full_name).replace("[Öğrenci Adı]", full_name)
+			with ui.container(border=True):
+				ui.markdown(f"###### 🤖 Gemini AI WHO Büyüme & Persantil Değerlendirmesi <small>({saved.get('model')})</small>", unsafe_allow_html=True)
+				ui.info(f"**📌 Kanal Durumu:** {d.get('channel_status', '—')}\n\n**🩺 Klinik Analiz:** {d.get('clinical_summary', '—')}\n\n**📋 İzlem Önerisi:** {d.get('recommendations', '—')}")
+				if letter:
+					ui.text_area("📨 Veli Bilgilendirme / Yönlendirme Mektubu Taslağı", value=letter, height=110, key=f"txt_gai_growth_letter_{pid}_{indicator_name}")
+
+
+def render_gemini_nanda_ai_bar(person_id: int, prefix: str, compiled_facts: str, k_diag: str, k_facts: str, k_goals: str, k_interv: str, k_mon: str, k_esc: str) -> None:
+	is_on, api_key, model = _get_active_gemini_config()
+	if not is_on:
+		return
+	with ui.container(border=True):
+		ui.markdown("###### 🤖 Gemini AI ile Kişiye Özel NANDA-I Bakım Planı Kurgula (KVKK Korumalı)")
+		ui.caption("Öğrencinin anonim kronik hastalık, alerji, ilaç ve son ölçüm profilini analiz ederek tüm NANDA-I, NOC ve NIC alanlarını otomatik doldurur.")
+		c_f1, c_f2 = ui.columns([3.0, 1.5])
+		with c_f1:
+			focus_inp = ui.text_input("Ek Klinik Odak / Hemşire Notu (İsteğe Bağlı)", placeholder="Örn: Okulda hipoglisemi yönetimi, nöbet güvenlik protokolü, besin alerjisi...", key=f"{prefix}_gai_focus_{person_id}", label_visibility="collapsed")
+		with c_f2:
+			if ui.button("✨ Gemini AI ile Bakım Planı Üret", key=f"{prefix}_btn_gai_nanda_{person_id}", type="primary", use_container_width=True):
+				anon_ctx, sensitive, _ = _build_person_anon_bundle(person_id)
+				ok, parsed, used_m = gai.generate_nanda_care_plan(
+					api_key=api_key,
+					model=model,
+					anon_context=anon_ctx,
+					compiled_facts=compiled_facts,
+					focus_note=focus_inp,
+					sensitive_names=sensitive,
+				)
+				if ok:
+					ui.session_state[k_diag] = parsed.get("diagnosis", "")
+					ui.session_state[k_facts] = (compiled_facts + "\n\n[Gemini AI Klinik Değerlendirme]: " + parsed.get("observed_facts", "")).strip()
+					ui.session_state[k_goals] = parsed.get("goals", "")
+					ui.session_state[k_interv] = parsed.get("interventions", "")
+					ui.session_state[k_mon] = parsed.get("monitoring", "")
+					ui.session_state[k_esc] = parsed.get("escalation", "")
+					ui.success(f"✅ NANDA-I bakım planı Gemini AI ({used_m}) tarafından oluşturuldu ve form alanlarına aktarıldı!")
+					ui.rerun(scope="fragment")
+				else:
+					ui.error(f"Gemini AI hatası: {parsed.get('error', 'Yanıt alınamadı')}")
+
+
+def render_gemini_visit_triage_assistant(
+	person: dict | sqlite3.Row,
+	complaint: str,
+	v_temp_raw: str,
+	v_spo2_raw: str,
+	v_pulse_raw: str,
+	v_sys_raw: str,
+	v_dia_raw: str,
+	v_glu_raw: str,
+	s_txt_key: str,
+	obs_key: str,
+	a_txt_key: str,
+	ref_key: str | None = None,
+	key_prefix: str = "stu_vis",
+) -> None:
+	is_on, api_key, model = _get_active_gemini_config()
+	if not is_on:
+		return
+	p_dict = dict(person)
+	pid = int(p_dict.get("id") or 0)
+	state_k = f"gai_triage_res_{key_prefix}_{pid}"
+
+	vitals_bits = []
+	if str(v_temp_raw or "").strip():
+		vitals_bits.append(f"Ateş: {v_temp_raw} °C")
+	if str(v_spo2_raw or "").strip():
+		vitals_bits.append(f"SpO2: %{v_spo2_raw}")
+	if str(v_pulse_raw or "").strip():
+		vitals_bits.append(f"Nabız: {v_pulse_raw}/dk")
+	if str(v_sys_raw or "").strip() or str(v_dia_raw or "").strip():
+		vitals_bits.append(f"Tansiyon: {v_sys_raw or '?'}/{v_dia_raw or '?'} mmHg")
+	if str(v_glu_raw or "").strip():
+		vitals_bits.append(f"Kan Şekeri: {v_glu_raw} mg/dL")
+	vitals_summary = ", ".join(vitals_bits)
+
+	if ui.button("✨ Gemini AI ile Triyaj Değerlendirmesi, Resmi Klinik Not & Veli Mesajı Oluştur", key=f"btn_gai_triage_{key_prefix}_{pid}", use_container_width=True):
+		anon_ctx, sensitive, _ = _build_person_anon_bundle(pid)
+		cfg = get_app_settings()
+		ok, parsed, used_m = gai.analyze_visit_triage(
+			api_key=api_key,
+			model=model,
+			anon_context=anon_ctx,
+			complaint=complaint,
+			vitals_summary=vitals_summary,
+			symptoms_draft=str(ui.session_state.get(s_txt_key) or ""),
+			observation_draft=str(ui.session_state.get(obs_key) or ""),
+			action_draft=str(ui.session_state.get(a_txt_key) or ""),
+			sensitive_names=sensitive,
+			school_name=cfg.get("school_name", "Okul Reviri"),
+			nurse_name=cfg.get("nurse_name", "Okul Revir Sorumlusu"),
+		)
+		ui.session_state[state_k] = {"ok": ok, "data": parsed, "model": used_m}
+
+	saved = ui.session_state.get(state_k)
+	if isinstance(saved, dict):
+		if not saved.get("ok"):
+			ui.error(f"Gemini AI hatası: {saved.get('data', {}).get('error', 'Bilinmeyen hata')}")
+		else:
+			d = saved["data"]
+			risk = str(d.get("risk_level") or "Normal")
+			warn_txt = str(d.get("clinical_warning") or "")
+			full_name = str(p_dict.get("full_name") or "Öğrenci")
+			g_msg = str(d.get("guardian_message") or "").replace("[ÖĞRENCİ_ADI]", full_name).replace("[Öğrenci Adı]", full_name)
+			with ui.container(border=True):
+				ui.markdown(f"###### 🤖 Gemini AI Triyaj & Klinik Dokümantasyon Önerisi <small>({saved.get('model')})</small>", unsafe_allow_html=True)
+				if "Acil" in risk or "Kritik" in risk:
+					ui.error(f"🚨 **Triyaj Risk Düzeyi: {risk}** — {warn_txt}")
+				elif "Dikkat" in risk:
+					ui.warning(f"⚠️ **Triyaj Risk Düzeyi: {risk}** — {warn_txt}")
+				else:
+					ui.success(f"✅ **Triyaj Risk Düzeyi: {risk}** — {warn_txt}")
+				ui.markdown(
+					f"- **Resmi Belirti/Şikayet:** {d.get('formal_symptoms', '—')}\n"
+					f"- **Resmi Fizik Muayene/Gözlem:** {d.get('formal_observation', '—')}\n"
+					f"- **Resmi Müdahale Notu:** {d.get('formal_action', '—')}\n"
+					f"- **Önerilen Sevk Durumu:** `{d.get('recommended_referral', 'Sevk edilmedi')}`"
+				)
+				if g_msg:
+					ui.text_area("📲 Veli Bilgilendirme Mesajı Taslağı (Kopyalamaya Hazır)", value=g_msg, height=90, key=f"gai_gmsg_{key_prefix}_{pid}")
+				ap_c1, ap_c2 = ui.columns([1.8, 1])
+				with ap_c1:
+					if ui.button("✅ Resmi Klinik Notları Forma Uygula", key=f"btn_apply_gai_triage_{key_prefix}_{pid}", type="primary", use_container_width=True):
+						if d.get("formal_symptoms"):
+							ui.session_state[s_txt_key] = str(d["formal_symptoms"])
+						if d.get("formal_observation"):
+							ui.session_state[obs_key] = str(d["formal_observation"])
+						if d.get("formal_action"):
+							ui.session_state[a_txt_key] = str(d["formal_action"])
+						ui.rerun()
+				with ap_c2:
+					if ui.button("✖ Kapat", key=f"btn_close_gai_triage_{key_prefix}_{pid}", use_container_width=True):
+						ui.session_state.pop(state_k, None)
+						ui.rerun()
+
+
+def render_gemini_medication_safety_shield(
+	student_id: int | None,
+	med_name: str,
+	med_route: str,
+	dosage_pattern: str,
+	dose_unit: str,
+	meal_rel: str,
+	k_prefix: str,
+) -> None:
+	is_on, api_key, model = _get_active_gemini_config()
+	if not is_on or not student_id:
+		return
+	st_key = f"gai_med_shield_{k_prefix}_{student_id}"
+	if ui.button("🛡️ Gemini AI ile İlaç-Alerji & Pediatrik Doz Güvenlik Kontrolü Yap", key=f"btn_gai_med_{k_prefix}_{student_id}", use_container_width=True):
+		if not str(med_name or "").strip():
+			ui.warning("Lütfen önce yukarıdaki kutuya ilaç adını yazın.")
+		else:
+			anon_ctx, _, _ = _build_person_anon_bundle(int(student_id))
+			ok, parsed, used_m = gai.check_medication_safety(
+				api_key=api_key,
+				model=model,
+				anon_context=anon_ctx,
+				medication_name=med_name,
+				route=med_route,
+				dosage_pattern=dosage_pattern,
+				dose_unit=dose_unit,
+				meal_relation=meal_rel,
+			)
+			ui.session_state[st_key] = {"ok": ok, "data": parsed, "model": used_m}
+
+	saved = ui.session_state.get(st_key)
+	if isinstance(saved, dict):
+		if not saved.get("ok"):
+			ui.error(f"Gemini AI hatası: {saved.get('data', {}).get('error', 'Bilinmeyen hata')}")
+		else:
+			d = saved["data"]
+			status = str(d.get("safety_status") or "")
+			msg = (
+				f"**🛡️ Güvenlik Durumu:** {status}\n\n"
+				f"- **🚨 Alerji Çapraz Kontrolü:** {d.get('allergy_check', '—')}\n"
+				f"- **🔄 Kronik Hastalık & İlaç Etkileşimi:** {d.get('interaction_check', '—')}\n"
+				f"- **👩‍⚕️ Revir Uygulama & Saklama Önerisi:** {d.get('administration_tips', '—')}"
+			)
+			if "Kritik" in status:
+				ui.error(msg)
+			elif "Dikkat" in status:
+				ui.warning(msg)
+			else:
+				ui.success(msg)
+
+
+def render_gemini_overview_command_center(s_date: str, e_date: str) -> None:
+	is_on, api_key, model = _get_active_gemini_config()
+	if not is_on:
+		return
+	with ui.container(border=True):
+		ui.markdown("##### 🤖 Gemini AI Klinik Komuta Merkezi <small>(KVKK Korumalı Doğal Dil Sorgu & Salgın Radarı)</small>", unsafe_allow_html=True)
+		tab_nlq, tab_epi = ui.tabs([
+			"🔍 Revir Veritabanına Doğal Dille Sor",
+			"🦠 14 Günlük Akıllı Salgın & Kümeleşme Analizi",
+		])
+		with tab_nlq:
+			ui.caption("Türkçe soru yazarak veya hazır sorulardan birine tıklayarak veritabanını anında sorgulayın (yalnızca güvenli salt-okunur `SELECT` çalıştırılır):")
+			q_c1, q_c2, q_c3 = ui.columns(3)
+			with q_c1:
+				if ui.button("🚨 Alerjisi veya Kronik Hastalığı Olanlar", key="gai_q_preset_1", use_container_width=True):
+					ui.session_state["gai_nlq_input"] = "Alerjisi veya kronik rahatsızlığı kayıtlı olan öğrencileri sınıfı, alerjisi ve kronik durumu ile listele"
+			with q_c2:
+				if ui.button("🌡️ Ateşi 37.8°C Üstü Başvurular", key="gai_q_preset_2", use_container_width=True):
+					ui.session_state["gai_nlq_input"] = "Ateşi 37.8 derece ve üzerinde olan revir başvurularını tarih, sınıf, öğrenci adı, ateş ve yapılan işlem ile en yeniden eskiye listele"
+			with q_c3:
+				if ui.button("📊 En Çok Revire Gelen 15 Kişi", key="gai_q_preset_3", use_container_width=True):
+					ui.session_state["gai_nlq_input"] = "En çok revir başvurusu yapan ilk 15 kişiyi sınıfı ve toplam başvuru sayısı ile birlikte listele"
+
+			in_col, btn_col = ui.columns([3.4, 1.1])
+			with in_col:
+				q_text = ui.text_input("Sorgunuz", placeholder="Örn: Penisilin alerjisi olan öğrenciler, 1-A sınıfındaki aktif ilaçlar, bu ay sevk edilenler...", key="gai_nlq_input", label_visibility="collapsed")
+			with btn_col:
+				run_q = ui.button("🔍 Gemini ile Sorgula", key="btn_run_gai_nlq", type="primary", use_container_width=True)
+
+			if run_q and str(q_text or "").strip():
+				with connect_db() as conn:
+					ok, expl, df_res, sql_str = gai.natural_language_db_query(
+						api_key=api_key,
+						model=model,
+						question=q_text,
+						connection=conn,
+					)
+				ui.session_state["gai_nlq_result"] = {"ok": ok, "expl": expl, "df": df_res, "sql": sql_str}
+
+			nlq_res = ui.session_state.get("gai_nlq_result")
+			if isinstance(nlq_res, dict):
+				if not nlq_res.get("ok"):
+					ui.error(f"Sorgu hatası: {nlq_res.get('expl')}")
+				else:
+					df_out: pd.DataFrame = nlq_res["df"]
+					ui.info(f"🤖 **{nlq_res.get('expl')}** *(Toplam **{len(df_out)}** kayıt bulundu)*")
+					if not df_out.empty:
+						disp_df = apply_kvkk_mask_to_roster_df(df_out.copy()) if is_kvkk_privacy_active() else df_out
+						ui.dataframe(disp_df, use_container_width=True, hide_index=True)
+					with ui.expander("Üretilen SQLite SELECT Sorgusunu Gör", expanded=False):
+						ui.code(nlq_res.get("sql", ""), language="sql")
+
+		with tab_epi:
+			ui.caption("Son 14 gündeki anonim revir başvurularını sınıf, tarih, şikayet ve ateş/vital kümelerine göre epidemiyolojik olarak değerlendirir.")
+			if ui.button("✨ Son 14 Günlük Başvuruları Epidemiyolojik Olarak Analiz Et", key="btn_gai_epi_analyze", type="primary"):
+				cutoff = (date.today() - timedelta(days=14)).isoformat()
+				with connect_db() as conn:
+					rows = conn.execute(
+						"""SELECT v.visit_date, c.name AS class_name, v.complaint, v.symptoms, v.temperature_c, v.referral
+						   FROM visits v
+						   JOIN students s ON s.id = v.student_id
+						   LEFT JOIN classes c ON c.id = s.class_id
+						   WHERE v.visit_date >= ?
+						   ORDER BY v.visit_date DESC LIMIT 120""",
+						(cutoff,),
+					).fetchall()
+					iso_cnt = conn.execute("SELECT COUNT(*) AS c FROM isolation_records WHERE status='Aktif İzolasyonda'").fetchone()["c"]
+				anon_list = [
+					{
+						"tarih": r["visit_date"],
+						"sinif": r["class_name"] or "Belirtilmedi",
+						"neden": r["complaint"],
+						"belirtiler": gai.anonymize_free_text(str(r["symptoms"] or "")),
+						"ates": r["temperature_c"],
+						"sevk": r["referral"],
+					}
+					for r in rows
+				]
+				ok, rep_md, used_m = gai.analyze_outbreak_trends(
+					api_key=api_key,
+					model=model,
+					anon_visit_summary=anon_list,
+					active_isolations_count=int(iso_cnt or 0),
+				)
+				ui.session_state["gai_epi_report"] = {"ok": ok, "text": rep_md, "model": used_m}
+
+			epi_res = ui.session_state.get("gai_epi_report")
+			if isinstance(epi_res, dict):
+				if epi_res.get("ok"):
+					ui.markdown(epi_res.get("text", ""))
+				else:
+					ui.error(f"Gemini AI hatası: {epi_res.get('text')}")
+
+
+def render_gemini_ai_settings_panel(current_cfg: dict[str, str]) -> None:
+	ui.markdown("### 🤖 Yapay Zekâ (Gemini API) & KVKK Anonimleştirme Ayarları")
+	ui.caption(
+		"Revir Defteri'ndeki 7 klinik yapay zekâ senaryosunu (Akıllı Triyaj & Veli Mesajı, Multimodal Tahlil/Evrak Okuyucu, NANDA Bakım Planı Kurgulayıcı, WHO Persantil Yorumlayıcı, İlaç-Alerji Güvenlik Kalkanı, Salgın Radarı ve Doğal Dil Sorgu) buradan yönetebilirsiniz."
+	)
+	cur_enabled = str(current_cfg.get("gemini_enabled", "1")).strip() != "0"
+	cur_key = gai.get_api_key(current_cfg, APP_DIR)
+	cur_model = str(current_cfg.get("gemini_model") or "gemini-3-flash-preview").strip()
+	if cur_model not in gai.GEMINI_MODEL_OPTIONS:
+		cur_model = "gemini-3-flash-preview"
+
+	with ui.container(border=True):
+		en_val = ui.toggle("🤖 Gemini Klinik Yapay Zekâ Asistanını Etkinleştir", value=cur_enabled, key="cfg_gemini_enabled_toggle")
+		k_c1, k_c2 = ui.columns([2.2, 1.8])
+		with k_c1:
+			api_key_inp = ui.text_input(
+				"🔑 Google Gemini API Anahtarı",
+				value=cur_key,
+				type="password",
+				placeholder="AIza... veya AQ....",
+				help="Anahtarınız yalnızca bu bilgisayardaki yerel veritabanında ve .gitignore korumalı yerel dosyada saklanır; GitHub'a asla yüklenmez.",
+				key="cfg_gemini_api_key_inp",
+			)
+		with k_c2:
+			m_idx = gai.GEMINI_MODEL_OPTIONS.index(cur_model)
+			sel_model = ui.selectbox(
+				"🧠 Tercih Edilen Gemini Modeli",
+				options=gai.GEMINI_MODEL_OPTIONS,
+				index=m_idx,
+				format_func=lambda m: gai.GEMINI_MODEL_LABELS.get(m, m),
+				key="cfg_gemini_model_sel",
+			)
+
+		b_c1, b_c2 = ui.columns(2)
+		with b_c1:
+			if ui.button("💾 Gemini AI Ayarlarını Kaydet", type="primary", use_container_width=True, key="btn_save_gemini_cfg"):
+				save_app_settings({
+					"gemini_enabled": "1" if en_val else "0",
+					"gemini_model": sel_model,
+					"gemini_api_key": api_key_inp.strip(),
+				})
+				gai.save_local_api_key(api_key_inp.strip(), APP_DIR)
+				clear_all_data_caches()
+				ui.success("✅ Gemini AI ayarları yerel veritabanına ve güvenli yerel anahtar dosyasına kaydedildi.")
+		with b_c2:
+			if ui.button("🔌 Bağlantıyı Şimdi Test Et", type="secondary", use_container_width=True, key="btn_test_gemini_conn"):
+				ok, msg, used_m = gai.test_gemini_connection(api_key_inp.strip(), sel_model)
+				if ok:
+					ui.success(f"✅ Bağlantı Başarılı ({used_m}): {msg}")
+				else:
+					ui.error(f"❌ Bağlantı Hatası: {msg}")
+
+	with ui.expander("🛡️ KVKK Kişisel Veri Anonimleştirme Mimarisi Nasıl Çalışır?", expanded=True):
+		ui.info(
+			"🔒 **Sıfır Kimlik Bilgisi Garantisi:**\n"
+			"- Gemini API'ye gönderilen hiçbir istekte öğrencinin **Adı Soyadı, T.C. Kimlik Numarası, Okul Numarası, Veli Adı, Telefon Numarası veya Ev Adresi** yer almaz.\n"
+			"- Yerel Python katmanı (`gemini_assistant.py`) tüm kimlik alanlarını maskeler ve yalnızca anonim klinik parametreleri (*Yaş: 10 yıl 2 ay, Cinsiyet: E, Boy: 140 cm, Alerji: Penisilin, Ateş: 38.2°C*) gönderir.\n"
+			"- Veli bilgilendirme mesajlarındaki `[ÖĞRENCİ_ADI]` alanı, yanıt bilgisayara döndükten sonra yerel olarak doldurulur."
+		)
 
 
 def _render_dossier_tab_measurements(person: sqlite3.Row, person_id: int) -> None:
@@ -10631,6 +11041,7 @@ def render_nanda_care_plan_editor(person_id: int, prefix: str = "cp") -> None:
 	template_keys = list(care_plan_templates.keys())
 
 	with ui.expander("➕ Yeni Hemşirelik Bakım Planı Oluştur", expanded=True):
+		render_gemini_nanda_ai_bar(person_id, prefix, compiled_facts, k_diag, k_facts, k_goals, k_interv, k_mon, k_esc)
 		# Master Template Quick Loader
 		with ui.container():
 			ui.markdown("###### ⚡ (İsteğe Bağlı) Tüm Planı Tek Seferde Doldur")
@@ -13206,6 +13617,8 @@ def render_overview() -> None:
 					ui.session_state["target_page"] = "💊 İlaç Takip Sistemi"
 					ui.rerun()
 
+	render_gemini_overview_command_center(s_date, e_date)
+
 	if is_section_visible("overview_pending_followups"):
 		render_pending_followups_panel()
 
@@ -14345,6 +14758,21 @@ def render_student_visit_tab() -> None:
 					on_change=on_stu_act_change,
 				)
 				action = ui.text_area("Yapılan İşlem / Müdahale", key=a_txt_key, height=70)
+				render_gemini_visit_triage_assistant(
+					student,
+					complaint,
+					v_temp_raw,
+					v_spo2_raw,
+					v_pulse_raw,
+					v_sys_raw,
+					v_dia_raw,
+					v_glu_raw,
+					s_txt_key,
+					f"vis_obs_{stu_id}",
+					a_txt_key,
+					f"vis_ref_{stu_id}",
+					key_prefix="stu_vis",
+				)
 
 				# --- Vizit Esnasında İlaç / Sarf Malzeme Çıkışı ---
 				with ui.expander("💊 Revirde İlaç veya Sarf Malzeme Verildi mi? (Stoktan Düş)", expanded=False):
@@ -14617,6 +15045,20 @@ def render_civilian_visit_tab(show_new_button: bool = True) -> None:
 				key=ca_tpl_key,
 				on_change=on_civ_act_change,
 				placeholder="Sık uygulanan işlemleri buradan seçebilirsiniz..."
+			)
+			render_gemini_visit_triage_assistant(
+				civ_person,
+				civ_complaint,
+				cv_temp_raw,
+				cv_spo2_raw,
+				cv_pulse_raw,
+				cv_sys_raw,
+				cv_dia_raw,
+				cv_glu_raw,
+				cs_txt_key,
+				f"civ_obs_{civ_id}",
+				ca_txt_key,
+				key_prefix="civ_vis",
 			)
 
 			ui.markdown("---")
@@ -15068,6 +15510,8 @@ def open_add_medication_dialog(preselected_student_id: int | None = None, edit_m
 					unit_opts.insert(0, med["dose_unit"])
 					u_idx = 0
 			dose_unit = ui.selectbox("📏 Doz Birimi", unit_opts, index=u_idx, key=f"{k}unit")
+
+	render_gemini_medication_safety_shield(selected_stu_id, med_name, med_route, dosage_pattern, dose_unit, "Fark etmez", k)
 
 	is_prn = "Gerektiğinde" in dosage_pattern or "PRN" in dosage_pattern or "S.O.S" in dosage_pattern
 
@@ -16894,6 +17338,26 @@ def render_vital_tracking() -> None:
 						ui.session_state[signature_key] = None
 				if ui.session_state.get(signature_key) == signature:
 					extracted = ui.session_state.get(f"lab_text_{student['id']}", "")
+					is_gai_on, gai_key, gai_model = _get_active_gemini_config()
+					if is_gai_on:
+						if ui.button("✨ Gemini Vision ile Tahlil Belgesini Çözümle & Tabloya Aktar", key=f"btn_gai_lab_parse_{student['id']}", use_container_width=True):
+							anon_ctx, _, _ = _build_person_anon_bundle(int(student["id"]))
+							ok_l, g_df, g_sum, used_m = gai.parse_lab_report_with_gemini(
+								api_key=gai_key,
+								model=gai_model,
+								file_bytes=content,
+								file_name=uploaded.name,
+								anon_context=anon_ctx,
+							)
+							if ok_l:
+								if not g_df.empty:
+									ui.session_state[session_key] = g_df
+								ui.session_state[f"gai_lab_summary_{student['id']}"] = f"🤖 **Gemini Vision ({used_m}) Değerlendirmesi:** {g_sum}"
+								ui.rerun()
+							else:
+								ui.error(f"Gemini Vision hatası: {g_sum}")
+						if ui.session_state.get(f"gai_lab_summary_{student['id']}"):
+							ui.info(ui.session_state[f"gai_lab_summary_{student['id']}"])
 					if uploaded.name.lower().endswith(".pdf") and not extracted.strip():
 						ui.warning("PDF'den metin veya OCR sonucu çıkarılamadı. Sonuç satırlarını aşağıya elle girin.")
 					elif uploaded.name.lower().endswith(".pdf"):
@@ -23932,6 +24396,24 @@ def _render_meb_activity_report_tab() -> None:
 	)
 
 	stats = collect_meb_annual_activity_stats(meb_start, meb_end)
+	is_gai_on, gai_key, gai_model = _get_active_gemini_config()
+	if is_gai_on:
+		if ui.button("✨ Gemini AI ile Resmi MEB Dönem Değerlendirme Metni Oluştur", key="btn_gai_meb_narrative", use_container_width=True):
+			cfg_meb = get_app_settings()
+			ok_m, narrative_txt, used_m = gai.generate_meb_activity_narrative(
+				api_key=gai_key,
+				model=gai_model,
+				stats=stats,
+				start_date_str=meb_start.isoformat(),
+				end_date_str=meb_end.isoformat(),
+				school_name=cfg_meb.get("school_name", "Okul Reviri"),
+			)
+			if ok_m:
+				ui.session_state["meb_rep_extra_notes"] = narrative_txt
+				ui.success(f"✅ Resmi MEB değerlendirme metni Gemini AI ({used_m}) ile oluşturuldu ve yukarıdaki alana aktarıldı!")
+				ui.rerun()
+			else:
+				ui.error(f"Gemini AI hatası: {narrative_txt}")
 	mc1, mc2, mc3, mc4, mc5 = ui.columns(5)
 	mc1.metric("Kayıtlı Öğrenci", stats["students_total"])
 	mc2.metric("Dönem Başvurusu", stats["visits_total"])
@@ -24842,6 +25324,36 @@ def open_document_preview_dialog(file_path: Path) -> None:
 		ui.download_button("📥 Bilgisayara İndir", data=dl_data, file_name=file_path.name, mime=mime_t, type="primary", use_container_width=True)
 
 	ui.divider()
+	is_gai_on, gai_key, gai_model = _get_active_gemini_config()
+	if is_gai_on and ext in (".pdf", ".png", ".jpg", ".jpeg", ".webp", ".txt", ".csv", ".docx"):
+		doc_sum_key = f"gai_doc_sum_{file_path.name}"
+		if ui.button("✨ Gemini AI ile Bu Belgeyi Klinik & İdari Olarak Özetle", key=f"btn_gai_doc_sum_{file_path.name}", use_container_width=True):
+			ext_txt = ""
+			if ext == ".pdf":
+				try:
+					ext_txt = extract_pdf_text(file_path.read_bytes())
+				except Exception:
+					ext_txt = ""
+			elif ext in (".txt", ".csv"):
+				try:
+					ext_txt = file_path.read_text(encoding="utf-8", errors="replace")
+				except Exception:
+					ext_txt = ""
+			ok_d, sum_md, used_m = gai.summarize_document_with_gemini(
+				api_key=gai_key,
+				model=gai_model,
+				file_path=file_path,
+				extracted_text=ext_txt,
+			)
+			ui.session_state[doc_sum_key] = {"ok": ok_d, "text": sum_md, "model": used_m}
+		doc_sum_res = ui.session_state.get(doc_sum_key)
+		if isinstance(doc_sum_res, dict):
+			if doc_sum_res.get("ok"):
+				with ui.container(border=True):
+					ui.markdown(f"###### 🤖 Gemini AI Belge Özeti <small>({doc_sum_res.get('model')})</small>", unsafe_allow_html=True)
+					ui.markdown(doc_sum_res.get("text", ""))
+			else:
+				ui.error(f"Gemini AI hatası: {doc_sum_res.get('text')}")
 
 	if ext == ".pdf":
 		import pymupdf
@@ -25477,6 +25989,7 @@ def render_settings() -> None:
 			ui.markdown("#### ⚙️ Ayarlar Menüsü")
 			ui.caption("Ayar kategorisini seçin:")
 			settings_sections = [
+				"🤖 Yapay Zekâ (Gemini API) & KVKK",
 				"🏫 Okul Adı, Kurum & Rapor Anteti",
 				"📅 Eğitim Öğretim Yılı & Arşiv Yönetimi",
 				"📥 Liste İçe Aktar (Excel / PDF)",
@@ -25500,8 +26013,12 @@ def render_settings() -> None:
 			)
 
 	with content_col:
+		# 🤖 Yapay Zekâ (Gemini API) & KVKK
+		if active_sec == "🤖 Yapay Zekâ (Gemini API) & KVKK":
+			render_gemini_ai_settings_panel(current_cfg)
+
 		# 📅 Eğitim Öğretim Yılı Yönetimi
-		if active_sec == "📅 Eğitim Öğretim Yılı & Arşiv Yönetimi":
+		elif active_sec == "📅 Eğitim Öğretim Yılı & Arşiv Yönetimi":
 			render_academic_year_settings()
 
 		# 🏫 Okul Adı, Kurum Bilgileri ve Rapor Anteti
@@ -26860,6 +27377,11 @@ def main() -> None:
 			value=False,
 			help="Açıldığında tablolardaki isimler, telefonlar ve tıbbi tanılar yıldızlanarak maskelenir.",
 		)
+		_ai_on, _, _ai_m = _get_active_gemini_config()
+		if _ai_on:
+			ui.caption(f"🤖 **Gemini AI:** Aktif (`{_ai_m}` · KVKK Korumalı)")
+		else:
+			ui.caption("⚪ **Gemini AI:** Kapalı (Çevrimdışı)")
 
 		cur_idx = PAGES.index(cur_page_val)
 		page = ui.radio("Menü", PAGES, index=cur_idx, key="main_menu_page", label_visibility="collapsed")

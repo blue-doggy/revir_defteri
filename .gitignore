@@ -34,6 +34,7 @@ installer/
 Kurulum_Paketleri/
 .revir_server.log
 .revir_desktop.pid
+.gemini_api_key
 scratch/
 .app_profile/
 .vscode/
