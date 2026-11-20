@@ -861,6 +861,10 @@ class _AppSession:
 		self.form_defs: dict[str, dict[str, Any]] = {}
 		self.page_title: str = "Revir Defteri"
 		self.last_html_payload: dict[str, Any] = {}
+		self.floating_chat_enabled: bool = False
+		self.floating_chat_label: str = "KVKK Korumalı"
+		self.floating_chat_handler: Callable | None = None
+		self.chat_history: list[dict[str, str]] = []
 
 	def register_download(self, data: bytes, file_name: str, mime: str) -> str:
 		h = hashlib.sha1(data[:2048] + file_name.encode("utf-8", errors="ignore") + str(len(data)).encode()).hexdigest()[:16]
@@ -2366,6 +2370,14 @@ def rerun(*, scope: str = "app") -> None:
 	raise _RerunException(scope=scope)
 
 
+def configure_floating_chat(enabled: bool, label: str = "KVKK Korumalı", handler: Callable | None = None) -> None:
+	ctx = _get_ctx()
+	ctx.session.floating_chat_enabled = bool(enabled)
+	ctx.session.floating_chat_label = str(label or "KVKK Korumalı")
+	if handler is not None:
+		ctx.session.floating_chat_handler = handler
+
+
 # Kök konteyner ve modül düzeyinde API dışa aktarımları
 _root = _UIContainer()
 sidebar = _UIContainer(is_sidebar=True)
@@ -2686,6 +2698,8 @@ def _execute_render_cycle(app_fn: Callable[[], None], session: _AppSession, payl
 			"balloons": last_ctx.balloons_triggered,
 			"styles_html": "\n".join(last_ctx.styles_parts),
 			"scripts_html": "\n".join(last_ctx.scripts_parts),
+			"floating_chat_enabled": session.floating_chat_enabled,
+			"floating_chat_label": session.floating_chat_label,
 		}
 		session.last_html_payload = result
 		return result
@@ -3096,11 +3110,161 @@ html, body {
 }
 #revir-busy-bar.active { width: 78%; opacity: 1; }
 #revir-toast {
-	position: fixed; bottom: 20px; right: 24px; z-index: 99999;
+	position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 99999;
 	background: #0f172a; color: #ffffff; padding: 10px 16px; border-radius: 10px;
 	font-size: 13.5px; font-weight: 600; box-shadow: 0 10px 28px rgba(0,0,0,0.25);
 	display: none;
 }
+
+/* Yüzen Gemini Sohbet Butonu & Konuşma Balonu */
+#revir-fab-btn {
+	position: fixed; bottom: 22px; right: 24px; z-index: 3400;
+	height: 54px; min-width: 54px; padding: 0 18px; border-radius: 999px;
+	border: 1.5px solid rgba(255,255,255,0.45);
+	background: linear-gradient(135deg, var(--teal, #0d9488) 0%, #0284c7 100%);
+	color: #ffffff; font-size: 14.5px; font-weight: 700; font-family: inherit;
+	display: none; align-items: center; justify-content: center; gap: 8px;
+	cursor: pointer; box-shadow: 0 10px 28px rgba(13,148,136,0.38);
+	transition: transform 0.2s cubic-bezier(0.34,1.56,0.64,1), box-shadow 0.2s ease;
+	user-select: none;
+}
+#revir-fab-btn.visible { display: inline-flex; }
+#revir-fab-btn:hover { transform: translateY(-3px) scale(1.03); box-shadow: 0 14px 34px rgba(2,132,199,0.45); }
+#revir-fab-btn .revir-fab-icon { font-size: 22px; line-height: 1; }
+
+#revir-chat-bubble {
+	position: fixed; bottom: 88px; right: 24px; z-index: 3450;
+	width: 390px; height: 535px; max-width: calc(100vw - 32px); max-height: calc(100vh - 110px);
+	background: var(--card-bg, #ffffff); color: var(--text-main, #0f172a);
+	border: 1px solid var(--line, #e2e8f0); border-radius: 20px;
+	box-shadow: 0 22px 60px rgba(15,23,42,0.28);
+	display: none; flex-direction: column; overflow: hidden;
+	transition: width 0.22s ease, height 0.22s ease;
+}
+#revir-chat-bubble.open { display: flex; }
+#revir-chat-bubble.expanded { width: 550px; height: 675px; }
+#revir-chat-bubble::after {
+	content: ""; position: absolute; bottom: -8px; right: 30px;
+	width: 16px; height: 16px; background: var(--card-bg, #ffffff);
+	border-right: 1px solid var(--line, #e2e8f0); border-bottom: 1px solid var(--line, #e2e8f0);
+	transform: rotate(45deg); pointer-events: none;
+}
+.revir-chat-hdr {
+	display: flex; align-items: center; justify-content: space-between;
+	padding: 12px 14px; background: linear-gradient(135deg, var(--teal, #0d9488) 0%, #0284c7 100%);
+	color: #ffffff; flex-shrink: 0;
+}
+.revir-chat-hdr-left { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.revir-chat-avatar {
+	width: 34px; height: 34px; border-radius: 10px;
+	background: rgba(255,255,255,0.2); display: flex; align-items: center; justify-content: center;
+	font-size: 19px; flex-shrink: 0;
+}
+.revir-chat-title-wrap { min-width: 0; }
+.revir-chat-title { font-size: 14px; font-weight: 800; color: #ffffff !important; line-height: 1.2; }
+.revir-chat-sub { font-size: 11px; color: rgba(255,255,255,0.88) !important; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.revir-chat-hdr-btns { display: flex; align-items: center; gap: 4px; }
+.revir-chat-hbtn {
+	width: 29px; height: 29px; border-radius: 8px; border: none;
+	background: rgba(255,255,255,0.16); color: #ffffff !important;
+	cursor: pointer; font-size: 13.5px; display: flex; align-items: center; justify-content: center;
+	transition: background 0.15s;
+}
+.revir-chat-hbtn:hover { background: rgba(255,255,255,0.3); }
+.revir-chat-hbtn.active { background: #ffffff; color: #0284c7 !important; box-shadow: 0 2px 6px rgba(0,0,0,0.18); }
+
+.revir-chat-chips {
+	display: flex; gap: 6px; overflow-x: auto; padding: 8px 12px;
+	border-bottom: 1px solid var(--line, #e2e8f0); background: var(--sidebar-bg, #f8fafc);
+	flex-shrink: 0; scrollbar-width: none;
+}
+.revir-chat-qchip {
+	white-space: nowrap; padding: 4px 10px; border-radius: 999px;
+	border: 1px solid var(--line, #e2e8f0); background: var(--card-bg, #ffffff);
+	color: var(--teal, #0d9488); font-size: 11.5px; font-weight: 600; cursor: pointer;
+	transition: all 0.15s; font-family: inherit;
+}
+.revir-chat-qchip:hover { background: var(--teal, #0d9488); color: #ffffff !important; border-color: var(--teal, #0d9488); }
+
+.revir-chat-msgs {
+	flex: 1; overflow-y: auto; padding: 12px 14px;
+	display: flex; flex-direction: column; gap: 10px;
+	background: var(--bg-page, #f4f7f9);
+}
+.revir-cmsg {
+	max-width: 88%; padding: 9px 13px; border-radius: 14px;
+	font-size: 13.2px; line-height: 1.48; word-wrap: break-word; position: relative;
+}
+.revir-cmsg p { margin: 0 0 6px 0; }
+.revir-cmsg p:last-child { margin-bottom: 0; }
+.revir-cmsg ul, .revir-cmsg ol { margin: 4px 0 6px 0; padding-left: 18px; }
+.revir-cmsg-user {
+	align-self: flex-end; background: var(--teal, #0d9488); color: #ffffff !important;
+	border-bottom-right-radius: 4px; box-shadow: 0 2px 8px rgba(13,148,136,0.22);
+}
+.revir-cmsg-user * { color: #ffffff !important; }
+.revir-cmsg-ai {
+	align-self: flex-start; background: var(--card-bg, #ffffff); color: var(--text-main, #0f172a);
+	border: 1px solid var(--line, #e2e8f0); border-bottom-left-radius: 4px;
+	box-shadow: 0 2px 6px rgba(0,0,0,0.04);
+}
+.revir-cmsg-tools {
+	display: flex; align-items: center; justify-content: flex-end; gap: 6px;
+	margin-top: 6px; padding-top: 4px; border-top: 1px dashed var(--line, #e2e8f0);
+}
+.revir-cmsg-tbtn {
+	border: none; background: transparent; color: var(--text-muted, #64748b);
+	font-size: 11px; font-weight: 600; cursor: pointer; padding: 2px 6px; border-radius: 5px;
+}
+.revir-cmsg-tbtn:hover { background: rgba(13,148,136,0.12); color: var(--teal, #0d9488); }
+
+.revir-chat-files {
+	display: none; flex-wrap: wrap; gap: 5px; padding: 6px 12px;
+	background: var(--sidebar-bg, #f8fafc); border-top: 1px solid var(--line, #e2e8f0);
+	max-height: 76px; overflow-y: auto;
+}
+.revir-chat-files.has-files { display: flex; }
+.revir-chat-fchip {
+	display: inline-flex; align-items: center; gap: 5px;
+	background: rgba(13,148,136,0.12); color: var(--teal, #0d9488);
+	border: 1px solid rgba(13,148,136,0.3); border-radius: 7px;
+	padding: 2px 8px; font-size: 11.5px; font-weight: 600;
+}
+
+.revir-chat-composer {
+	display: flex; align-items: flex-end; gap: 6px;
+	padding: 9px 11px; background: var(--card-bg, #ffffff);
+	border-top: 1px solid var(--line, #e2e8f0); flex-shrink: 0;
+}
+.revir-chat-ibtn {
+	width: 34px; height: 34px; border-radius: 9px;
+	border: 1px solid var(--line, #e2e8f0); background: var(--sidebar-bg, #f8fafc);
+	color: var(--text-main, #0f172a); font-size: 15px; cursor: pointer;
+	display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+	transition: all 0.15s;
+}
+.revir-chat-ibtn:hover { border-color: var(--teal, #0d9488); color: var(--teal, #0d9488); background: var(--mint, #f0fdfa); }
+.revir-chat-ibtn.recording {
+	background: #ef4444 !important; color: #ffffff !important; border-color: #dc2626 !important;
+	animation: revirPulse 1.1s infinite;
+}
+@keyframes revirPulse {
+	0% { box-shadow: 0 0 0 0 rgba(239,68,68,0.55); }
+	70% { box-shadow: 0 0 0 9px rgba(239,68,68,0); }
+	100% { box-shadow: 0 0 0 0 rgba(239,68,68,0); }
+}
+#revir-chat-inp {
+	flex: 1; min-height: 34px; max-height: 92px; padding: 7px 10px;
+	border-radius: 9px; border: 1px solid var(--line, #e2e8f0);
+	background: var(--input-bg, #ffffff); color: var(--input-text, #0f172a);
+	font-family: inherit; font-size: 13px; resize: none; outline: none; line-height: 1.38;
+}
+#revir-chat-inp:focus { border-color: var(--teal, #0d9488); box-shadow: 0 0 0 2px rgba(13,148,136,0.16); }
+#revir-chat-send-btn {
+	background: var(--teal, #0d9488); color: #ffffff !important; border-color: var(--teal, #0d9488);
+	font-weight: 800;
+}
+#revir-chat-send-btn:hover { background: var(--teal-hover, #0f766e); }
 </style>
 <div id="revir-dynamic-styles">__REVIR_INIT_STYLES__</div>
 </head>
@@ -3124,6 +3288,52 @@ html, body {
 </div>
 <div id="revir-chart-tooltip"></div>
 <div id="revir-toast"></div>
+
+<!-- Yüzen Gemini Sohbet Butonu ve Konuşma Balonu -->
+<button id="revir-fab-btn" type="button" title="Gemini Klinik Asistan ile Konuş" onclick="window.__revirToggleChatBubble()">
+	<span class="revir-fab-icon">🤖</span>
+	<span>Gemini Asistan</span>
+</button>
+
+<div id="revir-chat-bubble" ondragover="event.preventDefault()" ondrop="window.__revirChatDropFiles(event)">
+	<div class="revir-chat-hdr">
+		<div class="revir-chat-hdr-left">
+			<div class="revir-chat-avatar">🤖</div>
+			<div class="revir-chat-title-wrap">
+				<div class="revir-chat-title">Gemini Klinik Asistan</div>
+				<div id="revir-chat-sub" class="revir-chat-sub">🛡️ KVKK Korumalı · Ses & Dosya Destekli</div>
+			</div>
+		</div>
+		<div class="revir-chat-hdr-btns">
+			<button id="revir-chat-tts-btn" type="button" class="revir-chat-hbtn" title="Sesli Yanıt Okuma (Aç / Kapat)" onclick="window.__revirToggleChatTTS()">🔇</button>
+			<button type="button" class="revir-chat-hbtn" title="Sohbeti Temizle" onclick="window.__revirClearChat()">🗑️</button>
+			<button type="button" class="revir-chat-hbtn" title="Pencereyi Büyüt / Küçült" onclick="window.__revirExpandChat()">⤢</button>
+			<button type="button" class="revir-chat-hbtn" title="Küçült" onclick="window.__revirToggleChatBubble()">✕</button>
+		</div>
+	</div>
+	<div class="revir-chat-chips">
+		<button type="button" class="revir-chat-qchip" onclick="window.__revirQuickPrompt('Seçili kişinin sağlık, büyüme ve revir profilini kısaca özetle.')">🩺 Seçili Kişiyi Özetle</button>
+		<button type="button" class="revir-chat-qchip" onclick="window.__revirQuickPrompt('Bugünkü revir başvurularını ve dikkat edilmesi gerekenleri özetle.')">📊 Bugünkü Revir Özeti</button>
+		<button type="button" class="revir-chat-qchip" onclick="window.__revirQuickPrompt('Seçili kişinin kronik durumuna göre okul içi acil müdahale adımları nelerdir?')">🚨 Acil Müdahale Rehberi</button>
+		<button type="button" class="revir-chat-qchip" onclick="document.getElementById('revir-chat-file-inp').click()">📎 Tahlil / Belge Yükle</button>
+	</div>
+	<div id="revir-chat-messages" class="revir-chat-msgs">
+		<div class="revir-cmsg revir-cmsg-ai">
+			<p>Merhaba! Ben <strong>Gemini Klinik Asistan</strong>. 🩺</p>
+			<p>Bana yazılı soru sorabilir, <strong>📎 Dosya Ekle</strong> ile tahlil/PDF/görsel/Excel yükleyebilir veya <strong>🎙️ Mikrofon</strong> tuşuyla sesli konuşabilirsiniz.</p>
+		</div>
+	</div>
+	<div id="revir-chat-files" class="revir-chat-files"></div>
+	<div class="revir-chat-composer">
+		<label class="revir-chat-ibtn" title="Dosya / Tahlil / Görsel Ekle (.pdf, .png, .jpg, .xlsx, .docx, .csv)">
+			📎
+			<input id="revir-chat-file-inp" type="file" multiple style="display:none" accept=".pdf,.png,.jpg,.jpeg,.webp,.xlsx,.xls,.csv,.docx,.txt,.mp3,.wav,.webm,.m4a,.ogg" onchange="window.__revirChatAddFiles(this.files);this.value='';"/>
+		</label>
+		<button id="revir-chat-mic-btn" type="button" class="revir-chat-ibtn" title="Sesli Konuş (Başlat / Gönder)" onclick="window.__revirToggleVoiceMic()">🎙️</button>
+		<textarea id="revir-chat-inp" rows="1" placeholder="Mesaj yazın, dosya sürükleyin veya 🎙️ konuşun..." onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault();window.__revirSendChat();}"></textarea>
+		<button id="revir-chat-send-btn" type="button" class="revir-chat-ibtn" title="Gönder" onclick="window.__revirSendChat()">➤</button>
+	</div>
+</div>
 
 <script>
 (function() {
@@ -3268,6 +3478,22 @@ html, body {
 
 		// Konfeti animasyonu
 		if (data.balloons) launchConfetti();
+
+		// Yüzen Gemini sohbet butonu görünürlüğü ve alt başlığı
+		var fabBtn = document.getElementById("revir-fab-btn");
+		var chatBubble = document.getElementById("revir-chat-bubble");
+		var chatSub = document.getElementById("revir-chat-sub");
+		if (fabBtn) {
+			if (data.floating_chat_enabled) {
+				fabBtn.classList.add("visible");
+			} else {
+				fabBtn.classList.remove("visible");
+				if (chatBubble) chatBubble.classList.remove("open");
+			}
+		}
+		if (chatSub && data.floating_chat_label) {
+			chatSub.textContent = data.floating_chat_label;
+		}
 
 		// Düzenleyici odağını koru
 		if (refocusId) {
@@ -3693,6 +3919,332 @@ html, body {
 	});
 
 	// İlk yükleme (Sunucu tarafından önceden işlenmiş veri varsa anında uygula)
+	var chatFiles = [];
+	var chatTtsEnabled = false;
+	var chatBusy = false;
+	var voiceRec = null;
+	var mediaRecorder = null;
+	var audioChunks = [];
+	var isRecordingVoice = false;
+
+	window.__revirToggleChatBubble = function() {
+		var b = document.getElementById("revir-chat-bubble");
+		if (!b) return;
+		b.classList.toggle("open");
+		if (b.classList.contains("open")) {
+			var inp = document.getElementById("revir-chat-inp");
+			if (inp) setTimeout(function() { inp.focus(); }, 60);
+		}
+	};
+
+	window.__revirExpandChat = function() {
+		var b = document.getElementById("revir-chat-bubble");
+		if (b) b.classList.toggle("expanded");
+	};
+
+	window.__revirToggleChatTTS = function() {
+		chatTtsEnabled = !chatTtsEnabled;
+		var btn = document.getElementById("revir-chat-tts-btn");
+		if (btn) {
+			btn.textContent = chatTtsEnabled ? "🔊" : "🔇";
+			btn.classList.toggle("active", chatTtsEnabled);
+		}
+		if (!chatTtsEnabled && window.speechSynthesis) {
+			try { window.speechSynthesis.cancel(); } catch (e) {}
+		}
+		showToast(chatTtsEnabled ? "🔊 Sesli yanıt okuma açıldı" : "🔇 Sesli yanıt okuma kapatıldı");
+	};
+
+	window.__revirSpeakText = function(txt) {
+		if (!window.speechSynthesis || !txt) return;
+		try {
+			window.speechSynthesis.cancel();
+			var clean = String(txt).replace(/[*#_`~>-]+/g, " ").replace(/\s+/g, " ").trim();
+			var utt = new SpeechSynthesisUtterance(clean);
+			utt.lang = "tr-TR";
+			utt.rate = 1.04;
+			var voices = window.speechSynthesis.getVoices() || [];
+			for (var i = 0; i < voices.length; i++) {
+				if (voices[i].lang && voices[i].lang.toLowerCase().indexOf("tr") === 0) {
+					utt.voice = voices[i];
+					break;
+				}
+			}
+			window.speechSynthesis.speak(utt);
+		} catch (e) {}
+	};
+
+	function renderChatFileChips() {
+		var box = document.getElementById("revir-chat-files");
+		if (!box) return;
+		if (!chatFiles.length) {
+			box.classList.remove("has-files");
+			box.innerHTML = "";
+			return;
+		}
+		box.classList.add("has-files");
+		box.innerHTML = chatFiles.map(function(f, idx) {
+			return '<span class="revir-chat-fchip">📎 ' + escHtml(f.name)
+				+ ' <button type="button" class="revir-chip-x" onclick="window.__revirRemoveChatFile(' + idx + ')">×</button></span>';
+		}).join("");
+	}
+
+	window.__revirRemoveChatFile = function(idx) {
+		chatFiles.splice(idx, 1);
+		renderChatFileChips();
+	};
+
+	window.__revirChatAddFiles = function(fileList) {
+		if (!fileList || !fileList.length) return;
+		Array.prototype.slice.call(fileList).forEach(function(f) {
+			if (chatFiles.length >= 5) return;
+			var reader = new FileReader();
+			reader.onload = function() {
+				var b64 = String(reader.result || "").split(",")[1] || "";
+				chatFiles.push({ name: f.name, type: f.type || "application/octet-stream", data_b64: b64 });
+				renderChatFileChips();
+			};
+			reader.readAsDataURL(f);
+		});
+	};
+
+	window.__revirChatDropFiles = function(ev) {
+		ev.preventDefault();
+		if (ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files.length) {
+			window.__revirChatAddFiles(ev.dataTransfer.files);
+		}
+	};
+
+	function appendChatMsg(role, htmlContent, plainText) {
+		var box = document.getElementById("revir-chat-messages");
+		if (!box) return null;
+		var div = document.createElement("div");
+		div.className = "revir-cmsg " + (role === "user" ? "revir-cmsg-user" : "revir-cmsg-ai");
+		div.innerHTML = htmlContent;
+		if (role === "ai" && plainText) {
+			var tools = document.createElement("div");
+			tools.className = "revir-cmsg-tools";
+			var spkBtn = document.createElement("button");
+			spkBtn.type = "button";
+			spkBtn.className = "revir-cmsg-tbtn";
+			spkBtn.textContent = "🔊 Dinle";
+			spkBtn.onclick = function() { window.__revirSpeakText(plainText); };
+			var cpBtn = document.createElement("button");
+			cpBtn.type = "button";
+			cpBtn.className = "revir-cmsg-tbtn";
+			cpBtn.textContent = "📋 Kopyala";
+			cpBtn.onclick = function() {
+				if (navigator.clipboard) navigator.clipboard.writeText(plainText);
+				showToast("📋 Yanıt panoya kopyalandı");
+			};
+			tools.appendChild(spkBtn);
+			tools.appendChild(cpBtn);
+			div.appendChild(tools);
+		}
+		box.appendChild(div);
+		box.scrollTop = box.scrollHeight;
+		return div;
+	}
+
+	window.__revirQuickPrompt = function(txt) {
+		var inp = document.getElementById("revir-chat-inp");
+		if (inp) inp.value = txt;
+		window.__revirSendChat();
+	};
+
+	window.__revirClearChat = function() {
+		var box = document.getElementById("revir-chat-messages");
+		if (box) {
+			box.innerHTML = '<div class="revir-cmsg revir-cmsg-ai"><p>Sohbet geçmişi temizlendi. Size nasıl yardımcı olabilirim?</p></div>';
+		}
+		if (window.speechSynthesis) {
+			try { window.speechSynthesis.cancel(); } catch (e) {}
+		}
+		fetch("/api/gemini_chat_clear", {
+			method: "POST",
+			headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
+			body: "{}"
+		}).catch(function(){});
+	};
+
+	window.__revirSendChat = function(voicePayload) {
+		if (chatBusy) return;
+		var inp = document.getElementById("revir-chat-inp");
+		var msgTxt = inp ? inp.value.trim() : "";
+		var filesToSend = chatFiles.slice();
+		var hasVoice = !!(voicePayload && voicePayload.data_b64);
+
+		if (!msgTxt && !filesToSend.length && !hasVoice) return;
+
+		if (inp) inp.value = "";
+		chatFiles = [];
+		renderChatFileChips();
+
+		var badges = [];
+		filesToSend.forEach(function(f) { badges.push("📎 " + escHtml(f.name)); });
+		if (hasVoice) badges.push("🎙️ Sesli Mesaj");
+		var userHtml = "";
+		if (badges.length) {
+			userHtml += '<div style="font-size:11.5px;opacity:0.9;margin-bottom:4px;">' + badges.join(" · ") + "</div>";
+		}
+		if (msgTxt) {
+			userHtml += "<p>" + escHtml(msgTxt) + "</p>";
+		}
+		var userBubble = appendChatMsg("user", userHtml || "<p>🎙️ Sesli mesaj gönderildi...</p>", "");
+		var waitBubble = appendChatMsg("ai", '<p style="color:var(--text-muted);">⏳ <em>Gemini yanıt hazırlıyor...</em></p>', "");
+		chatBusy = true;
+
+		fetch("/api/gemini_chat", {
+			method: "POST",
+			headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
+			body: JSON.stringify({
+				message: msgTxt,
+				attachments: filesToSend,
+				voice_audio_b64: hasVoice ? voicePayload.data_b64 : "",
+				voice_audio_mime: hasVoice ? (voicePayload.mime || "audio/webm") : ""
+			})
+		})
+		.then(function(r) { return r.json(); })
+		.then(function(res) {
+			if (waitBubble) waitBubble.remove();
+			if (res.transcribed && userBubble && !msgTxt) {
+				userBubble.innerHTML = '<div style="font-size:11.5px;opacity:0.9;margin-bottom:4px;">🎙️ Sesli Mesaj</div><p>' + escHtml(res.transcribed) + "</p>";
+			}
+			if (res.ok) {
+				appendChatMsg("ai", res.reply_html || ("<p>" + escHtml(res.reply_text || "") + "</p>"), res.reply_text || "");
+				if (chatTtsEnabled || hasVoice) {
+					window.__revirSpeakText(res.reply_text || "");
+				}
+			} else {
+				appendChatMsg("ai", '<p style="color:#dc2626;">❌ ' + escHtml(res.error || "Yanıt alınamadı.") + "</p>", "");
+			}
+		})
+		.catch(function(err) {
+			if (waitBubble) waitBubble.remove();
+			appendChatMsg("ai", '<p style="color:#dc2626;">❌ Bağlantı hatası: ' + escHtml(String(err)) + "</p>", "");
+		})
+		.finally(function() {
+			chatBusy = false;
+		});
+	};
+
+	// Sesli Konuşma: Web Speech API + MediaRecorder (Gemini Multimodal Audio) Çift Motorlu
+	window.__revirToggleVoiceMic = function() {
+		var micBtn = document.getElementById("revir-chat-mic-btn");
+		if (isRecordingVoice) {
+			stopVoiceCapture();
+			return;
+		}
+		var SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+		if (SpeechRec && !window.__revirForceMediaRecorder) {
+			try {
+				voiceRec = new SpeechRec();
+				voiceRec.lang = "tr-TR";
+				voiceRec.interimResults = true;
+				voiceRec.continuous = false;
+				var finalTranscript = "";
+				isRecordingVoice = true;
+				if (micBtn) { micBtn.classList.add("recording"); micBtn.textContent = "⏹️"; }
+				showToast("🎙️ Dinleniyor... Konuşmanız bitince ⏹️ tuşuna basın.");
+
+				voiceRec.onresult = function(ev) {
+					var interim = "";
+					for (var i = ev.resultIndex; i < ev.results.length; i++) {
+						if (ev.results[i].isFinal) finalTranscript += ev.results[i][0].transcript;
+						else interim += ev.results[i][0].transcript;
+					}
+					var inp = document.getElementById("revir-chat-inp");
+					if (inp) inp.value = (finalTranscript + " " + interim).trim();
+				};
+				voiceRec.onerror = function() {
+					window.__revirForceMediaRecorder = true;
+					isRecordingVoice = false;
+					if (micBtn) { micBtn.classList.remove("recording"); micBtn.textContent = "🎙️"; }
+					startMediaRecorderCapture();
+				};
+				voiceRec.onend = function() {
+					var wasRec = isRecordingVoice;
+					isRecordingVoice = false;
+					if (micBtn) { micBtn.classList.remove("recording"); micBtn.textContent = "🎙️"; }
+					var inp = document.getElementById("revir-chat-inp");
+					if (wasRec && inp && inp.value.trim()) {
+						chatTtsEnabled = true;
+						var ttsBtn = document.getElementById("revir-chat-tts-btn");
+						if (ttsBtn) { ttsBtn.textContent = "🔊"; ttsBtn.classList.add("active"); }
+						window.__revirSendChat();
+					}
+				};
+				voiceRec.start();
+				return;
+			} catch (e) {
+				window.__revirForceMediaRecorder = true;
+			}
+		}
+		startMediaRecorderCapture();
+	};
+
+	function startMediaRecorderCapture() {
+		var micBtn = document.getElementById("revir-chat-mic-btn");
+		if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+			showToast("⚠️ Bu cihazda mikrofon erişimi desteklenmiyor.");
+			return;
+		}
+		navigator.mediaDevices.getUserMedia({ audio: true }).then(function(stream) {
+			audioChunks = [];
+			var mime = "audio/webm";
+			if (window.MediaRecorder && MediaRecorder.isTypeSupported) {
+				if (MediaRecorder.isTypeSupported("audio/webm")) mime = "audio/webm";
+				else if (MediaRecorder.isTypeSupported("audio/mp4")) mime = "audio/mp4";
+				else if (MediaRecorder.isTypeSupported("audio/wav")) mime = "audio/wav";
+			}
+			mediaRecorder = new MediaRecorder(stream);
+			isRecordingVoice = true;
+			if (micBtn) { micBtn.classList.add("recording"); micBtn.textContent = "⏹️"; }
+			showToast("🎙️ Ses kaydediliyor... Göndermek için ⏹️ tuşuna basın.");
+
+			mediaRecorder.ondataavailable = function(e) {
+				if (e.data && e.data.size > 0) audioChunks.push(e.data);
+			};
+			mediaRecorder.onstop = function() {
+				stream.getTracks().forEach(function(t) { t.stop(); });
+				isRecordingVoice = false;
+				if (micBtn) { micBtn.classList.remove("recording"); micBtn.textContent = "🎙️"; }
+				if (!audioChunks.length) return;
+				var blob = new Blob(audioChunks, { type: mime });
+				var reader = new FileReader();
+				reader.onload = function() {
+					var b64 = String(reader.result || "").split(",")[1] || "";
+					if (b64) {
+						chatTtsEnabled = true;
+						var ttsBtn = document.getElementById("revir-chat-tts-btn");
+						if (ttsBtn) { ttsBtn.textContent = "🔊"; ttsBtn.classList.add("active"); }
+						window.__revirSendChat({ data_b64: b64, mime: mime });
+					}
+				};
+				reader.readAsDataURL(blob);
+			};
+			mediaRecorder.start();
+		}).catch(function(err) {
+			isRecordingVoice = false;
+			if (micBtn) { micBtn.classList.remove("recording"); micBtn.textContent = "🎙️"; }
+			showToast("⚠️ Mikrofon izni alınamadı: " + err.message);
+		});
+	}
+
+	function stopVoiceCapture() {
+		var micBtn = document.getElementById("revir-chat-mic-btn");
+		if (voiceRec) {
+			try { voiceRec.stop(); } catch (e) {}
+			voiceRec = null;
+		}
+		if (mediaRecorder && mediaRecorder.state !== "inactive") {
+			try { mediaRecorder.stop(); } catch (e) {}
+			mediaRecorder = null;
+		}
+		isRecordingVoice = false;
+		if (micBtn) { micBtn.classList.remove("recording"); micBtn.textContent = "🎙️"; }
+	}
+
 	var INITIAL_DATA = __REVIR_INITIAL_JSON__;
 	function bootInitial() {
 		if (INITIAL_DATA && INITIAL_DATA.main_html) {
@@ -3879,6 +4431,33 @@ class LocalUIServer:
 						self._send_bytes(HTTPStatus.OK, "application/json", b'{"ok":true}')
 					except Exception:
 						self._send_bytes(HTTPStatus.BAD_REQUEST, "application/json", b'{"ok":false}')
+					return
+
+				if path == "/api/gemini_chat_clear":
+					with server_ref.session.lock:
+						server_ref.session.chat_history.clear()
+					self._send_bytes(HTTPStatus.OK, "application/json", b'{"ok":true}')
+					return
+
+				if path == "/api/gemini_chat":
+					try:
+						payload = self._read_json()
+						handler = server_ref.session.floating_chat_handler
+						if not callable(handler):
+							self._send_bytes(HTTPStatus.OK, "application/json", json.dumps({"ok": False, "error": "Gemini sohbet işleyicisi hazır değil."}).encode("utf-8"))
+							return
+						res_dict = handler(payload, server_ref.session.chat_history)
+						if res_dict.get("ok"):
+							u_txt = str(res_dict.get("transcribed") or payload.get("message") or "").strip()
+							r_txt = str(res_dict.get("reply_text") or "").strip()
+							if u_txt:
+								server_ref.session.chat_history.append({"role": "user", "text": u_txt})
+							if r_txt:
+								server_ref.session.chat_history.append({"role": "assistant", "text": r_txt})
+							res_dict["reply_html"] = _render_markdown(r_txt, unsafe_allow_html=False)
+						self._send_bytes(HTTPStatus.OK, "application/json; charset=utf-8", json.dumps(res_dict, ensure_ascii=False).encode("utf-8"))
+					except Exception as exc:
+						self._send_bytes(HTTPStatus.OK, "application/json", json.dumps({"ok": False, "error": str(exc)}).encode("utf-8"))
 					return
 
 				self._send_bytes(HTTPStatus.NOT_FOUND, "application/json", b'{"error":"not_found"}')

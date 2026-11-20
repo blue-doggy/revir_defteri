@@ -33,22 +33,22 @@ import pandas as pd
 
 
 GEMINI_MODEL_OPTIONS: list[str] = [
+	"gemini-3.1-flash-lite",
 	"gemini-3-flash-preview",
 	"gemini-3.8-flash",
-	"gemini-3.1-flash-lite",
 	"gemini-3.1-pro-preview",
 ]
 
 GEMINI_MODEL_LABELS: dict[str, str] = {
-	"gemini-3-flash-preview": "⚡ Gemini 3 Flash (Önerilen - Çok Hızlı Klinik & Görsel Analiz ~1.5sn)",
-	"gemini-3.8-flash": "🚀 Gemini 3.8 Flash (Yeni Nesil Klinik Akıl Yürütme)",
-	"gemini-3.1-flash-lite": "🪶 Gemini 3.1 Flash Lite (Ultra Hızlı & Yüksek Kota)",
+	"gemini-3.1-flash-lite": "⚡ Gemini 3.1 Flash Lite (Önerilen - Ultra Hızlı ~1.5sn & Yüksek Kota)",
+	"gemini-3-flash-preview": "🚀 Gemini 3 Flash (Hızlı Klinik & Görsel Analiz)",
+	"gemini-3.8-flash": "🧠 Gemini 3.8 Flash (Yeni Nesil Klinik Akıl Yürütme)",
 	"gemini-3.1-pro-preview": "🔬 Gemini 3.1 Pro (Derin Klinik & Rapor Analizi)",
 }
 
 _FALLBACK_MODELS: list[str] = [
-	"gemini-3-flash-preview",
 	"gemini-3.1-flash-lite",
+	"gemini-3-flash-preview",
 	"gemini-3.8-flash",
 	"gemini-3.1-pro-preview",
 ]
@@ -250,10 +250,17 @@ def call_gemini(
 	if system_instruction:
 		payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
 
-	body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 	last_error = ""
-
 	for cand_model in models_to_try:
+		gen_cfg: dict[str, Any] = {"temperature": temperature}
+		if expect_json:
+			gen_cfg["responseMimeType"] = "application/json"
+		if cand_model.startswith("gemini-3"):
+			gen_cfg["thinkingConfig"] = {"thinkingLevel": "LOW"}
+		req_payload = dict(payload)
+		req_payload["generationConfig"] = gen_cfg
+		body_bytes = json.dumps(req_payload, ensure_ascii=False).encode("utf-8")
+
 		url = f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(cand_model)}:generateContent?key={urllib.parse.quote(clean_key)}"
 		req = urllib.request.Request(
 			url,
@@ -747,3 +754,152 @@ Yanıtı yalnızca şu JSON formatında ver:
 		return True, explanation, df, sql_q
 	except Exception as exc:
 		return False, f"SQL çalıştırma hatası: {exc}", pd.DataFrame(), sql_q
+
+
+# ==============================================================================
+# 10. YÜZEN SOHBET BALONU (MULTIMODAL: METİN + DOSYA + SESLİ KONUŞMA)
+# ==============================================================================
+
+def _extract_attachment_context(name: str, mime: str, raw_bytes: bytes, sensitive_names: list[str] | None = None) -> tuple[tuple[bytes, str] | None, str]:
+	"""
+	Dosya ekini Gemini için hazırlar.
+	- PDF, Görsel (PNG/JPG/WEBP) ve Ses (WEBM/WAV/MP3/OGG/MP4) dosyalarını doğrudan inline_data olarak döndürür.
+	- Excel, CSV, Word (.docx) ve Metin dosyalarını yerel olarak okuyup KVKK maskeli metin özetine çevirir.
+	"""
+	low = (name or "").lower()
+	eff_mime = (mime or "").lower() or (mimetypes.guess_type(name)[0] or "application/octet-stream").lower()
+
+	if low.endswith((".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".webm", ".wav", ".mp3", ".ogg", ".m4a", ".mp4")) or eff_mime.startswith(("image/", "audio/", "application/pdf")):
+		if low.endswith(".pdf"):
+			eff_mime = "application/pdf"
+		elif low.endswith((".webm",)) and "audio" not in eff_mime:
+			eff_mime = "audio/webm"
+		return (raw_bytes, eff_mime), f"[Ekli Dosya: {name} ({eff_mime})]"
+
+	import io as _io
+	extracted = ""
+	try:
+		if low.endswith((".xlsx", ".xls")):
+			df = pd.read_excel(_io.BytesIO(raw_bytes)).head(60)
+			extracted = df.to_csv(index=False)
+		elif low.endswith(".csv"):
+			df = pd.read_csv(_io.BytesIO(raw_bytes)).head(80)
+			extracted = df.to_csv(index=False)
+		elif low.endswith(".docx"):
+			import docx as _docx
+			doc = _docx.Document(_io.BytesIO(raw_bytes))
+			extracted = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+		else:
+			extracted = raw_bytes.decode("utf-8", errors="replace")
+	except Exception as exc:
+		extracted = f"(Dosya içeriği okunamadı: {exc})"
+
+	safe_txt = anonymize_free_text(extracted[:10000], sensitive_names)
+	return None, f"[Ekli Belge ({name}) İçeriği]:\n{safe_txt}"
+
+
+def chat_with_gemini_assistant(
+	*,
+	api_key: str,
+	model: str,
+	user_message: str,
+	history: list[dict[str, str]] | None = None,
+	attachments: list[dict[str, str]] | None = None,
+	voice_audio_b64: str = "",
+	voice_audio_mime: str = "audio/webm",
+	anon_person_context: str = "",
+	school_context: str = "",
+	sensitive_names: list[str] | None = None,
+) -> tuple[bool, str, str, str]:
+	"""
+	Yüzen sohbet balonundan gelen metin, çoklu dosya eki ve/veya ses kaydını yanıtlar.
+	Dönüş: (başarılı_mı, yanıt_metni, kullanılan_model, ses_kaydı_varsa_çözümlenen_kullanıcı_metni)
+	"""
+	sys_inst = (
+		"Sen 'Revir Defteri' masaüstü okul sağlığı yazılımının içinde yer alan KVKK korumalı 'Gemini Klinik Asistan'sın. "
+		"Okul revir hemşiresine pediatrik triyaj, büyüme-gelişme (WHO persantil/Z-skoru), NANDA bakım planları, "
+		"ilaç etkileşimleri, tahlil/evrak yorumlama ve okul sağlığı yönetimi konularında hızlı, doğru, Türkçe ve öz yanıtlar verirsin. "
+		"Kısa, maddeli ve okunması kolay yanıtlar üret."
+	)
+
+	inline_files: list[tuple[bytes, str]] = []
+	extra_doc_blocks: list[str] = []
+
+	if attachments:
+		for att in attachments[:5]:
+			fname = str(att.get("name") or "dosya")
+			fmime = str(att.get("type") or "")
+			fb64 = str(att.get("data_b64") or "")
+			if not fb64:
+				continue
+			try:
+				fbytes = base64.b64decode(fb64)
+				inline_item, txt_block = _extract_attachment_context(fname, fmime, fbytes, sensitive_names)
+				if inline_item is not None:
+					inline_files.append(inline_item)
+				if txt_block:
+					extra_doc_blocks.append(txt_block)
+			except Exception:
+				continue
+
+	has_voice = False
+	if voice_audio_b64:
+		try:
+			vbytes = base64.b64decode(voice_audio_b64)
+			if vbytes:
+				inline_files.append((vbytes, voice_audio_mime or "audio/webm"))
+				has_voice = True
+		except Exception:
+			pass
+
+	hist_lines: list[str] = []
+	if history:
+		for msg in history[-10:]:
+			role_lbl = "Hemşire" if msg.get("role") == "user" else "Asistan"
+			content_s = anonymize_free_text(str(msg.get("text") or ""), sensitive_names)
+			if content_s:
+				hist_lines.append(f"{role_lbl}: {content_s}")
+
+	safe_user_msg = anonymize_free_text(user_message, sensitive_names)
+	ctx_parts: list[str] = []
+	if school_context:
+		ctx_parts.append(f"[OKUL & REVİR DURUMU]: {school_context}")
+	if anon_person_context:
+		ctx_parts.append(f"[SEÇİLİ KİŞİ ANONİM KLİNİK PROFİLİ]: {anon_person_context}")
+	if hist_lines:
+		hist_joined = "\n".join(hist_lines)
+		ctx_parts.append(f"[ÖNCEKİ SOHBET GEÇMİŞİ]:\n{hist_joined}")
+	if extra_doc_blocks:
+		docs_joined = "\n\n".join(extra_doc_blocks)
+		ctx_parts.append(docs_joined)
+
+	if has_voice and not safe_user_msg.strip():
+		ctx_parts.append(
+			"[KULLANICI SESLİ MESAJ GÖNDERDİ]: Ekli ses kaydını dinle. "
+			"Yanıtının ilk satırına kullanıcının ne söylediğini `[SES_ÇÖZÜMÜ]: <söylenen cümle>` biçiminde yaz, "
+			"alt satırda ise sorusuna Türkçe klinik yanıtını ver."
+		)
+	else:
+		ctx_parts.append(f"[HEMŞİRENİN MESAJI]: {safe_user_msg or 'Ekli dosyayı/sesi inceleyip yorumla.'}")
+
+	full_prompt = "\n\n".join(ctx_parts)
+	ok, raw_reply, used_model = call_gemini(
+		full_prompt,
+		api_key=api_key,
+		model=model,
+		system_instruction=sys_inst,
+		inline_files=inline_files if inline_files else None,
+		timeout=30.0,
+	)
+	if not ok:
+		return False, raw_reply, used_model, ""
+
+	transcribed = ""
+	clean_reply = raw_reply
+	m_tr = re.match(r"^\s*\[SES_ÇÖZÜMÜ\]\s*:\s*(.+?)(?:\n+|$)(.*)", raw_reply, re.S)
+	if m_tr:
+		transcribed = m_tr.group(1).strip()
+		clean_reply = m_tr.group(2).strip() or transcribed
+
+	return True, clean_reply, used_model, transcribed
+

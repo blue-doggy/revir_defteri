@@ -121,7 +121,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.4.0"
+_DEFAULT_APP_VERSION = "1.5.0"
 
 
 def _load_app_version() -> str:
@@ -284,7 +284,8 @@ DEFAULT_APP_SETTINGS: dict[str, str] = {
 	"medication_visible_fields": "med_route,dosage_pattern,dose_unit,meal_relation,total_volume,duration_days,active_days,storage_condition,guardian_consent,expiry_date,special_notes",
 	"page_sections_visibility": "{}",
 	"gemini_enabled": "1",
-	"gemini_model": "gemini-3-flash-preview",
+	"gemini_floating_chat": "1",
+	"gemini_model": "gemini-3.1-flash-lite",
 	"gemini_api_key": "",
 }
 
@@ -10033,9 +10034,9 @@ def _get_active_gemini_config() -> tuple[bool, str, str]:
 	cfg = get_app_settings()
 	enabled = str(cfg.get("gemini_enabled", "1")).strip() != "0"
 	key = gai.get_api_key(cfg, APP_DIR)
-	model = str(cfg.get("gemini_model") or "gemini-3-flash-preview").strip()
+	model = str(cfg.get("gemini_model") or "gemini-3.1-flash-lite").strip()
 	if model not in gai.GEMINI_MODEL_OPTIONS:
-		model = "gemini-3-flash-preview"
+		model = "gemini-3.1-flash-lite"
 	return (enabled and bool(key)), key, model
 
 
@@ -10369,19 +10370,111 @@ def render_gemini_overview_command_center(s_date: str, e_date: str) -> None:
 					ui.error(f"Gemini AI hatası: {epi_res.get('text')}")
 
 
+def _handle_floating_gemini_chat(payload: dict[str, Any], chat_history: list[dict[str, str]]) -> dict[str, Any]:
+	is_on, api_key, model = _get_active_gemini_config()
+	if not is_on:
+		return {"ok": False, "error": "Gemini AI kapalı veya API anahtarı tanımlı değil."}
+
+	active_pid = ui.session_state.get("active_person_id")
+	anon_person_ctx = ""
+	sensitive_names: list[str] = []
+	if active_pid:
+		try:
+			anon_person_ctx, sensitive_names, _ = _build_person_anon_bundle(int(active_pid))
+		except Exception:
+			pass
+
+	school_ctx = ""
+	try:
+		cfg = get_app_settings()
+		cur_page = str(ui.session_state.get("main_menu_page") or "Genel Bakış")
+		today_iso = date.today().isoformat()
+		with connect_db() as conn:
+			c_row = conn.execute(
+				"""SELECT (SELECT COUNT(*) FROM students) total_stu,
+						  (SELECT COUNT(*) FROM visits WHERE visit_date=?) today_vis,
+						  (SELECT COUNT(*) FROM isolation_records WHERE status='Aktif İzolasyonda') active_iso""",
+				(today_iso,),
+			).fetchone()
+		school_ctx = (
+			f"Kurum: {cfg.get('school_name', 'Okul Reviri')} | Aktif Sayfa: {cur_page} | "
+			f"Kayıtlı Kişi: {c_row['total_stu']} | Bugünkü Başvuru: {c_row['today_vis']} | Aktif İzolasyon: {c_row['active_iso']}"
+		)
+	except Exception:
+		pass
+
+	ok, reply_txt, used_m, transcribed = gai.chat_with_gemini_assistant(
+		api_key=api_key,
+		model=model,
+		user_message=str(payload.get("message") or ""),
+		history=chat_history,
+		attachments=payload.get("attachments") if isinstance(payload.get("attachments"), list) else None,
+		voice_audio_b64=str(payload.get("voice_audio_b64") or ""),
+		voice_audio_mime=str(payload.get("voice_audio_mime") or "audio/webm"),
+		anon_person_context=anon_person_ctx,
+		school_context=school_ctx,
+		sensitive_names=sensitive_names,
+	)
+	if not ok:
+		return {"ok": False, "error": reply_txt}
+	return {
+		"ok": True,
+		"reply_text": reply_txt,
+		"model": used_m,
+		"transcribed": transcribed,
+	}
+
+
+def _sync_floating_chat_ui() -> None:
+	cfg = get_app_settings()
+	is_on, _, model = _get_active_gemini_config()
+	float_on = is_on and (str(cfg.get("gemini_floating_chat", "1")).strip() != "0")
+	active_pid = ui.session_state.get("active_person_id")
+	active_p = get_person_by_id(active_pid) if active_pid else None
+	if active_p:
+		sub_lbl = f"📌 Aktif Kişi Bağlamı ({active_p['class_name']}) · 🛡️ KVKK"
+	else:
+		sub_lbl = f"🛡️ KVKK Korumalı · {model}"
+	ui.configure_floating_chat(enabled=float_on, label=sub_lbl, handler=_handle_floating_gemini_chat)
+
+
 def render_gemini_ai_settings_panel(current_cfg: dict[str, str]) -> None:
 	ui.markdown("### 🤖 Yapay Zekâ (Gemini API) & KVKK Anonimleştirme Ayarları")
 	ui.caption(
-		"Revir Defteri'ndeki 7 klinik yapay zekâ senaryosunu (Akıllı Triyaj & Veli Mesajı, Multimodal Tahlil/Evrak Okuyucu, NANDA Bakım Planı Kurgulayıcı, WHO Persantil Yorumlayıcı, İlaç-Alerji Güvenlik Kalkanı, Salgın Radarı ve Doğal Dil Sorgu) buradan yönetebilirsiniz."
+		"Revir Defteri'ndeki 7 klinik yapay zekâ senaryosunu ve sağ alt köşedeki yüzen Gemini sohbet balonunu (dosya ekleme & sesli konuşma destekli) buradan yönetebilirsiniz."
 	)
 	cur_enabled = str(current_cfg.get("gemini_enabled", "1")).strip() != "0"
+	cur_float = str(current_cfg.get("gemini_floating_chat", "1")).strip() != "0"
 	cur_key = gai.get_api_key(current_cfg, APP_DIR)
 	cur_model = str(current_cfg.get("gemini_model") or "gemini-3-flash-preview").strip()
 	if cur_model not in gai.GEMINI_MODEL_OPTIONS:
 		cur_model = "gemini-3-flash-preview"
 
+	def _on_quick_toggle_change() -> None:
+		en_v = bool(ui.session_state.get("cfg_gemini_enabled_toggle", True))
+		fl_v = bool(ui.session_state.get("cfg_gemini_floating_toggle", True))
+		save_app_settings({
+			"gemini_enabled": "1" if en_v else "0",
+			"gemini_floating_chat": "1" if fl_v else "0",
+		})
+		clear_all_data_caches()
+
 	with ui.container(border=True):
-		en_val = ui.toggle("🤖 Gemini Klinik Yapay Zekâ Asistanını Etkinleştir", value=cur_enabled, key="cfg_gemini_enabled_toggle")
+		t_c1, t_c2 = ui.columns(2)
+		with t_c1:
+			en_val = ui.toggle(
+				"🤖 Gemini Klinik Yapay Zekâ Asistanını Etkinleştir",
+				value=cur_enabled,
+				key="cfg_gemini_enabled_toggle",
+				on_change=_on_quick_toggle_change,
+			)
+		with t_c2:
+			float_val = ui.toggle(
+				"💬 Sağ Altta Yüzen Gemini Sohbet Balonunu Göster (Dosya & Sesli Konuşma)",
+				value=cur_float,
+				key="cfg_gemini_floating_toggle",
+				on_change=_on_quick_toggle_change,
+			)
 		k_c1, k_c2 = ui.columns([2.2, 1.8])
 		with k_c1:
 			api_key_inp = ui.text_input(
@@ -10407,12 +10500,14 @@ def render_gemini_ai_settings_panel(current_cfg: dict[str, str]) -> None:
 			if ui.button("💾 Gemini AI Ayarlarını Kaydet", type="primary", use_container_width=True, key="btn_save_gemini_cfg"):
 				save_app_settings({
 					"gemini_enabled": "1" if en_val else "0",
+					"gemini_floating_chat": "1" if float_val else "0",
 					"gemini_model": sel_model,
 					"gemini_api_key": api_key_inp.strip(),
 				})
 				gai.save_local_api_key(api_key_inp.strip(), APP_DIR)
 				clear_all_data_caches()
-				ui.success("✅ Gemini AI ayarları yerel veritabanına ve güvenli yerel anahtar dosyasına kaydedildi.")
+				_sync_floating_chat_ui()
+				ui.success("✅ Gemini AI ve yüzen sohbet balonu ayarları kaydedildi.")
 		with b_c2:
 			if ui.button("🔌 Bağlantıyı Şimdi Test Et", type="secondary", use_container_width=True, key="btn_test_gemini_conn"):
 				ok, msg, used_m = gai.test_gemini_connection(api_key_inp.strip(), sel_model)
@@ -27354,6 +27449,7 @@ def main() -> None:
 
 	active_id = ui.session_state.get("active_person_id")
 	active_person = get_person_by_id(active_id) if active_id else None
+	_sync_floating_chat_ui()
 
 	with ui.sidebar:
 		if APP_ICON_PATH.exists():
