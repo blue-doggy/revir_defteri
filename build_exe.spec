@@ -5,34 +5,6 @@ Okul Revir Defteri - PyInstaller Paketleme (.spec) Dosyası
 Çalıştırma Komutu (Spec ile önerilen):
     python -m PyInstaller build_exe.spec --noconfirm --clean
 
-Alternatif Tek Satır PyInstaller Komutu (Windows PowerShell / CMD):
-    python -m PyInstaller --noconfirm --clean --onedir --noconsole --name "RevirDefteri" --icon "app_icon.ico" ^
-      --add-data "persantil.py;." ^
-      --add-data "app_icon.ico;." ^
-      --add-data "app_icon.png;." ^
-      --add-data "turkiye-il-ilce-mahalle-koy.json;." ^
-      --add-data "persantil veriler;persantil veriler" ^
-      --add-data ".streamlit;.streamlit" ^
-      --copy-metadata streamlit ^
-      --copy-metadata altair ^
-      --copy-metadata python-docx ^
-      --copy-metadata openpyxl ^
-      --copy-metadata pymupdf ^
-      --copy-metadata pywebview ^
-      --collect-all streamlit ^
-      --collect-all altair ^
-      --collect-all docx ^
-      --collect-all openpyxl ^
-      --collect-all pymupdf ^
-      --collect-all webview ^
-      --hidden-import clr_loader ^
-      --hidden-import pythonnet ^
-      --hidden-import truststore ^
-      --hidden-import PIL ^
-      --hidden-import pandas ^
-      --hidden-import numpy ^
-      desktop_launcher.py
-
 Çıktı Klasörü:
     dist/RevirDefteri/RevirDefteri.exe
 """
@@ -49,16 +21,18 @@ PROJECT_ROOT = Path(SPECPATH).resolve()
 
 datas = [
     (str(PROJECT_ROOT / "persantil.py"), "."),
+    (str(PROJECT_ROOT / "revir_ui.py"), "."),
+    (str(PROJECT_ROOT / "VERSION"), "."),
     (str(PROJECT_ROOT / "app_icon.ico"), "."),
     (str(PROJECT_ROOT / "app_icon.png"), "."),
     (str(PROJECT_ROOT / "turkiye-il-ilce-mahalle-koy.json"), "."),
     (str(PROJECT_ROOT / "persantil veriler"), "persantil veriler"),
 ]
-if (PROJECT_ROOT / ".streamlit").exists():
-    datas.append((str(PROJECT_ROOT / ".streamlit"), ".streamlit"))
 
 binaries = []
 hiddenimports = [
+    "revir_ui",
+    "persantil",
     "clr_loader",
     "pythonnet",
     "truststore",
@@ -74,14 +48,13 @@ hiddenimports = [
     "pymupdf",
     "fitz",
     "altair",
-    "streamlit",
     "webview",
     "webview.platforms.edgechromium",
     "webview.platforms.winforms",
+    "psutil",
 ]
 
-# Paket veri dosyaları ve alt modülleri
-for pkg_name in ("streamlit", "altair", "docx", "openpyxl", "pymupdf", "webview"):
+for pkg_name in ("altair", "docx", "openpyxl", "pymupdf", "webview"):
     datas += collect_data_files(pkg_name)
     binaries += collect_dynamic_libs(pkg_name)
     hiddenimports += collect_submodules(pkg_name)
@@ -94,9 +67,7 @@ for extra_sub_pkg in ("clr_loader", "pythonnet"):
     except Exception:
         pass
 
-# importlib.metadata gereksinimleri (Streamlit ve bağımlılıkları için zorunlu)
 for meta_pkg in (
-    "streamlit",
     "altair",
     "openpyxl",
     "python-docx",
@@ -111,8 +82,6 @@ for meta_pkg in (
     except Exception:
         pass
 
-# Opsiyonel taralı PDF OCR (easyocr/torch) paketi ~700+ MB eklediğinden varsayılan .exe dışında tutulur.
-# Kurumda taralı PDF OCR gerekiyorsa aşağıdaki listeden easyocr/torch/torchvision/scipy/cv2 satırlarını kaldırın.
 excludes = [
     "PyQt6",
     "PyQt5",

@@ -1,13 +1,12 @@
 @echo off
 chcp 65001 >nul
 title Revir Defteri - Okul Saglik Yonetim Sistemi
-cls
+cd /d "%~dp0"
+
 echo ====================================================================
 echo                   REVIR DEFTERI BASLATILIYOR...
 echo ====================================================================
 echo.
-
-cd /d "%USERPROFILE%\OneDrive\Masaüstü\kod\ai persantil"
 
 :: 1. Hizli Internet ve Guncelleme Kontrolu (1 saniye)
 echo [*] Guncellemeler denetleniyor...
@@ -22,8 +21,11 @@ if %errorlevel% equ 0 (
     echo [i] Cevrimdisi mod: Internet baglantisi yok, mevcut surum aciliyor.
 )
 
-:: 2. Tarayiciyi ve Streamlit Uygulamasini Baslat
-echo [*] Program aciliyor, lutfen bekleyin...
-start "" "http://localhost:8501"
-"C:\Users\OKUL\AppData\Local\Python\pythoncore-3.14-64\python.exe" -m streamlit run "persantil.py" --server.headless false --server.port 8501
-pause
+:: 2. Python Masaustu Yoneticisi ile Uygulamayi Baslat
+echo [*] Masaustu uygulamasi aciliyor, lutfen bekleyin...
+where pythonw >nul 2>&1
+if %errorlevel% equ 0 (
+    start "" pythonw "desktop_app.py"
+) else (
+    python "desktop_app.py"
+)

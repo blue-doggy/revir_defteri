@@ -11,7 +11,6 @@ Derleme Komutu:
 
 from pathlib import Path
 from PyInstaller.utils.hooks import (
-    collect_all,
     collect_data_files,
     collect_dynamic_libs,
     collect_submodules,
@@ -22,17 +21,18 @@ PROJECT_ROOT = Path(SPECPATH).resolve()
 
 datas = [
     (str(PROJECT_ROOT / "persantil.py"), "."),
+    (str(PROJECT_ROOT / "revir_ui.py"), "."),
     (str(PROJECT_ROOT / "VERSION"), "."),
     (str(PROJECT_ROOT / "app_icon.png"), "."),
     (str(PROJECT_ROOT / "app_icon.ico"), "."),
     (str(PROJECT_ROOT / "turkiye-il-ilce-mahalle-koy.json"), "."),
     (str(PROJECT_ROOT / "persantil veriler"), "persantil veriler"),
 ]
-if (PROJECT_ROOT / ".streamlit").exists():
-    datas.append((str(PROJECT_ROOT / ".streamlit"), ".streamlit"))
 
 binaries = []
 hiddenimports = [
+    "revir_ui",
+    "persantil",
     "sqlite3",
     "pandas",
     "numpy",
@@ -55,12 +55,6 @@ hiddenimports = [
     "psutil",
 ]
 
-# Streamlit tüm veri dosyaları, alt modüller ve ikili eklentileri
-st_datas, st_bins, st_hidden = collect_all("streamlit")
-datas += st_datas
-binaries += st_bins
-hiddenimports += st_hidden
-
 # Altair, python-docx, openpyxl, pymupdf, pywebview ve pythonnet bağımlılıkları
 for pkg_name in ("altair", "docx", "openpyxl", "pymupdf", "webview", "clr_loader", "pythonnet"):
     try:
@@ -70,9 +64,8 @@ for pkg_name in ("altair", "docx", "openpyxl", "pymupdf", "webview", "clr_loader
     except Exception:
         pass
 
-# importlib.metadata gereksinimleri (Streamlit ve bileşenleri için zorunlu)
+# importlib.metadata gereksinimleri
 for meta_pkg in (
-    "streamlit",
     "altair",
     "openpyxl",
     "python-docx",
@@ -87,7 +80,7 @@ for meta_pkg in (
     except Exception:
         pass
 
-# Kullanılmayan ağır GUI/ML paketlerini hariç tut (taralı PDF OCR gerekiyorsa easyocr/torch çıkarılabilir)
+# Kullanılmayan ağır GUI/ML paketlerini hariç tut
 excludes = [
     "tkinter",
     "_tkinter",

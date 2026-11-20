@@ -33,6 +33,7 @@ dist/
 installer/
 Kurulum_Paketleri/
 .revir_server.log
+.revir_desktop.pid
 scratch/
 .app_profile/
 .vscode/

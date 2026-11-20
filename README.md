@@ -34,16 +34,19 @@ pip install -r requirements.txt
 
 ### 3. Uygulamayı Başlatma
 
-#### 🖥️ Seçenek A: Bağımsız Masaüstü Uygulaması Olarak (Önerilen)
-Siyah konsol penceresi olmadan, yerel bir masaüstü yazılımı gibi çalıştırmak için:
+#### 🖥️ Seçenek A: Python Masaüstü Yöneticisi ile (Önerilen)
+Doğrudan yerel masaüstü penceresi olarak çalıştırmak için:
+```bash
+python desktop_app.py
+```
+veya Windows'ta siyah konsol penceresi olmadan:
 ```powershell
 pythonw baslat.pyw
 ```
-*(Uygulama ilk açıldığında masaüstünüze otomatik olarak özel ikonlu **Revir Defteri** kısayolu oluşturur. Sonraki seferlerde doğrudan masaüstündeki simgeye çift tıklayabilirsiniz.)*
 
-#### 🌐 Seçenek B: Standart Streamlit Modunda
-```powershell
-streamlit run persantil.py
+#### ⚡ Seçenek B: Doğrudan Ana Dosya Üzerinden
+```bash
+python persantil.py
 ```
 
 ---

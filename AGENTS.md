@@ -10,3 +10,4 @@ Bu çalışma alanındaki (`persantil.py`, `desktop_app.py`, paketleme veya kuru
 3. `bump_version.py`, `VERSION` dosyasını ve `persantil.py`, `desktop_app.py`, `RevirDefteri_Setup.iss` ile `kurulum_olustur.iss` içindeki sürüm sabitlerini senkronize tutar.
 4. Kurulum paketi yeniden derlenirken (`paketi_olustur.bat` veya Inno Setup `ISCC.exe`) üretilen dosya adı `RevirDefteri_Kurulum_v<VERSION>.exe` biçiminde olmalı ve kökteki eski sürüm `RevirDefteri_Kurulum_v*.exe` kopyaları temizlenmelidir.
 5. GitHub'a commit/push yapılırken commit mesajında yeni sürüm (`vX.Y.Z`) belirtilmelidir.
+6. Yapılan her kod veya yapılandırma güncellemesinin ardından değişiklikler mutlaka commit edilip GitHub'a (`origin main`) push edilmelidir.
