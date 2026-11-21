@@ -367,6 +367,130 @@ def _apply_fields_to_pymupdf_page(page: Any, page_fields: list[dict[str, Any]], 
 			page.insert_text((x0 + 2.0, min(y1 - 2.0, y0 + cur_fs + 1.0)), val[:140], fontsize=cur_fs, fontname=fontname, color=col_rgb)
 
 
+def build_a4_html_shell(title: str, body_html: str, *, landscape: bool = False) -> str:
+	"""Herhangi bir belge/tablo/metin içeriğini ekranda gerçek A4 kâğıdı (210×297 mm) ve yazdırmaya hazır HTML olarak sarar."""
+	page_size = "A4 landscape" if landscape else "A4 portrait"
+	sheet_w = "297mm" if landscape else "210mm"
+	sheet_min_h = "210mm" if landscape else "297mm"
+	pad = "12mm 14mm" if landscape else "15mm 18mm"
+	return f"""<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<title>{html.escape(title)}</title>
+<style>
+@page {{ size: {page_size}; margin: 12mm; }}
+@media print {{
+	html, body {{ background: #ffffff !important; margin: 0 !important; padding: 0 !important; }}
+	.no-print {{ display: none !important; }}
+	.a4-sheet {{ box-shadow: none !important; border: none !important; margin: 0 !important; width: 100% !important; min-height: auto !important; padding: 0 !important; }}
+}}
+* {{ box-sizing: border-box; }}
+body {{
+	margin: 0; padding: 18px 14px 28px 14px;
+	background: #cbd5e1; color: #0f172a;
+	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+	font-size: 11pt; line-height: 1.5;
+}}
+.no-print {{
+	max-width: {sheet_w}; margin: 0 auto 12px auto;
+	display: flex; justify-content: space-between; align-items: center; gap: 8px;
+}}
+.a4-badge {{
+	font-size: 12px; font-weight: 700; color: #334155;
+	background: #ffffff; border: 1px solid #94a3b8; padding: 4px 12px; border-radius: 999px;
+}}
+.print-btn {{
+	background: #0f766e; color: #ffffff; border: none; padding: 7px 15px;
+	border-radius: 7px; font-weight: 700; font-size: 12.5px; cursor: pointer;
+}}
+.print-btn:hover {{ background: #115e59; }}
+.a4-sheet {{
+	width: min(100%, {sheet_w}); min-height: {sheet_min_h};
+	margin: 0 auto 20px auto; padding: {pad};
+	background: #ffffff; color: #0f172a;
+	border: 1px solid #94a3b8; border-radius: 3px;
+	box-shadow: 0 10px 30px rgba(15,23,42,0.22);
+}}
+h1 {{ font-size: 16pt; margin: 0 0 10px 0; color: #0f172a; border-bottom: 2px solid #0f766e; padding-bottom: 5px; }}
+h2 {{ font-size: 13.5pt; margin: 14px 0 6px 0; color: #0f766e; }}
+h3 {{ font-size: 11.5pt; margin: 10px 0 4px 0; color: #1e293b; }}
+p {{ margin: 0 0 7px 0; white-space: pre-wrap; }}
+table {{ width: 100%; border-collapse: collapse; margin: 10px 0 16px 0; font-size: 9.5pt; }}
+th, td {{ border: 1px solid #cbd5e1; padding: 5px 7px; text-align: left; vertical-align: top; word-break: break-word; }}
+th {{ background: #f1f5f9; font-weight: 700; color: #0f172a; }}
+pre.a4-pre {{ white-space: pre-wrap; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 9.5pt; margin: 0; }}
+</style>
+</head>
+<body>
+<div class="no-print">
+	<span class="a4-badge">📄 A4 {"Yatay (297×210 mm)" if landscape else "Dikey (210×297 mm)"} Önizleme</span>
+	<button class="print-btn" onclick="window.print()">🖨️ A4 Yazdır / PDF Kaydet</button>
+</div>
+<div class="a4-sheet">{body_html}</div>
+</body>
+</html>"""
+
+
+def render_docx_a4_html(file_path: Path, paras_override: list[dict[str, Any]] | None = None, tables_override: list[pd.DataFrame] | None = None, appended_paras: list[str] | None = None) -> str:
+	"""Word (.docx) belgesini gerçek A4 kâğıdı görünümünde HTML'e çevirir."""
+	if paras_override is None or tables_override is None:
+		paras, tables = _load_docx_structure(file_path)
+	else:
+		paras, tables = paras_override, tables_override
+	parts: list[str] = []
+	for p in paras:
+		txt = str(p.get("text") or "").strip()
+		if not txt:
+			continue
+		st = str(p.get("style") or "").lower()
+		esc = html.escape(txt)
+		if "heading 1" in st or "title" in st:
+			parts.append(f"<h1>{esc}</h1>")
+		elif "heading 2" in st:
+			parts.append(f"<h2>{esc}</h2>")
+		elif "heading 3" in st:
+			parts.append(f"<h3>{esc}</h3>")
+		else:
+			parts.append(f"<p>{esc}</p>")
+	for ap in (appended_paras or []):
+		if str(ap).strip():
+			parts.append(f"<p>{html.escape(str(ap).strip())}</p>")
+	for df in tables:
+		if df is None or df.empty:
+			continue
+		ths = "".join(f"<th>{html.escape(str(c))}</th>" for c in df.columns)
+		trs = []
+		for _, row in df.head(120).iterrows():
+			tds = "".join(f"<td>{html.escape('' if pd.isna(v) else str(v))}</td>" for v in row.tolist())
+			trs.append(f"<tr>{tds}</tr>")
+		parts.append(f"<table><thead><tr>{ths}</tr></thead><tbody>{''.join(trs)}</tbody></table>")
+	if not parts:
+		parts.append("<p style='color:#64748b;'>Belge boş.</p>")
+	return build_a4_html_shell(file_path.name, "\n".join(parts), landscape=False)
+
+
+def render_xlsx_a4_html(file_path: Path, sheet_name: str, df_override: pd.DataFrame | None = None, landscape: bool = True) -> str:
+	"""Excel (.xlsx) sayfasını A4 Yatay/Dikey kâğıt önizlemesine çevirir."""
+	df = df_override if df_override is not None else _load_xlsx_sheet_df(file_path, sheet_name)
+	hdr = f"<h1>{html.escape(file_path.stem)} — {html.escape(sheet_name)}</h1>"
+	if df is None or df.empty:
+		body = hdr + "<p style='color:#64748b;'>Sayfa boş.</p>"
+	else:
+		ths = "".join(f"<th>{html.escape(str(c))}</th>" for c in df.columns)
+		trs = []
+		for _, row in df.head(150).iterrows():
+			tds = "".join(f"<td>{html.escape('' if pd.isna(v) else str(v))}</td>" for v in row.tolist())
+			trs.append(f"<tr>{tds}</tr>")
+		body = hdr + f"<table><thead><tr>{ths}</tr></thead><tbody>{''.join(trs)}</tbody></table>"
+	return build_a4_html_shell(f"{file_path.name} ({sheet_name})", body, landscape=landscape)
+
+
+def render_text_a4_html(file_path: Path, txt_content: str) -> str:
+	body = f"<h1>{html.escape(file_path.name)}</h1><pre class='a4-pre'>{html.escape(txt_content)}</pre>"
+	return build_a4_html_shell(file_path.name, body, landscape=False)
+
+
 def render_pdf_page_preview_png(pdf_path: Path, page_idx: int, page_fields: list[dict[str, Any]], show_guides: bool = True, dpi: int = 135) -> bytes:
 	import pymupdf
 
@@ -957,16 +1081,23 @@ def _render_pdf_studio(
 					ui.session_state[flash_k] = f"✅ `{file_path.name}` dosyası güncellendi!"
 					ui.rerun(scope="fragment")
 
-	# Sol Sütun: Canlı Önizleme (sağdaki değişiklikler anında yansır!)
+	# Sol Sütun: Gerçek A4 Kâğıt Üzerinde Canlı Önizleme (sağdaki değişiklikler anında yansır!)
 	with col_prev:
-		with ui.container(border=True):
-			ui.markdown(f"##### 👁️ Canlı Önizleme — Sayfa {cur_pg + 1} / {num_pages}")
-			try:
-				png_bytes = render_pdf_page_preview_png(file_path, cur_pg, cur_fields, show_guides=show_guides, dpi=135)
-				if png_bytes:
-					ui.image(png_bytes, use_container_width=True)
-			except Exception as exc:
-				ui.error(f"PDF önizleme oluşturulamadı: {exc}")
+		ui.markdown(f"##### 📄 A4 Canlı Önizleme — Sayfa {cur_pg + 1} / {num_pages}")
+		try:
+			png_bytes = render_pdf_page_preview_png(file_path, cur_pg, cur_fields, show_guides=show_guides, dpi=135)
+			if png_bytes:
+				import base64 as _b64
+				b64_img = _b64.b64encode(png_bytes).decode("ascii")
+				ui.markdown(
+					f"<div class='revir-a4-stage'>"
+					f"<span class='revir-a4-page-badge'>📄 A4 · Sayfa {cur_pg + 1} / {num_pages}</span>"
+					f"<div class='revir-a4-sheet-img'><img src='data:image/png;base64,{b64_img}' alt='PDF Sayfa {cur_pg + 1}'/></div>"
+					f"</div>",
+					unsafe_allow_html=True,
+				)
+		except Exception as exc:
+			ui.error(f"PDF önizleme oluşturulamadı: {exc}")
 
 
 def _render_docx_studio(
@@ -1130,9 +1261,10 @@ def _render_docx_studio(
 						ui.session_state.pop(f"docx_ai_prop_{fhash}", None)
 						ui.rerun(scope="fragment")
 
-	t_p, t_t, t_s = ui.tabs([
+	t_p, t_t, t_a4, t_s = ui.tabs([
 		f"📝 Paragraflar ({sum(1 for p in paras if p['text'].strip())})",
 		f"📊 Tablolar ({len(tables)})",
+		"📄 A4 Önizleme",
 		"💾 Kaydet",
 	])
 
@@ -1179,6 +1311,10 @@ def _render_docx_studio(
 					use_container_width=True,
 					key=f"docx_tbl_{fhash}_{ti}",
 				)
+
+	with t_a4:
+		a4_doc_html = render_docx_a4_html(file_path, paras_override=paras, tables_override=tables, appended_paras=st["appended"])
+		ui.components.v1.html(a4_doc_html, height=620, scrolling=True)
 
 	with t_s:
 		new_stem = ui.text_input("Farklı Kaydet Dosya Adı (.docx otomatik eklenir)", value=f"{file_path.stem}_duzenlenmis", key=f"docx_sv_stem_{fhash}")
@@ -1316,6 +1452,10 @@ def _render_xlsx_studio(
 		key=f"xlsx_ed_{fhash}_{sel_sheet}",
 	)
 	ui.session_state[df_key] = edited_df
+
+	with ui.expander("📄 Canlı A4 Baskı Önizleme", expanded=False):
+		a4_xl_live = render_xlsx_a4_html(file_path, sel_sheet, df_override=edited_df, landscape=True)
+		ui.components.v1.html(a4_xl_live, height=560, scrolling=True)
 
 	ui.divider()
 	new_stem = ui.text_input("Farklı Kaydet Dosya Adı (.xlsx otomatik eklenir)", value=f"{file_path.stem}_duzenlenmis", key=f"xlsx_sv_stem_{fhash}")
@@ -1533,18 +1673,21 @@ def apply_extracted_clinical_record(
 				lab_ins = 0
 				for lr in valid_labs:
 					v_num = lr.get("value_num")
+					val_txt_raw = lr.get("value_text") if lr.get("value_text") not in (None, "") else lr.get("result_value")
+					ref_raw = lr.get("ref_range") if lr.get("ref_range") not in (None, "") else lr.get("reference_range")
+					flag_raw = lr.get("flag") if lr.get("flag") not in (None, "") else lr.get("status")
 					try:
 						v_num = float(str(v_num).replace(",", ".")) if v_num is not None and str(v_num).strip() != "" else None
 					except Exception:
 						v_num = None
 					if v_num is None:
 						try:
-							m_n = re.search(r"-?\d+(?:[.,]\d+)?", str(lr.get("value_text") or ""))
+							m_n = re.search(r"-?\d+(?:[.,]\d+)?", str(val_txt_raw or ""))
 							v_num = float(m_n.group(0).replace(",", ".")) if m_n else None
 						except Exception:
 							v_num = None
-					r_low, r_high = _parse_ref_bounds(str(lr.get("ref_range") or ""))
-					val_store: Any = v_num if v_num is not None else (str(lr.get("value_text") or "").strip() or "0")
+					r_low, r_high = _parse_ref_bounds(str(ref_raw or ""))
+					val_store: Any = v_num if v_num is not None else (str(val_txt_raw or "").strip() or "0")
 					conn.execute(
 						"""INSERT INTO lab_results(report_id, test_name, value, unit, ref_low, ref_high, lab_flag)
 						   VALUES (?, ?, ?, ?, ?, ?, ?)""",
@@ -1555,7 +1698,7 @@ def apply_extracted_clinical_record(
 							str(lr.get("unit") or "").strip() or None,
 							r_low,
 							r_high,
-							str(lr.get("flag") or "Normal").strip() or "Normal",
+							str(flag_raw or "Normal").strip() or "Normal",
 						),
 					)
 					lab_ins += 1

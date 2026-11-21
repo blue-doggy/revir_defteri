@@ -244,7 +244,7 @@ def get_diabetes_profile(connect_db_fn, student_id: int) -> dict[str, Any]:
 	return base
 
 
-def save_diabetes_profile(connect_db_fn, student_id: int, data: dict[str, Any], sync_chronic: bool = False) -> None:
+def save_diabetes_profile(connect_db_fn, student_id: int, data: dict[str, Any], sync_chronic: bool = True) -> None:
 	pid = int(student_id)
 	now_iso = datetime.now().isoformat(timespec="minutes")
 	with connect_db_fn() as conn:

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import base64
 import mimetypes
 import os
 
@@ -123,7 +124,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.11.1"
+_DEFAULT_APP_VERSION = "1.12.0"
 
 
 def _load_app_version() -> str:
@@ -8024,13 +8025,16 @@ def student_options(class_name: str | None = None, person_type: str | None = Non
 
 
 def clear_all_data_caches() -> None:
-	"""Veri değişikliklerinde önbellekleri temizler ve belleği boşaltır."""
-	for cached_fn in (get_students_enriched, get_classes, get_class_teacher_map):
-		try:
-			if callable(getattr(cached_fn, "clear", None)):
-				cached_fn.clear()
-		except Exception:
-			pass
+	"""Veri değişikliklerinde tüm @ui.cache_data önbelleklerini ve oturum önbelleklerini temizler."""
+	try:
+		ui.clear_all_caches()
+	except Exception:
+		for cached_fn in (get_students_enriched, get_classes, get_class_teacher_map):
+			try:
+				if callable(getattr(cached_fn, "clear", None)):
+					cached_fn.clear()
+			except Exception:
+				pass
 	try:
 		ui.session_state.pop("_cached_app_settings", None)
 		ui.session_state.pop("_cached_page_sections_visibility", None)
@@ -8040,8 +8044,35 @@ def clear_all_data_caches() -> None:
 	gc.collect()
 
 
+def _reconcile_person_cross_tables(pid: int) -> None:
+	"""Tek gerçeklik kaynağı: kişi verilerini çapraz tablolar arasında (students ↔ health_profiles ↔ diabetes ↔ ilaç) eşitler."""
+	try:
+		with connect_db() as conn:
+			_sync_guardian_bidirectional_conn(conn, pid)
+			# Diyabet profili aktifse health_profiles.chronic_conditions içine yansıt
+			try:
+				idm.ensure_diabetes_tables(conn)
+				dp_r = conn.execute("SELECT is_diabetic, diabetes_type FROM diabetes_profiles WHERE student_id=?", (pid,)).fetchone()
+				if dp_r and int(dp_r["is_diabetic"] or 0) == 1:
+					hp_r = conn.execute("SELECT chronic_conditions FROM health_profiles WHERE student_id=?", (pid,)).fetchone()
+					cur_ch = str(hp_r["chronic_conditions"] or "").strip() if hp_r else ""
+					if "diyabet" not in cur_ch.lower():
+						dtype_lbl = str(dp_r["diabetes_type"] or "Tip 1 Diyabet").strip()
+						new_ch = f"{cur_ch}, {dtype_lbl}".strip(", ")
+						conn.execute(
+							"""INSERT INTO health_profiles(student_id, chronic_conditions, updated_at)
+							   VALUES (?, ?, ?)
+							   ON CONFLICT(student_id) DO UPDATE SET chronic_conditions=excluded.chronic_conditions, updated_at=excluded.updated_at""",
+							(pid, new_ch, datetime.now().isoformat(timespec="minutes")),
+						)
+			except Exception:
+				pass
+	except Exception:
+		pass
+
+
 def sync_after_person_mutation(person_id: int | None = None, active_measurement_id: int | None = None) -> None:
-	"""Veri değişikliği sonrası kişi JSON dosyasını, uygulama önbelleklerini ve dinamik UI state'lerini eşitler."""
+	"""Veri değişikliği sonrası çapraz tabloları, kişi JSON dosyasını, tüm önbellekleri ve bayat form/widget state'lerini eşitler."""
 	pid: int | None = None
 	if person_id is not None:
 		try:
@@ -8050,6 +8081,7 @@ def sync_after_person_mutation(person_id: int | None = None, active_measurement_
 			pid = None
 
 	if pid is not None:
+		_reconcile_person_cross_tables(pid)
 		try:
 			save_person_data_file(pid)
 		except Exception:
@@ -8057,6 +8089,13 @@ def sync_after_person_mutation(person_id: int | None = None, active_measurement_
 
 	try:
 		ui.session_state.pop("_cached_persons", None)
+		ui.session_state["_global_data_rev"] = int(ui.session_state.get("_global_data_rev") or 0) + 1
+		if pid is not None:
+			rev_map = ui.session_state.get("_person_data_rev")
+			if not isinstance(rev_map, dict):
+				rev_map = {}
+			rev_map[pid] = int(rev_map.get(pid) or 0) + 1
+			ui.session_state["_person_data_rev"] = rev_map
 	except Exception:
 		pass
 
@@ -8081,19 +8120,39 @@ def sync_after_person_mutation(person_id: int | None = None, active_measurement_
 
 			ui.session_state.pop(f"sel_active_meas_{pid}", None)
 			ui.session_state.pop(f"active_edit_box_{pid}", None)
+			if ui.session_state.get("edit_profile_loaded_id") == pid:
+				ui.session_state["edit_profile_loaded_id"] = None
 
+			# Kişiye bağlı TÜM bayat form/widget anahtarlarını temizle (yeni DB değerlerinin her ekranda anında görünmesi için!)
 			pid_suffix = f"_{pid}"
-			editor_prefixes = (
+			pid_mid = f"_{pid}_"
+			stale_prefixes = (
+				"health_profile_",
+				"dossier_hp_",
+				"dossier_demo_",
+				"dossier_dis_",
+				"dp_",
+				"dis_",
+				"scr_",
+				"vax_",
+				"ins_prof_",
+				"ins_calc_bg_",
+				"lab_draft_",
+				"lab_signature_",
+				"health_form_signature_",
+				"health_form_text_",
 				"pfile_v_ed_",
 				"pfile_m_ed_",
 				"pfile_vr_ed_",
 				"pfile_raw_json_",
 				f"dossier_clinical_editor_{pid}_",
 				f"clinical_growth_editor_{pid}_",
+				"dossier_print_ai_",
+				"rep_classic_ai_",
 			)
 			for skey in list(ui.session_state.keys()):
-				if any(skey.startswith(pfx) for pfx in editor_prefixes):
-					if skey.endswith(pid_suffix) or f"_{pid}_" in skey:
+				if any(skey.startswith(pfx) for pfx in stale_prefixes):
+					if skey.endswith(pid_suffix) or pid_mid in skey:
 						ui.session_state.pop(skey, None)
 				elif skey.endswith("_last_synced_id") or skey.endswith("_last_synced_cls"):
 					ui.session_state.pop(skey, None)
@@ -8101,12 +8160,14 @@ def sync_after_person_mutation(person_id: int | None = None, active_measurement_
 			pass
 	else:
 		try:
+			ui.session_state["edit_profile_loaded_id"] = None
 			for skey in list(ui.session_state.keys()):
 				if skey.endswith("_last_synced_id") or skey.endswith("_last_synced_cls"):
 					ui.session_state.pop(skey, None)
 		except Exception:
 			pass
 
+	ui.clear_ephemeral_widget_values()
 	clear_all_data_caches()
 
 
@@ -8178,8 +8239,8 @@ def _sync_guardian_bidirectional_conn(connection: sqlite3.Connection, student_id
 def _upsert_health_profile_fields(person_id: int, fields: dict[str, Any]) -> None:
 	"""Kişinin health_profiles kaydını (yoksa oluşturarak) verilen alanlarla atomik olarak günceller."""
 	pid = int(person_id)
-	clean_items = [(col, val) for col, val in fields.items() if col in _HEALTH_PROFILE_UPDATABLE_COLS]
-	if not clean_items:
+	clean_map = {col: val for col, val in fields.items() if col in _HEALTH_PROFILE_UPDATABLE_COLS}
+	if not clean_map:
 		return
 	now_iso = datetime.now().isoformat(timespec="minutes")
 	with connect_db() as connection:
@@ -8187,25 +8248,33 @@ def _upsert_health_profile_fields(person_id: int, fields: dict[str, Any]) -> Non
 			"SELECT guardian_name, guardian_phone FROM students WHERE id=?",
 			(pid,),
 		).fetchone()
-		g_name = stu_g["guardian_name"] if stu_g else None
-		g_phone = stu_g["guardian_phone"] if stu_g else None
+		explicit_g_name = "guardian_name" in clean_map
+		explicit_g_phone = "guardian_phone" in clean_map
+		g_name = clean_map.pop("guardian_name") if explicit_g_name else (stu_g["guardian_name"] if stu_g else None)
+		g_phone = clean_map.pop("guardian_phone") if explicit_g_phone else (stu_g["guardian_phone"] if stu_g else None)
 
-		cols = [col for col, _ in clean_items]
-		vals = [val for _, val in clean_items]
+		cols = list(clean_map.keys())
+		vals = [clean_map[c] for c in cols]
 		col_list = ", ".join(["student_id", "guardian_name", "guardian_phone", "updated_at", *cols])
 		placeholders = ", ".join(["?"] * (4 + len(cols)))
-		update_clause = ", ".join([
-			"guardian_name=COALESCE(health_profiles.guardian_name, excluded.guardian_name)",
-			"guardian_phone=COALESCE(health_profiles.guardian_phone, excluded.guardian_phone)",
+		update_parts = [
+			"guardian_name=excluded.guardian_name" if explicit_g_name else "guardian_name=COALESCE(health_profiles.guardian_name, excluded.guardian_name)",
+			"guardian_phone=excluded.guardian_phone" if explicit_g_phone else "guardian_phone=COALESCE(health_profiles.guardian_phone, excluded.guardian_phone)",
 			"updated_at=excluded.updated_at",
 			*[f"{col}=excluded.{col}" for col in cols],
-		])
+		]
+		update_clause = ", ".join(update_parts)
 		connection.execute(
 			f"""INSERT INTO health_profiles({col_list})
 			    VALUES ({placeholders})
 			    ON CONFLICT(student_id) DO UPDATE SET {update_clause}""",
 			(pid, g_name, g_phone, now_iso, *vals),
 		)
+		# Veli ad/telefon açıkça güncellendiyse students tablosunu da anında güncelle
+		if explicit_g_name and str(g_name or "").strip():
+			connection.execute("UPDATE students SET guardian_name=? WHERE id=?", (str(g_name).strip(), pid))
+		if explicit_g_phone and str(g_phone or "").strip():
+			connection.execute("UPDATE students SET guardian_phone=? WHERE id=?", (str(g_phone).strip(), pid))
 		_sync_guardian_bidirectional_conn(connection, pid)
 	sync_after_person_mutation(pid)
 
@@ -9792,11 +9861,28 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 		ui.markdown("##### 📑 Tıbbi Profil & Kritik Notlar")
 		med_hist = (hp["medical_history"] if hp and hp["medical_history"] else "").strip()
 		emer_notes = (hp["emergency_notes"] if hp and hp["emergency_notes"] else "").strip()
+		# İlaç Takip Sistemindeki aktif ilaçları da Sağlık Profili sürekli ilaçlarıyla canlı birleştir
+		active_tracked_meds: list[str] = []
+		try:
+			with connect_db() as _mconn:
+				_mrows = _mconn.execute(
+					"SELECT medication_name, dosage_pattern FROM student_medications WHERE student_id=? AND status='Aktif' ORDER BY id DESC",
+					(person_id,),
+				).fetchall()
+				for _mr in _mrows:
+					m_lbl = str(_mr["medication_name"] or "").strip()
+					if m_lbl:
+						dos_s = f" ({_mr['dosage_pattern']})" if _mr["dosage_pattern"] else ""
+						active_tracked_meds.append(f"{m_lbl}{dos_s}")
+		except Exception:
+			pass
+		hp_med_str = (hp["medications"] if hp and hp["medications"] else "") or ""
+		combined_meds = dstudio._append_unique_csv(hp_med_str, ", ".join(active_tracked_meds)) if active_tracked_meds else hp_med_str
 		with ui.container(border=True):
 			ui.markdown(f"🩸 **Kan Grubu:** `{(hp['blood_group'] if hp and hp['blood_group'] else None) or 'Belirtilmedi'}`")
 			ui.markdown(f"🔴 **Alerjiler:** `{(hp['allergies'] if hp and hp['allergies'] else None) or 'Yok / Bildirilmedi'}`")
 			ui.markdown(f"🟠 **Kronik Durumlar:** `{(hp['chronic_conditions'] if hp and hp['chronic_conditions'] else None) or 'Yok / Bildirilmedi'}`")
-			ui.markdown(f"💊 **Sürekli İlaçlar:** `{(hp['medications'] if hp and hp['medications'] else None) or 'Yok / Bildirilmedi'}`")
+			ui.markdown(f"💊 **Sürekli / Aktif İlaçlar:** `{combined_meds or 'Yok / Bildirilmedi'}`")
 			if med_hist:
 				ui.markdown(f"📜 **Geçmiş:** {html.escape(med_hist)}")
 			if emer_notes:
@@ -11464,19 +11550,220 @@ def _handle_floating_gemini_export_msg(payload: dict[str, Any]) -> dict[str, Any
 		return {"ok": False, "error": str(exc)}
 
 
+def _detect_local_person_in_text(raw_text: str) -> tuple[int | None, str | None]:
+	"""%100 yerel SQLite üzerinde metin içinden en güçlü eşleşen öğrenci/kişi adını ve ID'sini bulur (KVKK uyumlu)."""
+	txt_fold = dstudio.tr_fold(raw_text)
+	if not txt_fold or len(txt_fold) < 3:
+		return None, None
+	try:
+		with connect_db() as conn:
+			rows = conn.execute("SELECT id, full_name, student_no FROM students").fetchall()
+	except Exception:
+		return None, None
+	best_id: int | None = None
+	best_name: str | None = None
+	best_score = 0.0
+	for r in rows:
+		fn = str(r["full_name"] or "").strip()
+		fn_f = dstudio.tr_fold(fn)
+		if not fn_f or len(fn_f) < 3:
+			continue
+		if fn_f in txt_fold:
+			sc = 2.0 + len(fn_f) * 0.01
+			if sc > best_score:
+				best_score = sc
+				best_id = int(r["id"])
+				best_name = fn
+			continue
+		parts = [p for p in fn_f.split() if len(p) >= 3]
+		if len(parts) >= 2 and all(p in txt_fold for p in parts):
+			sc = 1.6 + len(fn_f) * 0.01
+			if sc > best_score:
+				best_score = sc
+				best_id = int(r["id"])
+				best_name = fn
+	return best_id, best_name
+
+
+def _normalize_write_spec(ws: dict[str, Any]) -> dict[str, Any]:
+	"""Gemini çıktısındaki olası şema varyasyonlarını (liste/sözlük, alan takma adları) güvenli biçimde standartlaştırır."""
+	if not isinstance(ws, dict):
+		return {}
+	out = dict(ws)
+	for k_obj in ("measurements", "vitals", "health_profile", "disability", "diabetes"):
+		v = out.get(k_obj)
+		if isinstance(v, list):
+			merged: dict[str, Any] = {}
+			for item in v:
+				if isinstance(item, dict):
+					for ik, iv in item.items():
+						if iv not in (None, ""):
+							merged[ik] = iv
+			out[k_obj] = merged
+		elif not isinstance(v, dict):
+			out[k_obj] = {}
+	for k_list in ("lab_results", "medications"):
+		v = out.get(k_list)
+		if isinstance(v, dict):
+			out[k_list] = [v]
+		elif not isinstance(v, list):
+			out[k_list] = []
+	return out
+
+
+def _summarize_write_spec_items(ws: dict[str, Any]) -> list[str]:
+	ws = _normalize_write_spec(ws)
+	items: list[str] = []
+	ms = ws.get("measurements") or {}
+	m_parts = []
+	if ms.get("height_cm") not in (None, ""): m_parts.append(f"Boy: {ms['height_cm']} cm")
+	if ms.get("weight_kg") not in (None, ""): m_parts.append(f"Kilo: {ms['weight_kg']} kg")
+	if ms.get("head_circ_cm") not in (None, ""): m_parts.append(f"Baş Çevresi: {ms['head_circ_cm']} cm")
+	if m_parts:
+		items.append("📏 Ölçüm: " + ", ".join(m_parts))
+	vt = ws.get("vitals") or {}
+	v_parts = []
+	if vt.get("temperature_c") not in (None, ""): v_parts.append(f"Ateş {vt['temperature_c']}°C")
+	if vt.get("pulse_bpm") not in (None, ""): v_parts.append(f"Nabız {vt['pulse_bpm']}")
+	if vt.get("spo2_pct") not in (None, ""): v_parts.append(f"SpO2 %{vt['spo2_pct']}")
+	if vt.get("systolic_bp") not in (None, ""): v_parts.append(f"TA {vt['systolic_bp']}/{vt.get('diastolic_bp', '')}")
+	if vt.get("glucose_mg_dl") not in (None, ""): v_parts.append(f"KŞ {vt['glucose_mg_dl']} mg/dL")
+	if v_parts:
+		items.append("💓 Vital: " + ", ".join(v_parts))
+	hp = ws.get("health_profile") or {}
+	h_parts = []
+	if str(hp.get("allergies") or "").strip(): h_parts.append(f"Alerji: {hp['allergies']}")
+	if str(hp.get("chronic_conditions") or "").strip(): h_parts.append(f"Kronik: {hp['chronic_conditions']}")
+	if str(hp.get("blood_group") or "").strip(): h_parts.append(f"Kan: {hp['blood_group']}")
+	if str(hp.get("regular_medications") or "").strip(): h_parts.append(f"İlaç: {hp['regular_medications']}")
+	if str(hp.get("emergency_notes") or "").strip(): h_parts.append(f"Acil Not: {hp['emergency_notes']}")
+	if h_parts:
+		items.append("📋 Sağlık Profili: " + " · ".join(h_parts))
+	labs = [x for x in (ws.get("lab_results") or []) if isinstance(x, dict) and str(x.get("test_name") or "").strip()]
+	if labs:
+		items.append(f"🧪 Laboratuvar Tahlili: {len(labs)} parametre (" + ", ".join(str(x["test_name"]) for x in labs[:4]) + ("..." if len(labs) > 4 else "") + ")")
+	meds = [x for x in (ws.get("medications") or []) if isinstance(x, dict) and str(x.get("medication_name") or "").strip()]
+	if meds:
+		items.append("💊 İlaç Takip: " + ", ".join(str(x["medication_name"]) for x in meds[:4]))
+	if (ws.get("disability") or {}).get("has_disability"):
+		items.append("♿ Özel Gereksinim / Engel Profili güncellemesi")
+	if (ws.get("diabetes") or {}).get("is_diabetic"):
+		items.append("💉 Diyabet / İnsülin Profili güncellemesi")
+	if str(ws.get("visit_note_suggestion") or "").strip():
+		items.append(f"🩺 Revir Notu: {str(ws['visit_note_suggestion'])[:90]}")
+	return items
+
+
+def _handle_floating_gemini_apply_write(payload: dict[str, Any]) -> dict[str, Any]:
+	"""Yüzen sohbet balonundaki 1-tık onay kartından gelen klinik veriyi SQLite'a işler ve tüm ekranları eşitler."""
+	tok = str(payload.get("token") or "").strip()
+	pending = ui.pop_pending_chat_write(tok)
+	if not pending:
+		return {"ok": False, "error": "Onay isteği zaman aşımına uğradı veya zaten işlendi."}
+	try:
+		target_pid = int(payload.get("student_id") or payload.get("person_id") or pending.get("default_student_id") or 0)
+	except Exception:
+		target_pid = 0
+	person = get_person_by_id(target_pid) if target_pid else None
+	if not person:
+		return {"ok": False, "error": "Hedef öğrenci/kişi bulunamadı."}
+
+	ws = _normalize_write_spec(pending.get("write_spec") or {})
+	src_name = str(pending.get("source_filename") or "Gemini_Sohbet")
+	src_bytes = pending.get("source_bytes")
+
+	has_hp = any(str((ws.get("health_profile") or {}).get(k) or "").strip() for k in ("allergies", "chronic_conditions", "blood_group", "regular_medications", "emergency_notes"))
+	has_labs = bool([x for x in (ws.get("lab_results") or []) if isinstance(x, dict) and str(x.get("test_name") or "").strip()])
+	has_vt = any((ws.get("vitals") or {}).get(k) not in (None, "") for k in ("temperature_c", "pulse_bpm", "spo2_pct", "systolic_bp", "diastolic_bp", "glucose_mg_dl"))
+	has_ms = any((ws.get("measurements") or {}).get(k) not in (None, "") for k in ("height_cm", "weight_kg", "head_circ_cm"))
+	has_meds = bool([x for x in (ws.get("medications") or []) if isinstance(x, dict) and str(x.get("medication_name") or "").strip()])
+	has_dis = bool((ws.get("disability") or {}).get("has_disability"))
+	has_diab = bool((ws.get("diabetes") or {}).get("is_diabetic"))
+	has_vis = bool(str(ws.get("visit_note_suggestion") or "").strip())
+
+	try:
+		logs = dstudio.apply_extracted_clinical_record(
+			connect_db,
+			target_pid,
+			ws,
+			apply_profile=has_hp,
+			apply_labs=has_labs,
+			apply_vitals=has_vt,
+			apply_measurements=has_ms,
+			apply_meds=has_meds,
+			apply_disability=has_dis,
+			apply_diabetes=has_diab,
+			apply_visit_note=has_vis,
+			source_filename=src_name,
+			source_bytes=src_bytes,
+			age_in_months_fn=age_in_months,
+		)
+		should_archive = bool(payload.get("archive_doc") or payload.get("archive_attachment"))
+		if should_archive and src_bytes and src_name and src_name != "Gemini_Sohbet":
+			EVRAKLAR_DIR.mkdir(parents=True, exist_ok=True)
+			dst = dstudio._unique_target_path(EVRAKLAR_DIR, Path(src_name).stem, Path(src_name).suffix.lower() or ".pdf")
+			dst.write_bytes(src_bytes)
+			get_or_create_document_cover(dst, force=True)
+			logs.append(f"📁 `{dst.name}` Evrak Deposuna arşivlendi")
+
+		set_active_person(target_pid)
+		sync_after_person_mutation(target_pid)
+		disp_nm = mask_kvkk_value(person["full_name"], "name")
+		return {
+			"ok": True,
+			"student_id": target_pid,
+			"refresh_ui": True,
+			"logs": logs,
+			"summary": f"{disp_nm} ({person['class_name']}) dosyasına işlendi: " + (" · ".join(logs) if logs else "Güncellendi"),
+		}
+	except Exception as exc:
+		return {"ok": False, "error": f"Kayıt hatası: {exc}"}
+
+
 def _handle_floating_gemini_chat(payload: dict[str, Any], chat_history: list[dict[str, str]]) -> dict[str, Any]:
 	is_on, api_key, model = _get_active_gemini_config()
 	if not is_on:
 		return {"ok": False, "error": "Gemini AI kapalı veya API anahtarı tanımlı değil."}
 
+	raw_msg = str(payload.get("message") or "")
+	raw_atts = payload.get("attachments") if isinstance(payload.get("attachments"), list) else []
+
+	# 1. Yerel KVKK Korumalı Kimlik Ön-Eşleştirme (Mesaj + Ekli Belge İçeriğinden Yerel Öğrenci Bulma)
+	local_scan_blob = raw_msg
+	first_att_bytes: bytes | None = None
+	first_att_name: str = ""
+	for att in raw_atts[:2]:
+		fb64 = str(att.get("data_b64") or "")
+		fname = str(att.get("name") or "")
+		if fb64:
+			try:
+				fb = base64.b64decode(fb64)
+				if first_att_bytes is None:
+					first_att_bytes = fb
+					first_att_name = fname
+				if fname.lower().endswith(".pdf"):
+					local_scan_blob += "\n" + extract_pdf_text(fb)[:4000]
+				elif fname.lower().endswith((".txt", ".csv")):
+					local_scan_blob += "\n" + fb.decode("utf-8", errors="replace")[:4000]
+				elif fname.lower().endswith(".docx") and _ensure_docx_loaded() and docx is not None:
+					_d_loc = docx.Document(BytesIO(fb))
+					local_scan_blob += "\n" + "\n".join(p.text for p in _d_loc.paragraphs[:40])
+			except Exception:
+				pass
+
+	pre_pid, pre_name = _detect_local_person_in_text(local_scan_blob)
 	active_pid = ui.session_state.get("active_person_id")
+	context_pid = pre_pid or (int(active_pid) if active_pid else None)
+
 	anon_person_ctx = ""
 	sensitive_names: list[str] = []
-	if active_pid:
+	if context_pid:
 		try:
-			anon_person_ctx, sensitive_names, _ = _build_person_anon_bundle(int(active_pid))
+			anon_person_ctx, sensitive_names, _ = _build_person_anon_bundle(int(context_pid))
 		except Exception:
 			pass
+	if pre_name and pre_name not in sensitive_names:
+		sensitive_names.append(pre_name)
 
 	school_ctx = ""
 	all_cls: list[str] = []
@@ -11505,12 +11792,12 @@ def _handle_floating_gemini_chat(payload: dict[str, Any], chat_history: list[dic
 	except Exception:
 		pass
 
-	ok, reply_txt, used_m, transcribed, export_spec = gai.chat_with_gemini_assistant(
+	ok, reply_txt, used_m, transcribed, export_spec, write_spec = gai.chat_with_gemini_assistant(
 		api_key=api_key,
 		model=model,
-		user_message=str(payload.get("message") or ""),
+		user_message=raw_msg,
 		history=chat_history,
-		attachments=payload.get("attachments") if isinstance(payload.get("attachments"), list) else None,
+		attachments=raw_atts if raw_atts else None,
 		voice_audio_b64=str(payload.get("voice_audio_b64") or ""),
 		voice_audio_mime=str(payload.get("voice_audio_mime") or "audio/wav"),
 		anon_person_context=anon_person_ctx,
@@ -11522,10 +11809,82 @@ def _handle_floating_gemini_chat(payload: dict[str, Any], chat_history: list[dic
 		return {"ok": False, "error": reply_txt}
 
 	downloads: list[dict[str, str]] = []
+	refresh_ui = False
 	if export_spec:
-		downloads, exp_note = _execute_gemini_chat_export(export_spec, int(active_pid) if active_pid else None, reply_txt)
+		downloads, exp_note = _execute_gemini_chat_export(export_spec, int(context_pid) if context_pid else None, reply_txt)
 		if exp_note:
 			reply_txt = (reply_txt + exp_note).strip()
+		if str(export_spec.get("action") or "").strip().lower() == "create_classes":
+			refresh_ui = True
+
+	# 2. Yapılandırılmış Veri / Belge Yazma Önerisi (Onay Kartı Hazırla)
+	write_proposal: dict[str, Any] | None = None
+	if isinstance(write_spec, dict) and write_spec:
+		ws_items = _summarize_write_spec_items(write_spec)
+		if ws_items:
+			# Ses çözümü veya write_spec ipuçlarından yerel adayları sırala
+			hints = {
+				"name_hint": str(write_spec.get("person_hint") or pre_name or "").strip(),
+				"student_no_hint": str(write_spec.get("student_no_hint") or "").strip(),
+				"class_hint": str(write_spec.get("class_hint") or "").strip(),
+			}
+			if not hints["name_hint"] and transcribed:
+				tr_pid, tr_nm = _detect_local_person_in_text(transcribed)
+				if tr_nm:
+					hints["name_hint"] = tr_nm
+				if tr_pid and not pre_pid:
+					pre_pid = tr_pid
+			ranked = dstudio.rank_matching_people(connect_db, hints, limit=25)
+			cand_list: list[dict[str, Any]] = []
+			seen_ids: set[int] = set()
+			default_sid: int | None = None
+
+			if pre_pid:
+				p_pre = get_person_by_id(pre_pid)
+				if p_pre:
+					default_sid = int(p_pre["id"])
+					seen_ids.add(default_sid)
+					cand_list.append({
+						"id": default_sid,
+						"label": f"🎯 {mask_kvkk_value(p_pre['full_name'], 'name')} · {p_pre['class_name']}",
+					})
+			for rp in ranked:
+				rid = int(rp["id"])
+				if rid in seen_ids:
+					continue
+				seen_ids.add(rid)
+				tag = "🎯 " if rp.get("_match_score", 0) >= 0.45 else ""
+				cand_list.append({
+					"id": rid,
+					"label": f"{tag}{mask_kvkk_value(rp['full_name'], 'name')} · {rp['class_name']}",
+				})
+				if default_sid is None and rp.get("_match_score", 0) >= 0.45:
+					default_sid = rid
+			if active_pid and int(active_pid) not in seen_ids:
+				p_act = get_person_by_id(int(active_pid))
+				if p_act:
+					cand_list.insert(0, {
+						"id": int(p_act["id"]),
+						"label": f"📌 {mask_kvkk_value(p_act['full_name'], 'name')} · {p_act['class_name']} (Aktif)",
+					})
+			if default_sid is None:
+				default_sid = int(active_pid) if active_pid else (cand_list[0]["id"] if cand_list else None)
+
+			if cand_list and default_sid is not None:
+				cw_token = ui.register_pending_chat_write({
+					"write_spec": write_spec,
+					"default_student_id": default_sid,
+					"source_filename": first_att_name or "Gemini_Sohbet",
+					"source_bytes": first_att_bytes,
+				})
+				write_proposal = {
+					"token": cw_token,
+					"title": f"Kişi Dosyasına İşlenecek Veriler ({write_spec.get('document_type') or 'Klinik Kayıt'})",
+					"default_student_id": default_sid,
+					"candidates": cand_list[:20],
+					"items": ws_items,
+					"has_attachment": bool(first_att_bytes and first_att_name),
+				}
 
 	return {
 		"ok": True,
@@ -11533,6 +11892,8 @@ def _handle_floating_gemini_chat(payload: dict[str, Any], chat_history: list[dic
 		"model": used_m,
 		"transcribed": transcribed,
 		"downloads": downloads,
+		"write_proposal": write_proposal,
+		"refresh_ui": refresh_ui,
 	}
 
 
@@ -11605,6 +11966,7 @@ def _sync_floating_chat_ui(cur_page: str = "") -> None:
 		label=sub_lbl,
 		handler=_handle_floating_gemini_chat,
 		export_handler=_handle_floating_gemini_export_msg,
+		write_handler=_handle_floating_gemini_apply_write,
 		chips=_build_context_chat_chips(eff_page),
 	)
 
@@ -13171,11 +13533,15 @@ def _render_dossier_tab_printable(person: sqlite3.Row, person_id: int) -> None:
 <style>
 @media print {
 	@page { size: A4; margin: 12mm 15mm; }
+	html, body { background: #ffffff !important; padding: 0 !important; margin: 0 !important; }
 	.no-print { display: none !important; }
+	.a4-sheet { box-shadow: none !important; border: none !important; width: 100% !important; min-height: auto !important; padding: 0 !important; margin: 0 !important; }
 	body { font-size: 11pt; }
 }
-body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; margin: 20px auto; max-width: 900px; color: #1e293b; line-height: 1.4; }
-.report-page { page-break-after: always; padding: 10px 0; }
+* { box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; margin: 0; padding: 18px 14px 28px 14px; background: #cbd5e1; color: #1e293b; line-height: 1.42; }
+.a4-sheet { width: min(100%, 210mm); min-height: 297mm; margin: 0 auto 20px auto; padding: 14mm 16mm; background: #ffffff; border: 1px solid #94a3b8; border-radius: 3px; box-shadow: 0 10px 30px rgba(15,23,42,0.22); }
+.report-page { page-break-after: always; padding: 6px 0; }
 table { width: 100%; border-collapse: collapse; margin: 10px 0 16px 0; font-size: 11px; }
 th, td { border: 1px solid #cbd5e1; padding: 5px 8px; text-align: left; }
 th { background: #f1f5f9; font-weight: 600; color: #0f172a; }
@@ -13186,16 +13552,18 @@ h3 { color: #0f766e; margin-top: 14px; margin-bottom: 6px; font-size: 13px; }
 .header-box h2 { border: none; margin: 2px 0; font-size: 13px; color: #0f766e; }
 .sign-box { display: flex; justify-content: space-between; margin-top: 35px; page-break-inside: avoid; }
 .sign-item { text-align: center; width: 220px; border-top: 1px solid #64748b; padding-top: 5px; font-size: 11px; }
-button.print-btn { background: #0f766e; color: white; border: none; padding: 10px 20px; font-size: 14px; font-weight: 600; border-radius: 6px; cursor: pointer; }
+button.print-btn { background: #0f766e; color: white; border: none; padding: 9px 18px; font-size: 13px; font-weight: 600; border-radius: 7px; cursor: pointer; }
 button.print-btn:hover { background: #115e59; }
 </style>
 </head>
 <body>
-<div class="no-print" style="margin-bottom: 20px; text-align: right;">
+<div class="no-print" style="max-width: 210mm; margin: 0 auto 12px auto; display: flex; justify-content: space-between; align-items: center;">
+	<span style="font-size:12px;font-weight:700;color:#334155;background:#fff;border:1px solid #94a3b8;padding:4px 12px;border-radius:999px;">📄 A4 Yazdırma Önizleme (210×297 mm)</span>
 	<button class="print-btn" onclick="window.print()">🖨️ Sayfayı Yazdır / PDF Olarak Kaydet</button>
 </div>
+<div class="a4-sheet">
 """
-	full_print_html = css_header + single_body + "</body>\n</html>"
+	full_print_html = css_header + single_body + "</div>\n</body>\n</html>"
 
 	print_name = re.sub(r"[^A-Za-z0-9_-]+", "_", person["full_name"]).strip("_") or "kisi"
 	rep_docx = build_student_report_docx(person, report_cfg=rep_cfg_live)
@@ -24813,6 +25181,9 @@ def export_custom_screening_report_html(
 		sig_html = f"<div class='signature-section'>{boxes}</div>"
 
 	font_tbl = "10.5px" if len(df.columns) > 10 else "11.5px"
+	a4_w = "297mm" if orient == "landscape" else "210mm"
+	a4_min_h = "210mm" if orient == "landscape" else "297mm"
+	a4_lbl = "A4 Yatay (297×210 mm)" if orient == "landscape" else "A4 Dikey (210×297 mm)"
 	return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -24820,8 +25191,12 @@ def export_custom_screening_report_html(
 <title>{report_title}</title>
 <style>
 @page {{ size: A4 {orient}; margin: 10mm; }}
-body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1e293b; padding: 18px; line-height: 1.4; font-size: 12px; }}
-.print-btn {{ padding: 10px 18px; background: #0f766e; color: #ffffff; border: none; border-radius: 6px; font-weight: 600; cursor: pointer; margin-bottom: 14px; }}
+* {{ box-sizing: border-box; }}
+body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1e293b; background: #cbd5e1; margin: 0; padding: 18px 14px 28px 14px; line-height: 1.4; font-size: 12px; }}
+.a4-topbar {{ max-width: {a4_w}; margin: 0 auto 12px auto; display: flex; justify-content: space-between; align-items: center; }}
+.a4-pill {{ font-size: 12px; font-weight: 700; color: #334155; background: #ffffff; border: 1px solid #94a3b8; padding: 4px 12px; border-radius: 999px; }}
+.a4-sheet {{ width: min(100%, {a4_w}); min-height: {a4_min_h}; margin: 0 auto 20px auto; padding: 12mm 14mm; background: #ffffff; border: 1px solid #94a3b8; border-radius: 3px; box-shadow: 0 10px 30px rgba(15,23,42,0.22); }}
+.print-btn {{ padding: 9px 18px; background: #0f766e; color: #ffffff; border: none; border-radius: 7px; font-weight: 700; font-size: 13px; cursor: pointer; }}
 .header-box {{ border-bottom: 2px solid #0f766e; padding-bottom: 10px; margin-bottom: 14px; text-align: center; }}
 .header-box h4 {{ margin: 0; color: #64748b; font-size: 12px; font-weight: 600; }}
 .header-box h1 {{ margin: 2px 0; color: #0f766e; font-size: 18px; text-transform: uppercase; }}
@@ -24844,14 +25219,19 @@ tbody tr:nth-child(even) {{ background-color: #f8fafc; }}
 .sig-box {{ flex: 1; text-align: center; border-top: 1px solid #94a3b8; padding-top: 8px; font-size: 11.5px; color: #334155; }}
 .footer-note {{ margin-top: 20px; font-size: 10px; color: #94a3b8; text-align: center; }}
 @media print {{
-	.print-btn {{ display: none; }}
-	body {{ padding: 0; }}
+	.a4-topbar, .print-btn {{ display: none !important; }}
+	body {{ background: #ffffff !important; padding: 0 !important; }}
+	.a4-sheet {{ width: 100% !important; min-height: auto !important; margin: 0 !important; padding: 0 !important; border: none !important; box-shadow: none !important; }}
 	.class-section-break {{ page-break-before: always; break-before: page; }}
 }}
 </style>
 </head>
 <body>
-<button class="print-btn" onclick="window.print()">🖨️ Yazdır / PDF Olarak Kaydet</button>
+<div class="a4-topbar">
+	<span class="a4-pill">📄 {a4_lbl} Baskı Önizleme</span>
+	<button class="print-btn" onclick="window.print()">🖨️ Yazdır / PDF Olarak Kaydet</button>
+</div>
+<div class="a4-sheet">
 <div class="header-box">
 	<h4>{inst_top}</h4>
 	{f"<h1>{inst_school}</h1>" if inst_school else ""}
@@ -24863,6 +25243,7 @@ tbody tr:nth-child(even) {{ background-color: #f8fafc; }}
 {ai_narr_html_block}
 {sig_html}
 <p class="footer-note">Bu rapor okul reviri kayıtları doğrultusunda sistemden otomatik üretilmiştir. Kesin tıbbi tanı ve kurul raporu yerine geçmez.</p>
+</div>
 </body>
 </html>"""
 
@@ -27146,33 +27527,41 @@ def _render_classic_reports_content(all_classes: list[str], report_cfg: dict) ->
 <meta charset='utf-8'>
 <title>Sağlık ve Revir Raporu</title>
 <style>
-body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1e293b; padding: 30px; line-height: 1.5; }}
+@page {{ size: A4; margin: 12mm 14mm; }}
+* {{ box-sizing: border-box; }}
+body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1e293b; background: #cbd5e1; margin: 0; padding: 18px 14px 28px 14px; line-height: 1.5; }}
+.a4-topbar {{ max-width: 210mm; margin: 0 auto 12px auto; display: flex; justify-content: space-between; align-items: center; }}
+.a4-pill {{ font-size: 12px; font-weight: 700; color: #334155; background: #ffffff; border: 1px solid #94a3b8; padding: 4px 12px; border-radius: 999px; }}
+.student-report-page {{ width: min(100%, 210mm); min-height: 297mm; margin: 0 auto 22px auto; padding: 14mm 16mm; background: #ffffff; border: 1px solid #94a3b8; border-radius: 3px; box-shadow: 0 10px 30px rgba(15,23,42,0.22); }}
 .header-box {{ border-bottom: 2px solid #176b68; padding-bottom: 15px; margin-bottom: 20px; text-align: center; }}
-.header-box h1 {{ color: #176b68; margin: 0; font-size: 24px; text-transform: uppercase; }}
-.header-box h3 {{ color: #64748b; margin: 4px 0 0; font-size: 14px; font-weight: normal; }}
-.student-card {{ background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; margin-bottom: 20px; }}
-.card-row {{ display: flex; justify-content: space-between; flex-wrap: wrap; font-size: 14px; }}
+.header-box h1 {{ color: #176b68; margin: 0; font-size: 22px; text-transform: uppercase; }}
+.header-box h3 {{ color: #64748b; margin: 4px 0 0; font-size: 13.5px; font-weight: normal; }}
+.student-card {{ background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 14px; margin-bottom: 18px; }}
+.card-row {{ display: flex; justify-content: space-between; flex-wrap: wrap; font-size: 13.5px; }}
 .card-item {{ margin: 4px 12px 4px 0; }}
-h2 {{ color: #176b68; font-size: 16px; border-bottom: 1px solid #cbd5e1; padding-bottom: 6px; margin-top: 24px; }}
-table {{ border-collapse: collapse; width: 100%; margin: 10px 0 20px; font-size: 13px; page-break-inside: avoid; }}
-th, td {{ border: 1px solid #cbd5e1; padding: 8px 10px; text-align: left; }}
+h2 {{ color: #176b68; font-size: 15px; border-bottom: 1px solid #cbd5e1; padding-bottom: 5px; margin-top: 20px; }}
+table {{ border-collapse: collapse; width: 100%; margin: 10px 0 18px; font-size: 12px; page-break-inside: avoid; }}
+th, td {{ border: 1px solid #cbd5e1; padding: 6px 8px; text-align: left; }}
 th {{ background-color: #f1f5f9; color: #334155; font-weight: 600; }}
 tr:nth-child(even) {{ background-color: #f8fafc; }}
-.signature-section {{ margin-top: 40px; display: flex; justify-content: space-between; page-break-inside: avoid; }}
-.sig-box {{ width: 30%; text-align: center; border-top: 1px solid #94a3b8; padding-top: 10px; font-size: 12px; color: #475569; }}
-button {{ padding: 12px 20px; background: #176b68; color: white; border: none; border-radius: 6px; font-weight: 600; cursor: pointer; margin-bottom: 20px; }}
+.signature-section {{ margin-top: 34px; display: flex; justify-content: space-between; page-break-inside: avoid; }}
+.sig-box {{ width: 30%; text-align: center; border-top: 1px solid #94a3b8; padding-top: 8px; font-size: 11.5px; color: #475569; }}
+button {{ padding: 9px 18px; background: #176b68; color: white; border: none; border-radius: 7px; font-weight: 700; font-size: 13px; cursor: pointer; }}
 @media print {{
-	button {{ display: none; }}
-	body {{ padding: 0; font-size: 12px; }}
-	.student-report-page {{ page-break-after: always; break-after: page; }}
-	.header-box h1 {{ font-size: 20px; }}
-	h2 {{ font-size: 14px; margin-top: 16px; }}
-	th, td {{ padding: 6px 8px; }}
+	.a4-topbar, button {{ display: none !important; }}
+	body {{ background: #ffffff !important; padding: 0 !important; font-size: 11.5px; }}
+	.student-report-page {{ width: 100% !important; min-height: auto !important; margin: 0 !important; padding: 0 !important; border: none !important; box-shadow: none !important; page-break-after: always; break-after: page; }}
+	.header-box h1 {{ font-size: 19px; }}
+	h2 {{ font-size: 14px; margin-top: 14px; }}
+	th, td {{ padding: 5px 7px; }}
 }}
 </style>
 </head>
 <body>
-<button onclick='window.print()'>🖨️ Tümünü Yazdır / PDF Olarak Kaydet</button>
+<div class='a4-topbar'>
+	<span class='a4-pill'>📄 A4 Yazdırma Önizleme (210×297 mm)</span>
+	<button onclick='window.print()'>🖨️ Tümünü Yazdır / PDF Olarak Kaydet</button>
+</div>
 """
 
 	if report_mode == "🏫 Tüm Sınıf Raporu (Toplu)":
@@ -28071,93 +28460,87 @@ def open_document_preview_dialog(file_path: Path) -> None:
 
 	if ext == ".pdf":
 		import pymupdf
-		from PIL import Image
 		try:
 			doc = pymupdf.open(file_path)
 			num_pages = len(doc)
-			ui.caption(f"📑 Toplam **{num_pages}** sayfa bulundu. Önizleme aşağıda gösterilmektedir:")
+			ui.caption(f"📑 Toplam **{num_pages}** sayfa bulundu — gerçek **A4 (210×297 mm)** kâğıt önizlemesi:")
 			max_preview = min(num_pages, 8)
+			sheet_chunks: list[str] = []
 			for p_num in range(max_preview):
 				page = doc[p_num]
-				pix = page.get_pixmap(dpi=110)
-				page_img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-				ui.markdown(f"**Sayfa {p_num + 1} / {num_pages}**")
-				ui.image(page_img, use_container_width=True)
-				del page, pix, page_img
-			if num_pages > max_preview:
-				ui.info(f"ℹ️ Belgenin devamı ({num_pages - max_preview} sayfa daha var) için sağ üstteki **📥 Bilgisayara İndir** butonunu kullanabilirsiniz.")
+				pix = page.get_pixmap(dpi=120)
+				b64_p = base64.b64encode(pix.tobytes("png")).decode("ascii")
+				sheet_chunks.append(
+					f"<span class='revir-a4-page-badge'>📄 A4 · Sayfa {p_num + 1} / {num_pages}</span>"
+					f"<div class='revir-a4-sheet-img'><img src='data:image/png;base64,{b64_p}' alt='Sayfa {p_num + 1}'/></div>"
+				)
+				del page, pix
 			doc.close()
 			del doc
+			ui.markdown(f"<div class='revir-a4-stage'>{''.join(sheet_chunks)}</div>", unsafe_allow_html=True)
+			if num_pages > max_preview:
+				ui.info(f"ℹ️ Belgenin devamı ({num_pages - max_preview} sayfa daha var) için sağ üstteki **📥 İndir** veya **✍️ PDF Form Doldur** butonunu kullanabilirsiniz.")
 		except Exception as e:
 			ui.error(f"PDF önizleme hatası: {e}")
 
 	elif ext in [".png", ".jpg", ".jpeg", ".webp"]:
-		ui.image(str(file_path), use_container_width=True)
+		try:
+			b64_img = base64.b64encode(file_path.read_bytes()).decode("ascii")
+			mime_i = mimetypes.guess_type(file_path)[0] or "image/png"
+			ui.markdown(
+				f"<div class='revir-a4-stage'>"
+				f"<span class='revir-a4-page-badge'>📄 A4 Görsel Önizleme</span>"
+				f"<div class='revir-a4-sheet-img'><img src='data:{mime_i};base64,{b64_img}' alt='{html.escape(file_path.name)}'/></div>"
+				f"</div>",
+				unsafe_allow_html=True,
+			)
+		except Exception:
+			ui.image(str(file_path), use_container_width=True)
 
 	elif ext in [".xlsx", ".xls"]:
 		try:
 			import openpyxl
 			wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
-			sheet_names = wb.sheetnames
-			sel_sheet = ui.selectbox("📑 Görüntülenecek Sayfa (Sheet)", sheet_names, key=f"prev_sheet_{sha256(file_path.name.encode()).hexdigest()[:8]}")
-			ws = wb[sel_sheet]
-			rows_data = []
-			for r in ws.iter_rows(values_only=True):
-				if any(c is not None for c in r):
-					rows_data.append([str(c) if c is not None else "" for c in r])
-				if len(rows_data) >= 80:
-					break
+			sheet_names = list(wb.sheetnames)
 			wb.close()
 			del wb
-			if rows_data:
-				headers = rows_data[0]
-				body = rows_data[1:] if len(rows_data) > 1 else []
-				df_preview = pd.DataFrame(body, columns=[h or f"Kolon {i+1}" for i, h in enumerate(headers)])
-				ui.dataframe(df_preview, use_container_width=True, height=420)
-			else:
-				ui.info("Sayfa boş.")
+			f_h8 = sha256(file_path.name.encode()).hexdigest()[:8]
+			xs1, xs2 = ui.columns([2.2, 1.3])
+			with xs1:
+				sel_sheet = ui.selectbox("📑 Görüntülenecek Sayfa (Sheet)", sheet_names, key=f"prev_sheet_{f_h8}")
+			with xs2:
+				orient_xl = ui.selectbox("📐 A4 Yönü", ["A4 Yatay (297×210 mm)", "A4 Dikey (210×297 mm)"], index=0, key=f"prev_orient_{f_h8}")
+			a4_xl_html = dstudio.render_xlsx_a4_html(file_path, sel_sheet, landscape=("Yatay" in orient_xl))
+			ui.components.v1.html(a4_xl_html, height=640, scrolling=True)
 		except Exception as e:
 			ui.warning(f"Excel önizleme oluşturulamadı: {e}")
 
 	elif ext == ".docx":
 		try:
-			if not _ensure_docx_loaded() or docx is None:
-				raise ImportError("python-docx")
-			d = docx.Document(file_path)
-			ui.markdown("##### 📝 Belge İçeriği Metin Önizlemesi:")
-			with ui.container(border=True, height=420):
-				for p in d.paragraphs:
-					t = p.text.strip()
-					if t:
-						ui.markdown(f"• {html.escape(t)}")
-				if d.tables:
-					ui.markdown("---")
-					ui.markdown("##### 📊 Belgedeki Tablolar:")
-					for t_idx, table in enumerate(d.tables):
-						t_rows = []
-						for row in table.rows:
-							r_vals = [c.text.strip() for c in row.cells]
-							if any(r_vals):
-								t_rows.append(r_vals)
-						if t_rows:
-							ui.caption(f"Tablo #{t_idx + 1}")
-							df_t = pd.DataFrame(t_rows[1:], columns=t_rows[0]) if len(t_rows) > 1 else pd.DataFrame(t_rows)
-							ui.dataframe(df_t, use_container_width=True)
-			del d
+			a4_docx_html = dstudio.render_docx_a4_html(file_path)
+			ui.components.v1.html(a4_docx_html, height=660, scrolling=True)
 		except Exception as e:
-			ui.warning(f"Word içeriği okunamadı: {e}")
+			ui.warning(f"Word A4 önizlemesi okunamadı: {e}")
 
 	elif ext in [".txt", ".csv"]:
 		try:
-			txt_content = file_path.read_text(encoding="utf-8", errors="replace")[:10000]
-			ui.code(txt_content, language="csv" if ext == ".csv" else "text")
+			txt_content = file_path.read_text(encoding="utf-8", errors="replace")[:14000]
+			a4_txt_html = dstudio.render_text_a4_html(file_path, txt_content)
+			ui.components.v1.html(a4_txt_html, height=620, scrolling=True)
 		except Exception as e:
 			ui.warning(f"Metin okunamadı: {e}")
 
 	else:
 		cov = get_or_create_document_cover(file_path)
 		if cov and cov.exists():
-			ui.image(str(cov), use_container_width=True)
+			b64_c = base64.b64encode(cov.read_bytes()).decode("ascii")
+			ui.markdown(
+				f"<div class='revir-a4-stage'>"
+				f"<span class='revir-a4-page-badge'>📄 A4 Kapak Önizleme</span>"
+				f"<div class='revir-a4-sheet-img'><img src='data:image/png;base64,{b64_c}' alt='Kapak'/></div>"
+				f"</div>",
+				unsafe_allow_html=True,
+			)
 
 
 @ui.dialog("📤 Yeni Evrak / Belge Yükle", width="large", mode="drawer")

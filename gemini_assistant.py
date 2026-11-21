@@ -1077,12 +1077,12 @@ def chat_with_gemini_assistant(
 	school_context: str = "",
 	sensitive_names: list[str] | None = None,
 	available_classes: list[str] | None = None,
-) -> tuple[bool, str, str, str, dict[str, Any] | None]:
+) -> tuple[bool, str, str, str, dict[str, Any] | None, dict[str, Any] | None]:
 	"""
 	Yüzen sohbet balonundan gelen metin, çoklu dosya eki ve/veya ses kaydını yanıtlar.
-	Kullanıcı Word/Excel/PDF veya hazır program raporu isterse programın yerel belge oluşturucusunu
-	tetikleyen yapılandırılmış `export_spec` döndürür.
-	Dönüş: (başarılı_mı, yanıt_metni, kullanılan_model, ses_çözümü, export_spec_veya_None)
+	Kullanıcı Word/Excel/rapor veya sınıf oluşturma isterse `export_spec`,
+	öğrenciye ölçüm/vital/profil/belge işleme isterse `write_spec` döndürür.
+	Dönüş: (başarılı_mı, yanıt_metni, kullanılan_model, ses_çözümü, export_spec, write_spec)
 	"""
 	cls_hint = ", ".join(available_classes[:30]) if available_classes else "Belirtilmedi"
 	sys_inst = (
@@ -1111,7 +1111,22 @@ def chat_with_gemini_assistant(
 		"11) Seçili öğrencinin aylık yemek menüsüne göre tahmini insülin planı (Word/Excel): {\"action\":\"insulin_monthly_plan\",\"format\":\"docx\" veya \"xlsx\" veya \"both\",\"year_month\":\"YYYY-MM\"}\n"
 		"12) Seçili öğrencinin insülin & kan şekeri izlem defteri raporu (Word/Excel): {\"action\":\"insulin_log_report\",\"format\":\"docx\" veya \"xlsx\" veya \"both\"}\n"
 		"13) Okul sınıfları / şubeleri oluşturma (kullanıcı açıkça 'şu sınıfları oluştur / ekle' derse): {\"action\":\"create_classes\",\"classes\":[{\"name\":\"5-A\",\"teacher_name\":\"\"}]}\n\n"
-		"Kullanıcı dosya/Word/Excel/rapor çıktısı veya sınıf oluşturma istemiyorsa [[REVIR_EXPORT:...]] etiketini EKLEME. "
+		"ÖNEMLİ YETENEK — ÖĞRENCİ / KİŞİ DOSYASINA ÖLÇÜM, VİTAL, TAHLİL, İLAÇ, PROFİL VEYA BELGE İŞLEME:\n"
+		"Kullanıcı sohbet üzerinden yazılı/sesli bir ölçüm, vital, alerji, kronik hastalık, ilaç, revir notu söylerse "
+		"VEYA bir belge/tahlil/rapor/reçete/fotoğraf ekleyip 'öğrenciye işle / kaydet / profiline ekle / ölçümünü gir' derse, "
+		"önce hemşireye kısa ve net bir Türkçe özet yaz (örn: 'Çıkarılan veriler onay kartında hazırlandı'), ardından yanıtının EN SONUNA tek satırda şu JSON komut etiketini ekle:\n"
+		"[[REVIR_WRITE:{...}]]\n"
+		"Şema (sadece gerçekten geçen/okunan alanları doldur; diğerlerini boş bırak veya ekleme):\n"
+		"{\"person_hint\":\"Kullanıcının söylediği veya belgede okunan ad soyad (yoksa boş)\",\"student_no_hint\":\"\",\"class_hint\":\"\",\"document_type\":\"Ölçüm / Tahlil / Rapor / Profil\",\"document_date\":\"YYYY-MM-DD\",\"clinical_summary\":\"Kısa özet\","
+		"\"measurements\":{\"measured_on\":\"YYYY-MM-DD\",\"height_cm\":null,\"weight_kg\":null,\"head_circ_cm\":null},"
+		"\"vitals\":{\"measured_at\":\"YYYY-MM-DD HH:MM\",\"temperature_c\":null,\"pulse_bpm\":null,\"spo2_pct\":null,\"systolic_bp\":null,\"diastolic_bp\":null,\"glucose_mg_dl\":null},"
+		"\"health_profile\":{\"allergies\":\"\",\"chronic_conditions\":\"\",\"blood_group\":\"\",\"regular_medications\":\"\",\"emergency_notes\":\"\"},"
+		"\"lab_results\":[{\"test_name\":\"\",\"value_num\":null,\"value_text\":\"\",\"unit\":\"\",\"ref_range\":\"\",\"flag\":\"Normal\",\"measured_on\":\"YYYY-MM-DD\"}],"
+		"\"medications\":[{\"medication_name\":\"\",\"med_type\":\"Düzenli İlaç\",\"dosage\":\"\",\"schedule_times\":\"\",\"notes\":\"\"}],"
+		"\"disability\":{\"has_disability\":false,\"disability_rate\":null,\"categories\":[],\"school_adaptations\":\"\",\"report_summary\":\"\"},"
+		"\"diabetes\":{\"is_diabetic\":false,\"diabetes_type\":\"\",\"icr_breakfast\":null,\"icr_lunch\":null,\"icr_snack\":null,\"isf\":null,\"target_bg\":null,\"insulin_brand\":\"\"},"
+		"\"visit_note_suggestion\":\"\"}\n\n"
+		"Kullanıcı kayıt/veri işleme istemiyorsa [[REVIR_WRITE:...]] EKLEME; dosya/rapor/sınıf istemiyorsa [[REVIR_EXPORT:...]] EKLEME. "
 		"Kısa, maddeli ve okunması kolay yanıtlar üret."
 	)
 
@@ -1188,7 +1203,7 @@ def chat_with_gemini_assistant(
 		timeout=26.0,
 	)
 	if not ok:
-		return False, raw_reply, used_model, "", None
+		return False, raw_reply, used_model, "", None, None
 
 	transcribed = ""
 	clean_reply = raw_reply
@@ -1197,26 +1212,55 @@ def chat_with_gemini_assistant(
 		transcribed = m_tr.group(1).strip()
 		clean_reply = m_tr.group(2).strip() or transcribed
 
-	export_spec: dict[str, Any] | None = None
-	m_exp = re.search(r"\[\[REVIR_EXPORT\s*:\s*(\{.*?\})\s*\]\]", clean_reply, re.S)
-	if not m_exp:
-		# Handle nested braces inside JSON block cleanly
-		tag_idx = clean_reply.find("[[REVIR_EXPORT:")
-		if tag_idx != -1:
-			end_idx = clean_reply.rfind("]]")
-			if end_idx > tag_idx:
-				json_chunk = clean_reply[tag_idx + len("[[REVIR_EXPORT:"):end_idx].strip()
-				parsed_exp = _parse_json_response(json_chunk)
-				if parsed_exp:
-					export_spec = parsed_exp
-				clean_reply = (clean_reply[:tag_idx] + clean_reply[end_idx + 2:]).strip()
-	else:
-		parsed_exp = _parse_json_response(m_exp.group(1))
-		if parsed_exp:
-			export_spec = parsed_exp
-		clean_reply = (clean_reply[:m_exp.start()] + clean_reply[m_exp.end():]).strip()
+	def _extract_directive_tag(text_in: str, tag_prefix: str) -> tuple[str, dict[str, Any] | None]:
+		idx_s = text_in.find(tag_prefix)
+		if idx_s == -1:
+			return text_in, None
+		# Find matching closing ]]
+		idx_e = text_in.find("]]", idx_s + len(tag_prefix))
+		if idx_e == -1:
+			return text_in, None
+		# Handle nested ]] inside JSON arrays by balancing braces
+		json_start = text_in.find("{", idx_s + len(tag_prefix))
+		if json_start != -1 and json_start < idx_e:
+			depth = 0
+			in_str = False
+			esc = False
+			end_brace = -1
+			for pos in range(json_start, len(text_in)):
+				ch = text_in[pos]
+				if esc:
+					esc = False
+					continue
+				if ch == "\\":
+					esc = True
+					continue
+				if ch == '"':
+					in_str = not in_str
+					continue
+				if not in_str:
+					if ch == "{":
+						depth += 1
+					elif ch == "}":
+						depth -= 1
+						if depth == 0:
+							end_brace = pos
+							break
+			if end_brace != -1:
+				close_tag = text_in.find("]]", end_brace)
+				if close_tag != -1:
+					parsed_obj = _parse_json_response(text_in[json_start:end_brace + 1])
+					stripped = (text_in[:idx_s] + text_in[close_tag + 2:]).strip()
+					return stripped, parsed_obj if isinstance(parsed_obj, dict) and parsed_obj else None
+		chunk = text_in[idx_s + len(tag_prefix):idx_e].strip()
+		parsed_obj = _parse_json_response(chunk)
+		stripped = (text_in[:idx_s] + text_in[idx_e + 2:]).strip()
+		return stripped, parsed_obj if isinstance(parsed_obj, dict) and parsed_obj else None
 
-	return True, clean_reply, used_model, transcribed, export_spec
+	clean_reply, export_spec = _extract_directive_tag(clean_reply, "[[REVIR_EXPORT:")
+	clean_reply, write_spec = _extract_directive_tag(clean_reply, "[[REVIR_WRITE:")
+
+	return True, clean_reply, used_model, transcribed, export_spec, write_spec
 
 
 # ==============================================================================

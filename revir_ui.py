@@ -147,6 +147,36 @@ def _make_cache_key(args: tuple, kwargs: dict) -> str:
 	return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+_ALL_DATA_CACHES: list[Callable[[], None]] = []
+
+
+def clear_all_caches() -> None:
+	"""Tüm @ui.cache_data önbelleklerini tek seferde temizler."""
+	for clr in list(_ALL_DATA_CACHES):
+		try:
+			clr()
+		except Exception:
+			pass
+
+
+def clear_ephemeral_widget_values() -> None:
+	"""Anahtarsız (key=None) widget önbelleklerini ve tablo düzenleyici hash'lerini temizler."""
+	sessions = [_ACTIVE_SESSION]
+	try:
+		ctx = getattr(_LOCAL_CTX, "ctx", None)
+		if ctx is not None and getattr(ctx, "session", None) is not None and ctx.session is not _ACTIVE_SESSION:
+			sessions.append(ctx.session)
+	except Exception:
+		pass
+	for sess in sessions:
+		try:
+			with sess.lock:
+				sess.widget_values.clear()
+				sess.editor_input_hashes.clear()
+		except Exception:
+			pass
+
+
 def cache_data(func: Callable | None = None, *, ttl: float | None = None, show_spinner: bool | str = True, max_entries: int = 256):
 	def _decorator(fn: Callable) -> Callable:
 		store: OrderedDict[str, tuple[float, Any]] = OrderedDict()
@@ -176,6 +206,7 @@ def cache_data(func: Callable | None = None, *, ttl: float | None = None, show_s
 			with lock:
 				store.clear()
 
+		_ALL_DATA_CACHES.append(_clear)
 		_wrapper.clear = _clear  # type: ignore[attr-defined]
 		return _wrapper
 
@@ -920,6 +951,8 @@ class _AppSession:
 		self.floating_chat_chips: list[dict[str, str]] | None = None
 		self.floating_chat_handler: Callable | None = None
 		self.floating_chat_export_handler: Callable | None = None
+		self.floating_chat_write_handler: Callable | None = None
+		self.pending_chat_writes: dict[str, dict[str, Any]] = {}
 		self.chat_history: list[dict[str, str]] = []
 		self.topbar_html: str = ""
 		self.topbar_action_handler: Callable | None = None
@@ -2587,6 +2620,7 @@ def configure_floating_chat(
 	label: str = "KVKK Korumalı",
 	handler: Callable | None = None,
 	export_handler: Callable | None = None,
+	write_handler: Callable | None = None,
 	chips: list[dict[str, str]] | None = None,
 ) -> None:
 	ctx = _get_ctx()
@@ -2598,6 +2632,24 @@ def configure_floating_chat(
 		ctx.session.floating_chat_handler = handler
 	if export_handler is not None:
 		ctx.session.floating_chat_export_handler = export_handler
+	if write_handler is not None:
+		ctx.session.floating_chat_write_handler = write_handler
+
+
+def register_pending_chat_write(proposal: dict[str, Any]) -> str:
+	"""Yüzen sohbet balonundan onay bekleyen veri/belge yazma önerisini oturumda saklar."""
+	token = f"cw_{secrets.token_urlsafe(10)}"
+	with _ACTIVE_SESSION.lock:
+		while len(_ACTIVE_SESSION.pending_chat_writes) >= 24:
+			oldest = next(iter(_ACTIVE_SESSION.pending_chat_writes))
+			_ACTIVE_SESSION.pending_chat_writes.pop(oldest, None)
+		_ACTIVE_SESSION.pending_chat_writes[token] = proposal
+	return token
+
+
+def pop_pending_chat_write(token: str) -> dict[str, Any] | None:
+	with _ACTIVE_SESSION.lock:
+		return _ACTIVE_SESSION.pending_chat_writes.pop(str(token or ""), None)
 
 
 def register_download(data: bytes, file_name: str, mime: str = "application/octet-stream") -> str:
@@ -3454,8 +3506,80 @@ html, body {
 .revir-progress-fill { height: 100%; background: var(--teal); border-radius: 999px; transition: width 0.25s ease; }
 .revir-img-wrap { margin: 6px 0; }
 .revir-img { border-radius: 8px; display: block; }
-.revir-iframe-wrap { margin: 8px 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #ffffff; }
+.revir-iframe-wrap { margin: 8px 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #cbd5e1; }
 .revir-iframe { border: none; display: block; }
+
+/* A4 Belge & Rapor Önizleme Sahnesi (210mm x 297mm Gerçek Baskı Oranı) */
+.revir-a4-stage {
+	background: #cbd5e1; border: 1px solid var(--line); border-radius: 12px;
+	padding: 20px 16px; margin: 8px 0 12px 0;
+	display: flex; flex-direction: column; align-items: center; gap: 18px;
+	max-height: 76vh; overflow-y: auto;
+}
+body.revir-dark .revir-a4-stage, .dark .revir-a4-stage { background: #1e293b; }
+.revir-a4-sheet {
+	width: min(100%, 794px); min-height: 520px; aspect-ratio: 210 / 297;
+	background: #ffffff !important; color: #0f172a !important;
+	border: 1px solid #94a3b8; border-radius: 3px;
+	box-shadow: 0 10px 30px rgba(15,23,42,0.22);
+	padding: 26px 32px; position: relative; box-sizing: border-box;
+	overflow: auto;
+}
+.revir-a4-sheet-img {
+	width: min(100%, 794px);
+	background: #ffffff !important; color: #0f172a !important;
+	border: 1px solid #94a3b8; border-radius: 3px;
+	box-shadow: 0 10px 30px rgba(15,23,42,0.22);
+	padding: 12px; position: relative; box-sizing: border-box;
+}
+.revir-a4-sheet-img img { width: 100%; height: auto; display: block; border-radius: 2px; }
+.revir-a4-sheet-landscape {
+	width: min(100%, 960px); min-height: 460px; aspect-ratio: 297 / 210;
+	background: #ffffff !important; color: #0f172a !important;
+	border: 1px solid #94a3b8; border-radius: 3px;
+	box-shadow: 0 10px 30px rgba(15,23,42,0.22);
+	padding: 22px 26px; position: relative; box-sizing: border-box;
+	overflow: auto;
+}
+.revir-a4-page-badge {
+	display: inline-block; font-size: 11px; font-weight: 700; color: #475569;
+	background: rgba(255,255,255,0.92); border: 1px solid #cbd5e1;
+	padding: 2px 10px; border-radius: 999px; margin-bottom: 6px;
+}
+.revir-a4-sheet table, .revir-a4-sheet-landscape table {
+	width: 100%; border-collapse: collapse; margin: 8px 0 14px 0; font-size: 11.5px; color: #0f172a !important;
+}
+.revir-a4-sheet th, .revir-a4-sheet td, .revir-a4-sheet-landscape th, .revir-a4-sheet-landscape td {
+	border: 1px solid #cbd5e1; padding: 5px 7px; text-align: left; color: #0f172a !important;
+}
+.revir-a4-sheet th, .revir-a4-sheet-landscape th { background: #f1f5f9 !important; font-weight: 700; }
+
+/* Sohbet Balonu İçi Onaylı Veri İşleme Kartı */
+.revir-cmsg-write-card {
+	margin-top: 8px; padding: 10px 11px; border-radius: 10px;
+	background: rgba(13,148,136,0.08); border: 1px solid rgba(13,148,136,0.34);
+	font-size: 12.2px;
+}
+.revir-cmsg-write-card.done {
+	background: rgba(16,185,129,0.12); border-color: rgba(16,185,129,0.45);
+}
+.revir-cmsg-write-card select {
+	width: 100%; margin: 5px 0 7px 0; padding: 5px 8px; border-radius: 7px;
+	border: 1px solid var(--line); background: var(--input-bg); color: var(--input-text);
+	font-size: 12px; font-family: inherit;
+}
+.revir-cmsg-write-list { margin: 4px 0 8px 16px; padding: 0; }
+.revir-cmsg-write-list li { margin-bottom: 2px; }
+.revir-cmsg-write-actions { display: flex; gap: 6px; margin-top: 6px; }
+.revir-cmsg-write-actions button {
+	flex: 1; padding: 6px 8px; border-radius: 7px; font-size: 12px; font-weight: 700; cursor: pointer;
+	border: 1px solid var(--line); background: var(--card-bg); color: var(--text-main);
+}
+.revir-cmsg-write-actions button.confirm {
+	background: var(--teal); color: #ffffff; border-color: var(--teal);
+}
+.revir-cmsg-write-actions button.confirm:hover { filter: brightness(1.06); }
+.revir-cmsg-write-actions button:disabled { opacity: 0.55; cursor: not-allowed; }
 
 /* Çevrimdışı SVG Grafikler */
 .revir-chart-card {
@@ -5237,12 +5361,86 @@ body.revir-busy .revir-btn { pointer-events: none; }
 		}
 	};
 
-	function appendChatMsg(role, htmlContent, plainText, downloads) {
+	function appendChatMsg(role, htmlContent, plainText, downloads, writeProposal) {
 		var box = document.getElementById("revir-chat-messages");
 		if (!box) return null;
 		var div = document.createElement("div");
 		div.className = "revir-cmsg " + (role === "user" ? "revir-cmsg-user" : "revir-cmsg-ai");
 		div.innerHTML = htmlContent;
+		if (role === "ai" && writeProposal && writeProposal.token) {
+			var wc = document.createElement("div");
+			wc.className = "revir-cmsg-write-card";
+			var hdr = '<div style="font-weight:800;margin-bottom:4px;">📝 ' + escHtml(writeProposal.title || "Kişi Dosyasına İşlenecek Veriler") + "</div>";
+			var selHtml = "";
+			if (Array.isArray(writeProposal.candidates) && writeProposal.candidates.length) {
+				selHtml += '<label style="font-size:11.5px;font-weight:700;color:var(--text-muted);">🎯 Hedef Öğrenci / Kişi:</label>';
+				selHtml += '<select class="revir-cw-target">';
+				writeProposal.candidates.forEach(function(c) {
+					var selAttr = (String(c.id) === String(writeProposal.default_student_id)) ? " selected" : "";
+					selHtml += '<option value="' + escHtml(String(c.id)) + '"' + selAttr + ">" + escHtml(c.label) + "</option>";
+				});
+				selHtml += "</select>";
+			}
+			var itemsHtml = "";
+			if (Array.isArray(writeProposal.items) && writeProposal.items.length) {
+				itemsHtml = '<ul class="revir-cmsg-write-list">' + writeProposal.items.map(function(it) { return "<li>" + escHtml(it) + "</li>"; }).join("") + "</ul>";
+			}
+			var archHtml = writeProposal.has_attachment
+				? '<label style="display:flex;align-items:center;gap:6px;font-size:11.5px;margin:4px 0;"><input type="checkbox" class="revir-cw-arch" checked/> 📁 Ekli belgeyi Evrak Deposuna da arşivle</label>'
+				: "";
+			wc.innerHTML = hdr + selHtml + itemsHtml + archHtml
+				+ '<div class="revir-cmsg-write-actions">'
+				+ '<button type="button" class="confirm">✅ Onayla ve Kişiye İşle</button>'
+				+ '<button type="button" class="cancel">✖ İptal</button>'
+				+ "</div>";
+			var okBtn = wc.querySelector("button.confirm");
+			var noBtn = wc.querySelector("button.cancel");
+			if (okBtn) {
+				okBtn.onclick = function() {
+					var selEl = wc.querySelector(".revir-cw-target");
+					var archEl = wc.querySelector(".revir-cw-arch");
+					var targetId = selEl ? parseInt(selEl.value, 10) : (writeProposal.default_student_id || null);
+					okBtn.disabled = true;
+					if (noBtn) noBtn.disabled = true;
+					okBtn.textContent = "⏳ İşleniyor...";
+					fetch("/api/gemini_chat_apply_write", {
+						method: "POST",
+						headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
+						body: JSON.stringify({
+							token: writeProposal.token,
+							student_id: targetId,
+							archive_doc: archEl ? !!archEl.checked : false
+						})
+					})
+					.then(function(r) { return r.json(); })
+					.then(function(ares) {
+						if (ares && ares.ok) {
+							wc.classList.add("done");
+							wc.innerHTML = '<div style="font-weight:800;color:#059669;">✅ ' + escHtml(ares.summary || "Veriler kişi dosyasına işlendi ve tüm ekranlar eşitlendi!") + "</div>";
+							showToast("✅ " + (ares.summary || "Kişi dosyasına işlendi!"));
+							sendAction({ action: "refresh" });
+						} else {
+							okBtn.disabled = false;
+							if (noBtn) noBtn.disabled = false;
+							okBtn.textContent = "✅ Onayla ve Kişiye İşle";
+							showToast("❌ " + ((ares && ares.error) || "İşleme başarısız."), "err");
+						}
+					})
+					.catch(function(err) {
+						okBtn.disabled = false;
+						if (noBtn) noBtn.disabled = false;
+						okBtn.textContent = "✅ Onayla ve Kişiye İşle";
+						showToast("❌ Bağlantı hatası: " + String(err), "err");
+					});
+				};
+			}
+			if (noBtn) {
+				noBtn.onclick = function() {
+					wc.innerHTML = '<div style="color:var(--text-muted);font-size:11.5px;">✖ Veri işleme iptal edildi.</div>';
+				};
+			}
+			div.appendChild(wc);
+		}
 		if (role === "ai" && Array.isArray(downloads) && downloads.length) {
 			var dlWrap = document.createElement("div");
 			dlWrap.className = "revir-cmsg-downloads";
@@ -5366,8 +5564,12 @@ body.revir-busy .revir-btn { pointer-events: none; }
 					"ai",
 					res.reply_html || ("<p>" + escHtml(res.reply_text || "") + "</p>"),
 					res.reply_text || "",
-					res.downloads || []
+					res.downloads || [],
+					res.write_proposal || null
 				);
+				if (res.refresh_ui) {
+					sendAction({ action: "refresh" });
+				}
 				if (chatTtsEnabled) {
 					var btnInMsg = msgDiv ? msgDiv.querySelector(".revir-cmsg-tbtn") : null;
 					window.__revirSpeakText(res.reply_text || "", btnInMsg);
@@ -6119,6 +6321,19 @@ class LocalUIServer:
 				if path == "/api/tts_stop":
 					_AUDIO_CTRL.stop_speaking()
 					self._send_bytes(HTTPStatus.OK, "application/json", b'{"ok":true}')
+					return
+
+				if path == "/api/gemini_chat_apply_write":
+					try:
+						payload = self._read_json()
+						w_handler = server_ref.session.floating_chat_write_handler
+						if not callable(w_handler):
+							self._send_bytes(HTTPStatus.OK, "application/json", json.dumps({"ok": False, "error": "Veri işleme yöneticisi hazır değil."}, ensure_ascii=False).encode("utf-8"))
+							return
+						w_res = w_handler(payload)
+						self._send_bytes(HTTPStatus.OK, "application/json; charset=utf-8", json.dumps(w_res, ensure_ascii=False).encode("utf-8"))
+					except Exception as exc:
+						self._send_bytes(HTTPStatus.OK, "application/json", json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False).encode("utf-8"))
 					return
 
 				if path == "/api/gemini_export_msg":
