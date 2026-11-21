@@ -177,6 +177,26 @@ def clear_ephemeral_widget_values() -> None:
 			pass
 
 
+def clear_dataframe_selection(key: str | None = None) -> None:
+	"""Tek seferlik tablo/hücre seçimini temizler (ör. '📂 Aç' ile modal açıldıktan sonra sonraki tıklamalarda yeniden tetiklenmeyi önler)."""
+	sessions = [_ACTIVE_SESSION]
+	try:
+		ctx = getattr(_LOCAL_CTX, "ctx", None)
+		if ctx is not None and getattr(ctx, "session", None) is not None and ctx.session is not _ACTIVE_SESSION:
+			sessions.append(ctx.session)
+	except Exception:
+		pass
+	for sess in sessions:
+		try:
+			with sess.lock:
+				if key is None:
+					sess.dataframe_selections.clear()
+				else:
+					sess.dataframe_selections.pop(str(key), None)
+		except Exception:
+			pass
+
+
 def cache_data(func: Callable | None = None, *, ttl: float | None = None, show_spinner: bool | str = True, max_entries: int = 256):
 	def _decorator(fn: Callable) -> Callable:
 		store: OrderedDict[str, tuple[float, Any]] = OrderedDict()

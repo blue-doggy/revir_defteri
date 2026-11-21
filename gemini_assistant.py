@@ -448,6 +448,22 @@ def _parse_json_response(raw_text: str) -> dict[str, Any]:
 	return {}
 
 
+def _stringify_ai_field(val: Any) -> str:
+	"""Gemini JSON alanlarında bazen liste veya sözlük dönen değerleri temiz Türkçe metne çevirir."""
+	if val is None:
+		return ""
+	if isinstance(val, list):
+		parts = [str(x).strip() for x in val if x is not None and str(x).strip()]
+		if not parts:
+			return ""
+		if len(parts) == 1:
+			return parts[0]
+		return "\n".join(f"• {p}" if not p.startswith(("•", "-", "*")) else p for p in parts)
+	if isinstance(val, dict):
+		return "\n".join(f"{k}: {_stringify_ai_field(v)}" for k, v in val.items() if v not in (None, ""))
+	return str(val).strip()
+
+
 def test_gemini_connection(api_key: str, model: str = "gemini-3-flash-preview") -> tuple[bool, str, str]:
 	ok, txt, used_model = call_gemini(
 		"Merhaba! Okul revir sistemi bağlantı testi için tek cümleyle Türkçe 'Gemini Klinik Asistan bağlantısı başarılı.' yaz.",
@@ -518,7 +534,7 @@ Lütfen tam olarak şu JSON anahtarlarıyla Türkçe yanıt ver:
 	parsed = _parse_json_response(raw)
 	if not parsed:
 		return False, {"error": "Model yanıtı JSON olarak ayrıştırılamadı."}, used_model
-	return True, parsed, used_model
+	return True, {k: _stringify_ai_field(v) for k, v in parsed.items()}, used_model
 
 
 # ==============================================================================
@@ -668,7 +684,7 @@ Yanıtı yalnızca aşağıdaki JSON şemasıyla Türkçe döndür:
 	parsed = _parse_json_response(raw)
 	if not parsed:
 		return False, {"error": "NANDA bakım planı JSON olarak ayrıştırılamadı."}, used_model
-	return True, {k: str(v or "") for k, v in parsed.items()}, used_model
+	return True, {k: _stringify_ai_field(v) for k, v in parsed.items()}, used_model
 
 
 # ==============================================================================
@@ -683,11 +699,36 @@ def interpret_growth_trajectory(
 	measurements_df: pd.DataFrame,
 	school_name: str = "Okul Reviri",
 	nurse_name: str = "Okul Revir Sorumlusu",
+	focus_indicator: str = "",
 ) -> tuple[bool, dict[str, str], str]:
-	cols = [c for c in ["Tarih", "Yas_ay", "Boy_cm", "Boy_Z", "Boy_Persantil", "Kilo_kg", "Kilo_Z", "Kilo_Persantil", "BMI", "BMI_Z", "BMI_Persantil", "Gelisim_Degerlendirmesi"] if c in measurements_df.columns]
-	history_records = measurements_df[cols].head(12).to_dict(orient="records") if not measurements_df.empty else []
+	cols = [
+		c for c in [
+			"Tarih", "Yas_ay",
+			"Boy_cm", "Boy_Z", "Boy_Persantil",
+			"Kilo_kg", "Kilo_Z", "Kilo_Persantil",
+			"BMI", "BMI_Z", "BMI_Persantil",
+			"Bas_Cevresi_cm", "Bas_Cevresi_Z", "Bas_Cevresi_Persantil",
+			"Gelisim_Degerlendirmesi",
+		]
+		if c in measurements_df.columns
+	]
+	history_records: list[dict[str, Any]] = []
+	if not measurements_df.empty and cols:
+		for raw_rec in measurements_df[cols].head(12).to_dict(orient="records"):
+			clean_rec: dict[str, Any] = {}
+			for rk, rv in raw_rec.items():
+				try:
+					if pd.isna(rv):
+						clean_rec[rk] = None
+						continue
+				except Exception:
+					pass
+				clean_rec[rk] = rv
+			history_records.append(clean_rec)
 
-	prompt = f"""Dünya Sağlık Örgütü (WHO) pediatrik büyüme standartlarına göre aşağıdaki anonim öğrencinin kronolojik boy, kilo ve VKİ persantil/Z-skoru geçmişini değerlendir:
+	focus_line = f"\n[ÖNCELİKLİ ODAK PARAMETRESİ]: Özellikle **{focus_indicator}** persantil ve Z-skoru seyrine odaklan; diğer büyüme parametreleriyle uyumunu da kısaca belirt." if str(focus_indicator or "").strip() else ""
+
+	prompt = f"""Dünya Sağlık Örgütü (WHO) pediatrik büyüme standartlarına göre aşağıdaki anonim öğrencinin kronolojik boy, kilo, VKİ ve (varsa) baş çevresi persantil/Z-skoru geçmişini değerlendir:{focus_line}
 
 [ANONİM PROFİL]: {anon_context}
 [KRONOLOJİK ÖLÇÜM GEÇMİŞİ (En yeniden eskiye)]:
@@ -696,7 +737,7 @@ def interpret_growth_trajectory(
 Lütfen yanıtı aşağıdaki JSON anahtarlarıyla Türkçe olarak döndür:
 {{
   "channel_status": "Normal Kanalda Stabil | Persantil Kayması / İzlem Önerilir | Kritik Sınır (<3p veya >97p - Hekim Değerlendirmesi Önerilir)",
-  "clinical_summary": "Hemşire için büyüme hızı, boy-kilo uyumu, Z-skoru değişimi ve varsa persantil kanal kaymasının 2-3 cümlelik teknik analizi",
+  "clinical_summary": "Hemşire için büyüme hızı, seçili parametrenin persantil/Z-skoru değişimi, boy-kilo uyumu ve varsa kanal kaymasının 2-3 cümlelik teknik analizi",
   "recommendations": "Okul revirinde izlem sıklığı, beslenme/fiziksel aktivite veya pediatri/aile hekimi yönlendirme önerisi",
   "guardian_letter": "Veliye gönderilecek resmi, anlaşılır ve yapıcı büyüme-gelişme bilgilendirme notu ([ÖĞRENCİ_ADI] yer tutucusunu kullan, Kurum: {school_name}, İmza: {nurse_name})"
 }}"""
@@ -707,7 +748,7 @@ Lütfen yanıtı aşağıdaki JSON anahtarlarıyla Türkçe olarak döndür:
 	parsed = _parse_json_response(raw)
 	if not parsed:
 		return False, {"error": "Büyüme analizi JSON yanıtı ayrıştırılamadı."}, used_model
-	return True, {k: str(v or "") for k, v in parsed.items()}, used_model
+	return True, {k: _stringify_ai_field(v) for k, v in parsed.items()}, used_model
 
 
 # ==============================================================================
@@ -749,7 +790,7 @@ Yanıtı yalnızca aşağıdaki JSON şemasıyla Türkçe döndür:
 	parsed = _parse_json_response(raw)
 	if not parsed:
 		return False, {"error": "İlaç güvenlik analizi ayrıştırılamadı."}, used_model
-	return True, {k: str(v or "") for k, v in parsed.items()}, used_model
+	return True, {k: _stringify_ai_field(v) for k, v in parsed.items()}, used_model
 
 
 # ==============================================================================
@@ -1531,7 +1572,7 @@ Yanıtı YALNIZCA şu JSON şemasıyla Türkçe döndür:
 	parsed = _parse_json_response(raw)
 	if not parsed:
 		return False, {"error": "Gemini diyabet klinik yorumu JSON olarak ayrıştırılamadı."}, used_m
-	return True, {k: str(v or "") for k, v in parsed.items()}, used_m
+	return True, {k: _stringify_ai_field(v) for k, v in parsed.items()}, used_m
 
 
 def analyze_glycemic_trend_with_gemini(

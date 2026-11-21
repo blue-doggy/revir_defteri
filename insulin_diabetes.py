@@ -1305,6 +1305,7 @@ def _render_tab_bolus_calculator(
 							extra_instruction=ai_q_extra,
 						)
 					ui.session_state[ai_res_key] = {"ok": ok_ia, "data": ia_data, "model": used_ia}
+					ui.session_state.pop(f"ins_sms_draft_{student_id}", None)
 					ui.rerun()
 
 				ia_saved = ui.session_state.get(ai_res_key)
