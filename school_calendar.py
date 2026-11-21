@@ -1884,8 +1884,17 @@ def _render_interactive_calendar_leaf(
 						<div style="font-size:13px;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:0.8px;">
 							{html.escape(month_name)} {sel_date.year}
 						</div>
-						<div style="font-size:46px;font-weight:900;color:{num_color};line-height:1.0;margin:2px 0;">
-							{sel_date.day:02d}
+						<div style="display:flex;align-items:center;gap:10px;margin:2px 0;">
+							<span style="font-size:46px;font-weight:900;color:{num_color};line-height:1.0;">
+								{sel_date.day:02d}
+							</span>
+							<button type="button"
+							onclick="event.stopPropagation();window.__revirClick('btn_open_cal_event_popup');"
+							title="{sel_date.strftime('%d.%m.%Y')} — Etkinlik & Plan Yönetimi (Ekle / Düzenle)"
+							style="width:34px;height:34px;border-radius:50%;border:1.5px solid {header_accent};
+							background:{header_accent};color:#ffffff;font-size:21px;font-weight:900;
+							line-height:1;display:inline-flex;align-items:center;justify-content:center;
+							cursor:pointer;box-shadow:0 3px 10px rgba(15,23,42,0.16);">+</button>
 						</div>
 						<div style="font-size:16px;font-weight:800;color:{num_color};">
 							{html.escape(weekday_name)}
@@ -1982,11 +1991,61 @@ def _render_interactive_calendar_leaf(
 			ui.rerun()
 
 	# -----------------------------------------------------------------------
-	# SEÇİLİ GÜNÜN ETKİNLİKLERİ & YENİ ETKİNLİK / TATİL OLUŞTURMA FORMU
+	# ETKİNLİK & PLAN YÖNETİMİ POP-UP DİYALOG TETİKLEYİCİSİ (+ BUTONU)
 	# -----------------------------------------------------------------------
-	with ui.container(border=True):
-		ui.markdown(f"#### 📌 {sel_date.strftime('%d')} {month_name} {sel_date.year} — Etkinlik & Plan Yönetimi")
-		if day_events:
+	try:
+		clicked_wid = getattr(ui._get_ctx(), "clicked_button", None)
+		if clicked_wid == "btn_open_cal_event_popup":
+			open_calendar_event_manager_dialog(
+				sel_iso=sel_iso,
+				connect_db_fn=connect_db_fn,
+				get_active_gemini_config_fn=get_active_gemini_config_fn,
+			)
+	except Exception:
+		pass
+
+
+@ui.dialog("📌 Etkinlik & Plan Yönetimi", width="large")
+def open_calendar_event_manager_dialog(
+	*,
+	sel_iso: str,
+	connect_db_fn: Callable,
+	get_active_gemini_config_fn: Callable,
+) -> None:
+	"""Günlük Takvim Yaprağı üzerindeki '+' butonuna basıldığında açılan Etkinlik & Plan Yönetimi pop-up penceresi."""
+	try:
+		sel_date = date.fromisoformat(str(sel_iso)[:10])
+	except Exception:
+		sel_date = date.today()
+		sel_iso = sel_date.isoformat()
+
+	month_name = TR_MONTH_NAMES[sel_date.month]
+	weekday_name = TR_WEEKDAY_NAMES[sel_date.weekday()]
+	ai_enabled, ai_key, ai_model = get_active_gemini_config_fn()
+
+	dlg_flash = ui.session_state.pop("_cal_dlg_flash", None)
+	if dlg_flash:
+		ui.success(dlg_flash)
+
+	ui.markdown(f"### 📅 {sel_date.strftime('%d')} {month_name} {sel_date.year} ({weekday_name}) — Etkinlik & Plan Yönetimi")
+
+	with connect_db_fn() as conn:
+		day_events = [
+			dict(r)
+			for r in conn.execute(
+				"""SELECT id, event_date, title, category, symbol_type, is_civil_holiday,
+				          is_half_day, profession_group, start_time, end_time, description,
+				          source, is_completed
+				   FROM calendar_events
+				   WHERE event_date = ?
+				   ORDER BY is_civil_holiday DESC, start_time ASC, id ASC""",
+				(sel_iso,),
+			).fetchall()
+		]
+
+	if day_events:
+		with ui.container(border=True):
+			ui.markdown("#### 📋 Bu Güne Kayıtlı Etkinlikler / Tatiller")
 			for ev in day_events:
 				ev_id = int(ev["id"])
 				ev_done = bool(ev.get("is_completed"))
@@ -1994,122 +2053,126 @@ def _render_interactive_calendar_leaf(
 				t_badge = f"`{t_range}` · " if t_range else ""
 				strike_open = "~~" if ev_done else ""
 				strike_close = "~~" if ev_done else ""
-				row_c1, row_c2, row_c3 = ui.columns([2.6, 0.55, 0.55])
+				row_c1, row_c2, row_c3 = ui.columns([2.8, 0.55, 0.55])
 				with row_c1:
 					ui.markdown(f"{t_badge}{strike_open}**{ev['title']}**{strike_close}")
 					if ev.get("description"):
 						ui.caption(ev["description"])
 				with row_c2:
 					done_lbl = "↩️" if ev_done else "✓"
-					if ui.button(done_lbl, key=f"btn_cal_done_{ev_id}", help="Tamamlandı durumunu değiştir", use_container_width=True):
+					if ui.button(done_lbl, key=f"dlg_btn_cal_done_{ev_id}", help="Tamamlandı durumunu değiştir", use_container_width=True):
 						with connect_db_fn() as conn:
 							conn.execute("UPDATE calendar_events SET is_completed = ? WHERE id = ?", (0 if ev_done else 1, ev_id))
 						ui.rerun()
 				with row_c3:
-					if ui.button("🗑️", key=f"btn_cal_del_{ev_id}", help="Bu kaydı sil", use_container_width=True):
+					if ui.button("🗑️", key=f"dlg_btn_cal_del_{ev_id}", help="Bu kaydı sil", use_container_width=True):
 						with connect_db_fn() as conn:
 							conn.execute("DELETE FROM calendar_events WHERE id = ?", (ev_id,))
-						ui.session_state["_cal_flash_msg"] = f"🗑️ '{ev['title']}' takvimden silindi."
+						ui.session_state["_cal_dlg_flash"] = f"🗑️ '{ev['title']}' takvimden silindi."
 						ui.rerun()
+	else:
+		ui.info("Bu güne henüz kayıtlı bir etkinlik, tatil veya sınav bulunmuyor. Aşağıdan hemen ekleyebilirsiniz.")
 
-		with ui.expander(f"➕ {sel_date.strftime('%d.%m.%Y')} Gününe Yeni Etkinlik / Tatil / Sınav Ekle", expanded=True):
-			if ai_enabled and ai_key:
-				q_ai_txt = ui.text_input(
-					"✍️ Yapay Zekâya (Gemini AI) Yazarak Hızlı Etkinlik / Gün / Saat / Durum Ekle",
-					placeholder=f"Örn: '{sel_date.strftime('%d.%m.%Y')} saat 10:30 4-A sınıfı göz taraması' veya 'Cuma günü idari izin'...",
-					key=f"cal_leaf_quick_ai_txt_{sel_iso}",
-				)
-				if ui.button("✨ Yazılanı Gemini AI ile Takvime İşle", key=f"btn_leaf_quick_ai_add_{sel_iso}", type="secondary", use_container_width=True):
-					if not q_ai_txt.strip():
-						ui.warning("Lütfen eklenecek etkinlik, gün, saat veya durumu yazın.")
-					else:
-						ok, res, used_m = generate_calendar_events_with_ai(
-							api_key=ai_key,
-							model=ai_model,
-							year=sel_date.year,
-							month=sel_date.month,
-							preset_type="election_or_custom",
-							custom_prompt=f"(Seçili gün bağlamı: {sel_iso}) {q_ai_txt.strip()}",
-						)
-						if ok:
-							ev_items = res.get("events") or []
-							added = save_ai_generated_events_to_db(ev_items, connect_db_fn, upsert=True)
-							if ev_items and isinstance(ev_items[0], dict) and ev_items[0].get("event_date"):
-								try:
-									d0 = date.fromisoformat(str(ev_items[0]["event_date"])[:10])
-									ui.session_state["cal_selected_date"] = d0.isoformat()
-									ui.session_state["cal_view_year"] = d0.year
-									ui.session_state["cal_view_month"] = d0.month
-								except Exception:
-									pass
-							ui.session_state["_cal_flash_msg"] = f"✨ Gemini AI ({used_m}): {res.get('summary') or ''} ({added} kayıt takvime eklendi)."
-							ui.rerun()
-						else:
-							ui.error(f"Gemini hatası: {res.get('error')}")
-				ui.divider()
-
-			cat_keys = list(CATEGORY_LABELS.keys())
-			cat_disp = [CATEGORY_LABELS[k][0] for k in cat_keys]
-			sym_keys = list(SYMBOL_OPTIONS.keys())
-			sym_disp = [SYMBOL_OPTIONS[k] for k in sym_keys]
-
-			picked_cat_disp = ui.selectbox(
-				"Kategori Seçin",
-				cat_disp,
-				index=cat_keys.index("revir_etkinlik"),
-				key=f"cal_add_cat_live_{sel_iso}",
+	with ui.container(border=True):
+		ui.markdown(f"#### ➕ {sel_date.strftime('%d.%m.%Y')} Gününe Yeni Etkinlik / Tatil / Sınav Ekle")
+		if ai_enabled and ai_key:
+			q_ai_txt = ui.text_input(
+				"✍️ Yapay Zekâya (Gemini AI) Yazarak Hızlı Etkinlik / Gün / Saat / Durum Ekle",
+				placeholder=f"Örn: '{sel_date.strftime('%d.%m.%Y')} saat 10:30 4-A sınıfı göz taraması' veya 'Cuma günü idari izin'...",
+				key=f"dlg_cal_quick_ai_txt_{sel_iso}",
 			)
-			picked_cat = cat_keys[cat_disp.index(picked_cat_disp)]
-			default_sym = CATEGORY_LABELS[picked_cat][2]
-			default_hol = picked_cat in ("milli_bayram", "resmi_tatil", "yarim_gun", "secim_idari_tatil")
-			default_half = picked_cat == "yarim_gun"
-
-			with ui.form(f"form_add_cal_event_{sel_iso}_{picked_cat}"):
-				new_title = ui.text_input("Etkinlik / Tatil / Sınav Başlığı", placeholder="Örn: 3-A Sınıfı Boy-Kilo Taraması veya Seçim İdari İzni")
-				picked_sym_disp = ui.selectbox("Takvim Sembolü", sym_disp, index=sym_keys.index(default_sym))
-				picked_sym = sym_keys[sym_disp.index(picked_sym_disp)]
-
-				tc1, tc2 = ui.columns(2)
-				with tc1:
-					new_start = ui.text_input("Başlangıç Saati", placeholder="09:00")
-				with tc2:
-					new_end = ui.text_input("Bitiş Saati", placeholder="12:30")
-
-				hc1, hc2 = ui.columns(2)
-				with hc1:
-					new_is_hol = ui.checkbox("Devlet Memuru Resmi Tatili (Kırmızı Yaz)", value=default_hol)
-				with hc2:
-					new_is_half = ui.checkbox("Yarım Gün Mesai (½ Rozeti)", value=default_half)
-
-				new_prof = ui.text_input("İlgili Meslek Grubu (Opsiyonel)", placeholder="Örn: Okul Hemşireleri ve Öğretmenler")
-				new_desc = ui.text_area("Açıklama / Not", placeholder="Günün anlamı veya planlanan etkinlik detayı...", height=55)
-
-				if ui.form_submit_button("💾 Takvime Kaydet", type="primary", use_container_width=True):
-					if not new_title.strip():
-						ui.warning("Lütfen bir başlık girin.")
-					else:
-						with connect_db_fn() as conn:
-							conn.execute(
-								"""INSERT INTO calendar_events
-								   (event_date, title, category, symbol_type, is_civil_holiday, is_half_day,
-								    profession_group, start_time, end_time, description, source, is_completed, created_at)
-								   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', 0, ?)""",
-								(
-									sel_iso,
-									new_title.strip(),
-									picked_cat,
-									picked_sym,
-									1 if (new_is_hol or new_is_half) else 0,
-									1 if new_is_half else 0,
-									new_prof.strip(),
-									new_start.strip()[:5],
-									new_end.strip()[:5],
-									new_desc.strip(),
-									datetime.now().isoformat(timespec="seconds"),
-								),
-							)
-						ui.session_state["_cal_flash_msg"] = f"✅ '{new_title.strip()}' ({sel_date.strftime('%d.%m.%Y')}) takvime eklendi."
+			if ui.button("✨ Yazılanı Gemini AI ile Takvime İşle", key=f"dlg_btn_quick_ai_add_{sel_iso}", type="secondary", use_container_width=True):
+				if not q_ai_txt.strip():
+					ui.warning("Lütfen eklenecek etkinlik, gün, saat veya durumu yazın.")
+				else:
+					ok, res, used_m = generate_calendar_events_with_ai(
+						api_key=ai_key,
+						model=ai_model,
+						year=sel_date.year,
+						month=sel_date.month,
+						preset_type="election_or_custom",
+						custom_prompt=f"(Seçili gün bağlamı: {sel_iso}) {q_ai_txt.strip()}",
+					)
+					if ok:
+						ev_items = res.get("events") or []
+						added = save_ai_generated_events_to_db(ev_items, connect_db_fn, upsert=True)
+						if ev_items and isinstance(ev_items[0], dict) and ev_items[0].get("event_date"):
+							try:
+								d0 = date.fromisoformat(str(ev_items[0]["event_date"])[:10])
+								ui.session_state["cal_selected_date"] = d0.isoformat()
+								ui.session_state["cal_view_year"] = d0.year
+								ui.session_state["cal_view_month"] = d0.month
+							except Exception:
+								pass
+						ui.session_state["_cal_dlg_flash"] = f"✨ Gemini AI ({used_m}): {res.get('summary') or ''} ({added} kayıt takvime eklendi)."
 						ui.rerun()
+					else:
+						ui.error(f"Gemini hatası: {res.get('error')}")
+			ui.divider()
+
+		cat_keys = list(CATEGORY_LABELS.keys())
+		cat_disp = [CATEGORY_LABELS[k][0] for k in cat_keys]
+		sym_keys = list(SYMBOL_OPTIONS.keys())
+		sym_disp = [SYMBOL_OPTIONS[k] for k in sym_keys]
+
+		picked_cat_disp = ui.selectbox(
+			"Kategori Seçin",
+			cat_disp,
+			index=cat_keys.index("revir_etkinlik"),
+			key=f"dlg_cal_add_cat_live_{sel_iso}",
+		)
+		picked_cat = cat_keys[cat_disp.index(picked_cat_disp)]
+		default_sym = CATEGORY_LABELS[picked_cat][2]
+		default_hol = picked_cat in ("milli_bayram", "resmi_tatil", "yarim_gun", "secim_idari_tatil")
+		default_half = picked_cat == "yarim_gun"
+
+		with ui.form(f"dlg_form_add_cal_event_{sel_iso}_{picked_cat}"):
+			new_title = ui.text_input("Etkinlik / Tatil / Sınav Başlığı", placeholder="Örn: 3-A Sınıfı Boy-Kilo Taraması veya Seçim İdari İzni")
+			picked_sym_disp = ui.selectbox("Takvim Sembolü", sym_disp, index=sym_keys.index(default_sym))
+			picked_sym = sym_keys[sym_disp.index(picked_sym_disp)]
+
+			tc1, tc2 = ui.columns(2)
+			with tc1:
+				new_start = ui.text_input("Başlangıç Saati", placeholder="09:00")
+			with tc2:
+				new_end = ui.text_input("Bitiş Saati", placeholder="12:30")
+
+			hc1, hc2 = ui.columns(2)
+			with hc1:
+				new_is_hol = ui.checkbox("Devlet Memuru Resmi Tatili (Kırmızı Yaz)", value=default_hol)
+			with hc2:
+				new_is_half = ui.checkbox("Yarım Gün Mesai (½ Rozeti)", value=default_half)
+
+			new_prof = ui.text_input("İlgili Meslek Grubu (Opsiyonel)", placeholder="Örn: Okul Hemşireleri ve Öğretmenler")
+			new_desc = ui.text_area("Açıklama / Not", placeholder="Günün anlamı veya planlanan etkinlik detayı...", height=60)
+
+			if ui.form_submit_button("💾 Takvime Kaydet", type="primary", use_container_width=True):
+				if not new_title.strip():
+					ui.warning("Lütfen bir başlık girin.")
+				else:
+					with connect_db_fn() as conn:
+						conn.execute(
+							"""INSERT INTO calendar_events
+							   (event_date, title, category, symbol_type, is_civil_holiday, is_half_day,
+							    profession_group, start_time, end_time, description, source, is_completed, created_at)
+							   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', 0, ?)""",
+							(
+								sel_iso,
+								new_title.strip(),
+								picked_cat,
+								picked_sym,
+								1 if (new_is_hol or new_is_half) else 0,
+								1 if new_is_half else 0,
+								new_prof.strip(),
+								new_start.strip()[:5],
+								new_end.strip()[:5],
+								new_desc.strip(),
+								datetime.now().isoformat(timespec="seconds"),
+							),
+						)
+					ui.session_state["_cal_flash_msg"] = f"✅ '{new_title.strip()}' ({sel_date.strftime('%d.%m.%Y')}) takvime eklendi."
+					ui.close_dialog()
+					ui.rerun()
 
 
 # ---------------------------------------------------------------------------
