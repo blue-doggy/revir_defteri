@@ -123,7 +123,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.11.0"
+_DEFAULT_APP_VERSION = "1.11.1"
 
 
 def _load_app_version() -> str:
@@ -1511,12 +1511,29 @@ def _slugify_person_name(name: str) -> str:
 	return cleaned or "kisi"
 
 
+def _ensure_master_academic_years_table(connection: sqlite3.Connection) -> None:
+	connection.execute(
+		"""CREATE TABLE IF NOT EXISTS academic_years (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT UNIQUE NOT NULL,
+			start_date TEXT NOT NULL,
+			end_date TEXT NOT NULL,
+			folder_name TEXT NOT NULL,
+			is_active INTEGER DEFAULT 0,
+			created_at TEXT DEFAULT CURRENT_TIMESTAMP
+		)"""
+	)
+	cnt_r = connection.execute("SELECT COUNT(*) FROM academic_years").fetchone()
+	if cnt_r and int(cnt_r[0] or 0) == 0:
+		connection.execute(
+			"INSERT OR IGNORE INTO academic_years(id, name, start_date, end_date, folder_name, is_active) VALUES (1, '2026-2027', '2026-09-01', '2027-06-20', 'egitim_yillari/2026_2027', 1)"
+		)
+
+
 def get_all_academic_years() -> list[dict]:
 	try:
 		with connect_master_db() as connection:
-			tbl_check = connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='academic_years'").fetchone()
-			if not tbl_check:
-				return []
+			_ensure_master_academic_years_table(connection)
 			rows = connection.execute("SELECT * FROM academic_years ORDER BY start_date DESC").fetchall()
 			return [dict(r) for r in rows]
 	except Exception:
@@ -1570,6 +1587,7 @@ def set_active_academic_year(year_id: int) -> None:
 	_ACTIVE_YEAR_CACHE.clear()
 	_DB_PATH_CACHE.clear()
 	with connect_master_db() as connection:
+		_ensure_master_academic_years_table(connection)
 		connection.execute("UPDATE academic_years SET is_active=0")
 		connection.execute("UPDATE academic_years SET is_active=1 WHERE id=?", (year_id,))
 		row = connection.execute("SELECT * FROM academic_years WHERE id=?", (year_id,)).fetchone()
@@ -1608,6 +1626,7 @@ def create_academic_year(
 	slug = re.sub(r"[^a-zA-Z0-9]+", "_", name).strip("_")
 	folder_rel = f"egitim_yillari/{slug}"
 	with connect_master_db() as connection:
+		_ensure_master_academic_years_table(connection)
 		cur = connection.execute(
 			"INSERT INTO academic_years(name, start_date, end_date, folder_name, is_active) VALUES (?, ?, ?, ?, 0)",
 			(name, start_date, end_date, folder_rel)
@@ -1698,16 +1717,19 @@ def create_academic_year(
 
 def update_academic_year(year_id: int, name: str, start_date: str, end_date: str) -> None:
 	with connect_master_db() as connection:
+		_ensure_master_academic_years_table(connection)
 		connection.execute(
 			"UPDATE academic_years SET name=?, start_date=?, end_date=? WHERE id=?",
 			(name.strip(), start_date, end_date, year_id)
 		)
+	_ACTIVE_YEAR_CACHE.clear()
 
 
 def delete_academic_year(year_id: int) -> tuple[bool, str]:
 	"""Deletes an academic year, its independent database, and its files permanently."""
 	import shutil
 	with connect_master_db() as connection:
+		_ensure_master_academic_years_table(connection)
 		all_rows = connection.execute("SELECT * FROM academic_years").fetchall()
 		if len(all_rows) <= 1:
 			return False, "Sistemde en az bir eğitim öğretim yılı bulunmalıdır; tek kalan eğitim yılı silinemez."
@@ -9798,7 +9820,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 				if ui.button("🔄 Senkronize Et", key=f"dossier_sync_json_{person_id}", use_container_width=True):
 					sync_after_person_mutation(person_id)
 					ui.success("Senkronize edildi.")
-					ui.rerun()
+					ui.rerun(scope="fragment")
 
 	# Opsiyonel Gemini AI: Öğrencinin Tüm Raporlarından & Geçmişinden Derin Klinik Çıkarım (Sadece AI açıkken)
 	_ov_ai_on, _ov_ai_key, _ov_ai_model = _get_active_gemini_config()
@@ -9870,7 +9892,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 						focus_question=inf_q,
 					)
 				ui.session_state[inf_state_k] = {"ok": ok_inf, "data": inf_data, "model": used_im, "doc_cnt": len(matched_docs_i)}
-				ui.rerun()
+				ui.rerun(scope="fragment")
 
 			inf_saved = ui.session_state.get(inf_state_k)
 			if isinstance(inf_saved, dict):
@@ -9908,7 +9930,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 							if upd_f:
 								_upsert_health_profile_fields(person_id, upd_f)
 								ui.success("✅ Önerilen alanlar sağlık profiline eklendi!")
-								ui.rerun()
+								ui.rerun(scope="fragment")
 					with act_r2:
 						if ui.button("📋 Önerilen Bakım Planını Ekle", disabled=not has_cp_sug, use_container_width=True, key=f"dos_inf_ap_cp_{person_id}"):
 							app_c_inf = get_app_settings()
@@ -9930,14 +9952,14 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 								)
 							sync_after_person_mutation(person_id)
 							ui.success("✅ Önerilen bakım planı eklendi!")
-							ui.rerun()
+							ui.rerun(scope="fragment")
 					with act_r3:
 						if ui.button("📄 Rapor AI Metnine Yansıt", disabled=not rep_para, use_container_width=True, key=f"dos_inf_ap_rep_{person_id}"):
 							_, cur_rep_txt = get_student_ai_report_state(person_id)
 							combined = (cur_rep_txt.strip() + "\n\n" + rep_para).strip() if cur_rep_txt.strip() else rep_para
 							save_student_ai_report_state(person_id, True, combined)
 							ui.success("✅ Çıkarım özeti öğrencinin Word/PDF rapor AI bölümüne eklendi!")
-							ui.rerun()
+							ui.rerun(scope="fragment")
 
 	ui.markdown("---")
 	ui.markdown("### 🩺 Okul Sağlık Taraması ve Bireysel Gelişim Bulguları")
@@ -9963,7 +9985,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 			btn_label = "✖ Kapat" if is_editing_vis else "✏️ Düzenle"
 			if hdr2.button(btn_label, key=f"btn_edit_vis_{person_id}", use_container_width=True):
 				ui.session_state[active_box_key] = None if is_editing_vis else "vision"
-				ui.rerun()
+				ui.rerun(scope="fragment")
 
 			if is_editing_vis:
 				with ui.form(f"form_inline_vis_{person_id}"):
@@ -9984,7 +10006,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 						)
 						ui.session_state[active_box_key] = None
 						ui.success("Göz ve görme bilgisi güncellendi.")
-						ui.rerun()
+						ui.rerun(scope="fragment")
 			else:
 				gl_val = hp["wears_glasses"] if hp and hp["wears_glasses"] else "Kayıt Yok"
 				vr_val = hp["vision_right"] if hp and hp["vision_right"] else "—"
@@ -10001,7 +10023,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 			btn_label = "✖ Kapat" if is_editing_beh else "✏️ Düzenle"
 			if hdr2.button(btn_label, key=f"btn_edit_beh_{person_id}", use_container_width=True):
 				ui.session_state[active_box_key] = None if is_editing_beh else "behavior"
-				ui.rerun()
+				ui.rerun(scope="fragment")
 
 			if is_editing_beh:
 				with ui.form(f"form_inline_beh_{person_id}"):
@@ -10014,7 +10036,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 						_upsert_health_profile_fields(person_id, {"health_behavior": res_beh})
 						ui.session_state[active_box_key] = None
 						ui.success("Sağlık davranışı bilgisi güncellendi.")
-						ui.rerun()
+						ui.rerun(scope="fragment")
 			else:
 				beh_val = hp["health_behavior"] if hp and hp["health_behavior"] else "Kayıt Yok / Değerlendirilmedi"
 				beh_items = parse_multiselect_values(beh_val)
@@ -10033,7 +10055,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 			btn_label = "✖ Kapat" if is_editing_hair else "✏️ Düzenle"
 			if hdr2.button(btn_label, key=f"btn_edit_hair_{person_id}", use_container_width=True):
 				ui.session_state[active_box_key] = None if is_editing_hair else "hair"
-				ui.rerun()
+				ui.rerun(scope="fragment")
 
 			if is_editing_hair:
 				with ui.form(f"form_inline_hair_{person_id}"):
@@ -10046,7 +10068,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 						_upsert_health_profile_fields(person_id, {"hair_screening": res_hair})
 						ui.session_state[active_box_key] = None
 						ui.success("Saç taraması bilgisi güncellendi.")
-						ui.rerun()
+						ui.rerun(scope="fragment")
 			else:
 				hair_val = hp["hair_screening"] if hp and hp["hair_screening"] else "Tarama Yapılmadı"
 				hair_items = parse_multiselect_values(hair_val)
@@ -10068,7 +10090,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 			btn_label = "✖ Kapat" if is_editing_psy else "✏️ Düzenle"
 			if hdr2.button(btn_label, key=f"btn_edit_psy_{person_id}", use_container_width=True):
 				ui.session_state[active_box_key] = None if is_editing_psy else "psychosocial"
-				ui.rerun()
+				ui.rerun(scope="fragment")
 
 			if is_editing_psy:
 				with ui.form(f"form_inline_psy_{person_id}"):
@@ -10086,7 +10108,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 						_upsert_health_profile_fields(person_id, {"psychosocial_status": res_psy})
 						ui.session_state[active_box_key] = None
 						ui.success("Psikososyal durum bilgisi güncellendi.")
-						ui.rerun()
+						ui.rerun(scope="fragment")
 			else:
 				psy_val = hp["psychosocial_status"] if hp and hp["psychosocial_status"] else "Kayıt Yok / Değerlendirilmedi"
 				ui.markdown(f"🧠 **Sınıf İçi Uyum ve İletişim:**<br>`{psy_val}`", unsafe_allow_html=True)
@@ -10100,7 +10122,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 			btn_label = "✖ Kapat" if is_editing_hear else "✏️ Düzenle"
 			if hdr2.button(btn_label, key=f"btn_edit_hear_{person_id}", use_container_width=True):
 				ui.session_state[active_box_key] = None if is_editing_hear else "hearing"
-				ui.rerun()
+				ui.rerun(scope="fragment")
 
 			if is_editing_hear:
 				with ui.form(f"form_inline_hear_{person_id}"):
@@ -10120,7 +10142,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 						)
 						ui.session_state[active_box_key] = None
 						ui.success("İşitme bilgisi güncellendi.")
-						ui.rerun()
+						ui.rerun(scope="fragment")
 			else:
 				hr_val = hp["hearing_right"] if hp and hp["hearing_right"] else "—"
 				hl_val = hp["hearing_left"] if hp and hp["hearing_left"] else "—"
@@ -10135,7 +10157,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 			btn_label = "✖ Kapat" if is_editing_harm else "✏️ Düzenle"
 			if hdr2.button(btn_label, key=f"btn_edit_harm_{person_id}", use_container_width=True):
 				ui.session_state[active_box_key] = None if is_editing_harm else "harmful_habits"
-				ui.rerun()
+				ui.rerun(scope="fragment")
 
 			if is_editing_harm:
 				with ui.form(f"form_inline_harm_{person_id}"):
@@ -10148,7 +10170,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 						_upsert_health_profile_fields(person_id, {"harmful_habits": res_harm})
 						ui.session_state[active_box_key] = None
 						ui.success("Zararlı alışkanlıklar bilgisi güncellendi.")
-						ui.rerun()
+						ui.rerun(scope="fragment")
 			else:
 				harm_val = hp["harmful_habits"] if (hp and "harmful_habits" in hp.keys() and hp["harmful_habits"]) else "Zararlı Alışkanlık Tespit Edilmedi"
 				harm_items = parse_multiselect_values(harm_val)
@@ -10167,7 +10189,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 			btn_label = "✖ Kapat" if is_editing_clin else "✏️ Düzenle"
 			if hdr2.button(btn_label, key=f"btn_edit_clin_{person_id}", use_container_width=True):
 				ui.session_state[active_box_key] = None if is_editing_clin else "clinical"
-				ui.rerun()
+				ui.rerun(scope="fragment")
 
 			if is_editing_clin:
 				with ui.form(f"form_inline_clin_{person_id}"):
@@ -10192,7 +10214,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 						)
 						ui.session_state[active_box_key] = None
 						ui.success("Klinik profil güncellendi.")
-						ui.rerun()
+						ui.rerun(scope="fragment")
 			else:
 				ui.markdown(f"🩸 **Kan Grubu:** `{(hp['blood_group'] if hp and hp['blood_group'] else None) or 'Belirtilmedi'}`")
 				ui.markdown(f"🔴 **Alerjiler:** `{(hp['allergies'] if hp and hp['allergies'] else None) or 'Yok'}`")
@@ -10207,7 +10229,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 			btn_label = "✖ Kapat" if is_editing_vac else "✏️ Düzenle"
 			if hdr2.button(btn_label, key=f"btn_edit_vac_{person_id}", use_container_width=True):
 				ui.session_state[active_box_key] = None if is_editing_vac else "vaccination"
-				ui.rerun()
+				ui.rerun(scope="fragment")
 
 			vac_sum = get_student_vaccination_summary(person_id, person["birth_date"])
 			if is_editing_vac:
@@ -10244,7 +10266,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 						save_bulk_student_vaccinations(person_id, vac_records)
 						ui.session_state[active_box_key] = None
 						ui.success("Aşı bilgileri güncellendi.")
-						ui.rerun()
+						ui.rerun(scope="fragment")
 			else:
 				if vac_sum["applicable_done_count"] > 0 and len(vac_sum["overdue_list"]) == 0:
 					ui.markdown(f"🟢 **Durum:** `Takvime Tam Uygun (%{vac_sum['percent']})`")
@@ -10367,7 +10389,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 					try:
 						ui.rerun(scope="fragment")
 					except Exception:
-						ui.rerun()
+						ui.rerun(scope="fragment")
 		else:
 			sn_c1, sn_c2 = ui.columns(2)
 			with sn_c1:
@@ -10482,7 +10504,7 @@ def _render_dossier_tab_visits(person: sqlite3.Row, person_id: int) -> None:
 				)
 			sync_after_person_mutation(person_id)
 			ui.success(f"{person['full_name']} için yeni revir kaydı başarıyla eklendi.")
-			ui.rerun()
+			ui.rerun(scope="fragment")
 
 	ui.markdown("#### 📋 Geçmiş Revir Kayıtları")
 	with connect_db() as connection:
@@ -10511,7 +10533,7 @@ def _render_dossier_tab_visits(person: sqlite3.Row, person_id: int) -> None:
 			if ui.button("🗑️ Seçili Viziti Sil", type="secondary", key=f"dossier_btn_del_v_{person_id}", use_container_width=True):
 				delete_visit(sel_dos_vid)
 				ui.success("Revir kaydı silindi.")
-				ui.rerun()
+				ui.rerun(scope="fragment")
 
 		_render_visit_doc_actions_bar(person_id, sel_dos_vid, key_prefix=f"dos_vdoc_{person_id}", person_name=str(person["full_name"] or ""))
 
@@ -10923,7 +10945,13 @@ def render_gemini_overview_command_center(s_date: str, e_date: str) -> None:
 				cutoff = (date.today() - timedelta(days=14)).isoformat()
 				with connect_db() as conn:
 					rows = conn.execute(
-						"""SELECT v.visit_date, c.name AS class_name, v.complaint, v.symptoms, v.temperature_c, v.referral
+						"""SELECT v.visit_date, c.name AS class_name, v.complaint, v.symptoms,
+								  (SELECT vr.temperature_c FROM vital_readings vr
+								   WHERE vr.student_id = v.student_id
+								     AND substr(vr.measured_at, 1, 10) = v.visit_date
+								     AND vr.temperature_c IS NOT NULL
+								   ORDER BY vr.id DESC LIMIT 1) AS temperature_c,
+								  v.referral
 						   FROM visits v
 						   JOIN students s ON s.id = v.student_id
 						   LEFT JOIN classes c ON c.id = s.class_id
@@ -11835,7 +11863,7 @@ def _render_student_ai_report_editor(person_id: int, key_prefix: str = "stu_rep"
 				ui.session_state[txt_key] = ai_txt
 				ui.session_state[sync_key] = (True, ai_txt.strip())
 				ui.session_state[flash_k] = f"✅ Gemini ({used_m}) değerlendirmesi oluşturuldu, kaydedildi ve hem profile hem raporlara yansıtıldı!"
-				ui.rerun()
+				ui.rerun(scope="fragment")
 			else:
 				ui.error(f"Gemini AI hatası: {ai_txt}")
 
@@ -11858,7 +11886,7 @@ def _render_student_ai_report_editor(person_id: int, key_prefix: str = "stu_rep"
 					ui.session_state[txt_key] = rev_txt
 					ui.session_state[sync_key] = (True, rev_txt.strip())
 					ui.session_state[flash_k] = f"✅ Rapor metni Gemini ({used_m}) ile talimatınıza göre düzenlendi ve kaydedildi!"
-					ui.rerun()
+					ui.rerun(scope="fragment")
 				else:
 					ui.error(f"Gemini AI düzenleme hatası: {rev_txt}")
 
@@ -11873,13 +11901,13 @@ def _render_student_ai_report_editor(person_id: int, key_prefix: str = "stu_rep"
 			save_student_ai_report_state(pid, True, edited_txt)
 			ui.session_state[sync_key] = (True, (edited_txt or "").strip())
 			ui.session_state[flash_k] = "✅ Düzenlediğiniz metin kaydedildi; hem Öğrenci Profilindeki hem Raporlar ekranındaki Word/PDF çıktılara anında yansır."
-			ui.rerun()
+			ui.rerun(scope="fragment")
 
 		if clr_txt_clicked:
 			save_student_ai_report_state(pid, inc_val, "")
 			ui.session_state[txt_key] = ""
 			ui.session_state[sync_key] = (inc_val, "")
-			ui.rerun()
+			ui.rerun(scope="fragment")
 
 		return True, (edited_txt or "").strip()
 
@@ -12036,7 +12064,7 @@ def _render_dossier_tab_measurements(person: sqlite3.Row, person_id: int) -> Non
 				for _mk in (f"dossier_m_h_{person_id}", f"dossier_m_w_{person_id}", f"dossier_m_hc_{person_id}"):
 					ui.session_state.pop(_mk, None)
 				ui.success(f"Ölçüm kaydedildi: {summary_txt}")
-				ui.rerun()
+				ui.rerun(scope="fragment")
 
 	with connect_db() as connection:
 		records = pd.read_sql_query(
@@ -12115,7 +12143,7 @@ def _render_dossier_tab_measurements(person: sqlite3.Row, person_id: int) -> Non
 					)
 				sync_after_person_mutation(person_id, active_measurement_id=active_meas_id)
 				ui.success("Tablo üzerinden ölçüm güncellendi.")
-				ui.rerun()
+				ui.rerun(scope="fragment")
 
 	# WHO Clinical Growth Curves & Percentile tracking
 	ui.markdown("#### 📈 WHO Klinik Büyüme Eğrileri ve Takip Grafiği")
@@ -12182,7 +12210,7 @@ def _render_dossier_tab_measurements(person: sqlite3.Row, person_id: int) -> Non
 		if ui.button("🗑️ Seçili Ölçümü Sil", type="secondary", key=f"dossier_btn_del_m_{person_id}", use_container_width=True):
 			delete_measurement(m_opts[sel_del_m])
 			ui.success("Ölçüm kaydı silindi.")
-			ui.rerun()
+			ui.rerun(scope="fragment")
 
 
 def _render_dossier_tab_vitals(person: sqlite3.Row, person_id: int) -> None:
@@ -12238,7 +12266,7 @@ def _render_dossier_tab_vitals(person: sqlite3.Row, person_id: int) -> None:
 					spo2=v_spo2
 				)
 				ui.success(f"Vital bulgu kaydedildi: {summary_v}")
-				ui.rerun()
+				ui.rerun(scope="fragment")
 
 	ui.markdown("#### 📋 Geçmiş Vital Ölçümleri")
 	with connect_db() as connection:
@@ -12260,7 +12288,7 @@ def _render_dossier_tab_vitals(person: sqlite3.Row, person_id: int) -> None:
 			if ui.button("🗑️ Seçili Vital Kaydını Sil", type="secondary", key=f"dossier_btn_del_vr_{person_id}", use_container_width=True):
 				delete_vital(vr_opts[sel_del_vr])
 				ui.success("Vital kaydı silindi.")
-				ui.rerun()
+				ui.rerun(scope="fragment")
 
 
 def _render_dossier_tab_labs(person: sqlite3.Row, person_id: int) -> None:
@@ -12312,7 +12340,7 @@ def _render_dossier_tab_labs(person: sqlite3.Row, person_id: int) -> None:
 							)
 				sync_after_person_mutation(person_id)
 				ui.success("Tahlil sonuçları kaydedildi.")
-				ui.rerun()
+				ui.rerun(scope="fragment")
 
 	ui.markdown("#### 📋 Kayıtlı Tahlil Sonuçları & Orijinal Belgeler")
 	with connect_db() as connection:
@@ -12370,17 +12398,17 @@ def _render_dossier_tab_vaccinations(person: sqlite3.Row, person_id: int, hp: sq
 		if ui.button("✅ Yaşına Uygun Aşıları Tamamla", key=f"vac_btn_fill_age_{person_id}", type="primary", use_container_width=True):
 			cnt = quick_fill_routine_vaccinations_for_student(person_id, person["birth_date"], up_to_age=True)
 			ui.success(f"{cnt} adet yaşa uygun aşı yapıldı olarak işaretlendi.")
-			ui.rerun()
+			ui.rerun(scope="fragment")
 	with t_c2:
 		if ui.button("📋 Tüm Takvimi İşaretle", key=f"vac_btn_fill_all_{person_id}", use_container_width=True):
 			cnt = quick_fill_routine_vaccinations_for_student(person_id, person["birth_date"], up_to_age=False)
 			ui.success("Tüm rutin aşılar yapıldı olarak işaretlendi.")
-			ui.rerun()
+			ui.rerun(scope="fragment")
 	with t_c3:
 		if ui.button("🔄 Sıfırla", key=f"vac_btn_clear_{person_id}", use_container_width=True):
 			clear_student_vaccinations(person_id)
 			ui.warning("Tüm aşı kayıtları temizlendi.")
-			ui.rerun()
+			ui.rerun(scope="fragment")
 	with t_c4:
 		vac_docx = build_vaccination_card_docx(person_id)
 		ui.download_button(
@@ -12475,7 +12503,7 @@ def _render_dossier_tab_vaccinations(person: sqlite3.Row, person_id: int, hp: sq
 			records_to_save = list(vac_form_entries.values())
 			save_bulk_student_vaccinations(person_id, records_to_save)
 			ui.success("✅ Aşı kayıtları başarıyla kaydedildi ve tüm profil ile eşitlendi.")
-			ui.rerun()
+			ui.rerun(scope="fragment")
 
 
 def compile_person_clinical_facts(person_id: int) -> str:
@@ -12982,7 +13010,7 @@ def _render_dossier_tab_care_plans(person: sqlite3.Row, person_id: int, hp: sqli
 			_sync_guardian_bidirectional_conn(connection, person_id)
 		sync_after_person_mutation(person_id)
 		ui.success("Sağlık profili ve tarama bilgileri başarıyla güncellendi.")
-		ui.rerun()
+		ui.rerun(scope="fragment")
 
 	ui.markdown("---")
 	ui.markdown("#### 📋 Hemşirelik Bakım Planı Yönetimi")
@@ -13105,7 +13133,7 @@ def _render_dossier_tab_edit_demographics(person: sqlite3.Row, person_id: int, h
 			sync_student_measurements(person_id, _sync=False)
 			sync_after_person_mutation(person_id)
 			ui.success("Kimlik ve iletişim bilgileri başarıyla güncellendi.")
-			ui.rerun()
+			ui.rerun(scope="fragment")
 
 	ui.markdown("---")
 	del_chk_col, del_btn_col = ui.columns([2, 1])
@@ -13484,7 +13512,7 @@ def _render_dossier_tab_seizures(person: sqlite3.Row, person_id: int, hp: sqlite
 				try:
 					ui.rerun(scope="fragment")
 				except Exception:
-					ui.rerun()
+					ui.rerun(scope="fragment")
 
 	logs = get_student_seizure_logs(person_id)
 	safe_slug = _slugify_person_name(person["full_name"])
@@ -13546,7 +13574,7 @@ def _render_dossier_tab_seizures(person: sqlite3.Row, person_id: int, hp: sqlite
 			try:
 				ui.rerun(scope="fragment")
 			except Exception:
-				ui.rerun()
+				ui.rerun(scope="fragment")
 
 
 def _render_dossier_tab_disability(person: sqlite3.Row, person_id: int, hp: sqlite3.Row | None) -> None:
@@ -13562,7 +13590,7 @@ def _render_dossier_tab_disability(person: sqlite3.Row, person_id: int, hp: sqli
 			dp_off["has_disability"] = False
 			save_person_disability_profile(person_id, dp_off)
 			ui.success("Engel durumu 'Engeli Yok' olarak güncellendi. Bu sekme gizlendi.")
-			ui.rerun()
+			ui.rerun(scope="fragment")
 
 	summary_line = format_disability_badge_text(dp)
 	if summary_line:
@@ -13724,7 +13752,7 @@ def _render_dossier_tab_disability(person: sqlite3.Row, person_id: int, hp: sqli
 		}
 		save_person_disability_profile(person_id, new_dp)
 		ui.success("✅ Engellilik ve fonksiyonel kullanım profili kaydedildi! Artık Gemini AI ve tüm sağlık raporları bu bilgileri otomatik dikkate alacaktır.")
-		ui.rerun()
+		ui.rerun(scope="fragment")
 
 
 def render_person_dossier_content(person_id: int, is_dialog: bool = False) -> None:
@@ -15603,7 +15631,7 @@ def open_class_manager_dialog() -> None:
 								connection.execute("INSERT OR IGNORE INTO classes(name, teacher_name) VALUES (?, ?)", (p, new_tch_input.strip() if new_tch_input.strip() else None))
 						clear_all_data_caches()
 						ui.success(f"{len(parts)} sınıf eklendi.")
-						ui.rerun()
+						ui.rerun(scope="fragment")
 
 		with add_c2:
 			ui.markdown("##### ⚡ Hazır Şablon & Kademe Ekle")
@@ -15620,7 +15648,7 @@ def open_class_manager_dialog() -> None:
 				if to_add:
 					added_cnt, _ = apply_class_template(to_add, clear_empty=False)
 					ui.success(f"'{preset_choice}' şablonundan {added_cnt} yeni sınıf eklendi.")
-					ui.rerun()
+					ui.rerun(scope="fragment")
 				else:
 					ui.warning("Lütfen eklemek istediğiniz şablonu seçin.")
 
@@ -15656,7 +15684,7 @@ def open_class_manager_dialog() -> None:
 							)
 						if ok_ac:
 							ui.session_state["modal_ai_cls_preview"] = {"res": ac_res, "model": used_am}
-							ui.rerun()
+							ui.rerun(scope="fragment")
 						else:
 							ui.error(f"Gemini hatası: {ac_res.get('error')}")
 
@@ -15707,11 +15735,11 @@ def open_class_manager_dialog() -> None:
 								clear_all_data_caches()
 								ui.session_state.pop("modal_ai_cls_preview", None)
 								ui.success(f"🎉 {added_c} yeni sınıf" + (f" ve {added_s} yeni öğrenci" if added_s else "") + " oluşturuldu!")
-								ui.rerun()
+								ui.rerun(scope="fragment")
 						with ca2:
 							if ui.button("✖ Önizlemeyi Temizle", use_container_width=True, key="modal_btn_ai_cls_cancel"):
 								ui.session_state.pop("modal_ai_cls_preview", None)
-								ui.rerun()
+								ui.rerun(scope="fragment")
 
 		ui.markdown("##### 📋 Kayıtlı Sınıflar ve Öğretmenler Listesi")
 		ui.dataframe(
@@ -15752,7 +15780,7 @@ def open_class_manager_dialog() -> None:
 							connection.execute("UPDATE classes SET teacher_name=? WHERE id=?", (new_t_name, old_r["id"]))
 				sync_all_person_data_files()
 				ui.success(f"'{target_cls}' bilgileri başarıyla güncellendi.")
-				ui.rerun()
+				ui.rerun(scope="fragment")
 
 			if ui.button(f"🗑️ '{target_cls}' Sınıfını Çıkar (İçindeki öğrenciler 'Sınıf Belirtilmedi' olarak korunur)", type="secondary", key="modal_btn_del_cls", use_container_width=True):
 				with connect_db() as connection:
@@ -15766,7 +15794,7 @@ def open_class_manager_dialog() -> None:
 					ui.session_state["active_class_filter"] = "Tüm sınıflar"
 				sync_all_person_data_files()
 				ui.success(f"'{target_cls}' sınıfı kaldırıldı.")
-				ui.rerun()
+				ui.rerun(scope="fragment")
 
 	with tab_assign:
 		ui.caption("Aşağıdaki listeden bir veya birden fazla öğrenci seçip okuldaki sınıflarına tek tıkla atayabilirsiniz.")
@@ -15786,7 +15814,7 @@ def open_class_manager_dialog() -> None:
 						sid = stu_label_map[lbl]
 						connection.execute("UPDATE OR IGNORE students SET class_id=? WHERE id=?", (dest_cid, sid))
 				ui.success(f"{len(picked_students)} öğrenci '{dest_class}' sınıfına atandı.")
-				ui.rerun()
+				ui.rerun(scope="fragment")
 
 
 @ui.dialog("➕ Yeni Profil ve İlk Ölçüm / Sağlık Kaydı", width="large", mode="drawer")
@@ -16264,7 +16292,7 @@ def render_students() -> None:
 				hit_ids = {int(r[0]) for r in _fconn.execute("SELECT student_id FROM diabetes_profiles WHERE is_diabetic = 1").fetchall()}
 			elif clin_filter == "♿ Engelli / Özel Gereksinim":
 				hit_ids = {int(r[0]) for r in _fconn.execute("SELECT id FROM students WHERE COALESCE(has_disability, 0) = 1").fetchall()}
-				hit_ids |= {int(r[0]) for r in _fconn.execute("SELECT student_id FROM health_profiles WHERE COALESCE(has_disability, 0) = 1 OR (special_needs_codes IS NOT NULL AND trim(special_needs_codes) != '')").fetchall()}
+				hit_ids |= {int(r[0]) for r in _fconn.execute("SELECT student_id FROM health_profiles WHERE COALESCE(disability_rate, 0) > 0 OR (disability_profile_json IS NOT NULL AND disability_profile_json LIKE '%\"has_disability\": true%') OR (special_needs_codes IS NOT NULL AND trim(special_needs_codes) != '')").fetchall()}
 			else:  # ⚠️ Eksik Bilgi
 				hit_ids = {int(r[0]) for r in _fconn.execute("SELECT id FROM students WHERE birth_date IS NULL OR trim(birth_date) = '' OR sex IS NULL OR trim(sex) = '' OR guardian_phone IS NULL OR trim(guardian_phone) = ''").fetchall()}
 		students = students[students["id"].isin(hit_ids)].reset_index(drop=True)
@@ -22271,7 +22299,7 @@ def open_report_settings_dialog() -> None:
 			if ui.button("✅ Tam Kapsamlı Resmi Sağlık Raporu", use_container_width=True, help="Tüm bölümler ve geçmiş kayıtlar eksiksiz dahil edilir.", key="rep_preset_full"):
 				save_report_settings(dict(DEFAULT_REPORT_SETTINGS))
 				ui.success("Tam kapsamlı resmi rapor şablonu uygulandı!")
-				ui.rerun()
+				ui.rerun(scope="fragment")
 			if ui.button("🩺 Yalnızca Revir & Muayene Raporu", use_container_width=True, help="Sadece kimlik, uyarılar ve revir vizit geçmişi dahil edilir.", key="rep_preset_visits"):
 				custom_s = dict(DEFAULT_REPORT_SETTINGS)
 				custom_s.update({
@@ -22284,7 +22312,7 @@ def open_report_settings_dialog() -> None:
 				})
 				save_report_settings(custom_s)
 				ui.success("Yalnızca revir muayene raporu şablonu uygulandı!")
-				ui.rerun()
+				ui.rerun(scope="fragment")
 		with pr_c2:
 			if ui.button("📏 Yalnızca Büyüme & Persantil Raporu", use_container_width=True, help="DSÖ büyüme eğrileri, boy-kilo geçmişi ve persantil değerlendirmesi.", key="rep_preset_growth"):
 				custom_s = dict(DEFAULT_REPORT_SETTINGS)
@@ -22296,7 +22324,7 @@ def open_report_settings_dialog() -> None:
 				})
 				save_report_settings(custom_s)
 				ui.success("Büyüme ve persantil raporu şablonu uygulandı!")
-				ui.rerun()
+				ui.rerun(scope="fragment")
 			if ui.button("📋 Özet Sağlık Künyesi (Vizitsiz Form)", use_container_width=True, help="Alerji, kronik durum, acil notu ve vital özetinden oluşan tek sayfalık form.", key="rep_preset_summary"):
 				custom_s = dict(DEFAULT_REPORT_SETTINGS)
 				custom_s.update({
@@ -22307,7 +22335,7 @@ def open_report_settings_dialog() -> None:
 				})
 				save_report_settings(custom_s)
 				ui.success("Özet sağlık künyesi şablonu uygulandı!")
-				ui.rerun()
+				ui.rerun(scope="fragment")
 
 	with tab_sections:
 		ui.markdown("##### 📑 Rapora Dahil Edilecek Ana Bölümler")

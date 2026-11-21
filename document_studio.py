@@ -734,7 +734,7 @@ def _render_pdf_studio(
 		if ui.button("🔍 Yazılabilir Alanları Tara", type="secondary", use_container_width=True, key=f"pdf_rescan_{fhash}_{cur_pg}"):
 			ui.session_state[state_key][cur_pg] = scan_pdf_writable_fields(file_path, cur_pg)
 			ui.session_state[flash_k] = f"✅ Sayfa {cur_pg + 1} yerel olarak tarandı: {len(ui.session_state[state_key][cur_pg])} yazılabilir alan bulundu."
-			ui.rerun()
+			ui.rerun(scope="fragment")
 
 	with tb3:
 		ui.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
@@ -750,7 +750,7 @@ def _render_pdf_studio(
 					pass
 			cnt = auto_match_pdf_fields_locally(cur_fields, app_cfg, active_person, hp_dict)
 			ui.session_state[flash_k] = f"⚡ {cnt} alan okul ayarları ve seçili kişi bilgileriyle otomatik dolduruldu!" if cnt else "Eşleşen boş alan bulunamadı; manuel girebilir veya yeni alan ekleyebilirsiniz."
-			ui.rerun()
+			ui.rerun(scope="fragment")
 
 	with tb4:
 		ui.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
@@ -811,7 +811,7 @@ def _render_pdf_studio(
 							})
 						ui.session_state[state_key][cur_pg] = new_ai_fields
 						ui.session_state[flash_k] = f"✨ Gemini Vision ({used_m}) Sayfa {cur_pg + 1} üzerinde {len(new_ai_fields)} yazılabilir alan buldu!"
-						ui.rerun()
+						ui.rerun(scope="fragment")
 					else:
 						ui.error(f"Gemini Vision tarama hatası: {sc_res.get('error', 'Alan bulunamadı')}")
 
@@ -849,7 +849,7 @@ def _render_pdf_studio(
 									f["value"] = nv
 									upd += 1
 							ui.session_state[flash_k] = f"✨ Gemini ({used_m}) {upd} form alanını doldurdu! {af_res.get('explanation', '')}"
-							ui.rerun()
+							ui.rerun(scope="fragment")
 						else:
 							ui.error(f"Gemini doldurma hatası: {af_res.get('error', 'Ayrıştırılamadı')}")
 
@@ -885,7 +885,7 @@ def _render_pdf_studio(
 							ui.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
 							if ui.button("🗑️", key=f"pdf_fdel_{fhash}_{cur_pg}_{fid}", help="Bu alanı kaldır", use_container_width=True):
 								cur_fields.pop(f_idx)
-								ui.rerun()
+								ui.rerun(scope="fragment")
 						with ui.expander(f"⚙️ Konum & Yazı Boyutu İnce Ayar (#{f_idx + 1})", expanded=False):
 							t1, t2, t3, t4 = ui.columns(4)
 							f["x0"] = float(t1.number_input("Sol (X)", min_value=0.0, max_value=pw, value=float(f["x0"]), step=4.0, key=f"pdf_fx0_{fhash}_{cur_pg}_{fid}"))
@@ -930,7 +930,7 @@ def _render_pdf_studio(
 					"clear_bg": False,
 				})
 				ui.session_state[flash_k] = f"➕ '{m_lbl}' alanı Sayfa {cur_pg + 1} üzerine eklendi."
-				ui.rerun()
+				ui.rerun(scope="fragment")
 
 		with st_tab_save:
 			filled_total = sum(
@@ -949,13 +949,13 @@ def _render_pdf_studio(
 					save_filled_pdf(file_path, ui.session_state[state_key], target_p)
 					ctx_api["get_or_create_document_cover"](target_p, force=True)
 					ui.session_state[flash_k] = f"✅ Doldurulmuş PDF `{target_p.name}` olarak Evrak Deposuna kaydedildi!"
-					ui.rerun()
+					ui.rerun(scope="fragment")
 			with sv2:
 				if ui.button("💾 Mevcut PDF Üzerine Yaz", type="secondary", use_container_width=True, key=f"pdf_save_over_{fhash}"):
 					save_filled_pdf(file_path, ui.session_state[state_key], file_path)
 					ctx_api["get_or_create_document_cover"](file_path, force=True)
 					ui.session_state[flash_k] = f"✅ `{file_path.name}` dosyası güncellendi!"
-					ui.rerun()
+					ui.rerun(scope="fragment")
 
 	# Sol Sütun: Canlı Önizleme (sağdaki değişiklikler anında yansır!)
 	with col_prev:
@@ -1015,7 +1015,7 @@ def _render_docx_studio(
 									df[col] = df[col].astype(str).str.replace(find_txt, rep_txt, regex=False)
 									hit += int(mask.sum())
 					ui.session_state[flash_k] = f"🔄 {hit} yerde değiştirme uygulandı."
-					ui.rerun()
+					ui.rerun(scope="fragment")
 
 		if ui.button("⚡ Yer Tutucuları ([OKUL_ADI], [TARIH], [HEMSIRE_ADI], [OGRENCI_ADI], [SINIF]) Otomatik Doldur", use_container_width=True, key=f"docx_fill_ph_{fhash}"):
 			ph_map = {
@@ -1043,7 +1043,7 @@ def _render_docx_studio(
 								df[col] = s_col.str.replace(k_ph, v_ph, regex=False)
 								hit += 1
 			ui.session_state[flash_k] = f"⚡ {hit} yer tutucu otomatik dolduruldu!" if hit else "Belgede eşleşen köşeli parantezli yer tutucu bulunamadı."
-			ui.rerun()
+			ui.rerun(scope="fragment")
 
 	# Opsiyonel Gemini Word Yardımcı Paneli (SADECE Gemini açıkken!)
 	if is_gai_on:
@@ -1083,7 +1083,7 @@ def _render_docx_studio(
 						)
 					if ok_dw:
 						ui.session_state[f"docx_ai_prop_{fhash}"] = {"res": dw_res, "model": used_m}
-						ui.rerun()
+						ui.rerun(scope="fragment")
 					else:
 						ui.error(f"Gemini hatası: {dw_res.get('error')}")
 
@@ -1124,11 +1124,11 @@ def _render_docx_studio(
 								pass
 						ui.session_state.pop(f"docx_ai_prop_{fhash}", None)
 						ui.session_state[flash_k] = "✅ Gemini önerileri düzenleyiciye aktarıldı! Kaydetmek için aşağıdan 'Kaydet' butonuna basın."
-						ui.rerun()
+						ui.rerun(scope="fragment")
 				with ap_c2:
 					if ui.button("✖ Öneriyi İptal Et", use_container_width=True, key=f"docx_ai_dismiss_{fhash}"):
 						ui.session_state.pop(f"docx_ai_prop_{fhash}", None)
-						ui.rerun()
+						ui.rerun(scope="fragment")
 
 	t_p, t_t, t_s = ui.tabs([
 		f"📝 Paragraflar ({sum(1 for p in paras if p['text'].strip())})",
@@ -1157,7 +1157,7 @@ def _render_docx_studio(
 				st["appended"].append(new_p_txt.strip())
 				ui.session_state[f"docx_newp_{fhash}"] = ""
 				ui.session_state[flash_k] = "➕ Yeni paragraf belge sonuna eklendi."
-				ui.rerun()
+				ui.rerun(scope="fragment")
 		if st["appended"]:
 			ui.caption(f"Belge sonuna eklenecek **{len(st['appended'])}** yeni paragraf:")
 			for ai, at in enumerate(st["appended"]):
@@ -1165,7 +1165,7 @@ def _render_docx_studio(
 				ac1.markdown(f"• {html.escape(at)}")
 				if ac2.button("✖", key=f"docx_rm_app_{fhash}_{ai}"):
 					st["appended"].pop(ai)
-					ui.rerun()
+					ui.rerun(scope="fragment")
 
 	with t_t:
 		if not tables:
@@ -1191,7 +1191,7 @@ def _render_docx_studio(
 				ctx_api["get_or_create_document_cover"](file_path, force=True)
 				ui.session_state.pop(st_key, None)
 				ui.session_state[flash_k] = f"✅ `{file_path.name}` başarıyla güncellendi!"
-				ui.rerun()
+				ui.rerun(scope="fragment")
 		with s2:
 			if ui.button("📄 Yeni Kopya Olarak Depoya Kaydet", type="secondary", use_container_width=True, key=f"docx_sv_copy_{fhash}"):
 				target_p = _unique_target_path(evrak_dir, new_stem, ".docx")
@@ -1200,7 +1200,7 @@ def _render_docx_studio(
 				_save_docx_structure(file_path, target_p, edited_map, st["appended"], tbl_map)
 				ctx_api["get_or_create_document_cover"](target_p, force=True)
 				ui.session_state[flash_k] = f"✅ `{target_p.name}` Evrak Deposuna yeni kopya olarak kaydedildi!"
-				ui.rerun()
+				ui.rerun(scope="fragment")
 
 
 def _render_xlsx_studio(
@@ -1269,7 +1269,7 @@ def _render_xlsx_studio(
 						)
 					if ok_x:
 						ui.session_state[f"xlsx_ai_prop_{fhash}_{sel_sheet}"] = {"res": x_res, "model": used_m}
-						ui.rerun()
+						ui.rerun(scope="fragment")
 					else:
 						ui.error(f"Gemini hatası: {x_res.get('error')}")
 
@@ -1302,11 +1302,11 @@ def _render_xlsx_studio(
 						ui.session_state[df_key] = df_mod
 						ui.session_state.pop(f"xlsx_ai_prop_{fhash}_{sel_sheet}", None)
 						ui.session_state[flash_k] = "✅ Gemini önerileri Excel tablosuna uygulandı!"
-						ui.rerun()
+						ui.rerun(scope="fragment")
 				with xa2:
 					if ui.button("✖ İptal", use_container_width=True, key=f"xlsx_ai_dismiss_{fhash}_{sel_sheet}"):
 						ui.session_state.pop(f"xlsx_ai_prop_{fhash}_{sel_sheet}", None)
-						ui.rerun()
+						ui.rerun(scope="fragment")
 
 	ui.caption("💡 Hücreye tıklayıp doğrudan yazabilirsiniz; `Enter` tuşu bir alt satıra geçer, alttan yeni satır ekleyebilirsiniz.")
 	edited_df = ui.data_editor(
@@ -1325,14 +1325,14 @@ def _render_xlsx_studio(
 			_save_xlsx_sheet_df(file_path, file_path, sel_sheet, edited_df, new_sheet_title=new_sh_nm)
 			ctx_api["get_or_create_document_cover"](file_path, force=True)
 			ui.session_state[flash_k] = f"✅ `{file_path.name}` ({new_sh_nm.strip() or sel_sheet}) kaydedildi!"
-			ui.rerun()
+			ui.rerun(scope="fragment")
 	with sv2:
 		if ui.button("📊 Yeni Kopya Olarak Depoya Kaydet", type="secondary", use_container_width=True, key=f"xlsx_sv_copy_{fhash}"):
 			target_p = _unique_target_path(evrak_dir, new_stem, ".xlsx")
 			_save_xlsx_sheet_df(file_path, target_p, sel_sheet, edited_df, new_sheet_title=new_sh_nm)
 			ctx_api["get_or_create_document_cover"](target_p, force=True)
 			ui.session_state[flash_k] = f"✅ `{target_p.name}` Evrak Deposuna kaydedildi!"
-			ui.rerun()
+			ui.rerun(scope="fragment")
 
 
 def _render_text_studio(file_path: Path, fhash: str, evrak_dir: Path, ctx_api: dict[str, Any], flash_k: str) -> None:
@@ -1342,7 +1342,7 @@ def _render_text_studio(file_path: Path, fhash: str, evrak_dir: Path, ctx_api: d
 		file_path.write_text(edited or "", encoding="utf-8")
 		ctx_api["get_or_create_document_cover"](file_path, force=True)
 		ui.session_state[flash_k] = f"✅ `{file_path.name}` kaydedildi!"
-		ui.rerun()
+		ui.rerun(scope="fragment")
 
 
 def create_new_office_document_in_depot(
@@ -1687,27 +1687,6 @@ def apply_extracted_clinical_record(
 					)
 				applied_log.append("♿ Özel gereksinim / engellilik profili güncellendi")
 
-		# 7. Diyabet / İnsülin Profili
-		if apply_diabetes:
-			diab = extracted.get("diabetes") or {}
-			if diab.get("is_diabetic"):
-				idm.ensure_diabetes_tables(conn)
-				cur_p = idm.get_diabetes_profile(connect_db_fn, student_id)
-				upd_p = dict(cur_p)
-				upd_p["is_diabetic"] = 1
-				if str(diab.get("diabetes_type") or "").strip():
-					upd_p["diabetes_type"] = str(diab["diabetes_type"]).strip()
-				for num_k in ("icr_breakfast", "icr_lunch", "icr_snack", "isf", "target_bg"):
-					if diab.get(num_k) not in (None, ""):
-						try:
-							upd_p[num_k] = float(str(diab[num_k]).replace(",", "."))
-						except Exception:
-							pass
-				if str(diab.get("insulin_brand") or "").strip():
-					upd_p["insulin_brand"] = str(diab["insulin_brand"]).strip()
-				idm.save_diabetes_profile(connect_db_fn, student_id, upd_p)
-				applied_log.append("💉 Diyabet / İnsülin profili (İKO / İDF) güncellendi")
-
 		# 8. Revir İzlem Notu (visits)
 		if apply_visit_note and str(extracted.get("visit_note_suggestion") or extracted.get("clinical_summary") or "").strip():
 			v_note = str(extracted.get("visit_note_suggestion") or extracted.get("clinical_summary") or "").strip()
@@ -1724,6 +1703,28 @@ def apply_extracted_clinical_record(
 				),
 			)
 			applied_log.append("🩺 Revir başvuru / izlem notu eklendi")
+
+	# 7. Diyabet / İnsülin Profili (Dışarıda kendi kısa işleminde yaz — SQLite kilit çakışmasını önler!)
+	if apply_diabetes:
+		diab = extracted.get("diabetes") or {}
+		if diab.get("is_diabetic"):
+			with connect_db_fn() as _dc:
+				idm.ensure_diabetes_tables(_dc)
+			cur_p = idm.get_diabetes_profile(connect_db_fn, student_id)
+			upd_p = dict(cur_p)
+			upd_p["is_diabetic"] = 1
+			if str(diab.get("diabetes_type") or "").strip():
+				upd_p["diabetes_type"] = str(diab["diabetes_type"]).strip()
+			for num_k in ("icr_breakfast", "icr_lunch", "icr_snack", "isf", "target_bg"):
+				if diab.get(num_k) not in (None, ""):
+					try:
+						upd_p[num_k] = float(str(diab[num_k]).replace(",", "."))
+					except Exception:
+						pass
+			if str(diab.get("insulin_brand") or "").strip():
+				upd_p["insulin_brand"] = str(diab["insulin_brand"]).strip()
+			idm.save_diabetes_profile(connect_db_fn, student_id, upd_p)
+			applied_log.append("💉 Diyabet / İnsülin profili (İKO / İDF) güncellendi")
 
 	return applied_log
 
@@ -1792,7 +1793,7 @@ def render_smart_document_importer_dialog(ctx_api: dict[str, Any], initial_file_
 				extra_instruction=extra_note,
 			)
 		ui.session_state[res_key] = {"ok": ok_ex, "data": ex_data, "model": used_m, "name": src_name}
-		ui.rerun()
+		ui.rerun(scope="fragment")
 
 	saved_res = ui.session_state.get(res_key)
 	if not isinstance(saved_res, dict):
@@ -1904,4 +1905,4 @@ def render_smart_document_importer_dialog(ctx_api: dict[str, Any], initial_file_
 				ui.success("✅ İşlem Tamamlandı:\n\n" + "\n".join(f"- {x}" for x in logs))
 			else:
 				ui.info("İşlenecek aktif bir bölüm seçilmedi.")
-			ui.rerun()
+			ui.rerun(scope="fragment")

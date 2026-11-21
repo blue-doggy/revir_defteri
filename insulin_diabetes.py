@@ -977,6 +977,7 @@ def _render_tab_bolus_calculator(
 ) -> None:
 	connect_db_fn = ctx_api["connect_db"]
 	is_gai_on, gai_key, gai_model = ctx_api["_get_active_gemini_config"]()
+	disp_name = ctx_api["mask_kvkk_value"](person["full_name"], "name")
 
 	# Ekstra yiyecek oturum listesi
 	extras_key = f"ins_extras_list_{student_id}"
@@ -1443,6 +1444,7 @@ def _render_tab_monthly_menu(
 ) -> None:
 	connect_db_fn = ctx_api["connect_db"]
 	is_gai_on, gai_key, gai_model = ctx_api["_get_active_gemini_config"]()
+	disp_name = ctx_api["mask_kvkk_value"](person["full_name"], "name")
 
 	today = date.today()
 	ym_options: list[str] = []
@@ -1725,6 +1727,7 @@ def _render_tab_logs_and_trends(
 ) -> None:
 	connect_db_fn = ctx_api["connect_db"]
 	is_gai_on, gai_key, gai_model = ctx_api["_get_active_gemini_config"]()
+	disp_name = ctx_api["mask_kvkk_value"](person["full_name"], "name")
 
 	p_c1, p_c2 = ui.columns([1.2, 2.8])
 	days_back = p_c1.selectbox("İzlem Aralığı", [7, 14, 30, 90, 365], index=2, format_func=lambda d: f"Son {d} Gün", key=f"ins_log_days_{student_id}")
