@@ -124,7 +124,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.15.1"
+_DEFAULT_APP_VERSION = "1.15.2"
 
 
 def _load_app_version() -> str:
@@ -1379,6 +1379,7 @@ def initialize_db() -> None:
 				hadith_text TEXT,
 				hadith_source TEXT,
 				day_significance TEXT,
+				profession_override TEXT,
 				custom_note TEXT,
 				prayer_cache_json TEXT,
 				updated_at TEXT NOT NULL
@@ -1415,6 +1416,10 @@ def initialize_db() -> None:
 				connection.execute(f"ALTER TABLE students ADD COLUMN {loc_col} TEXT")
 		if "has_disability" not in student_columns:
 			connection.execute("ALTER TABLE students ADD COLUMN has_disability INTEGER NOT NULL DEFAULT 0")
+
+		cal_note_cols = {row["name"] for row in connection.execute("PRAGMA table_info(calendar_daily_notes)")}
+		if "profession_override" not in cal_note_cols:
+			connection.execute("ALTER TABLE calendar_daily_notes ADD COLUMN profession_override TEXT")
 
 		for def_k, def_v in DEFAULT_APP_SETTINGS.items():
 			connection.execute("INSERT OR IGNORE INTO app_settings(key, value) VALUES (?, ?)", (def_k, def_v))
@@ -1857,7 +1862,8 @@ def perform_factory_reset() -> tuple[bool, str]:
 			"medication_logs", "student_medications", "student_vaccinations",
 			"school_screenings", "care_plans", "health_forms", "health_profiles",
 			"lab_results", "lab_reports", "vital_readings", "vital_reference",
-			"measurements", "visits", "students", "classes"
+			"measurements", "visits", "students", "classes",
+			"calendar_events", "calendar_daily_notes"
 		]
 
 		for db_file in target_dbs:
@@ -31040,6 +31046,7 @@ def main() -> None:
 			save_app_settings_fn=save_app_settings,
 			get_active_gemini_config_fn=_get_active_gemini_config,
 			get_tr_provinces_fn=get_tr_provinces,
+			is_section_visible_fn=is_section_visible,
 		)
 	elif page_clean == "Raporlar":
 		render_reports()

@@ -2053,6 +2053,19 @@ def generate_calendar_events_with_ai(
 			"Eczacılar Günü, Diş Hekimleri Günü, Dünya Diyabet Günü, Yeşilay Haftası, Otizm Farkındalık Günü vb.) ve "
 			"meslek grubu günlerini (Öğretmenler Günü, Avukatlar Günü, Gazeteciler Günü, Mühendisler Günü, Hemşireler Günü vb.) çıkar."
 		),
+		"meb_belirli_gunler": (
+			f"{period_txt} için T.C. Millî Eğitim Bakanlığı (MEB) Eğitim Kurumları Sosyal Etkinlikler Yönetmeliği'nde yer alan "
+			"resmi 'MEB Belirli Gün ve Haftalar Çizelgesi'ndeki tüm belirli gün ve haftaları (İlköğretim Haftası, Gaziler Günü, "
+			"Hayvanları Koruma Günü, Kızılay Haftası, Lösemili Çocuklar Haftası, Organ Bağışı Haftası, Atatürk Haftası, "
+			"Dünya Diyabet Günü, Çocuk Hakları Günü, Ağız ve Diş Sağlığı Haftası, Öğretmenler Günü, Dünya Engelliler Günü, "
+			"İnsan Hakları ve Demokrasi Haftası, Tutum Yatırım ve Türk Malları / Yerli Malı Haftası, Enerji Tasarrufu Haftası, "
+			"Verem Eğitimi ve Propaganda Haftası, Sivil Savunma Günü, Yeşilay Haftası, Bilim ve Teknoloji Haftası, "
+			"İstiklâl Marşı'nın Kabulü ve Mehmet Akif Ersoy'u Anma Günü, Tüketiciyi Koruma Haftası, Şehitler Günü, "
+			"Yaşlılara Saygı Haftası, Orman Haftası, Kütüphaneler Haftası, Kanser Haftası, Dünya Otizm Farkındalık Günü, "
+			"Sağlık Haftası, Turizm Haftası, Trafik ve İlkyardım Haftası, Bilişim Haftası, Vakıflar Haftası, Engelliler Haftası, "
+			"Hemşirelik Haftası, Müzeler Haftası, Etik Günü, İstanbul'un Fethi, Çevre Koruma Haftası vb.) tarihleriyle çıkar. "
+			"category='belirli_gun', symbol_type='event' (milli olanlarda 'tr_flag', sağlık olanlarda 'health') kullan."
+		),
 		"election_or_custom": (
 			f"{period_txt} bağlamında kullanıcının şu özel takvim talimatını yerine getir: {custom_prompt or 'Okul ve revir takvim planı oluştur'}"
 		),

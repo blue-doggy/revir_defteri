@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 Okul Revir Defteri ve Sağlık Takip Sistemi - Akıllı Okul & Revir Takvimi,
-İnteraktif Takvim Yaprağı, 81 İl Ezan Vakitleri Canlı Sayacı ve Gemini AI Planlama Modülü.
+İnteraktif Takvim Yaprağı, 81 İl Ezan Vakitleri Canlı Sayacı, MEB Belirli Gün ve Haftalar
+ve Gemini AI Planlama Modülü.
 """
 from __future__ import annotations
 
@@ -81,7 +82,7 @@ CATEGORY_LABELS: dict[str, tuple[str, str, str]] = {
 	"secim_idari_tatil": ("Seçim Tatili / İdari İzin / Ara Tatil", "#7c3aed", "ballot"),
 	"osym_sinav": ("ÖSYM / MEB Sınavı", "#2563eb", "exam"),
 	"meslek_gunu": ("Meslek Grubu Günü", "#0d9488", "profession"),
-	"belirli_gun": ("Belirli Gün ve Hafta", "#0284c7", "event"),
+	"belirli_gun": ("MEB Belirli Gün ve Hafta", "#0284c7", "event"),
 	"revir_etkinlik": ("Revir Taraması / Aşı / Etkinlik", "#059669", "health"),
 }
 
@@ -93,7 +94,7 @@ SYMBOL_OPTIONS: dict[str, str] = {
 	"profession": "👩‍⚕️ Meslek Grubu Günü",
 	"ballot": "🗳️ Seçim Tatili / İdari İzin",
 	"health": "🩺 Revir Taraması / Aşı / Sağlık",
-	"event": "📌 Standart Etkinlik / Belirli Gün",
+	"event": "📌 MEB Belirli Gün ve Hafta / Etkinlik",
 }
 
 # Özel Çizim SVG Türk Bayrağı ve Altın Hilal Rozetleri
@@ -137,7 +138,7 @@ def render_symbol_badge(symbol_type: str, compact: bool = False) -> str:
 		return '<span style="font-size:12.5px;" title="Seçim Tatili / İdari İzin">🗳️</span>'
 	if st == "health":
 		return '<span style="font-size:12.5px;" title="Revir / Sağlık Etkinliği">🩺</span>'
-	return '<span style="font-size:12px;" title="Etkinlik / Belirli Gün">📌</span>'
+	return '<span style="font-size:12px;" title="MEB Belirli Gün ve Hafta / Etkinlik">📌</span>'
 
 
 # ---------------------------------------------------------------------------
@@ -176,15 +177,71 @@ TR_PROVINCE_COORDS: dict[str, tuple[float, float]] = {
 
 
 # ---------------------------------------------------------------------------
-# HİCRİ TAKVİM HESAPLAYICI (KUWAITI / UMM AL-QURA YAKLAŞIMI)
+# DİYANET TAKVİMİ İLE KALİBRE EDİLMİŞ HİCRİ TAKVİM HESAPLAYICI (HATA #8 DÜZELTMESİ)
 # ---------------------------------------------------------------------------
 
+# Diyanet İşleri Başkanlığı Resmi Hicri Ay Başlangıç Çıpaları (Miladi Tarih -> (Hicri Yıl, Hicri Ay))
+# Bu çıpalar sayesinde 1 Ramazan, 1 Şevval (Ramazan Bayramı), 10 Zilhicce (Kurban Bayramı) ve
+# 1 Muharrem (Hicri Yılbaşı) Diyanet Takvimi ile %100 birebir örtüşür.
+_DIYANET_HIJRI_MONTH_ANCHORS: list[tuple[date, int, int]] = [
+	(date(2024, 7, 7), 1446, 1),    # 1 Muharrem 1446
+	(date(2025, 1, 1), 1446, 7),    # 1 Recep 1446
+	(date(2025, 1, 31), 1446, 8),   # 1 Şaban 1446
+	(date(2025, 3, 1), 1446, 9),    # 1 Ramazan 1446
+	(date(2025, 3, 30), 1446, 10),  # 1 Şevval 1446 (Ramazan Bayramı 1. Gün)
+	(date(2025, 4, 29), 1446, 11),  # 1 Zilkade 1446
+	(date(2025, 5, 28), 1446, 12),  # 1 Zilhicce 1446 (6 Haziran = 10 Zilhicce Kurban Bayramı)
+	(date(2025, 6, 26), 1447, 1),   # 1 Muharrem 1447 (Hicri Yılbaşı)
+	(date(2025, 7, 26), 1447, 2),   # 1 Safer 1447
+	(date(2025, 8, 24), 1447, 3),   # 1 Rebiülevvel 1447 (3 Eylül = 11/12 Rebiülevvel Mevlid)
+	(date(2025, 9, 23), 1447, 4),   # 1 Rebiülahir 1447
+	(date(2025, 10, 23), 1447, 5),  # 1 Cemaziyelevvel 1447
+	(date(2025, 11, 21), 1447, 6),  # 1 Cemaziyelahir 1447
+	(date(2025, 12, 21), 1447, 7),  # 1 Recep 1447
+	(date(2026, 1, 20), 1447, 8),   # 1 Şaban 1447
+	(date(2026, 2, 19), 1447, 9),   # 1 Ramazan 1447
+	(date(2026, 3, 20), 1447, 10),  # 1 Şevval 1447 (Ramazan Bayramı 1. Gün)
+	(date(2026, 4, 18), 1447, 11),  # 1 Zilkade 1447
+	(date(2026, 5, 18), 1447, 12),  # 1 Zilhicce 1447 (27 Mayıs = 10 Zilhicce Kurban Bayramı)
+	(date(2026, 6, 16), 1448, 1),   # 1 Muharrem 1448 (Hicri Yılbaşı)
+	(date(2026, 7, 16), 1448, 2),   # 1 Safer 1448
+	(date(2026, 8, 14), 1448, 3),   # 1 Rebiülevvel 1448
+	(date(2026, 9, 13), 1448, 4),   # 1 Rebiülahir 1448
+	(date(2026, 10, 12), 1448, 5),  # 1 Cemaziyelevvel 1448
+	(date(2026, 11, 11), 1448, 6),  # 1 Cemaziyelahir 1448
+	(date(2026, 12, 10), 1448, 7),  # 1 Recep 1448
+	(date(2027, 1, 9), 1448, 8),    # 1 Şaban 1448
+	(date(2027, 2, 8), 1448, 9),    # 1 Ramazan 1448
+	(date(2027, 3, 9), 1448, 10),   # 1 Şevval 1448 (Ramazan Bayramı 1. Gün)
+	(date(2027, 4, 8), 1448, 11),   # 1 Zilkade 1448
+	(date(2027, 5, 7), 1448, 12),   # 1 Zilhicce 1448 (16 Mayıs = 10 Zilhicce Kurban Bayramı)
+	(date(2027, 6, 6), 1449, 1),    # 1 Muharrem 1449 (Hicri Yılbaşı)
+]
+
+
 def gregorian_to_hijri_str(d: date) -> str:
-	"""Miladi tarihi Türkçe Hicri takvim metnine (Örn: '20 Cemaziyelevvel 1448') dönüştürür."""
+	"""
+	Miladi tarihi Diyanet İşleri Başkanlığı takvimiyle kalibre edilmiş Türkçe Hicri takvim
+	metnine (Örn: '1 Ramazan 1447', '1 Muharrem 1448') dönüştürür.
+	"""
+	# Önce Diyanet çıpa tablosunda aralık eşleşmesi kontrol et
+	if _DIYANET_HIJRI_MONTH_ANCHORS[0][0] <= d <= (_DIYANET_HIJRI_MONTH_ANCHORS[-1][0] + timedelta(days=29)):
+		chosen_anchor = _DIYANET_HIJRI_MONTH_ANCHORS[0]
+		for anc in _DIYANET_HIJRI_MONTH_ANCHORS:
+			if anc[0] <= d:
+				chosen_anchor = anc
+			else:
+				break
+		anc_date, h_year, h_month = chosen_anchor
+		h_day = (d - anc_date).days + 1
+		if 1 <= h_day <= 30:
+			return f"{h_day} {HIJRI_MONTH_NAMES.get(h_month, 'Muharrem')} {h_year}"
+
+	# Çıpa aralığı dışındaki yıllar için Diyanet ofsetli (-1 gün) astronomik Jülyen dönüşümü
 	jd = int((1461 * (d.year + 4800 + int((d.month - 14) / 12))) / 4)
 	jd += int((367 * (d.month - 2 - 12 * int((d.month - 14) / 12))) / 12)
 	jd -= int((3 * int((d.year + 4900 + int((d.month - 14) / 12)) / 100)) / 4)
-	jd += d.day - 32075
+	jd += d.day - 32076  # Diyanet rü'yet-i hilal kalibrasyonu
 
 	l_val = jd - 1948440 + 10632
 	n_val = int((l_val - 1) / 10631)
@@ -192,7 +249,7 @@ def gregorian_to_hijri_str(d: date) -> str:
 	j_val = (int((10985 - l_val) / 5316)) * (int((50 * l_val) / 17719)) + (int(l_val / 5670)) * (int((43 * l_val) / 15238))
 	l_val = l_val - (int((30 - j_val) / 15)) * (int((17719 * j_val) / 50)) - (int(j_val / 16)) * (int((15238 * j_val) / 43)) + 29
 	h_month = int((24 * l_val) / 709)
-	h_day = l_val - int((709 * h_month) / 24)
+	h_day = max(1, min(30, l_val - int((709 * h_month) / 24)))
 	h_year = 30 * n_val + j_val - 30
 	m_name = HIJRI_MONTH_NAMES.get(h_month, "Muharrem")
 	return f"{h_day} {m_name} {h_year}"
@@ -241,7 +298,7 @@ def _compute_offline_prayer_times(province: str, d: date) -> dict[str, str]:
 	ha_fajr = _hour_angle(-18.0)
 	ha_isha = _hour_angle(-17.0)
 
-	# Asr-ı Evvel (Şafii/Hanefi Diyanet standart gölge = 1 + tan(|lat - decl|))
+	# Asr-ı Evvel (Diyanet standart gölge = 1 + tan(|lat - decl|))
 	asr_alt = math.degrees(math.atan(1.0 / (1.0 + math.tan(abs(lat_rad - decl)))))
 	ha_asr = _hour_angle(asr_alt)
 
@@ -281,7 +338,6 @@ def get_prayer_times_for_province(province: str, d: date, connect_db_fn: Callabl
 	"""
 	prov_clean = (province or "Ankara").strip() or "Ankara"
 	if prov_clean not in TR_PROVINCE_COORDS:
-		# Büyük/küçük harf eşleştirmesi
 		for k in TR_PROVINCE_COORDS:
 			if k.lower() == prov_clean.lower():
 				prov_clean = k
@@ -294,7 +350,6 @@ def get_prayer_times_for_province(province: str, d: date, connect_db_fn: Callabl
 	if cache_key in _PRAYER_MEMORY_CACHE:
 		return _PRAYER_MEMORY_CACHE[cache_key]
 
-	# SQLite önbellek kontrolü
 	if connect_db_fn is not None:
 		try:
 			with connect_db_fn() as conn:
@@ -310,13 +365,12 @@ def get_prayer_times_for_province(province: str, d: date, connect_db_fn: Callabl
 		except Exception:
 			pass
 
-	# Çevrimiçi Diyanet (Method 13) sorgusu (kısa timeout ile arayüzü bloklamaz)
 	lat, lon = TR_PROVINCE_COORDS.get(prov_clean, TR_PROVINCE_COORDS["Ankara"])
 	result: dict[str, str] | None = None
 	try:
 		d_str = d.strftime("%d-%m-%Y")
 		url = f"https://api.aladhan.com/v1/timings/{d_str}?latitude={lat}&longitude={lon}&method=13"
-		req = urllib.request.Request(url, headers={"User-Agent": "RevirDefteri/1.14"})
+		req = urllib.request.Request(url, headers={"User-Agent": "RevirDefteri/1.15"})
 		with urllib.request.urlopen(req, timeout=2.2) as resp:
 			payload = json.loads(resp.read().decode("utf-8"))
 			timings = (payload.get("data") or {}).get("timings") or {}
@@ -338,7 +392,6 @@ def get_prayer_times_for_province(province: str, d: date, connect_db_fn: Callabl
 
 	_PRAYER_MEMORY_CACHE[cache_key] = result
 
-	# SQLite önbelleğine kaydet
 	if connect_db_fn is not None:
 		try:
 			with connect_db_fn() as conn:
@@ -373,10 +426,9 @@ def get_prayer_times_for_province(province: str, d: date, connect_db_fn: Callabl
 
 
 # ---------------------------------------------------------------------------
-# YERLEŞİK TÜRKİYE RESMİ & DİNİ TATİLLER, YARIM GÜNLER, MESLEK GÜNLERİ VE SINAVLAR
+# YERLEŞİK TÜRKİYE RESMİ & DİNİ TATİLLER, YARIM GÜNLER, MEB BELİRLİ GÜN VE HAFTALAR
 # ---------------------------------------------------------------------------
 
-# Sabit Miladi Resmi Tatiller ve Ulusal Günler (Ay, Gün)
 FIXED_NATIONAL_DAYS: list[dict[str, Any]] = [
 	{
 		"month": 1, "day": 1,
@@ -387,10 +439,11 @@ FIXED_NATIONAL_DAYS: list[dict[str, Any]] = [
 	},
 	{
 		"month": 3, "day": 18,
-		"title": "18 Mart Çanakkale Zaferi ve Şehitleri Anma Günü",
+		"title": "18 Mart Şehitler Günü ve Çanakkale Deniz Zaferi",
 		"category": "milli_bayram", "symbol_type": "tr_flag",
 		"is_civil_holiday": False, "is_half_day": False,
-		"description": "Çanakkale Deniz Zaferi'nin yıl dönümü ve Aziz Şehitlerimizi Anma Günü.",
+		"profession_group": "Türk Silahlı Kuvvetleri, Şehit Aileleri ve Gaziler",
+		"description": "18 Mart Çanakkale Deniz Zaferi'nin yıl dönümü ve Aziz Şehitlerimizi Anma Günü.",
 	},
 	{
 		"month": 4, "day": 23,
@@ -445,15 +498,15 @@ FIXED_NATIONAL_DAYS: list[dict[str, Any]] = [
 	},
 	{
 		"month": 11, "day": 10,
-		"title": "10 Kasım Atatürk'ü Anma Günü",
+		"title": "10 Kasım Atatürk'ü Anma Günü ve Atatürk Haftası (10-16 Kasım)",
 		"category": "milli_bayram", "symbol_type": "tr_flag",
 		"is_civil_holiday": False, "is_half_day": False,
 		"start_time": "09:05",
-		"description": "Cumhuriyetimizin kurucusu Gazi Mustafa Kemal Atatürk'ü Anma Günü ve Atatürk Haftası başlangıcı.",
+		"description": "Cumhuriyetimizin kurucusu Gazi Mustafa Kemal Atatürk'ü Anma Günü ve MEB Atatürk Haftası (10-16 Kasım).",
 	},
 ]
 
-# Diyanet Takvimine Göre Yıllara Özel Dini Bayramlar, Arifeler ve Kandiller (2025, 2026, 2027, 2028)
+# Diyanet Takvimine Göre Yıllara Özel Dini Bayramlar, Arifeler ve Kandiller
 RELIGIOUS_DAYS_BY_YEAR: dict[int, list[dict[str, Any]]] = {
 	2025: [
 		{"date": "2025-01-02", "title": "Regaip Kandili", "holiday": False, "half": False, "desc": "Üç ayların müjdecisi mübarek Regaip Kandili."},
@@ -461,11 +514,11 @@ RELIGIOUS_DAYS_BY_YEAR: dict[int, list[dict[str, Any]]] = {
 		{"date": "2025-02-13", "title": "Berat Kandili", "holiday": False, "half": False, "desc": "Ramazan ayının müjdecisi Berat Kandili."},
 		{"date": "2025-03-01", "title": "Ramazan Ayı Başlangıcı", "holiday": False, "half": False, "desc": "On bir ayın sultanı Ramazan-ı Şerif'in ilk günü."},
 		{"date": "2025-03-26", "title": "Kadir Gecesi", "holiday": False, "half": False, "desc": "Bin aydan daha hayırlı olan mübarek Kadir Gecesi."},
-		{"date": "2025-03-29", "title": "Ramazan Bayramı Arifesi (Yarım Gün Mesai)", "holiday": True, "half": True, "desc": "Ramazan Bayramı Arifesi — Saat 13:00'ten itibaren devlet memurları için yarım gün resmi tatil."},
+		{"date": "2025-03-29", "title": "Ramazan Bayramı Arifesi (Yarım Gün Resmi Tatil)", "holiday": True, "half": True, "desc": "Ramazan Bayramı Arifesi — Saat 13:00'ten itibaren devlet memurları için yarım gün resmi tatil."},
 		{"date": "2025-03-30", "title": "Ramazan Bayramı (1. Gün)", "holiday": True, "half": False, "desc": "Ramazan Bayramı 1. Günü — Resmi tatil."},
 		{"date": "2025-03-31", "title": "Ramazan Bayramı (2. Gün)", "holiday": True, "half": False, "desc": "Ramazan Bayramı 2. Günü — Resmi tatil."},
 		{"date": "2025-04-01", "title": "Ramazan Bayramı (3. Gün)", "holiday": True, "half": False, "desc": "Ramazan Bayramı 3. Günü — Resmi tatil."},
-		{"date": "2025-06-05", "title": "Kurban Bayramı Arifesi (Yarım Gün Mesai)", "holiday": True, "half": True, "desc": "Kurban Bayramı Arifesi — Saat 13:00'ten itibaren devlet memurları için yarım gün resmi tatil."},
+		{"date": "2025-06-05", "title": "Kurban Bayramı Arifesi (Yarım Gün Resmi Tatil)", "holiday": True, "half": True, "desc": "Kurban Bayramı Arifesi — Saat 13:00'ten itibaren devlet memurları için yarım gün resmi tatil."},
 		{"date": "2025-06-06", "title": "Kurban Bayramı (1. Gün)", "holiday": True, "half": False, "desc": "Kurban Bayramı 1. Günü — Resmi tatil."},
 		{"date": "2025-06-07", "title": "Kurban Bayramı (2. Gün)", "holiday": True, "half": False, "desc": "Kurban Bayramı 2. Günü — Resmi tatil."},
 		{"date": "2025-06-08", "title": "Kurban Bayramı (3. Gün)", "holiday": True, "half": False, "desc": "Kurban Bayramı 3. Günü — Resmi tatil."},
@@ -478,32 +531,32 @@ RELIGIOUS_DAYS_BY_YEAR: dict[int, list[dict[str, Any]]] = {
 	2026: [
 		{"date": "2026-01-15", "title": "Miraç Kandili", "holiday": False, "half": False, "desc": "Mübarek Miraç Kandili gecesi."},
 		{"date": "2026-02-02", "title": "Berat Kandili", "holiday": False, "half": False, "desc": "Ramazan ayının müjdecisi mübarek Berat Kandili."},
-		{"date": "2026-02-19", "title": "Ramazan Ayı Başlangıcı", "holiday": False, "half": False, "desc": "On bir ayın sultanı Ramazan-ı Şerif'in ilk günü."},
+		{"date": "2026-02-19", "title": "Ramazan Ayı Başlangıcı (1 Ramazan 1447)", "holiday": False, "half": False, "desc": "On bir ayın sultanı Ramazan-ı Şerif'in ilk günü."},
 		{"date": "2026-03-16", "title": "Kadir Gecesi", "holiday": False, "half": False, "desc": "Bin aydan daha hayırlı olan mübarek Kadir Gecesi."},
-		{"date": "2026-03-19", "title": "Ramazan Bayramı Arifesi (Yarım Gün Mesai)", "holiday": True, "half": True, "desc": "Ramazan Bayramı Arifesi — Saat 13:00'ten itibaren devlet memurları ve okullar için yarım gün resmi tatil."},
+		{"date": "2026-03-19", "title": "Ramazan Bayramı Arifesi (Yarım Gün Resmi Tatil)", "holiday": True, "half": True, "desc": "Ramazan Bayramı Arifesi — Saat 13:00'ten itibaren devlet memurları ve okullar için yarım gün resmi tatil."},
 		{"date": "2026-03-20", "title": "Ramazan Bayramı (1. Gün)", "holiday": True, "half": False, "desc": "Ramazan Bayramı 1. Günü — Devlet memurları ve okullar için resmi tatil."},
 		{"date": "2026-03-21", "title": "Ramazan Bayramı (2. Gün)", "holiday": True, "half": False, "desc": "Ramazan Bayramı 2. Günü — Resmi tatil."},
 		{"date": "2026-03-22", "title": "Ramazan Bayramı (3. Gün)", "holiday": True, "half": False, "desc": "Ramazan Bayramı 3. Günü — Resmi tatil."},
-		{"date": "2026-05-26", "title": "Kurban Bayramı Arifesi (Yarım Gün Mesai)", "holiday": True, "half": True, "desc": "Kurban Bayramı Arifesi — Saat 13:00'ten itibaren devlet memurları ve okullar için yarım gün resmi tatil."},
+		{"date": "2026-05-26", "title": "Kurban Bayramı Arifesi (Yarım Gün Resmi Tatil)", "holiday": True, "half": True, "desc": "Kurban Bayramı Arifesi — Saat 13:00'ten itibaren devlet memurları ve okullar için yarım gün resmi tatil."},
 		{"date": "2026-05-27", "title": "Kurban Bayramı (1. Gün)", "holiday": True, "half": False, "desc": "Kurban Bayramı 1. Günü — Devlet memurları ve okullar için resmi tatil."},
 		{"date": "2026-05-28", "title": "Kurban Bayramı (2. Gün)", "holiday": True, "half": False, "desc": "Kurban Bayramı 2. Günü — Devlet memurları ve okullar için resmi tatil."},
 		{"date": "2026-05-29", "title": "Kurban Bayramı (3. Gün)", "holiday": True, "half": False, "desc": "Kurban Bayramı 3. Günü — Devlet memurları ve okullar için resmi tatil."},
 		{"date": "2026-05-30", "title": "Kurban Bayramı (4. Gün)", "holiday": True, "half": False, "desc": "Kurban Bayramı 4. Günü — Resmi tatil."},
 		{"date": "2026-06-16", "title": "Hicri Yılbaşı (1 Muharrem 1448)", "holiday": False, "half": False, "desc": "Hicri 1448 takvim yılının ilk günü."},
-		{"date": "2026-06-25", "title": "Aşure Günü (10 Muharrem)", "holiday": False, "half": False, "desc": "10 Muharrem Aşure Günü."},
+		{"date": "2026-06-25", "title": "Aşure Günü (10 Muharrem 1448)", "holiday": False, "half": False, "desc": "10 Muharrem Aşure Günü."},
 		{"date": "2026-08-24", "title": "Mevlid Kandili", "holiday": False, "half": False, "desc": "Peygamber Efendimiz Hz. Muhammed'in (s.a.v.) dünyaya teşrifi — Mevlid Kandili."},
 		{"date": "2026-12-10", "title": "Regaip Kandili (1448)", "holiday": False, "half": False, "desc": "Üç ayların müjdecisi mübarek Regaip Kandili."},
 	],
 	2027: [
 		{"date": "2027-01-04", "title": "Miraç Kandili", "holiday": False, "half": False, "desc": "Mübarek Miraç Kandili gecesi."},
 		{"date": "2027-01-22", "title": "Berat Kandili", "holiday": False, "half": False, "desc": "Mübarek Berat Kandili gecesi."},
-		{"date": "2027-02-08", "title": "Ramazan Ayı Başlangıcı", "holiday": False, "half": False, "desc": "Ramazan-ı Şerif'in ilk günü."},
+		{"date": "2027-02-08", "title": "Ramazan Ayı Başlangıcı (1 Ramazan 1448)", "holiday": False, "half": False, "desc": "Ramazan-ı Şerif'in ilk günü."},
 		{"date": "2027-03-05", "title": "Kadir Gecesi", "holiday": False, "half": False, "desc": "Mübarek Kadir Gecesi."},
-		{"date": "2027-03-08", "title": "Ramazan Bayramı Arifesi (Yarım Gün Mesai)", "holiday": True, "half": True, "desc": "Ramazan Bayramı Arifesi — Saat 13:00'ten itibaren devlet memurları için yarım gün resmi tatil."},
+		{"date": "2027-03-08", "title": "Ramazan Bayramı Arifesi (Yarım Gün Resmi Tatil)", "holiday": True, "half": True, "desc": "Ramazan Bayramı Arifesi — Saat 13:00'ten itibaren devlet memurları için yarım gün resmi tatil."},
 		{"date": "2027-03-09", "title": "Ramazan Bayramı (1. Gün)", "holiday": True, "half": False, "desc": "Ramazan Bayramı 1. Günü — Resmi tatil."},
 		{"date": "2027-03-10", "title": "Ramazan Bayramı (2. Gün)", "holiday": True, "half": False, "desc": "Ramazan Bayramı 2. Günü — Resmi tatil."},
 		{"date": "2027-03-11", "title": "Ramazan Bayramı (3. Gün)", "holiday": True, "half": False, "desc": "Ramazan Bayramı 3. Günü — Resmi tatil."},
-		{"date": "2027-05-15", "title": "Kurban Bayramı Arifesi (Yarım Gün Mesai)", "holiday": True, "half": True, "desc": "Kurban Bayramı Arifesi — Yarım gün resmi tatil."},
+		{"date": "2027-05-15", "title": "Kurban Bayramı Arifesi (Yarım Gün Resmi Tatil)", "holiday": True, "half": True, "desc": "Kurban Bayramı Arifesi — Yarım gün resmi tatil."},
 		{"date": "2027-05-16", "title": "Kurban Bayramı (1. Gün)", "holiday": True, "half": False, "desc": "Kurban Bayramı 1. Günü — Resmi tatil."},
 		{"date": "2027-05-17", "title": "Kurban Bayramı (2. Gün)", "holiday": True, "half": False, "desc": "Kurban Bayramı 2. Günü — Resmi tatil."},
 		{"date": "2027-05-18", "title": "Kurban Bayramı (3. Gün)", "holiday": True, "half": False, "desc": "Kurban Bayramı 3. Günü — Resmi tatil."},
@@ -514,69 +567,140 @@ RELIGIOUS_DAYS_BY_YEAR: dict[int, list[dict[str, Any]]] = {
 	],
 }
 
-# Meslek Grubu Günleri ve Belirli Gün / Haftalar Sözlüğü ((Ay, Gün) -> Bilgi)
+# MEB Belirli Gün ve Haftalar Çizelgesi + Meslek Grubu Günleri ((Ay, Gün) -> Bilgi)
+# Not: FIXED_NATIONAL_DAYS içindeki (3,18), (5,1), (10,29), (11,10) ile mükerrer başlık oluşturmaz (Hata #9 düzeltmesi)
 PROFESSION_AND_SPECIAL_DAYS: dict[tuple[int, int], dict[str, str]] = {
-	(1, 7): {"title": "Beyaz Baston Görme Engelliler Haftası (7-14 Ocak)", "prof": "Özel Eğitim ve Rehabilitasyon Uzmanları", "cat": "belirli_gun"},
+	(1, 5): {"title": "MEB - Verem Eğitimi ve Propaganda Haftası (Ocak İlk Haftası)", "prof": "Göğüs Hastalıkları ve Halk Sağlığı Hemşireleri", "cat": "belirli_gun"},
+	(1, 7): {"title": "MEB - Beyaz Baston Görme Engelliler Haftası (7-14 Ocak)", "prof": "Özel Eğitim ve Rehabilitasyon Uzmanları", "cat": "belirli_gun"},
 	(1, 10): {"title": "10 Ocak Çalışan Gazeteciler Günü & İdareciler Günü", "prof": "Gazeteciler, Basın Emekçileri ve Mülki İdareciler", "cat": "meslek_gunu"},
+	(1, 12): {"title": "MEB - Enerji Tasarrufu Haftası (Ocak 2. Haftası)", "prof": "Enerji ve Çevre Mühendisleri", "cat": "belirli_gun"},
+	(1, 25): {"title": "MEB - Cüzzam Haftası (25-31 Ocak)", "prof": "Dermatoloji ve Enfeksiyon Kontrol Hemşireleri", "cat": "belirli_gun"},
 	(1, 26): {"title": "Dünya Gümrük Günü", "prof": "Gümrük Muhafaza ve Ticaret Personeli", "cat": "meslek_gunu"},
 	(2, 4): {"title": "4 Şubat Dünya Kanser Günü", "prof": "Onkoloji Hekimleri ve Koruyucu Sağlık Çalışanları", "cat": "belirli_gun"},
 	(2, 9): {"title": "9 Şubat Dünya Sigarayı Bırakma Günü", "prof": "Göğüs Hastalıkları ve Yeşilay Danışmanları", "cat": "belirli_gun"},
-	(2, 28): {"title": "28 Şubat Sivil Savunma Günü", "prof": "AFAD, Arama Kurtarma ve Sivil Savunma Uzmanları", "cat": "meslek_gunu"},
-	(3, 1): {"title": "Yeşilay Haftası Başlangıcı (1-7 Mart) & Muhasebeciler Günü", "prof": "Mali Müşavirler, Muhasebeciler ve Bağımlılık Danışmanları", "cat": "meslek_gunu"},
-	(3, 8): {"title": "8 Mart Dünya Kadınlar Günü", "prof": "Tüm Emekçi Kadınlar", "cat": "belirli_gun"},
-	(3, 12): {"title": "12 Mart İstiklâl Marşı'nın Kabulü ve Mehmet Akif Ersoy'u Anma Günü", "prof": "Edebiyatçılar, Şairler ve Eğitimciler", "cat": "milli_bayram"},
-	(3, 14): {"title": "14 Mart Tıp Bayramı", "prof": "Hekimler, Hemşireler ve Tüm Sağlık Çalışanları", "cat": "meslek_gunu"},
-	(3, 18): {"title": "18 Mart Şehitleri Anma Günü ve Çanakkale Deniz Zaferi & Yaşlılara Saygı Haftası", "prof": "Geriatri Uzmanları ve Sosyal Hizmet Çalışanları", "cat": "milli_bayram"},
-	(3, 21): {"title": "21 Mart Nevruz Günü & Dünya Down Sendromu Farkındalık Günü", "prof": "Özel Eğitim Öğretmenleri ve Çocuk Gelişimciler", "cat": "belirli_gun"},
-	(3, 22): {"title": "22 Mart Dünya Su Günü", "prof": "Çevre ve Su Mühendisleri", "cat": "belirli_gun"},
+	(2, 28): {"title": "MEB - 28 Şubat Sivil Savunma Günü", "prof": "AFAD, Arama Kurtarma ve Sivil Savunma Uzmanları", "cat": "meslek_gunu"},
+	(3, 1): {"title": "MEB - Yeşilay Haftası (1-7 Mart) & Muhasebeciler Günü", "prof": "Yeşilay Danışmanları, Rehber Öğretmenler ve Mali Müşavirler", "cat": "belirli_gun"},
+	(3, 2): {"title": "MEB - Girişimcilik Haftası (Mart İlk Haftası)", "prof": "Girişimciler ve Mesleki Eğitim Öğretmenleri", "cat": "belirli_gun"},
+	(3, 8): {"title": "MEB - 8 Mart Dünya Kadınlar Günü & Bilim ve Teknoloji Haftası (8-14 Mart)", "prof": "Bilim İnsanları, Araştırmacılar ve Tüm Emekçi Kadınlar", "cat": "belirli_gun"},
+	(3, 12): {"title": "MEB - 12 Mart İstiklâl Marşı'nın Kabulü ve Mehmet Akif Ersoy'u Anma Günü", "prof": "Edebiyatçılar, Şairler ve Eğitimciler", "cat": "milli_bayram"},
+	(3, 14): {"title": "MEB - 14 Mart Tıp Bayramı", "prof": "Hekimler, Hemşireler ve Tüm Sağlık Çalışanları", "cat": "meslek_gunu"},
+	(3, 15): {"title": "MEB - Tüketiciyi Koruma Haftası (15-21 Mart)", "prof": "Tüketici Hakları Uzmanları ve Denetçiler", "cat": "belirli_gun"},
+	(3, 18): {"title": "MEB - Yaşlılara Saygı Haftası (18-24 Mart)", "prof": "Geriatri Uzmanları ve Sosyal Hizmet Çalışanları", "cat": "belirli_gun"},
+	(3, 21): {"title": "MEB - Orman Haftası (21-26 Mart), Türk Dünyası Günü & Down Sendromu Farkındalık Günü", "prof": "Orman Mühendisleri ve Özel Eğitim Öğretmenleri", "cat": "belirli_gun"},
+	(3, 22): {"title": "MEB - 22 Mart Dünya Su Günü", "prof": "Çevre ve Su Mühendisleri", "cat": "belirli_gun"},
 	(3, 24): {"title": "24 Mart Dünya Tüberküloz (Verem) Günü", "prof": "Halk Sağlığı ve Göğüs Hastalıkları Hemşireleri", "cat": "belirli_gun"},
-	(3, 30): {"title": "Kütüphaneler Haftası", "prof": "Kütüphaneciler ve Arşiv Uzmanları", "cat": "meslek_gunu"},
-	(4, 2): {"title": "2 Nisan Dünya Otizm Farkındalık Günü", "prof": "Çocuk Psikiyatristleri ve Özel Eğitimciler", "cat": "belirli_gun"},
+	(3, 27): {"title": "MEB - 27 Mart Dünya Tiyatrolar Günü", "prof": "Tiyatro Sanatçıları ve Drama Öğretmenleri", "cat": "meslek_gunu"},
+	(3, 30): {"title": "MEB - Kütüphaneler Haftası (Mart Son Haftası)", "prof": "Kütüphaneciler ve Arşiv Uzmanları", "cat": "meslek_gunu"},
+	(4, 1): {"title": "MEB - Kanser Haftası (1-7 Nisan)", "prof": "Onkoloji Uzmanları ve Halk Sağlığı Tarama Ekipleri", "cat": "belirli_gun"},
+	(4, 2): {"title": "MEB - 2 Nisan Dünya Otizm Farkındalık Günü", "prof": "Çocuk Psikiyatristleri ve Özel Eğitimciler", "cat": "belirli_gun"},
 	(4, 5): {"title": "5 Nisan Avukatlar Günü", "prof": "Avukatlar ve Hukukçular", "cat": "meslek_gunu"},
-	(4, 7): {"title": "7 Nisan Dünya Sağlık Günü & Sağlık Haftası (7-13 Nisan)", "prof": "Tüm Sağlık Profesyonelleri ve Okul Hemşireleri", "cat": "meslek_gunu"},
+	(4, 7): {"title": "MEB - 7 Nisan Dünya Sağlık Günü & Sağlık ve Sosyal Güvenlik Haftası (7-13 Nisan) & KVKK Günü", "prof": "Tüm Sağlık Profesyonelleri, Okul Hemşireleri ve Veri Güvenliği Uzmanları", "cat": "meslek_gunu"},
 	(4, 10): {"title": "10 Nisan Polis Haftası ve Türk Polis Teşkilatı Kuruluş Günü", "prof": "Emniyet Mensupları ve Polisler", "cat": "meslek_gunu"},
-	(4, 15): {"title": "Turizm Haftası (15-22 Nisan)", "prof": "Turizm Çalışanları ve Rehberler", "cat": "meslek_gunu"},
-	(4, 21): {"title": "21-28 Nisan Ebeler Haftası", "prof": "Ebeler ve Ana-Çocuk Sağlığı Çalışanları", "cat": "meslek_gunu"},
-	(4, 28): {"title": "28 Nisan Dünya İş Sağlığı ve Güvenliği Günü", "prof": "İşyeri Hekimleri, İSG Uzmanları ve Kurum Hemşireleri", "cat": "meslek_gunu"},
-	(5, 1): {"title": "1 Mayıs Emek ve Dayanışma Günü", "prof": "Tüm İşçiler, Emekçiler ve Kamu Görevlileri", "cat": "meslek_gunu"},
-	(5, 3): {"title": "Trafik ve İlkyardım Haftası (Mayıs İlk Haftası)", "prof": "Paramedikler, ATT'ler ve İlkyardım Eğitmenleri", "cat": "meslek_gunu"},
+	(4, 14): {"title": "MEB - Kutlu Doğum / Peygamberimizi Anma ve Kardeşlik Haftası", "prof": "Din Kültürü ve Ahlak Bilgisi Öğretmenleri", "cat": "belirli_gun"},
+	(4, 15): {"title": "MEB - Turizm Haftası (15-22 Nisan)", "prof": "Turizm Çalışanları ve Rehberler", "cat": "meslek_gunu"},
+	(4, 21): {"title": "MEB - 21-28 Nisan Ebeler Haftası", "prof": "Ebeler ve Ana-Çocuk Sağlığı Çalışanları", "cat": "meslek_gunu"},
+	(4, 26): {"title": "MEB - 26 Nisan Dünya Fikri Mülkiyet Günü", "prof": "Patent Vekilleri ve Buluşçular", "cat": "belirli_gun"},
+	(4, 28): {"title": "MEB - Kardeşlik Haftası (28 Nisan - 4 Mayıs) & Dünya İş Sağlığı ve Güvenliği Günü", "prof": "İşyeri Hekimleri, İSG Uzmanları ve Kurum Hemşireleri", "cat": "meslek_gunu"},
+	(4, 29): {"title": "MEB - 29 Nisan Kût'ül-Amâre Zaferi", "prof": "Tarih Öğretmenleri ve Askerî Tarihçiler", "cat": "milli_bayram"},
+	(5, 3): {"title": "MEB - Trafik ve İlkyardım Haftası & Bilişim Haftası (Mayıs İlk Haftası)", "prof": "Paramedikler, ATT'ler, İlkyardım Eğitmenleri ve Bilişim Öğretmenleri", "cat": "meslek_gunu"},
+	(5, 4): {"title": "MEB - İş Sağlığı ve Güvenliği Haftası (4-10 Mayıs)", "prof": "İSG Uzmanları ve Okul Güvenlik Ekipleri", "cat": "belirli_gun"},
 	(5, 6): {"title": "6 Mayıs Hıdırellez Kültür ve Bahar Bayramı", "prof": "Kültür ve Halkbilim Çalışanları", "cat": "belirli_gun"},
-	(5, 10): {"title": "10-16 Mayıs Engelliler Haftası & Psikologlar Günü", "prof": "Psikologlar, PDR Uzmanları ve Özel Eğitimciler", "cat": "meslek_gunu"},
-	(5, 12): {"title": "12 Mayıs Dünya Hemşireler Günü & Hemşirelik Haftası (12-18 Mayıs)", "prof": "Okul Revir Hemşireleri ve Tüm Hemşireler", "cat": "meslek_gunu"},
+	(5, 10): {"title": "MEB - Engelliler Haftası (10-16 Mayıs), Vakıflar Haftası & Psikologlar Günü", "prof": "Psikologlar, PDR Uzmanları ve Özel Eğitimciler", "cat": "meslek_gunu"},
+	(5, 12): {"title": "MEB - 12 Mayıs Dünya Hemşireler Günü & Hemşirelik Haftası (12-18 Mayıs)", "prof": "Okul Revir Hemşireleri ve Tüm Hemşireler", "cat": "meslek_gunu"},
 	(5, 14): {"title": "14 Mayıs Eczacılık Günü & Dünya Çiftçiler Günü", "prof": "Eczacılar ve Çiftçiler / Ziraat Mühendisleri", "cat": "meslek_gunu"},
-	(5, 18): {"title": "18 Mayıs Müzeler Günü", "prof": "Müzeciler, Arkeologlar ve Sanat Tarihçileri", "cat": "meslek_gunu"},
-	(5, 21): {"title": "21 Mayıs Dünya Süt Günü", "prof": "Gıda Mühendisleri ve Beslenme Uzmanları", "cat": "belirli_gun"},
-	(6, 5): {"title": "5 Haziran Dünya Çevre Günü", "prof": "Çevre Mühendisleri ve Doğa Koruma Görevlileri", "cat": "meslek_gunu"},
+	(5, 15): {"title": "MEB - Aile Haftası (15-21 Mayıs)", "prof": "Aile Danışmanları ve Sosyal Hizmet Uzmanları", "cat": "belirli_gun"},
+	(5, 18): {"title": "MEB - Müzeler Haftası (18-24 Mayıs)", "prof": "Müzeciler, Arkeologlar ve Sanat Tarihçileri", "cat": "meslek_gunu"},
+	(5, 21): {"title": "MEB - 21 Mayıs Dünya Süt Günü", "prof": "Gıda Mühendisleri ve Beslenme Uzmanları", "cat": "belirli_gun"},
+	(5, 25): {"title": "MEB - 25 Mayıs Etik Günü", "prof": "Kamu Etik Kurulu ve Eğitimciler", "cat": "belirli_gun"},
+	(5, 29): {"title": "MEB - 29 Mayıs İstanbul'un Fethi", "prof": "Tarihçiler ve Eğitimciler", "cat": "milli_bayram"},
+	(6, 5): {"title": "MEB - 5 Haziran Dünya Çevre Günü & Çevre Koruma Haftası (Haziran 2. Haftası)", "prof": "Çevre Mühendisleri ve Doğa Koruma Görevlileri", "cat": "meslek_gunu"},
 	(6, 6): {"title": "6 Haziran Diyetisyenler Günü", "prof": "Diyetisyenler ve Beslenme Uzmanları", "cat": "meslek_gunu"},
 	(6, 14): {"title": "14 Haziran Dünya Gönüllü Kan Bağışçıları Günü", "prof": "Kızılay ve Kan Merkezi Sağlık Çalışanları", "cat": "belirli_gun"},
 	(7, 1): {"title": "1 Temmuz Denizcilik ve Kabotaj Bayramı", "prof": "Denizciler, Kaptanlar ve Gemi Adamları", "cat": "meslek_gunu"},
 	(7, 24): {"title": "24 Temmuz Gazeteciler ve Basın Bayramı", "prof": "Basın ve Medya Çalışanları", "cat": "meslek_gunu"},
+	(8, 26): {"title": "26 Ağustos Malazgirt Zaferi", "prof": "Tarih Öğretmenleri ve Türk Silahlı Kuvvetleri", "cat": "milli_bayram"},
 	(9, 1): {"title": "1 Eylül Dünya Barış Günü & Adli Yıl Açılışı", "prof": "Hakimler, Savcılar ve Hukuk Çalışanları", "cat": "meslek_gunu"},
-	(9, 8): {"title": "8 Eylül Dünya Fizyoterapistler Günü", "prof": "Fizyoterapistler", "cat": "meslek_gunu"},
-	(9, 15): {"title": "İlköğretim Haftası (Eylül 3. Haftası)", "prof": "Öğretmenler, Okul İdarecileri ve Okul Hemşireleri", "cat": "belirli_gun"},
-	(9, 25): {"title": "25 Eylül - 1 Ekim İtfaiyecilik Haftası", "prof": "İtfaiyeciler ve Yangın Güvenliği Personeli", "cat": "meslek_gunu"},
+	(9, 8): {"title": "8 Eylül Dünya Fizyoterapistler Günü & Dünya Okuma Yazma Günü", "prof": "Fizyoterapistler ve Sınıf Öğretmenleri", "cat": "meslek_gunu"},
+	(9, 15): {"title": "MEB - İlköğretim Haftası (Eylül 3. Haftası)", "prof": "Öğretmenler, Okul İdarecileri ve Okul Hemşireleri", "cat": "belirli_gun"},
+	(9, 19): {"title": "MEB - 19 Eylül Gaziler Günü", "prof": "Kahraman Gazilerimiz ve Şehit Yakınları", "cat": "milli_bayram"},
+	(9, 22): {"title": "MEB - Ahilik Kültürü Haftası", "prof": "Esnaf, Sanatkârlar ve Meslek Lisesi Öğretmenleri", "cat": "belirli_gun"},
+	(9, 25): {"title": "MEB - İtfaiyecilik Haftası (25 Eylül - 1 Ekim) & Dünya Okul Sütü Günü", "prof": "İtfaiyeciler ve Okul Beslenme Görevlileri", "cat": "meslek_gunu"},
+	(9, 26): {"title": "MEB - 26 Eylül Türk Dil Bayramı", "prof": "Türkçe ve Edebiyat Öğretmenleri, Dilbilimciler", "cat": "belirli_gun"},
 	(9, 29): {"title": "29 Eylül Dünya Kalp Günü", "prof": "Kardiyologlar ve Koruyucu Sağlık Ekibi", "cat": "belirli_gun"},
-	(10, 4): {"title": "4 Ekim Hayvanları Koruma Günü", "prof": "Veteriner Hekimler", "cat": "meslek_gunu"},
+	(10, 1): {"title": "1 Ekim Dünya Yaşlılar Günü & Camiler ve Din Görevlileri Haftası (1-7 Ekim)", "prof": "Din Görevlileri ve Geriatri Uzmanları", "cat": "meslek_gunu"},
+	(10, 4): {"title": "MEB - 4 Ekim Hayvanları Koruma Günü", "prof": "Veteriner Hekimler", "cat": "meslek_gunu"},
 	(10, 10): {"title": "10 Ekim Dünya Ruh Sağlığı Günü", "prof": "Psikiyatristler, Psikologlar ve Okul Rehber Öğretmenleri", "cat": "meslek_gunu"},
+	(10, 13): {"title": "13 Ekim Ankara'nın Başkent Oluşu & Dünya Afet Risklerinin Azaltılması Günü", "prof": "AFAD ve Kamu Yönetimi Çalışanları", "cat": "milli_bayram"},
 	(10, 15): {"title": "15 Ekim Dünya El Yıkama Günü", "prof": "Okul Sağlığı Hemşireleri ve Enfeksiyon Kontrol Ekibi", "cat": "belirli_gun"},
 	(10, 19): {"title": "19 Ekim Muhtarlar Günü", "prof": "Mahalle ve Köy Muhtarları", "cat": "meslek_gunu"},
-	(10, 29): {"title": "29 Ekim - 4 Kasım Kızılay Haftası", "prof": "Kızılay Çalışanları ve İnsani Yardım Gönüllüleri", "cat": "belirli_gun"},
-	(11, 2): {"title": "2-8 Kasım Lösemili Çocuklar Haftası", "prof": "Pediatrik Hematoloji Hekimleri ve Hemşireleri", "cat": "belirli_gun"},
-	(11, 3): {"title": "3-9 Kasım Organ Bağışı ve Nakli Haftası", "prof": "Organ Nakli Koordinatörleri ve Cerrahlar", "cat": "belirli_gun"},
+	(10, 24): {"title": "MEB - 24 Ekim Birleşmiş Milletler Günü", "prof": "Diplomatlar ve Uluslararası İlişkiler Uzmanları", "cat": "belirli_gun"},
+	(10, 30): {"title": "MEB - Kızılay Haftası (29 Ekim - 4 Kasım)", "prof": "Kızılay Çalışanları ve İnsani Yardım Gönüllüleri", "cat": "belirli_gun"},
+	(11, 2): {"title": "MEB - Lösemili Çocuklar Haftası (2-8 Kasım)", "prof": "Pediatrik Hematoloji Hekimleri ve Hemşireleri", "cat": "belirli_gun"},
+	(11, 3): {"title": "MEB - Organ Bağışı ve Nakli Haftası (3-9 Kasım)", "prof": "Organ Nakli Koordinatörleri ve Cerrahlar", "cat": "belirli_gun"},
 	(11, 8): {"title": "8 Kasım Dünya Radyoloji Günü", "prof": "Radyoloji Uzmanları ve Teknikerleri", "cat": "meslek_gunu"},
-	(11, 14): {"title": "14 Kasım Dünya Diyabet Günü", "prof": "Endokrinologlar, Diyabet Eğitim Hemşireleri ve Okul Hemşireleri", "cat": "belirli_gun"},
-	(11, 20): {"title": "20 Kasım Dünya Çocuk Hakları Günü", "prof": "Çocuk Sağlığı Uzmanları ve Eğitimciler", "cat": "belirli_gun"},
-	(11, 22): {"title": "22 Kasım Diş Hekimleri Günü & Ağız ve Diş Sağlığı Haftası", "prof": "Diş Hekimleri ve Ağız-Diş Sağlığı Çalışanları", "cat": "meslek_gunu"},
-	(11, 24): {"title": "24 Kasım Öğretmenler Günü", "prof": "Öğretmenler ve Eğitim Camiası", "cat": "meslek_gunu"},
-	(12, 3): {"title": "3 Aralık Dünya Engelliler Günü", "prof": "Özel Eğitim, Fizyoterapi ve Sosyal Hizmet Uzmanları", "cat": "belirli_gun"},
+	(11, 12): {"title": "MEB - 12 Kasım Afet Eğitimi Hazırlık Günü", "prof": "AFAD, Okul İş Güvenliği ve İlk Yardım Ekipleri", "cat": "belirli_gun"},
+	(11, 14): {"title": "MEB - 14 Kasım Dünya Diyabet Günü", "prof": "Endokrinologlar, Diyabet Eğitim Hemşireleri ve Okul Hemşireleri", "cat": "belirli_gun"},
+	(11, 20): {"title": "MEB - 20 Kasım Dünya Çocuk Hakları Günü & Dünya Felsefe Günü", "prof": "Çocuk Sağlığı Uzmanları, Felsefe Öğretmenleri ve Eğitimciler", "cat": "belirli_gun"},
+	(11, 22): {"title": "MEB - 22 Kasım Diş Hekimleri Günü & Ağız ve Diş Sağlığı Haftası (21-27 Kasım)", "prof": "Diş Hekimleri ve Ağız-Diş Sağlığı Çalışanları", "cat": "meslek_gunu"},
+	(11, 24): {"title": "MEB - 24 Kasım Öğretmenler Günü", "prof": "Öğretmenler ve Eğitim Camiası", "cat": "meslek_gunu"},
+	(12, 3): {"title": "MEB - 3 Aralık Dünya Engelliler Günü & Vakıf Haftası", "prof": "Özel Eğitim, Fizyoterapi ve Sosyal Hizmet Uzmanları", "cat": "belirli_gun"},
 	(12, 4): {"title": "4 Aralık Dünya Madenciler Günü", "prof": "Maden İşçileri ve Maden Mühendisleri", "cat": "meslek_gunu"},
-	(12, 5): {"title": "5 Aralık Dünya Mühendisler Günü & Türk Kadınına Seçme ve Seçilme Hakkı Günü", "prof": "Mühendisler", "cat": "meslek_gunu"},
-	(12, 10): {"title": "10 Aralık Dünya İnsan Hakları Günü", "prof": "Hukukçular ve İnsan Hakları Savunucuları", "cat": "belirli_gun"},
-	(12, 12): {"title": "12-18 Aralık Tutum, Yatırım ve Türk Malları (Yerli Malı) Haftası", "prof": "Yerli Üreticiler, Esnaf ve Sanayiciler", "cat": "belirli_gun"},
+	(12, 5): {"title": "MEB - 5 Aralık Dünya Mühendisler Günü & Türk Kadınına Seçme ve Seçilme Hakkı Günü", "prof": "Mühendisler ve Hukukçular", "cat": "meslek_gunu"},
+	(12, 10): {"title": "MEB - 10 Aralık Dünya İnsan Hakları Günü & İnsan Hakları ve Demokrasi Haftası (10-16 Aralık)", "prof": "Hukukçular, Öğretmenler ve İnsan Hakları Savunucuları", "cat": "belirli_gun"},
+	(12, 12): {"title": "MEB - Tutum, Yatırım ve Türk Malları (Yerli Malı) Haftası (12-18 Aralık)", "prof": "Yerli Üreticiler, Esnaf, Öğretmenler ve Veliler", "cat": "belirli_gun"},
 	(12, 22): {"title": "22 Aralık Dünya Paramedikler Günü", "prof": "Paramedikler ve 112 Acil Sağlık Ekibi", "cat": "meslek_gunu"},
+	(12, 27): {"title": "27 Aralık Atatürk'ün Ankara'ya Gelişi", "prof": "Tarih Öğretmenleri ve Kamu Görevlileri", "cat": "milli_bayram"},
 }
 
-# Haftanın gününe göre varsayılan meslek/topluluk takdiri (Özel bir meslek günü olmayan günler için)
+# Hafta Boyu Süren Resmi MEB Belirli Gün ve Haftalar (Takvim Yaprağında o haftanın tüm günlerinde görünür!)
+MEB_WEEK_RANGES: list[dict[str, Any]] = [
+	{"m1": 1, "d1": 1, "m2": 1, "d2": 7, "title": "Verem Eğitimi ve Propaganda Haftası", "focus": "Solunum hijyeni, sınıf havalandırması ve bulaşıcı hastalık farkındalığı"},
+	{"m1": 1, "d1": 7, "m2": 1, "d2": 14, "title": "Beyaz Baston Görme Engelliler Haftası", "focus": "Okulda görme taramaları ve erişilebilirlik farkındalığı"},
+	{"m1": 1, "d1": 11, "m2": 1, "d2": 17, "title": "Enerji Tasarrufu Haftası", "focus": "Kaynakların verimli kullanımı"},
+	{"m1": 3, "d1": 1, "m2": 3, "d2": 7, "title": "Yeşilay Haftası (1–7 Mart)", "focus": "Zararlı alışkanlıklardan ve teknoloji/tütün bağımlılığından korunma"},
+	{"m1": 3, "d1": 8, "m2": 3, "d2": 14, "title": "Bilim ve Teknoloji Haftası (8–14 Mart)", "focus": "Bilimsel düşünce ve sağlık teknolojileri"},
+	{"m1": 3, "d1": 15, "m2": 3, "d2": 21, "title": "Tüketiciyi Koruma Haftası (15–21 Mart)", "focus": "Güvenli gıda, etiket okuma ve bilinçli tüketim"},
+	{"m1": 3, "d1": 18, "m2": 3, "d2": 24, "title": "Yaşlılara Saygı Haftası (18–24 Mart)", "focus": "Kuşaklar arası dayanışma ve büyüklere saygı"},
+	{"m1": 3, "d1": 21, "m2": 3, "d2": 26, "title": "Orman Haftası (21–26 Mart)", "focus": "Doğa sevgisi, temiz hava ve çevre sağlığı"},
+	{"m1": 3, "d1": 28, "m2": 4, "d2": 3, "title": "Kütüphaneler Haftası", "focus": "Okuma alışkanlığı ve bilgi okuryazarlığı"},
+	{"m1": 4, "d1": 1, "m2": 4, "d2": 7, "title": "Kanser Haftası (1–7 Nisan)", "focus": "Erken tanı, sağlıklı beslenme ve hareketli yaşam"},
+	{"m1": 4, "d1": 7, "m2": 4, "d2": 13, "title": "Dünya Sağlık Haftası & Sağlık ve Sosyal Güvenlik Haftası (7–13 Nisan)", "focus": "Okul sağlığı taramaları, kişisel hijyen ve koruyucu sağlık"},
+	{"m1": 4, "d1": 15, "m2": 4, "d2": 22, "title": "Turizm Haftası (15–22 Nisan)", "focus": "Kültürel miras ve doğa bilinci"},
+	{"m1": 4, "d1": 21, "m2": 4, "d2": 28, "title": "Ebeler Haftası (21–28 Nisan)", "focus": "Anne ve çocuk sağlığı"},
+	{"m1": 4, "d1": 28, "m2": 5, "d2": 4, "title": "Kardeşlik Haftası (28 Nisan – 4 Mayıs)", "focus": "Akran zorbalığını önleme, empati ve okul içi uyum"},
+	{"m1": 5, "d1": 1, "m2": 5, "d2": 7, "title": "Trafik ve İlkyardım Haftası & Bilişim Haftası (Mayıs 1. Haftası)", "focus": "Revir ilk yardım eğitimi, okul servis güvenliği ve güvenli internet"},
+	{"m1": 5, "d1": 4, "m2": 5, "d2": 10, "title": "İş Sağlığı ve Güvenliği Haftası (4–10 Mayıs)", "focus": "Okul ve laboratuvar güvenliği, kaza önleme"},
+	{"m1": 5, "d1": 10, "m2": 5, "d2": 16, "title": "Engelliler Haftası (10–16 Mayıs) & Vakıflar Haftası", "focus": "Özel gereksinimli öğrencilerle kapsayıcı eğitim ve yardımlaşma"},
+	{"m1": 5, "d1": 12, "m2": 5, "d2": 18, "title": "Hemşirelik Haftası (12–18 Mayıs)", "focus": "Okul sağlığı hemşireliği ve şefkatli bakım"},
+	{"m1": 5, "d1": 18, "m2": 5, "d2": 24, "title": "Müzeler Haftası (18–24 Mayıs)", "focus": "Tarih ve kültür bilinci"},
+	{"m1": 6, "d1": 5, "m2": 6, "d2": 11, "title": "Çevre Koruma Haftası (Haziran 2. Haftası)", "focus": "Temiz okul, geri dönüşüm ve su tasarrufu"},
+	{"m1": 9, "d1": 14, "m2": 9, "d2": 20, "title": "İlköğretim Haftası (Eylül 3. Haftası)", "focus": "Okula uyum, yeni eğitim yılı sağlık künyesi ve hijyen kontrolü"},
+	{"m1": 9, "d1": 25, "m2": 10, "d2": 1, "title": "İtfaiyecilik ve Yangınından Korunma Haftası (25 Eylül – 1 Ekim)", "focus": "Acil durum tahliye ve yangın güvenliği"},
+	{"m1": 10, "d1": 29, "m2": 11, "d2": 4, "title": "Kızılay Haftası (29 Ekim – 4 Kasım)", "focus": "İlk yardım, kan bağışı ve afet dayanışması"},
+	{"m1": 11, "d1": 2, "m2": 11, "d2": 8, "title": "Lösemili Çocuklar Haftası (2–8 Kasım)", "focus": "Lösemi farkındalığı ve bağışıklık dostu hijyen"},
+	{"m1": 11, "d1": 3, "m2": 11, "d2": 9, "title": "Organ Bağışı ve Nakli Haftası (3–9 Kasım)", "focus": "Yaşam kurtaran organ bağışı bilinci"},
+	{"m1": 11, "d1": 10, "m2": 11, "d2": 16, "title": "Atatürk Haftası (10–16 Kasım)", "focus": "Atatürk'ün bilim, eğitim ve sağlığa verdiği önem"},
+	{"m1": 11, "d1": 21, "m2": 11, "d2": 27, "title": "Ağız ve Diş Sağlığı Haftası (21–27 Kasım)", "focus": "Doğru diş fırçalama ve okul diş sağlığı taraması"},
+	{"m1": 12, "d1": 10, "m2": 12, "d2": 16, "title": "İnsan Hakları ve Demokrasi Haftası (10–16 Aralık)", "focus": "Çocuk hakları, eşitlik ve saygı"},
+	{"m1": 12, "d1": 12, "m2": 12, "d2": 18, "title": "Tutum, Yatırım ve Türk Malları (Yerli Malı) Haftası (12–18 Aralık)", "focus": "Sağlıklı mevsim meyve-sebzeleri, alerjen kontrolü ve dengeli beslenme"},
+]
+
+
+def get_active_meb_weeks_for_date(d: date) -> list[dict[str, str]]:
+	"""Seçili tarihin içine düştüğü MEB Belirli Gün ve Haftalarını döndürür."""
+	matches: list[dict[str, str]] = []
+	for w in MEB_WEEK_RANGES:
+		try:
+			start_d = date(d.year, w["m1"], w["d1"])
+			end_d = date(d.year, w["m2"], w["d2"])
+			if start_d <= d <= end_d:
+				matches.append({"title": w["title"], "focus": w["focus"]})
+		except Exception:
+			pass
+	return matches
+
+
+# Haftanın gününe göre varsayılan meslek/topluluk takdiri
 WEEKDAY_DEFAULT_PROFESSION_THEME: dict[int, tuple[str, str]] = {
 	0: ("Okul Sağlığı Hemşireleri & Koruyucu Sağlık Ekibi", "Haftanın ilk iş gününde öğrencilerin sağlığı için görev yapan okul revir sorumluları."),
 	1: ("Öğretmenler & Okul Rehberlik (PDR) Servisi", "Öğrencilerin akademik ve psikososyal gelişimine rehberlik eden eğitimciler."),
@@ -587,22 +711,45 @@ WEEKDAY_DEFAULT_PROFESSION_THEME: dict[int, tuple[str, str]] = {
 	6: ("Aileler, Veliler & Gönüllü Yardım Kuruluşları", "Çocukların sağlıklı büyümesinde okul ile iş birliği yapan aileler."),
 }
 
-# Yerleşik ÖSYM & MEB Merkezi Sınav Takvimi (Çevrimdışı Hızlı Yükleme İçin)
+
+def _nth_weekday_of_month(year: int, month: int, weekday: int, nth: int) -> date:
+	"""
+	Belirtilen yıl ve ayda `nth` (1..5) sıradaki `weekday` (5=Cumartesi, 6=Pazar) tarihini döndürür.
+	ÖSYM ve MEB sınavlarının her yılda gerçek Cumartesi/Pazar gününe düşmesini sağlar (Hata #6 düzeltmesi).
+	"""
+	first_day = date(year, month, 1)
+	diff = (weekday - first_day.weekday()) % 7
+	day_num = 1 + diff + (nth - 1) * 7
+	_, max_d = calendar.monthrange(year, month)
+	while day_num > max_d:
+		day_num -= 7
+	return date(year, month, day_num)
+
+
+# Yerleşik ÖSYM & MEB Merkezi Sınav Takvimi (Her yıla hafta sonu hizalı + 2026 kesin tarihli)
 BUILTIN_OSYM_MEB_EXAMS: list[dict[str, Any]] = [
-	{"code": "MSÜ", "month": 3, "day": 1, "time": "10:15", "title": "ÖSYM - MSÜ (Millî Savunma Üniversitesi Askerî Öğrenci Aday Belirleme Sınavı)", "desc": "ÖSYM tarafından uygulanan MSÜ sınavı (Saat: 10:15)."},
-	{"code": "YDS / YÖKDİL", "month": 3, "day": 8, "time": "10:15", "title": "ÖSYM - YÖKDİL / 1 (Yükseköğretim Kurumları Yabancı Dil Sınavı)", "desc": "ÖSYM YÖKDİL İlkbahar dönemi sınavı."},
-	{"code": "YDS / YÖKDİL", "month": 4, "day": 5, "time": "10:15", "title": "ÖSYM - YDS / 1 (Yabancı Dil Bilgisi Seviye Tespit Sınavı)", "desc": "ÖSYM YDS İlkbahar dönemi sınavı."},
-	{"code": "İOKBS Bursluluk", "month": 4, "day": 26, "time": "10:00", "title": "MEB - İOKBS (İlköğretim ve Ortaöğretim Kurumları Bursluluk Sınavı)", "desc": "MEB merkezi bursluluk sınavı."},
-	{"code": "ALES", "month": 5, "day": 10, "time": "10:15", "title": "ÖSYM - ALES / 1 (Akademik Personel ve Lisansüstü Eğitimi Giriş Sınavı)", "desc": "ÖSYM ALES-1 oturumu."},
-	{"code": "LGS", "month": 6, "day": 14, "time": "09:30", "title": "MEB - LGS (Liselere Geçiş Sistemi Merkezi Sınavı)", "desc": "8. sınıf öğrencileri için MEB LGS Sözel (09:30) ve Sayısal (11:30) oturumları."},
-	{"code": "YKS (TYT-AYT-YDT)", "month": 6, "day": 20, "time": "10:15", "title": "ÖSYM - YKS 1. Oturum: TYT (Temel Yeterlilik Testi)", "desc": "Yükseköğretim Kurumları Sınavı TYT oturumu (Saat 10:15)."},
-	{"code": "YKS (TYT-AYT-YDT)", "month": 6, "day": 21, "time": "10:15", "title": "ÖSYM - YKS 2. Oturum: AYT & 3. Oturum: YDT", "desc": "YKS Alan Yeterlilik Testleri (10:15) ve Yabancı Dil Testi (15:45)."},
-	{"code": "DGS", "month": 7, "day": 19, "time": "10:15", "title": "ÖSYM - DGS (Dikey Geçiş Sınavı)", "desc": "Meslek yüksekokulu mezunları için Dikey Geçiş Sınavı."},
-	{"code": "KPSS", "month": 9, "day": 6, "time": "10:15", "title": "ÖSYM - KPSS Lisans (Genel Yetenek - Genel Kültür & Eğitim Bilimleri)", "desc": "Kamu Personel Seçme Sınavı Lisans oturumu."},
-	{"code": "KPSS", "month": 10, "day": 4, "time": "10:15", "title": "ÖSYM - KPSS Ön Lisans Oturumu", "desc": "Kamu Personel Seçme Sınavı Ön Lisans oturumu."},
-	{"code": "KPSS", "month": 10, "day": 25, "time": "10:15", "title": "ÖSYM - KPSS Ortaöğretim (Lise) Oturumu", "desc": "Kamu Personel Seçme Sınavı Ortaöğretim oturumu."},
-	{"code": "ALES", "month": 11, "day": 22, "time": "10:15", "title": "ÖSYM - ALES / 3 (Sonbahar Dönemi)", "desc": "ÖSYM ALES-3 oturumu."},
+	{"code": "MSÜ", "month": 3, "day_2026": 1, "weekday": 6, "nth": 1, "time": "10:15", "title": "ÖSYM - MSÜ (Millî Savunma Üniversitesi Askerî Öğrenci Aday Belirleme Sınavı)", "desc": "ÖSYM tarafından Pazar günü uygulanan MSÜ sınavı (Saat: 10:15)."},
+	{"code": "YDS / YÖKDİL", "month": 3, "day_2026": 8, "weekday": 6, "nth": 2, "time": "10:15", "title": "ÖSYM - YÖKDİL / 1 (Yükseköğretim Kurumları Yabancı Dil Sınavı)", "desc": "ÖSYM YÖKDİL İlkbahar dönemi Pazar oturumu."},
+	{"code": "YDS / YÖKDİL", "month": 4, "day_2026": 5, "weekday": 6, "nth": 1, "time": "10:15", "title": "ÖSYM - YDS / 1 (Yabancı Dil Bilgisi Seviye Tespit Sınavı)", "desc": "ÖSYM YDS İlkbahar dönemi Pazar oturumu."},
+	{"code": "İOKBS Bursluluk", "month": 4, "day_2026": 26, "weekday": 6, "nth": 4, "time": "10:00", "title": "MEB - İOKBS (İlköğretim ve Ortaöğretim Kurumları Bursluluk Sınavı)", "desc": "MEB merkezi bursluluk Pazar sınavı."},
+	{"code": "ALES", "month": 5, "day_2026": 10, "weekday": 6, "nth": 2, "time": "10:15", "title": "ÖSYM - ALES / 1 (Akademik Personel ve Lisansüstü Eğitimi Giriş Sınavı)", "desc": "ÖSYM ALES-1 Pazar oturumu."},
+	{"code": "LGS", "month": 6, "day_2026": 14, "weekday": 6, "nth": 2, "time": "09:30", "title": "MEB - LGS (Liselere Geçiş Sistemi Merkezi Sınavı)", "desc": "8. sınıf öğrencileri için MEB LGS Sözel (09:30) ve Sayısal (11:30) oturumları."},
+	{"code": "YKS (TYT-AYT-YDT)", "month": 6, "day_2026": 20, "weekday": 5, "nth": 3, "time": "10:15", "title": "ÖSYM - YKS 1. Oturum: TYT (Temel Yeterlilik Testi)", "desc": "Yükseköğretim Kurumları Sınavı Cumartesi TYT oturumu (Saat 10:15)."},
+	{"code": "YKS (TYT-AYT-YDT)", "month": 6, "day_2026": 21, "weekday": 6, "nth": 3, "time": "10:15", "title": "ÖSYM - YKS 2. Oturum: AYT & 3. Oturum: YDT", "desc": "YKS Pazar Alan Yeterlilik Testleri (10:15) ve Yabancı Dil Testi (15:45)."},
+	{"code": "DGS", "month": 7, "day_2026": 19, "weekday": 6, "nth": 3, "time": "10:15", "title": "ÖSYM - DGS (Dikey Geçiş Sınavı)", "desc": "Meslek yüksekokulu mezunları için Dikey Geçiş Sınavı."},
+	{"code": "KPSS", "month": 9, "day_2026": 6, "weekday": 6, "nth": 1, "time": "10:15", "title": "ÖSYM - KPSS Lisans (Genel Yetenek - Genel Kültür & Eğitim Bilimleri)", "desc": "Kamu Personel Seçme Sınavı Lisans Pazar oturumu."},
+	{"code": "KPSS", "month": 10, "day_2026": 4, "weekday": 6, "nth": 1, "time": "10:15", "title": "ÖSYM - KPSS Ön Lisans Oturumu", "desc": "Kamu Personel Seçme Sınavı Ön Lisans Pazar oturumu."},
+	{"code": "KPSS", "month": 10, "day_2026": 25, "weekday": 6, "nth": 4, "time": "10:15", "title": "ÖSYM - KPSS Ortaöğretim (Lise) Oturumu", "desc": "Kamu Personel Seçme Sınavı Ortaöğretim Pazar oturumu."},
+	{"code": "ALES", "month": 11, "day_2026": 22, "weekday": 6, "nth": 4, "time": "10:15", "title": "ÖSYM - ALES / 3 (Sonbahar Dönemi)", "desc": "ÖSYM ALES-3 Pazar oturumu."},
 ]
+
+
+def _resolve_exam_date_for_year(year: int, ex: dict[str, Any]) -> str:
+	"""2026 için kesin günü, diğer yıllar için ilgili haftanın Cumartesi/Pazar gününü döndürür."""
+	if year == 2026 and ex.get("day_2026"):
+		return f"{year:04d}-{ex['month']:02d}-{int(ex['day_2026']):02d}"
+	d_obj = _nth_weekday_of_month(year, int(ex["month"]), int(ex.get("weekday", 6)), int(ex.get("nth", 2)))
+	return d_obj.isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -661,13 +808,13 @@ def get_builtin_daily_quote_and_hadith(d: date) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# VERİTABANI YARDIMCILARI VE OTOMATİK RESMİ TATİL YÜKLEYİCİ
+# VERİTABANI YARDIMCILARI VE OTOMATİK RESMİ TATİL / MEB BELİRLİ GÜN YÜKLEYİCİ
 # ---------------------------------------------------------------------------
 
 def ensure_year_builtin_holidays_seeded(year: int, connect_db_fn: Callable, include_special_days: bool = False) -> int:
 	"""
-	Belirtilen yıl için resmi tatiller, yarım gün arife/28 Ekim çalışmaları ve dini bayramlar
-	henüz yüklenmemişse veritabanına ekler.
+	Belirtilen yıl için resmi tatiller, yarım gün arife/28 Ekim çalışmaları, dini bayramlar
+	ve isteğe bağlı olarak MEB Belirli Gün ve Haftaları + Meslek Günlerini veritabanına işler.
 	"""
 	added = 0
 	now_iso = datetime.now().isoformat(timespec="seconds")
@@ -732,14 +879,14 @@ def ensure_year_builtin_holidays_seeded(year: int, connect_db_fn: Callable, incl
 			existing_keys.add(t_key)
 			added += 1
 
-		# 3. İsteğe bağlı olarak Meslek Günleri ve Belirli Günler
+		# 3. MEB Belirli Gün ve Haftaları + Meslek Grubu Günleri
 		if include_special_days:
 			for (m_no, d_no), sp_info in PROFESSION_AND_SPECIAL_DAYS.items():
 				ev_date = f"{year:04d}-{m_no:02d}-{d_no:02d}"
 				t_key = (ev_date, sp_info["title"].strip().lower())
 				if t_key in existing_keys:
 					continue
-				cat = sp_info.get("cat", "meslek_gunu")
+				cat = sp_info.get("cat", "belirli_gun")
 				sym = "tr_flag" if cat == "milli_bayram" else ("profession" if cat == "meslek_gunu" else "event")
 				conn.execute(
 					"""INSERT INTO calendar_events
@@ -752,7 +899,7 @@ def ensure_year_builtin_holidays_seeded(year: int, connect_db_fn: Callable, incl
 						cat,
 						sym,
 						sp_info.get("prof", ""),
-						f"Günün Meslek Grubu: {sp_info.get('prof', '')}",
+						f"MEB Belirli Gün ve Haftalar / Meslek Grubu: {sp_info.get('prof', '')}",
 						now_iso,
 					),
 				)
@@ -763,7 +910,7 @@ def ensure_year_builtin_holidays_seeded(year: int, connect_db_fn: Callable, incl
 
 
 def seed_selected_exams_to_db(year: int, selected_exams: list[str], connect_db_fn: Callable) -> int:
-	"""Seçilen ÖSYM ve MEB sınavlarını ilgili yılın takvimine işler."""
+	"""Seçilen ÖSYM ve MEB sınavlarını ilgili yılın gerçek hafta sonu günlerine hizalayarak işler."""
 	added = 0
 	now_iso = datetime.now().isoformat(timespec="seconds")
 	sel_set = set(selected_exams)
@@ -777,7 +924,7 @@ def seed_selected_exams_to_db(year: int, selected_exams: list[str], connect_db_f
 		for ex in BUILTIN_OSYM_MEB_EXAMS:
 			if sel_set and ex["code"] not in sel_set:
 				continue
-			ev_date = f"{year:04d}-{ex['month']:02d}-{ex['day']:02d}"
+			ev_date = _resolve_exam_date_for_year(year, ex)
 			t_key = (ev_date, ex["title"].strip().lower())
 			if t_key in existing_keys:
 				continue
@@ -805,6 +952,10 @@ def save_ai_generated_events_to_db(events: list[dict[str, Any]], connect_db_fn: 
 			title = str(ev.get("title") or "").strip()
 			if len(ev_date) != 10 or not title:
 				continue
+			try:
+				date.fromisoformat(ev_date)
+			except Exception:
+				continue
 			dup = conn.execute(
 				"SELECT id FROM calendar_events WHERE event_date = ? AND lower(trim(title)) = lower(trim(?))",
 				(ev_date, title),
@@ -817,8 +968,8 @@ def save_ai_generated_events_to_db(events: list[dict[str, Any]], connect_db_fn: 
 			sym = str(ev.get("symbol_type") or CATEGORY_LABELS[cat][2]).strip()
 			if sym not in SYMBOL_OPTIONS:
 				sym = CATEGORY_LABELS[cat][2]
-			is_hol = 1 if bool(ev.get("is_civil_holiday")) else 0
-			is_half = 1 if bool(ev.get("is_half_day")) else 0
+			is_half = 1 if (bool(ev.get("is_half_day")) or cat == "yarim_gun") else 0
+			is_hol = 1 if (bool(ev.get("is_civil_holiday")) or is_half or cat in ("resmi_tatil", "secim_idari_tatil")) else 0
 			prof = str(ev.get("profession_group") or "").strip()
 			st_time = str(ev.get("start_time") or "").strip()[:5]
 			en_time = str(ev.get("end_time") or "").strip()[:5]
@@ -834,6 +985,25 @@ def save_ai_generated_events_to_db(events: list[dict[str, Any]], connect_db_fn: 
 	return added
 
 
+def _sync_selected_date_when_month_changes(new_year: int, new_month: int, today: date) -> None:
+	"""
+	Ay veya yıl değiştirildiğinde sağdaki Takvim Yaprağının eski ayda takılı kalmasını önler (Hata #4/#7 düzeltmesi).
+	"""
+	cur_iso = str(ui.session_state.get("cal_selected_date") or today.isoformat())[:10]
+	try:
+		cur_d = date.fromisoformat(cur_iso)
+	except Exception:
+		cur_d = today
+	if cur_d.year == new_year and cur_d.month == new_month:
+		return
+	if today.year == new_year and today.month == new_month:
+		ui.session_state["cal_selected_date"] = today.isoformat()
+	else:
+		_, max_d = calendar.monthrange(new_year, new_month)
+		target_day = min(cur_d.day, max_d)
+		ui.session_state["cal_selected_date"] = date(new_year, new_month, target_day).isoformat()
+
+
 # ---------------------------------------------------------------------------
 # ANA TAKVİM VE TAKVİM YAPRAĞI EKRANI RENDER FONKSİYONU
 # ---------------------------------------------------------------------------
@@ -845,20 +1015,15 @@ def render_calendar_and_planning_page(
 	save_app_settings_fn: Callable,
 	get_active_gemini_config_fn: Callable,
 	get_tr_provinces_fn: Callable,
+	is_section_visible_fn: Callable | None = None,
 ) -> None:
 	"""
-	GELİŞİM & PLAN -> 📅 Takvim & Planlama ana sayfasını oluşturur:
-	- Üst Bar: Ay/Yıl seçici, Önceki/Sonraki ay butonları, Ayın İş Günü / Hafta Sonu / Resmi Tatil özeti
-	- ✨ Gemini AI Takvim Sihirbazı & Hızlı Tatil / ÖSYM Sınavı / Meslek Günü İşaretleyici
-	- Sol Panel (%62): 7 sütunlu renk kodlu ve bayrak/hilal sembollü Aylık Takvim Izgarası
-	- Sağ Panel (%38): Seçili Güne Ait Klasik & Modern 'Takvim Yaprağı' (Meslek Grubu, Tatil,
-	  İl Bazlı Canlı Ezan Vakti Geri Sayım Sayacı, Ayarlara Göre Hadis/Özlü Söz ve Etkinlik Yönetimi)
+	GELİŞİM & PLAN -> 📅 Takvim & Planlama ana sayfasını oluşturur.
 	"""
 	today = date.today()
 	cfg = get_app_settings_fn()
 	ai_enabled, ai_key, ai_model = get_active_gemini_config_fn()
 
-	# Seçili tarih, ay ve yıl state yönetimi
 	if "cal_selected_date" not in ui.session_state:
 		ui.session_state["cal_selected_date"] = today.isoformat()
 	try:
@@ -875,17 +1040,21 @@ def render_calendar_and_planning_page(
 	view_year = int(ui.session_state.get("cal_view_year") or today.year)
 	view_month = int(ui.session_state.get("cal_view_month") or today.month)
 
+	# Eğer seçili tarih görüntülenen ayın dışındaysa senkronize et
+	if sel_date_obj.year != view_year or sel_date_obj.month != view_month:
+		_sync_selected_date_when_month_changes(view_year, view_month, today)
+		sel_date_obj = date.fromisoformat(str(ui.session_state["cal_selected_date"])[:10])
+
 	# Yılın temel resmi ve dini tatillerini ilk açılışta otomatik hazırla
 	seed_flag_key = f"_cal_seeded_{view_year}"
 	if not ui.session_state.get(seed_flag_key) and str(cfg.get("calendar_auto_load_holidays", "1")) != "0":
 		ensure_year_builtin_holidays_seeded(view_year, connect_db_fn, include_special_days=False)
 		ui.session_state[seed_flag_key] = True
 
-	# Başlık ve Üst Navigasyon
-	ui.markdown("## 📅 Okul & Revir Takvimi, Resmi Tatiller ve Günlük Takvim Yaprağı")
+	ui.markdown("## 📅 Okul & Revir Takvimi, MEB Belirli Günler ve Günlük Takvim Yaprağı")
 	ui.caption(
 		"İş günleri, hafta sonları, devlet memurları için **kırmızı** resmi tatiller ve **½ yarım gün** arife mesaileri, "
-		"🇹🇷 milli bayramlar, 🌙 dini bayramlar/kandiller, 📝 ÖSYM/MEB sınavları, 👩‍⚕️ meslek günleri ve 🕌 il bazlı canlı ezan vakti sayacı."
+		"🇹🇷 milli bayramlar, 🌙 dini bayramlar/kandiller, 🏫 MEB belirli gün ve haftalar, 📝 ÖSYM/MEB sınavları, 👩‍⚕️ meslek günleri ve 🕌 canlı ezan vakti sayacı."
 	)
 
 	flash_msg = ui.session_state.pop("_cal_flash_msg", None)
@@ -905,6 +1074,7 @@ def render_calendar_and_planning_page(
 			ui.session_state["cal_view_month"] = view_month
 			ui.session_state["cal_sel_month_box"] = TR_MONTH_NAMES[view_month]
 			ui.session_state["cal_sel_year_box"] = view_year
+			_sync_selected_date_when_month_changes(view_year, view_month, today)
 			ui.rerun()
 	with nav_c2:
 		month_labels = list(TR_MONTH_NAMES.values())
@@ -920,6 +1090,7 @@ def render_calendar_and_planning_page(
 		if new_m != view_month:
 			view_month = new_m
 			ui.session_state["cal_view_month"] = view_month
+			_sync_selected_date_when_month_changes(view_year, view_month, today)
 			ui.rerun()
 	with nav_c3:
 		year_opts = list(range(2024, 2031))
@@ -938,6 +1109,7 @@ def render_calendar_and_planning_page(
 		if picked_y != view_year:
 			view_year = picked_y
 			ui.session_state["cal_view_year"] = view_year
+			_sync_selected_date_when_month_changes(view_year, view_month, today)
 			ui.rerun()
 	with nav_c4:
 		if ui.button("📍 Bugüne Git", key="btn_cal_goto_today", type="secondary", use_container_width=True):
@@ -958,55 +1130,95 @@ def render_calendar_and_planning_page(
 			ui.session_state["cal_view_month"] = view_month
 			ui.session_state["cal_sel_month_box"] = TR_MONTH_NAMES[view_month]
 			ui.session_state["cal_sel_year_box"] = view_year
+			_sync_selected_date_when_month_changes(view_year, view_month, today)
 			ui.rerun()
 
 	# -----------------------------------------------------------------------
-	# GEMINI AI TAKVİM SİHİRBAZI & HIZLI TATİL / SINAV / MESLEK GÜNÜ PANELİ
+	# GEMINI AI TAKVİM SİHİRBAZI & MEB BELİRLİ GÜN VE HAFTALAR İŞARETLEYİCİ
 	# -----------------------------------------------------------------------
-	with ui.expander("✨ Gemini AI Takvim Sihirbazı · Resmi/Dini Tatil, Yarım Gün, ÖSYM Sınavları ve Özel Gün İşaretleyici", expanded=False):
-		wiz_t1, wiz_t2, wiz_t3 = ui.tabs([
-			"🇹🇷 Resmi & Dini Tatiller / Meslek Günleri",
+	with ui.expander("✨ Gemini AI Takvim Sihirbazı · Resmi/Dini Tatil, MEB Belirli Gün ve Haftalar, ÖSYM Sınavları ve Özel Gün İşaretleyici", expanded=False):
+		wiz_t1, wiz_t2, wiz_t3, wiz_t4 = ui.tabs([
+			"🇹🇷 Resmi & Dini Tatiller / Yarım Günler",
+			"🏫 MEB Belirli Gün ve Haftalar & Meslek Günleri",
 			"📝 ÖSYM & MEB Sınav Takvimi",
-			"🤖 Gemini AI Serbest Takvim Komutu (Seçim Tatili, Ara Tatil vb.)",
+			"🤖 Gemini AI Serbest Komut (Seçim Tatili, Ara Tatil vb.)",
 		])
 
 		with wiz_t1:
 			ui.caption(
 				f"**{view_year}** yılı için Türkiye Cumhuriyeti resmi tatillerini, devlet memurları yarım gün arife/28 Ekim mesailerini, "
-				"milli bayramları (🇹🇷), dini bayram ve kandilleri (🌙) veya 365 günlük meslek grubu & belirli günleri tek tıkla takvime işleyin."
+				"milli bayramları (🇹🇷) ve dini bayram/kandilleri (🌙) tek tıkla takvime işleyin."
 			)
-			wc1, wc2, wc3 = ui.columns(3)
+			wc1, wc2 = ui.columns(2)
 			with wc1:
-				if ui.button(f"📥 {view_year} Resmi & Dini Tatilleri + Yarım Günleri İşle", key="btn_seed_official_holidays", type="primary", use_container_width=True):
+				if ui.button(f"📥 {view_year} Resmi & Dini Tatilleri + Yarım Günleri İşle (Hızlı)", key="btn_seed_official_holidays", type="primary", use_container_width=True):
 					cnt = ensure_year_builtin_holidays_seeded(view_year, connect_db_fn, include_special_days=False)
-					ui.session_state["_cal_flash_msg"] = f"✅ {view_year} yılı resmi tatilleri, yarım gün arife mesaileri ve dini bayramlar kontrol edildi ({cnt} yeni kayıt eklendi)."
+					ui.session_state["_cal_flash_msg"] = f"✅ {view_year} yılı resmi tatilleri, yarım gün arife mesaileri ve dini bayramlar işlendi ({cnt} yeni kayıt eklendi)."
 					ui.rerun()
 			with wc2:
-				if ui.button(f"👩‍⚕️ {view_year} Meslek Günleri & Belirli Gün/Haftaları İşle", key="btn_seed_profession_days", type="secondary", use_container_width=True):
-					cnt = ensure_year_builtin_holidays_seeded(view_year, connect_db_fn, include_special_days=True)
-					ui.session_state["_cal_flash_msg"] = f"✅ {view_year} yılı meslek günleri (Tıp Bayramı, Hemşireler Günü, Öğretmenler Günü vb.) ve belirli gün/haftalar takvime işlendi ({cnt} yeni kayıt)."
-					ui.rerun()
-			with wc3:
 				if ai_enabled and ai_key:
-					if ui.button(f"✨ Gemini AI ile {TR_MONTH_NAMES[view_month]} {view_year} Özel Günlerini Zenginleştir", key="btn_ai_enrich_month", type="secondary", use_container_width=True):
+					if ui.button(f"✨ Gemini AI ile {view_year} Resmi/Dini Tatilleri Doğrula & İşle", key="btn_ai_official_holidays", type="secondary", use_container_width=True):
+						ok, res, used_m = generate_calendar_events_with_ai(
+							api_key=ai_key,
+							model=ai_model,
+							year=view_year,
+							month=None,
+							preset_type="official_holidays",
+						)
+						if ok:
+							added = save_ai_generated_events_to_db(res.get("events") or [], connect_db_fn)
+							ui.session_state["_cal_flash_msg"] = f"✨ Gemini AI ({used_m}) ile {view_year} yılı için {added} resmi/dini tatil kaydı işlendi."
+							ui.rerun()
+						else:
+							ui.error(f"Gemini hatası: {res.get('error')}")
+
+		with wiz_t2:
+			ui.caption(
+				"MEB Eğitim Kurumları Sosyal Etkinlikler Yönetmeliği'ndeki **Belirli Gün ve Haftalar Çizelgesini** "
+				"(İlköğretim Haftası, Yeşilay Haftası, Kızılay Haftası, Lösemili Çocuklar Haftası, Atatürk Haftası, Yerli Malı Haftası, "
+				"Trafik ve İlkyardım Haftası, Engelliler Haftası, Orman Haftası vb.) ve **Meslek Grubu Günlerini** takvime ekleyin."
+			)
+			mc1, mc2, mc3 = ui.columns(3)
+			with mc1:
+				if ui.button(f"🏫 {view_year} Tüm MEB Belirli Gün ve Haftaları + Meslek Günlerini İşle", key="btn_seed_meb_all_year", type="primary", use_container_width=True):
+					cnt = ensure_year_builtin_holidays_seeded(view_year, connect_db_fn, include_special_days=True)
+					ui.session_state["_cal_flash_msg"] = f"✅ {view_year} yılı MEB Belirli Gün ve Haftalar çizelgesi ile meslek günleri takvime işlendi ({cnt} yeni kayıt)."
+					ui.rerun()
+			with mc2:
+				if ai_enabled and ai_key:
+					if ui.button(f"✨ Gemini AI ile {TR_MONTH_NAMES[view_month]} {view_year} MEB Belirli Gün ve Haftalarını Ekle", key="btn_ai_meb_month", type="secondary", use_container_width=True):
 						ok, res, used_m = generate_calendar_events_with_ai(
 							api_key=ai_key,
 							model=ai_model,
 							year=view_year,
 							month=view_month,
-							preset_type="special_days",
+							preset_type="meb_belirli_gunler",
 						)
 						if ok:
 							added = save_ai_generated_events_to_db(res.get("events") or [], connect_db_fn)
-							ui.session_state["_cal_flash_msg"] = f"✨ Gemini AI ({used_m}) ile {TR_MONTH_NAMES[view_month]} {view_year} için {added} yeni özel gün ve meslek günü takvime işlendi!"
+							ui.session_state["_cal_flash_msg"] = f"✨ Gemini AI ({used_m}) ile {TR_MONTH_NAMES[view_month]} {view_year} için {added} MEB Belirli Gün ve Haftası takvime işlendi!"
 							ui.rerun()
 						else:
 							ui.error(f"Gemini hatası: {res.get('error')}")
-				else:
-					ui.caption("💡 Gemini AI açık olduğunda aya özel ek ulusal/uluslararası sağlık ve meslek günlerini yapay zekayla da tarayabilirsiniz.")
+			with mc3:
+				if ai_enabled and ai_key:
+					if ui.button(f"✨ Gemini AI ile Tüm {view_year} Yılı MEB Belirli Günlerini Üret", key="btn_ai_meb_full_year", type="secondary", use_container_width=True):
+						ok, res, used_m = generate_calendar_events_with_ai(
+							api_key=ai_key,
+							model=ai_model,
+							year=view_year,
+							month=None,
+							preset_type="meb_belirli_gunler",
+						)
+						if ok:
+							added = save_ai_generated_events_to_db(res.get("events") or [], connect_db_fn)
+							ui.session_state["_cal_flash_msg"] = f"✨ Gemini AI ({used_m}) ile {view_year} yılı tamamı için {added} MEB Belirli Gün ve Haftası takvime işlendi!"
+							ui.rerun()
+						else:
+							ui.error(f"Gemini hatası: {res.get('error')}")
 
-		with wiz_t2:
-			ui.caption("Takvimde işaretlenmesini istediğiniz **ÖSYM** ve **MEB** merkezi sınavlarını seçin:")
+		with wiz_t3:
+			ui.caption("Takvimde işaretlenmesini istediğiniz **ÖSYM** ve **MEB** merkezi sınavlarını seçin (Her yıl ilgili haftanın Cumartesi/Pazar gününe otomatik hizalanır):")
 			exam_choices = ["YKS (TYT-AYT-YDT)", "LGS", "KPSS", "MSÜ", "ALES", "DGS", "YDS / YÖKDİL", "İOKBS Bursluluk"]
 			picked_exams = ui.multiselect(
 				"İşaretlenecek Sınavlar",
@@ -1038,7 +1250,7 @@ def render_calendar_and_planning_page(
 						else:
 							ui.error(f"Gemini hatası: {res.get('error')}")
 
-		with wiz_t3:
+		with wiz_t4:
 			if not (ai_enabled and ai_key):
 				ui.info("🤖 Serbest doğal dil ile takvim işaretlemek için **Ayarlar → Yapay Zekâ (Gemini)** bölümünden Gemini AI'yı aktif hale getirebilirsiniz. Manuel etkinlik ve tatil ekleme formu sağdaki **Takvim Yaprağı** altında her zaman aktiftir.")
 			else:
@@ -1046,14 +1258,14 @@ def render_calendar_and_planning_page(
 					"Gemini AI'ya Takvim Talimatı Verin",
 					placeholder=(
 						f"Örn: {TR_MONTH_NAMES[view_month]} {view_year} içindeki MEB ara tatilini, seçim ertesi idari izin gününü, "
-						"okul genel göz ve boy-kilo tarama haftasını veya istediğiniz özel tatil/sınav günlerini yazın..."
+						"MEB belirli gün ve haftalarını veya okul genel göz/boy-kilo tarama haftasını takvime işle..."
 					),
 					height=78,
 					key="cal_ai_free_prompt",
 				)
 				if ui.button("✨ Gemini AI ile Analiz Et ve Takvime İşle", key="btn_run_ai_free_cal", type="primary"):
 					if not ai_cal_prompt.strip():
-						ui.warning("Lütfen eklenecek tatil, sınav veya etkinlik talimatını yazın.")
+						ui.warning("Lütfen eklenecek tatil, sınav, belirli gün veya etkinlik talimatını yazın.")
 					else:
 						ok, res, used_m = generate_calendar_events_with_ai(
 							api_key=ai_key,
@@ -1072,7 +1284,7 @@ def render_calendar_and_planning_page(
 							ui.error(f"Gemini hatası: {res.get('error')}")
 
 	# -----------------------------------------------------------------------
-	# GÖRÜNTÜLENEN AYIN VERİLERİNİ VERİTABANINDAN ÇEKME VE ANALİZ
+	# GÖRÜNTÜLENEN AYIN VERİLERİNİ VERİTABANINDAN ÇEKME VE MESAİ ANALİZİ
 	# -----------------------------------------------------------------------
 	month_prefix = f"{view_year:04d}-{view_month:02d}-"
 	with connect_db_fn() as conn:
@@ -1086,7 +1298,6 @@ def render_calendar_and_planning_page(
 			(month_prefix + "%",),
 		).fetchall()
 
-		# Aynı aydaki klinik izlem / aşı / tarama sayılarını da bilgi amaçlı çekelim
 		visit_counts_by_day: dict[str, int] = {}
 		try:
 			for vr in conn.execute(
@@ -1102,12 +1313,12 @@ def render_calendar_and_planning_page(
 		d_key = str(r["event_date"])[:10]
 		events_by_date.setdefault(d_key, []).append(dict(r))
 
-	# Ayın günlerini ve mesai istatistiklerini hesapla
 	_, days_in_month = calendar.monthrange(view_year, view_month)
 	workdays_count = 0.0
 	weekend_days_count = 0
 	civil_holiday_count = 0
 	half_day_count = 0
+	admin_leave_count = 0
 	total_events_count = len(month_rows)
 
 	for d_num in range(1, days_in_month + 1):
@@ -1117,29 +1328,33 @@ def render_calendar_and_planning_page(
 		is_wknd = d_obj.weekday() >= 5
 		has_full_hol = any(bool(e.get("is_civil_holiday")) and not bool(e.get("is_half_day")) for e in day_evs)
 		has_half_hol = any(bool(e.get("is_half_day")) for e in day_evs)
+		has_admin_leave = any(e.get("category") == "secim_idari_tatil" or e.get("symbol_type") == "ballot" for e in day_evs)
 
 		if has_full_hol:
 			civil_holiday_count += 1
 		elif has_half_hol:
 			half_day_count += 1
+		elif has_admin_leave:
+			admin_leave_count += 1
 
 		if is_wknd:
 			weekend_days_count += 1
 		else:
-			if has_full_hol:
-				pass
+			if has_full_hol or has_admin_leave:
+				pass  # Resmi tatil veya seçim/idari izin hafta içine denk geldiğinde net iş gününden düşülür (Hata #3 düzeltmesi)
 			elif has_half_hol:
 				workdays_count += 0.5
 			else:
 				workdays_count += 1.0
 
 	workdays_str = f"{int(workdays_count)}" if workdays_count.is_integer() else f"{workdays_count:.1f}".replace(".", ",")
+	admin_badge_str = f" · {admin_leave_count} idari izin" if admin_leave_count else ""
 
 	# Ay Özeti & Renk / Sembol Rehberi Şeridi
 	ui.markdown(
 		f"""<div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;
 		padding:10px 14px;border-radius:12px;background:var(--bg-card);border:1px solid var(--line);margin:6px 0 12px 0;">
-			<div style="display:flex;flex-wrap:wrap;align-items:center;gap:14px;">
+			<div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;">
 				<span style="font-size:15px;font-weight:800;color:var(--text-heading);">🗓️ {TR_MONTH_NAMES[view_month]} {view_year}</span>
 				<span style="font-size:12.5px;background:#ecfdf5;color:#047857;border:1px solid #a7f3d0;padding:3px 9px;border-radius:999px;font-weight:700;">
 					🏢 Net İş Günü: {workdays_str} gün
@@ -1148,7 +1363,7 @@ def render_calendar_and_planning_page(
 					🏖️ Hafta Sonu: {weekend_days_count} gün
 				</span>
 				<span style="font-size:12.5px;background:#fef2f2;color:#dc2626;border:1px solid #fecaca;padding:3px 9px;border-radius:999px;font-weight:800;">
-					🇹🇷 Resmi Tatil: {civil_holiday_count} tam{f' · {half_day_count} yarım gün' if half_day_count else ''}
+					🇹🇷 Resmi Tatil: {civil_holiday_count} tam{f' · {half_day_count} yarım gün' if half_day_count else ''}{admin_badge_str}
 				</span>
 				<span style="font-size:12.5px;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;padding:3px 9px;border-radius:999px;font-weight:700;">
 					📌 Kayıtlı Gün/Etkinlik: {total_events_count}
@@ -1168,193 +1383,241 @@ def render_calendar_and_planning_page(
 	)
 
 	# -----------------------------------------------------------------------
-	# İKİ SÜTUNLU ANA YERLEŞİM: SOL = AYLIK TAKVİM, SAĞ = TAKVİM YAPRAĞI
+	# SAYFA BÖLÜM GÖRÜNÜRLÜĞÜ KONTROLÜ VE KAPATILAN BÖLÜMLERİ GERİ AÇMA ŞERİDİ
+	# (Hata #11 + "kapatınca kaybolan kısımları ekle" düzeltmesi)
 	# -----------------------------------------------------------------------
-	cal_col, leaf_col = ui.columns([1.68, 1.05], gap="medium")
+	show_grid_sec = True
+	show_leaf_sec = True
+	if is_section_visible_fn is not None:
+		try:
+			show_grid_sec = bool(is_section_visible_fn("calendar_monthly_grid"))
+			show_leaf_sec = bool(is_section_visible_fn("calendar_daily_leaf"))
+		except Exception:
+			pass
 
-	with cal_col:
-		# Haftanın Günleri Başlığı (Pzt - Paz)
-		hdr_cols = ui.columns(7)
-		for w_idx, w_short in enumerate(TR_WEEKDAY_SHORT):
-			is_wk = w_idx >= 5
-			hdr_bg = "#fee2e2" if w_idx == 6 else ("#e2e8f0" if is_wk else "var(--bg-card)")
-			hdr_fg = "#dc2626" if w_idx == 6 else ("#334155" if is_wk else "var(--text-heading)")
-			with hdr_cols[w_idx]:
-				ui.markdown(
-					f"""<div style="text-align:center;padding:6px 4px;border-radius:8px;background:{hdr_bg};
-					border:1px solid var(--line);font-size:12.5px;font-weight:800;color:{hdr_fg};margin-bottom:4px;">
-						{w_short}
-					</div>""",
-					unsafe_allow_html=True,
-				)
+	if not show_grid_sec or not show_leaf_sec:
+		hidden_names = []
+		if not show_grid_sec:
+			hidden_names.append("Aylık Takvim Izgarası")
+		if not show_leaf_sec:
+			hidden_names.append("Günlük Takvim Yaprağı")
+		hc1, hc2 = ui.columns([3.0, 1.2])
+		with hc1:
+			ui.info(f"👁️ Gizlenmiş takvim bölümü var: **{', '.join(hidden_names)}**.")
+		with hc2:
+			if ui.button("👁️ Gizli Takvim Bölümlerini Geri Aç", key="btn_restore_hidden_cal_sections", type="primary", use_container_width=True):
+				try:
+					vis_raw = cfg.get("page_sections_visibility", "{}")
+					vis_map = json.loads(vis_raw) if vis_raw else {}
+				except Exception:
+					vis_map = {}
+				vis_map["calendar_monthly_grid"] = True
+				vis_map["calendar_daily_leaf"] = True
+				save_app_settings_fn({"page_sections_visibility": json.dumps(vis_map, ensure_ascii=False)})
+				ui.rerun()
 
-		cal_matrix = calendar.Calendar(firstweekday=0).monthdayscalendar(view_year, view_month)
-		for week_idx, week_days in enumerate(cal_matrix):
-			w_cols = ui.columns(7)
-			for wd_idx, day_num in enumerate(week_days):
-				with w_cols[wd_idx]:
-					if day_num == 0:
-						ui.markdown(
-							'<div style="min-height:112px;border-radius:10px;background:rgba(148,163,184,0.06);'
-							'border:1px dashed rgba(148,163,184,0.22);margin-bottom:4px;"></div>',
-							unsafe_allow_html=True,
-						)
-						continue
+	if show_grid_sec and show_leaf_sec:
+		cal_col, leaf_col = ui.columns([1.68, 1.05], gap="medium")
+	elif show_grid_sec:
+		cal_col = ui.container()
+		leaf_col = None
+	elif show_leaf_sec:
+		cal_col = None
+		leaf_col = ui.container()
+	else:
+		return
 
-					cell_date = date(view_year, view_month, day_num)
-					cell_iso = cell_date.isoformat()
-					is_today = (cell_date == today)
-					is_selected = (cell_date == sel_date_obj)
-					is_weekend = (wd_idx >= 5)
-					is_sunday = (wd_idx == 6)
-
-					cell_events = events_by_date.get(cell_iso, [])
-					sp_builtin = PROFESSION_AND_SPECIAL_DAYS.get((view_month, day_num))
-					revir_v_cnt = visit_counts_by_day.get(cell_iso, 0)
-
-					has_full_holiday = any(bool(e.get("is_civil_holiday")) and not bool(e.get("is_half_day")) for e in cell_events)
-					has_half_day = any(bool(e.get("is_half_day")) for e in cell_events)
-					has_tr_flag = any(e.get("symbol_type") == "tr_flag" for e in cell_events) or (
-						sp_builtin and sp_builtin.get("cat") == "milli_bayram"
-					)
-					has_crescent = any(e.get("symbol_type") == "crescent" for e in cell_events)
-					has_exam = any(e.get("symbol_type") == "exam" or e.get("category") == "osym_sinav" for e in cell_events)
-					has_ballot = any(e.get("symbol_type") == "ballot" or e.get("category") == "secim_idari_tatil" for e in cell_events)
-					has_prof = any(e.get("symbol_type") == "profession" or e.get("category") == "meslek_gunu" for e in cell_events) or bool(sp_builtin)
-
-					# Renk Planı:
-					# 1. Devlet Memuru Resmi Tatili -> Kırmızı Vurgulu (#fef2f2 zemin, #dc2626 kırmızı yazı)
-					# 2. Yarım Gün Mesai -> Turuncu-Kırmızı (#fff7ed zemin, #ea580c / #dc2626)
-					# 3. Hafta Sonu -> Belirgin Arduvaz/Mavi-Gri (#f1f5f9 zemin)
-					# 4. İş Günü -> Beyaz / Temiz Kart Zemini
-					if has_full_holiday:
-						cell_bg = "linear-gradient(180deg, #fef2f2 0%, #fee2e2 100%)"
-						cell_border = "2px solid #dc2626" if is_selected else "1.5px solid #fca5a5"
-						num_color = "#dc2626"
-						status_tag = '<span style="font-size:9.5px;font-weight:800;color:#ffffff;background:#dc2626;padding:1px 5px;border-radius:4px;">TATİL</span>'
-					elif has_half_day:
-						cell_bg = "linear-gradient(180deg, #fff7ed 0%, #ffedd5 100%)"
-						cell_border = "2px solid #ea580c" if is_selected else "1.5px solid #fdba74"
-						num_color = "#dc2626"
-						status_tag = '<span style="font-size:9.5px;font-weight:800;color:#9a3412;background:#fed7aa;padding:1px 5px;border-radius:4px;">½ YARIM GÜN</span>'
-					elif has_ballot:
-						cell_bg = "linear-gradient(180deg, #f5f3ff 0%, #ede9fe 100%)"
-						cell_border = "2px solid #7c3aed" if is_selected else "1.5px solid #c4b5fd"
-						num_color = "#6d28d9"
-						status_tag = '<span style="font-size:9.5px;font-weight:800;color:#5b21b6;background:#ddd6fe;padding:1px 5px;border-radius:4px;">İDARİ İZİN</span>'
-					elif is_weekend:
-						cell_bg = "linear-gradient(180deg, #f1f5f9 0%, #e2e8f0 100%)"
-						cell_border = "2px solid var(--teal)" if is_selected else "1px solid #cbd5e1"
-						num_color = "#dc2626" if is_sunday else "#334155"
-						status_tag = '<span style="font-size:9px;font-weight:700;color:#64748b;">H.Sonu</span>'
-					else:
-						cell_bg = "var(--bg-card)"
-						cell_border = "2px solid var(--teal)" if is_selected else "1px solid var(--line)"
-						num_color = "var(--text-heading)"
-						status_tag = '<span style="font-size:9px;font-weight:600;color:#059669;">İş Günü</span>'
-
-					if is_today and not is_selected:
-						cell_border = "2px solid #0284c7"
-
-					# Üst sağ sembol dizisi (Bayrak, Hilal, Sınav, Meslek)
-					top_symbols: list[str] = []
-					if has_tr_flag:
-						top_symbols.append(SVG_TR_FLAG_MINI)
-					if has_crescent:
-						top_symbols.append(SVG_CRESCENT_MINI)
-					if has_exam:
-						top_symbols.append('<span title="ÖSYM / MEB Sınavı" style="font-size:12px;">📝</span>')
-					if has_prof and not has_tr_flag:
-						top_symbols.append('<span title="Meslek / Belirli Gün" style="font-size:11.5px;">👩‍⚕️</span>')
-					symbols_html = "".join(top_symbols)
-
-					# Hücre içi etkinlik/tatil başlık etiketleri (en fazla 2 satır + taşma sayısı)
-					pills_html_list: list[str] = []
-					for ev in cell_events[:2]:
-						ev_title = html.escape(str(ev.get("title") or ""))
-						ev_hol = bool(ev.get("is_civil_holiday"))
-						ev_cat = str(ev.get("category") or "belirli_gun")
-						if ev_hol:
-							p_bg, p_fg, p_bd = "#fee2e2", "#b91c1c", "#fca5a5"
-						elif ev_cat == "dini_bayram":
-							p_bg, p_fg, p_bd = "#fef3c7", "#b45309", "#fde68a"
-						elif ev_cat == "osym_sinav":
-							p_bg, p_fg, p_bd = "#dbeafe", "#1d4ed8", "#93c5fd"
-						elif ev_cat == "revir_etkinlik":
-							p_bg, p_fg, p_bd = "#d1fae5", "#047857", "#6ee7b7"
-						else:
-							p_bg, p_fg, p_bd = "#f1f5f9", "#334155", "#cbd5e1"
-						pills_html_list.append(
-							f'<div style="font-size:10px;font-weight:700;color:{p_fg};background:{p_bg};'
-							f'border:1px solid {p_bd};border-radius:4px;padding:1.5px 4px;margin-top:2px;'
-							f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="{ev_title}">'
-							f'{ev_title}</div>'
-						)
-
-					# Eğer veritabanında kayıt yoksa ama yerleşik meslek/belirli gün varsa onu hafif etiketle göster
-					if not cell_events and sp_builtin:
-						sp_t = html.escape(sp_builtin["title"])
-						pills_html_list.append(
-							f'<div style="font-size:9.5px;font-weight:600;color:#0f766e;background:#f0fdfa;'
-							f'border:1px solid #99f6e4;border-radius:4px;padding:1px 4px;margin-top:2px;'
-							f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="{sp_t}">'
-							f'{sp_t}</div>'
-						)
-
-					if len(cell_events) > 2:
-						pills_html_list.append(
-							f'<div style="font-size:9.5px;font-weight:800;color:#475569;margin-top:1px;">+{len(cell_events) - 2} etkinlik daha</div>'
-						)
-					elif revir_v_cnt > 0:
-						pills_html_list.append(
-							f'<div style="font-size:9.5px;font-weight:700;color:#0369a1;margin-top:1px;">🩺 {revir_v_cnt} revir kaydı</div>'
-						)
-
-					pills_joined = "".join(pills_html_list)
-					today_dot = (
-						'<span style="background:#0284c7;color:#fff;font-size:8.5px;font-weight:800;padding:1px 4px;border-radius:4px;margin-left:3px;">BUGÜN</span>'
-						if is_today else ""
-					)
-					sel_shadow = "0 0 0 2px rgba(13,148,136,0.22)" if is_selected else "0 1px 2px rgba(0,0,0,0.04)"
-
+	# -----------------------------------------------------------------------
+	# SOL PANEL: 7 SÜTUNLU AYLIK İNTERAKTİF TAKVİM IZGARASI
+	# -----------------------------------------------------------------------
+	if cal_col is not None:
+		with cal_col:
+			hdr_cols = ui.columns(7)
+			for w_idx, w_short in enumerate(TR_WEEKDAY_SHORT):
+				is_wk = w_idx >= 5
+				hdr_bg = "#fee2e2" if w_idx == 6 else ("#e2e8f0" if is_wk else "var(--bg-card)")
+				hdr_fg = "#dc2626" if w_idx == 6 else ("#334155" if is_wk else "var(--text-heading)")
+				with hdr_cols[w_idx]:
 					ui.markdown(
-						f"""<div style="min-height:86px;padding:6px 7px;border-radius:10px 10px 4px 4px;background:{cell_bg};
-						border:{cell_border};box-shadow:{sel_shadow};display:flex;flex-direction:column;justify-content:space-between;">
-							<div>
-								<div style="display:flex;align-items:center;justify-content:space-between;gap:2px;">
-									<span style="font-size:15.5px;font-weight:900;color:{num_color};line-height:1.1;">{day_num}{today_dot}</span>
-									<span style="display:flex;align-items:center;gap:3px;">{symbols_html}</span>
-								</div>
-								<div style="margin-top:2px;">{status_tag}</div>
-								<div style="margin-top:3px;">{pills_joined}</div>
-							</div>
+						f"""<div style="text-align:center;padding:6px 4px;border-radius:8px;background:{hdr_bg};
+						border:1px solid var(--line);font-size:12.5px;font-weight:800;color:{hdr_fg};margin-bottom:4px;">
+							{w_short}
 						</div>""",
 						unsafe_allow_html=True,
 					)
-					btn_lbl = f"✓ {day_num} {TR_MONTH_NAMES[view_month][:3]}" if is_selected else f"{day_num} {TR_MONTH_NAMES[view_month][:3]}"
-					if ui.button(
-						btn_lbl,
-						key=f"btn_cal_day_{cell_iso}",
-						type=("primary" if is_selected else "secondary"),
-						use_container_width=True,
-					):
-						ui.session_state["cal_selected_date"] = cell_iso
-						ui.rerun()
+
+			cal_matrix = calendar.Calendar(firstweekday=0).monthdayscalendar(view_year, view_month)
+			for week_idx, week_days in enumerate(cal_matrix):
+				w_cols = ui.columns(7)
+				for wd_idx, day_num in enumerate(week_days):
+					with w_cols[wd_idx]:
+						if day_num == 0:
+							ui.markdown(
+								'<div style="min-height:112px;border-radius:10px;background:rgba(148,163,184,0.06);'
+								'border:1px dashed rgba(148,163,184,0.22);margin-bottom:4px;"></div>',
+								unsafe_allow_html=True,
+							)
+							continue
+
+						cell_date = date(view_year, view_month, day_num)
+						cell_iso = cell_date.isoformat()
+						is_today = (cell_date == today)
+						is_selected = (cell_date == sel_date_obj)
+						is_weekend = (wd_idx >= 5)
+						is_sunday = (wd_idx == 6)
+
+						cell_events = events_by_date.get(cell_iso, [])
+						sp_builtin = PROFESSION_AND_SPECIAL_DAYS.get((view_month, day_num))
+						revir_v_cnt = visit_counts_by_day.get(cell_iso, 0)
+
+						has_full_holiday = any(bool(e.get("is_civil_holiday")) and not bool(e.get("is_half_day")) for e in cell_events)
+						has_half_day = any(bool(e.get("is_half_day")) for e in cell_events)
+						has_tr_flag = any(e.get("symbol_type") == "tr_flag" for e in cell_events) or (
+							sp_builtin and sp_builtin.get("cat") == "milli_bayram"
+						)
+						has_crescent = any(e.get("symbol_type") == "crescent" for e in cell_events)
+						has_exam = any(e.get("symbol_type") == "exam" or e.get("category") == "osym_sinav" for e in cell_events)
+						has_ballot = any(e.get("symbol_type") == "ballot" or e.get("category") == "secim_idari_tatil" for e in cell_events)
+						has_prof = any(e.get("symbol_type") == "profession" or e.get("category") in ("meslek_gunu", "belirli_gun") for e in cell_events) or bool(sp_builtin)
+
+						# Hata #2 düzeltmesi: Hafta sonuna denk gelen Arife / Yarım gün tatillerde
+						# memur zaten hafta sonu tatilinde olduğu için "½ YARIM GÜN" değil "ARİFE · TATİL" gösterilir!
+						if has_full_holiday:
+							cell_bg = "linear-gradient(180deg, #fef2f2 0%, #fee2e2 100%)"
+							cell_border = "2px solid #dc2626" if is_selected else "1.5px solid #fca5a5"
+							num_color = "#dc2626"
+							status_tag = '<span style="font-size:9.5px;font-weight:800;color:#ffffff;background:#dc2626;padding:1px 5px;border-radius:4px;">TATİL</span>'
+						elif has_half_day and is_weekend:
+							cell_bg = "linear-gradient(180deg, #fef2f2 0%, #fee2e2 100%)"
+							cell_border = "2px solid #dc2626" if is_selected else "1.5px solid #fca5a5"
+							num_color = "#dc2626"
+							status_tag = '<span style="font-size:9px;font-weight:800;color:#b91c1c;background:#fecaca;padding:1px 5px;border-radius:4px;">ARİFE · TATİL</span>'
+						elif has_half_day:
+							cell_bg = "linear-gradient(180deg, #fff7ed 0%, #ffedd5 100%)"
+							cell_border = "2px solid #ea580c" if is_selected else "1.5px solid #fdba74"
+							num_color = "#dc2626"
+							status_tag = '<span style="font-size:9.5px;font-weight:800;color:#9a3412;background:#fed7aa;padding:1px 5px;border-radius:4px;">½ YARIM GÜN</span>'
+						elif has_ballot:
+							cell_bg = "linear-gradient(180deg, #f5f3ff 0%, #ede9fe 100%)"
+							cell_border = "2px solid #7c3aed" if is_selected else "1.5px solid #c4b5fd"
+							num_color = "#6d28d9"
+							status_tag = '<span style="font-size:9.5px;font-weight:800;color:#5b21b6;background:#ddd6fe;padding:1px 5px;border-radius:4px;">İDARİ İZİN</span>'
+						elif is_weekend:
+							cell_bg = "linear-gradient(180deg, #f1f5f9 0%, #e2e8f0 100%)"
+							cell_border = "2px solid var(--teal)" if is_selected else "1px solid #cbd5e1"
+							num_color = "#dc2626" if is_sunday else "#334155"
+							status_tag = '<span style="font-size:9px;font-weight:700;color:#64748b;">H.Sonu</span>'
+						else:
+							cell_bg = "var(--bg-card)"
+							cell_border = "2px solid var(--teal)" if is_selected else "1px solid var(--line)"
+							num_color = "var(--text-heading)"
+							status_tag = '<span style="font-size:9px;font-weight:600;color:#059669;">İş Günü</span>'
+
+						if is_today and not is_selected:
+							cell_border = "2px solid #0284c7"
+
+						top_symbols: list[str] = []
+						if has_tr_flag:
+							top_symbols.append(SVG_TR_FLAG_MINI)
+						if has_crescent:
+							top_symbols.append(SVG_CRESCENT_MINI)
+						if has_exam:
+							top_symbols.append('<span title="ÖSYM / MEB Sınavı" style="font-size:12px;">📝</span>')
+						if has_prof and not has_tr_flag:
+							top_symbols.append('<span title="MEB Belirli Gün / Meslek Günü" style="font-size:11.5px;">👩‍⚕️</span>')
+						symbols_html = "".join(top_symbols)
+
+						pills_html_list: list[str] = []
+						for ev in cell_events[:2]:
+							ev_title = html.escape(str(ev.get("title") or ""))
+							ev_hol = bool(ev.get("is_civil_holiday"))
+							ev_cat = str(ev.get("category") or "belirli_gun")
+							if ev_hol:
+								p_bg, p_fg, p_bd = "#fee2e2", "#b91c1c", "#fca5a5"
+							elif ev_cat == "dini_bayram":
+								p_bg, p_fg, p_bd = "#fef3c7", "#b45309", "#fde68a"
+							elif ev_cat == "osym_sinav":
+								p_bg, p_fg, p_bd = "#dbeafe", "#1d4ed8", "#93c5fd"
+							elif ev_cat == "secim_idari_tatil":
+								p_bg, p_fg, p_bd = "#ede9fe", "#6d28d9", "#c4b5fd"
+							elif ev_cat == "revir_etkinlik":
+								p_bg, p_fg, p_bd = "#d1fae5", "#047857", "#6ee7b7"
+							else:
+								p_bg, p_fg, p_bd = "#f1f5f9", "#334155", "#cbd5e1"
+							pills_html_list.append(
+								f'<div style="font-size:10px;font-weight:700;color:{p_fg};background:{p_bg};'
+								f'border:1px solid {p_bd};border-radius:4px;padding:1.5px 4px;margin-top:2px;'
+								f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="{ev_title}">'
+								f'{ev_title}</div>'
+							)
+
+						# Yerleşik MEB belirli gün/meslek günü varsa ve henüz aynı başlıkla eklenmemişse hücrede göster
+						if sp_builtin and len(pills_html_list) < 2:
+							existing_titles_low = {str(e.get("title") or "").lower() for e in cell_events}
+							if sp_builtin["title"].lower() not in existing_titles_low:
+								sp_t = html.escape(sp_builtin["title"])
+								pills_html_list.append(
+									f'<div style="font-size:9.5px;font-weight:600;color:#0f766e;background:#f0fdfa;'
+									f'border:1px solid #99f6e4;border-radius:4px;padding:1px 4px;margin-top:2px;'
+									f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="{sp_t}">'
+									f'{sp_t}</div>'
+								)
+
+						if len(cell_events) > 2:
+							pills_html_list.append(
+								f'<div style="font-size:9.5px;font-weight:800;color:#475569;margin-top:1px;">+{len(cell_events) - 2} kayıt daha</div>'
+							)
+						elif revir_v_cnt > 0:
+							pills_html_list.append(
+								f'<div style="font-size:9.5px;font-weight:700;color:#0369a1;margin-top:1px;">🩺 {revir_v_cnt} revir kaydı</div>'
+							)
+
+						pills_joined = "".join(pills_html_list)
+						today_dot = (
+							'<span style="background:#0284c7;color:#fff;font-size:8.5px;font-weight:800;padding:1px 4px;border-radius:4px;margin-left:3px;">BUGÜN</span>'
+							if is_today else ""
+						)
+						sel_shadow = "0 0 0 2px rgba(13,148,136,0.22)" if is_selected else "0 1px 2px rgba(0,0,0,0.04)"
+
+						ui.markdown(
+							f"""<div style="min-height:86px;padding:6px 7px;border-radius:10px 10px 4px 4px;background:{cell_bg};
+							border:{cell_border};box-shadow:{sel_shadow};display:flex;flex-direction:column;justify-content:space-between;">
+								<div>
+									<div style="display:flex;align-items:center;justify-content:space-between;gap:2px;">
+										<span style="font-size:15.5px;font-weight:900;color:{num_color};line-height:1.1;">{day_num}{today_dot}</span>
+										<span style="display:flex;align-items:center;gap:3px;">{symbols_html}</span>
+									</div>
+									<div style="margin-top:2px;">{status_tag}</div>
+									<div style="margin-top:3px;">{pills_joined}</div>
+								</div>
+							</div>""",
+							unsafe_allow_html=True,
+						)
+						btn_lbl = f"✓ {day_num} {TR_MONTH_NAMES[view_month][:3]}" if is_selected else f"{day_num} {TR_MONTH_NAMES[view_month][:3]}"
+						if ui.button(
+							btn_lbl,
+							key=f"btn_cal_day_{cell_iso}",
+							type=("primary" if is_selected else "secondary"),
+							use_container_width=True,
+						):
+							ui.session_state["cal_selected_date"] = cell_iso
+							ui.rerun()
 
 	# -----------------------------------------------------------------------
 	# SAĞ PANEL: SEÇİLİ GÜNE AİT İNTERAKTİF "TAKVİM YAPRAĞI"
 	# -----------------------------------------------------------------------
-	with leaf_col:
-		_render_interactive_calendar_leaf(
-			sel_date=sel_date_obj,
-			connect_db_fn=connect_db_fn,
-			cfg=cfg,
-			save_app_settings_fn=save_app_settings_fn,
-			ai_enabled=ai_enabled,
-			ai_key=ai_key,
-			ai_model=ai_model,
-			get_tr_provinces_fn=get_tr_provinces_fn,
-		)
+	if leaf_col is not None:
+		with leaf_col:
+			_render_interactive_calendar_leaf(
+				sel_date=sel_date_obj,
+				connect_db_fn=connect_db_fn,
+				cfg=cfg,
+				save_app_settings_fn=save_app_settings_fn,
+				ai_enabled=ai_enabled,
+				ai_key=ai_key,
+				ai_model=ai_model,
+				get_tr_provinces_fn=get_tr_provinces_fn,
+			)
 
 
 # ---------------------------------------------------------------------------
@@ -1372,6 +1635,7 @@ def _render_interactive_calendar_leaf(
 	ai_model: str,
 	get_tr_provinces_fn: Callable,
 ) -> None:
+	today = date.today()
 	sel_iso = sel_date.isoformat()
 	weekday_idx = sel_date.weekday()
 	weekday_name = TR_WEEKDAY_NAMES[weekday_idx]
@@ -1381,7 +1645,6 @@ def _render_interactive_calendar_leaf(
 	days_in_year = 366 if calendar.isleap(sel_date.year) else 365
 	remaining_days = days_in_year - day_of_year
 
-	# Seçili günün veritabanı kayıtları ve günlük yaprak notu
 	with connect_db_fn() as conn:
 		day_events = [
 			dict(r)
@@ -1397,22 +1660,33 @@ def _render_interactive_calendar_leaf(
 		]
 		leaf_note_row = conn.execute(
 			"""SELECT quote_text, quote_source, hadith_text, hadith_source,
-			          day_significance, custom_note
+			          day_significance, profession_override, custom_note
 			   FROM calendar_daily_notes
 			   WHERE note_date = ?""",
 			(sel_iso,),
 		).fetchone()
 
 	sp_builtin = PROFESSION_AND_SPECIAL_DAYS.get((sel_date.month, sel_date.day))
+	active_meb_weeks = get_active_meb_weeks_for_date(sel_date)
 	has_full_hol = any(bool(e.get("is_civil_holiday")) and not bool(e.get("is_half_day")) for e in day_events)
 	has_half_hol = any(bool(e.get("is_half_day")) for e in day_events)
+	has_admin_leave = any(e.get("category") == "secim_idari_tatil" or e.get("symbol_type") == "ballot" for e in day_events)
 	is_weekend = weekday_idx >= 5
 	is_sunday = weekday_idx == 6
 
+	# Hata #2 ve Hata #3 düzeltmeleri:
+	# - Hafta sonuna denk gelen arife günlerinde memurlar tam gün tatildedir.
+	# - Seçim tatili / idari izinlerde "TAM İŞ GÜNÜ" değil "SEÇİM TATİLİ / İDARİ İZİN" gösterilir.
 	if has_full_hol:
 		header_accent = "#dc2626"
 		num_color = "#dc2626"
 		work_status_badge = "🇹🇷 RESMİ TATİL (DEVLET MEMURLARI İZİNLİ)"
+		work_status_bg = "#fee2e2"
+		work_status_fg = "#b91c1c"
+	elif has_half_hol and is_weekend:
+		header_accent = "#dc2626"
+		num_color = "#dc2626"
+		work_status_badge = "🏖️ HAFTA SONU & ARİFE GÜNÜ (MEMURLAR TAM GÜN İZİNLİ)"
 		work_status_bg = "#fee2e2"
 		work_status_fg = "#b91c1c"
 	elif has_half_hol:
@@ -1421,6 +1695,12 @@ def _render_interactive_calendar_leaf(
 		work_status_badge = "½ YARIM GÜN MESAİ (13:00'TEN SONRA RESMİ TATİL)"
 		work_status_bg = "#ffedd5"
 		work_status_fg = "#c2410c"
+	elif has_admin_leave:
+		header_accent = "#7c3aed"
+		num_color = "#6d28d9"
+		work_status_badge = "🗳️ SEÇİM TATİLİ / İDARİ İZİN (OKUL & KURUM TATİLİ)"
+		work_status_bg = "#ede9fe"
+		work_status_fg = "#5b21b6"
 	elif is_weekend:
 		header_accent = "#475569"
 		num_color = "#dc2626" if is_sunday else "#334155"
@@ -1434,7 +1714,7 @@ def _render_interactive_calendar_leaf(
 		work_status_bg = "#d1fae5"
 		work_status_fg = "#065f46"
 
-	# Günün Meslek Grubu Tespiti
+	# Günün Meslek Grubu Tespiti (+ Gemini AI profession_override desteği — Hata #7/#8 düzeltmesi)
 	prof_groups: list[str] = []
 	for e in day_events:
 		pg = str(e.get("profession_group") or "").strip()
@@ -1442,24 +1722,43 @@ def _render_interactive_calendar_leaf(
 			prof_groups.append(pg)
 	if sp_builtin and sp_builtin.get("prof") and sp_builtin["prof"] not in prof_groups:
 		prof_groups.append(sp_builtin["prof"])
+	ai_prof_override = (leaf_note_row["profession_override"] if leaf_note_row and leaf_note_row["profession_override"] else "").strip()
+	if ai_prof_override and ai_prof_override not in prof_groups:
+		prof_groups.append(ai_prof_override)
 
 	default_wd_prof, default_wd_desc = WEEKDAY_DEFAULT_PROFESSION_THEME[weekday_idx]
+	ai_significance = (leaf_note_row["day_significance"] if leaf_note_row and leaf_note_row["day_significance"] else "").strip()
+
 	if prof_groups:
 		active_prof_title = " · ".join(prof_groups)
 		active_prof_sub = (
-			sp_builtin["title"]
-			if sp_builtin
-			else next((e["title"] for e in day_events if e.get("profession_group")), "Günün Özel Meslek Grubu")
+			ai_significance
+			or (sp_builtin["title"] if sp_builtin else "")
+			or next((e["title"] for e in day_events if e.get("profession_group")), "Günün Özel Meslek Grubu")
 		)
 	else:
 		active_prof_title = default_wd_prof
-		active_prof_sub = default_wd_desc
+		active_prof_sub = ai_significance or default_wd_desc
+
+	# MEB Aktif Belirli Gün ve Haftası Şeridi
+	meb_weeks_html_list: list[str] = []
+	for mw in active_meb_weeks:
+		meb_weeks_html_list.append(
+			f"""<div style="padding:6px 10px;border-radius:8px;background:#eff6ff;border:1px solid #bfdbfe;margin-bottom:5px;">
+				<div style="font-size:12px;font-weight:800;color:#1e40af;">🏫 {html.escape(mw['title'])}</div>
+				<div style="font-size:11px;color:#1e3a8a;margin-top:1px;">Revir & Okul Odağı: {html.escape(mw['focus'])}</div>
+			</div>"""
+		)
+	meb_weeks_block = "".join(meb_weeks_html_list)
 
 	# Günün Tatil / Belirli Gün Özeti
 	special_badges_html: list[str] = []
+	existing_titles_low: set[str] = set()
 	for e in day_events:
 		sym_html = render_symbol_badge(e.get("symbol_type") or "event")
-		e_ttl = html.escape(str(e.get("title") or ""))
+		raw_ttl = str(e.get("title") or "").strip()
+		existing_titles_low.add(raw_ttl.lower())
+		e_ttl = html.escape(raw_ttl)
 		e_desc = html.escape(str(e.get("description") or ""))
 		is_h = bool(e.get("is_civil_holiday"))
 		b_bg = "#fef2f2" if is_h else "#f8fafc"
@@ -1473,7 +1772,7 @@ def _render_interactive_calendar_leaf(
 				{f'<div style="font-size:11.2px;color:#475569;margin-top:2px;">{e_desc}</div>' if e_desc else ''}
 			</div>"""
 		)
-	if not day_events and sp_builtin:
+	if sp_builtin and sp_builtin["title"].lower() not in existing_titles_low:
 		sym_html = render_symbol_badge("tr_flag" if sp_builtin.get("cat") == "milli_bayram" else "profession")
 		special_badges_html.append(
 			f"""<div style="padding:7px 10px;border-radius:8px;background:#f0fdfa;border:1px solid #99f6e4;margin-bottom:6px;">
@@ -1511,7 +1810,7 @@ def _render_interactive_calendar_leaf(
 						</div>
 					</div>
 					<div style="text-align:right;">
-						<div style="display:inline-block;padding:4px 10px;border-radius:999px;background:{work_status_bg};color:{work_status_fg};font-size:11px;font-weight:900;margin-bottom:6px;">
+						<div style="display:inline-block;padding:4px 10px;border-radius:999px;background:{work_status_bg};color:{work_status_fg};font-size:10.8px;font-weight:900;margin-bottom:6px;">
 							{work_status_badge}
 						</div>
 						<div style="font-size:11.5px;color:#475569;font-weight:700;">
@@ -1525,7 +1824,7 @@ def _render_interactive_calendar_leaf(
 
 				<div style="margin-top:10px;padding:8px 11px;border-radius:9px;background:#f0fdfa;border:1px solid #99f6e4;">
 					<div style="font-size:10.5px;font-weight:800;color:#0f766e;text-transform:uppercase;letter-spacing:0.5px;">
-						👩‍⚕️ GÜNÜN MESLEK GRUBU & TOPLULUK TAKDİRİ
+						👩‍⚕️ GÜNÜN MESLEK GRUBU & ANLAMI
 					</div>
 					<div style="font-size:13px;font-weight:800;color:#134e4a;margin-top:2px;">
 						{html.escape(active_prof_title)}
@@ -1534,6 +1833,8 @@ def _render_interactive_calendar_leaf(
 						{html.escape(active_prof_sub)}
 					</div>
 				</div>
+
+				{f'<div style="margin-top:9px;"><div style="font-size:10.5px;font-weight:800;color:#1e40af;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">🏫 BU HAFTANIN MEB BELİRLİ GÜN VE HAFTALARI</div>{meb_weeks_block}</div>' if meb_weeks_block else ''}
 
 				<div style="margin-top:10px;">
 					<div style="font-size:10.5px;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px;">
@@ -1548,17 +1849,28 @@ def _render_interactive_calendar_leaf(
 
 	# -----------------------------------------------------------------------
 	# 2. SEÇİLİ İLE GÖRE EZAN VAKİTLERİ VE CANLI GERİ SAYIM SAYACI
+	# (Hata #1 + Hata #10 + Kapatınca Kaybolmama Düzeltmesi)
 	# -----------------------------------------------------------------------
 	show_prayer = str(cfg.get("calendar_show_prayer_times", "1")).strip() != "0"
-	if show_prayer:
-		default_prov = (cfg.get("default_province") or "Ankara").strip() or "Ankara"
-		default_dist = (cfg.get("default_district") or "").strip()
-		all_provs = get_tr_provinces_fn() or sorted(TR_PROVINCE_COORDS.keys())
-		if default_prov not in all_provs:
-			default_prov = "Ankara"
+	default_prov = (cfg.get("default_province") or "Ankara").strip() or "Ankara"
+	default_dist = (cfg.get("default_district") or "").strip()
+	all_provs = get_tr_provinces_fn() or sorted(TR_PROVINCE_COORDS.keys())
+	if default_prov not in all_provs:
+		default_prov = "Ankara"
 
+	if not show_prayer:
+		# Kapatıldığında tamamen kaybolmak yerine geri açma şeridi gösterilir!
 		with ui.container(border=True):
-			pr_hdr1, pr_hdr2 = ui.columns([1.8, 1.2])
+			pr_off1, pr_off2 = ui.columns([2.1, 1.1])
+			with pr_off1:
+				ui.caption(f"🕌 **Ezan Vakitleri & Canlı Sayaç ({default_prov})** şu an gizli.")
+			with pr_off2:
+				if ui.button("🕌 Ezan Vakitlerini Aç", key="btn_reopen_prayer_card", type="secondary", use_container_width=True):
+					save_app_settings_fn({"calendar_show_prayer_times": "1"})
+					ui.rerun()
+	else:
+		with ui.container(border=True):
+			pr_hdr1, pr_hdr2, pr_hdr3 = ui.columns([1.65, 1.05, 0.45])
 			with pr_hdr1:
 				loc_disp = f"{default_prov} / {default_dist}" if default_dist else default_prov
 				ui.markdown(f"#### 🕌 Ezan Vakitleri ({html.escape(loc_disp)})")
@@ -1573,56 +1885,63 @@ def _render_interactive_calendar_leaf(
 				if picked_prov != default_prov:
 					save_app_settings_fn({"default_province": picked_prov})
 					ui.rerun()
+			with pr_hdr3:
+				if ui.button("Gizle", key="btn_hide_prayer_card", help="Ezan vakitleri kartını gizle", use_container_width=True):
+					save_app_settings_fn({"calendar_show_prayer_times": "0"})
+					ui.rerun()
 
-			ptimes = get_prayer_times_for_province(default_prov, sel_date, connect_db_fn)
+			# 6'lı tablo seçili günün (sel_date) vakitlerini gösterir
+			sel_ptimes = get_prayer_times_for_province(default_prov, sel_date, connect_db_fn)
+			# Canlı geri sayım sayacı ise DAİMA bugünün (today) ve yarının (today + 1) gerçek vakitlerini baz alır! (Hata #1 düzeltmesi)
+			today_ptimes = sel_ptimes if sel_date == today else get_prayer_times_for_province(default_prov, today, connect_db_fn)
+			tmr_ptimes = get_prayer_times_for_province(default_prov, today + timedelta(days=1), connect_db_fn)
+
 			vakit_keys = ["İmsak", "Güneş", "Öğle", "İkindi", "Akşam", "Yatsı"]
 			now_dt = datetime.now()
 			now_hm = now_dt.strftime("%H:%M")
 
-			# Aktif ve sıradaki vakti bul
 			next_vakit_name = "İmsak"
-			next_vakit_hm = ptimes.get("İmsak", "05:30")
+			next_vakit_hm = today_ptimes.get("İmsak", "05:30")
 			current_vakit_name = "Yatsı"
+			is_target_tomorrow = False
 			for idx_v, vk in enumerate(vakit_keys):
-				vhm = ptimes.get(vk, "00:00")
+				vhm = today_ptimes.get(vk, "00:00")
 				if now_hm < vhm:
 					next_vakit_name = vk
 					next_vakit_hm = vhm
 					current_vakit_name = vakit_keys[idx_v - 1] if idx_v > 0 else "Yatsı"
 					break
 			else:
-				# Yatsı geçtiyse yarının İmsak vakti
-				tmr_pt = get_prayer_times_for_province(default_prov, date.today() + timedelta(days=1), connect_db_fn)
+				is_target_tomorrow = True
 				next_vakit_name = "İmsak (Yarın)"
-				next_vakit_hm = tmr_pt.get("İmsak", ptimes.get("İmsak", "05:30"))
+				next_vakit_hm = tmr_ptimes.get("İmsak", today_ptimes.get("İmsak", "05:30"))
 				current_vakit_name = "Yatsı"
 
-			# Canlı JavaScript Geri Sayım Sayacı için tüm vakitlerin listesi
-			vakit_json_list = json.dumps(
-				[{"name": vk, "time": ptimes.get(vk, "00:00")} for vk in vakit_keys],
+			today_schedule_json = json.dumps(
+				[{"name": vk, "time": today_ptimes.get(vk, "00:00")} for vk in vakit_keys],
 				ensure_ascii=False,
 			)
+			tmr_imsak_json = json.dumps(tmr_ptimes.get("İmsak", today_ptimes.get("İmsak", "05:30")))
 
 			v_cards_html: list[str] = []
 			for vk in vakit_keys:
-				vhm = ptimes.get(vk, "--:--")
-				is_cur_v = (vk == current_vakit_name and sel_date == date.today())
+				vhm = sel_ptimes.get(vk, "--:--")
+				is_cur_v = (vk == current_vakit_name and sel_date == today)
 				vc_bg = "#0f766e" if is_cur_v else "var(--bg-card)"
 				vc_fg = "#ffffff" if is_cur_v else "var(--text-heading)"
 				vc_sub = "#ccfbf1" if is_cur_v else "var(--text-muted)"
 				vc_bd = "2px solid #0d9488" if is_cur_v else "1px solid var(--line)"
 				v_cards_html.append(
-					f"""<div style="text-align:center;padding:6px 4px;border-radius:8px;background:{vc_bg};border:{vc_bd};">
+					f"""<div data-vakit-card="{vk}" style="text-align:center;padding:6px 4px;border-radius:8px;background:{vc_bg};border:{vc_bd};">
 						<div style="font-size:10.5px;font-weight:700;color:{vc_sub};">{vk}</div>
 						<div style="font-size:13.5px;font-weight:900;color:{vc_fg};margin-top:1px;">{vhm}</div>
 					</div>"""
 				)
 
-			# Kalan süreyi Python tarafında da başlangıç değeri olarak hesapla (ilk render anında anında görünsün)
 			try:
 				nh, nm = [int(x) for x in next_vakit_hm.split(":")[:2]]
 				target_dt = now_dt.replace(hour=nh, minute=nm, second=0, microsecond=0)
-				if target_dt <= now_dt:
+				if is_target_tomorrow or target_dt <= now_dt:
 					target_dt += timedelta(days=1)
 				diff_sec = max(0, int((target_dt - now_dt).total_seconds()))
 				init_h = diff_sec // 3600
@@ -1631,6 +1950,12 @@ def _render_interactive_calendar_leaf(
 				init_countdown_txt = f"{init_h:02d} saat {init_m:02d} dk {init_s:02d} sn"
 			except Exception:
 				init_countdown_txt = "-- saat -- dk -- sn"
+
+			diff_day_note = (
+				f"Tablo {sel_date.strftime('%d.%m.%Y')} vakitleridir · Sayaç bugünün ({today.strftime('%d.%m.%Y')}) sıradaki vaktine sayar"
+				if sel_date != today
+				else f"Kaynak: {sel_ptimes.get('source', 'Diyanet Takvimi')} · Ayarlar → Varsayılan Konum ile senkronize"
+			)
 
 			ui.markdown(
 				f"""<div style="display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:5px;margin:4px 0 8px 0;">
@@ -1644,11 +1969,12 @@ def _render_interactive_calendar_leaf(
 					</span>
 				</div>
 				<div style="font-size:10.5px;color:var(--text-muted);margin-top:4px;text-align:right;">
-					Kaynak: {html.escape(ptimes.get('source', 'Diyanet Takvimi'))} · Ayarlar → Varsayılan Konum ile senkronize
+					{html.escape(diff_day_note)}
 				</div>
 				<script>
 				(function() {{
-					var schedule = {vakit_json_list};
+					var schedule = {today_schedule_json};
+					var tomorrowImsak = {tmr_imsak_json};
 					function tickPrayerCountdown() {{
 						var el = document.getElementById('revir_prayer_countdown');
 						var lbl = document.getElementById('revir_next_prayer_label');
@@ -1669,10 +1995,10 @@ def _render_interactive_calendar_leaf(
 							}}
 						}}
 						if (!target) {{
-							var p0 = schedule[0].time.split(':');
+							var p0 = (tomorrowImsak || schedule[0].time).split(':');
 							target = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, parseInt(p0[0], 10), parseInt(p0[1], 10), 0);
-							targetName = schedule[0].name + ' (Yarın)';
-							targetHM = schedule[0].time;
+							targetName = 'İmsak (Yarın)';
+							targetHM = tomorrowImsak || schedule[0].time;
 						}}
 						var diff = Math.max(0, Math.floor((target.getTime() - now.getTime()) / 1000));
 						var hh = String(Math.floor(diff / 3600)).padStart(2, '0');
@@ -1690,19 +2016,24 @@ def _render_interactive_calendar_leaf(
 			)
 
 	# -----------------------------------------------------------------------
-	# 3. GÜNÜN HADİS-İ ŞERİFİ / ÖZLÜ SÖZÜ (AYARLARDAN YÖNETİLEN & GEMINI DESTEKLİ)
+	# 3. GÜNÜN HADİS-İ ŞERİFİ / ÖZLÜ SÖZÜ (KAPATINCA KAYBOLMAYAN SEÇİCİ İLE)
 	# -----------------------------------------------------------------------
 	quote_mode = cfg.get("calendar_quote_mode", QUOTE_MODE_OPTIONS[0])
-	if quote_mode != "Kapalı (Gösterme)":
-		builtin_qh = get_builtin_daily_quote_and_hadith(sel_date)
-		hadith_txt = (leaf_note_row["hadith_text"] if leaf_note_row and leaf_note_row["hadith_text"] else "") or builtin_qh["hadith_text"]
-		hadith_src = (leaf_note_row["hadith_source"] if leaf_note_row and leaf_note_row["hadith_source"] else "") or builtin_qh["hadith_source"]
-		quote_txt = (leaf_note_row["quote_text"] if leaf_note_row and leaf_note_row["quote_text"] else "") or builtin_qh["quote_text"]
-		quote_src = (leaf_note_row["quote_source"] if leaf_note_row and leaf_note_row["quote_source"] else "") or builtin_qh["quote_author"]
-		leaf_back_txt = (leaf_note_row["custom_note"] if leaf_note_row and leaf_note_row["custom_note"] else "")
+	if quote_mode not in QUOTE_MODE_OPTIONS:
+		quote_mode = QUOTE_MODE_OPTIONS[0]
 
-		with ui.container(border=True):
-			ui.markdown("#### 📜 Takvim Yaprağı Arkası: Günün Sözü & Hadis-i Şerif")
+	with ui.container(border=True):
+		ui.markdown("#### 📜 Takvim Yaprağı Arkası: Günün Sözü & Hadis-i Şerif")
+		if quote_mode == "Kapalı (Gösterme)":
+			ui.caption("Günün Hadis-i Şerifi ve Özlü Söz gösterimi şu an kapalı. Aşağıdaki kutudan istediğiniz zaman tekrar açabilirsiniz:")
+		else:
+			builtin_qh = get_builtin_daily_quote_and_hadith(sel_date)
+			hadith_txt = (leaf_note_row["hadith_text"] if leaf_note_row and leaf_note_row["hadith_text"] else "") or builtin_qh["hadith_text"]
+			hadith_src = (leaf_note_row["hadith_source"] if leaf_note_row and leaf_note_row["hadith_source"] else "") or builtin_qh["hadith_source"]
+			quote_txt = (leaf_note_row["quote_text"] if leaf_note_row and leaf_note_row["quote_text"] else "") or builtin_qh["quote_text"]
+			quote_src = (leaf_note_row["quote_source"] if leaf_note_row and leaf_note_row["quote_source"] else "") or builtin_qh["quote_author"]
+			leaf_back_txt = (leaf_note_row["custom_note"] if leaf_note_row and leaf_note_row["custom_note"] else "")
+
 			show_hadith = ("Hadis" in quote_mode) or ("Karışık" in quote_mode)
 			show_quote = ("Özlü Söz" in quote_mode) or ("Karışık" in quote_mode)
 
@@ -1726,69 +2057,78 @@ def _render_interactive_calendar_leaf(
 				)
 			if leaf_back_txt:
 				ui.markdown(
-					f"""<div style="padding:8px 11px;border-radius:8px;background:var(--bg-card);border:1px solid var(--line);font-size:12px;color:var(--text-body);">
+					f"""<div style="padding:8px 11px;border-radius:8px;background:var(--bg-card);border:1px solid var(--line);font-size:12px;color:var(--text-body);margin-bottom:7px;">
 						<b>📖 Takvim Yaprağı Notu:</b> {html.escape(leaf_back_txt)}
 					</div>""",
 					unsafe_allow_html=True,
 				)
 
-			qm_c1, qm_c2 = ui.columns([1.45, 1.35])
-			with qm_c1:
-				new_q_mode = ui.selectbox(
-					"Gösterim Tercihi (Ayarlar)",
-					QUOTE_MODE_OPTIONS,
-					index=(QUOTE_MODE_OPTIONS.index(quote_mode) if quote_mode in QUOTE_MODE_OPTIONS else 0),
-					key="cal_leaf_quote_mode_sel",
-					label_visibility="collapsed",
-				)
-				if new_q_mode != quote_mode:
-					save_app_settings_fn({"calendar_quote_mode": new_q_mode})
-					ui.rerun()
-			with qm_c2:
-				if ai_enabled and ai_key:
-					if ui.button("✨ Gemini ile Bu Güne Özel Üret", key=f"btn_ai_leaf_{sel_iso}", type="secondary", use_container_width=True):
-						day_ctx = ", ".join([e["title"] for e in day_events]) or (sp_builtin["title"] if sp_builtin else "")
-						ok, res, used_m = generate_daily_leaf_content_with_ai(
-							api_key=ai_key,
-							model=ai_model,
-							target_date=sel_iso,
-							quote_mode=quote_mode,
-							day_context=day_ctx,
-							province=cfg.get("default_province", "Ankara"),
-						)
-						if ok:
-							with connect_db_fn() as conn:
-								conn.execute(
-									"""INSERT INTO calendar_daily_notes
-									   (note_date, quote_text, quote_source, hadith_text, hadith_source,
-									    day_significance, custom_note, updated_at)
-									   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-									   ON CONFLICT(note_date) DO UPDATE SET
-									     quote_text = excluded.quote_text,
-									     quote_source = excluded.quote_source,
-									     hadith_text = excluded.hadith_text,
-									     hadith_source = excluded.hadith_source,
-									     day_significance = excluded.day_significance,
-									     custom_note = excluded.custom_note,
-									     updated_at = excluded.updated_at""",
-									(
-										sel_iso,
-										str(res.get("quote_text") or "").strip(),
-										str(res.get("quote_author") or "").strip(),
-										str(res.get("hadith_text") or "").strip(),
-										str(res.get("hadith_source") or "").strip(),
-										str(res.get("day_significance") or "").strip(),
-										str(res.get("leaf_back_note") or "").strip(),
-										datetime.now().isoformat(timespec="seconds"),
-									),
-								)
-							ui.session_state["_cal_flash_msg"] = f"✨ {sel_date.strftime('%d.%m.%Y')} takvim yaprağı yazısı Gemini AI ({used_m}) ile güncellendi."
-							ui.rerun()
-						else:
-							ui.error(f"Gemini hatası: {res.get('error')}")
+		# Seçici ve Gemini üretim butonu her zaman görünür kalır (Kapalı seçildiğinde bile kaybolmaz!)
+		qm_c1, qm_c2 = ui.columns([1.45, 1.35])
+		with qm_c1:
+			new_q_mode = ui.selectbox(
+				"Gösterim Tercihi (Ayarlar)",
+				QUOTE_MODE_OPTIONS,
+				index=QUOTE_MODE_OPTIONS.index(quote_mode),
+				key="cal_leaf_quote_mode_sel",
+				label_visibility="collapsed",
+			)
+			if new_q_mode != quote_mode:
+				save_app_settings_fn({"calendar_quote_mode": new_q_mode})
+				ui.rerun()
+		with qm_c2:
+			if ai_enabled and ai_key and quote_mode != "Kapalı (Gösterme)":
+				if ui.button("✨ Gemini ile Bu Güne Özel Üret", key=f"btn_ai_leaf_{sel_iso}", type="secondary", use_container_width=True):
+					meb_ctx = ", ".join([w["title"] for w in active_meb_weeks])
+					day_ctx = ", ".join(filter(None, [
+						", ".join([e["title"] for e in day_events]),
+						sp_builtin["title"] if sp_builtin else "",
+						meb_ctx,
+					]))
+					ok, res, used_m = generate_daily_leaf_content_with_ai(
+						api_key=ai_key,
+						model=ai_model,
+						target_date=sel_iso,
+						quote_mode=quote_mode,
+						day_context=day_ctx,
+						province=default_prov,
+					)
+					if ok:
+						with connect_db_fn() as conn:
+							conn.execute(
+								"""INSERT INTO calendar_daily_notes
+								   (note_date, quote_text, quote_source, hadith_text, hadith_source,
+								    day_significance, profession_override, custom_note, updated_at)
+								   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+								   ON CONFLICT(note_date) DO UPDATE SET
+								     quote_text = excluded.quote_text,
+								     quote_source = excluded.quote_source,
+								     hadith_text = excluded.hadith_text,
+								     hadith_source = excluded.hadith_source,
+								     day_significance = excluded.day_significance,
+								     profession_override = excluded.profession_override,
+								     custom_note = excluded.custom_note,
+								     updated_at = excluded.updated_at""",
+								(
+									sel_iso,
+									str(res.get("quote_text") or "").strip(),
+									str(res.get("quote_author") or "").strip(),
+									str(res.get("hadith_text") or "").strip(),
+									str(res.get("hadith_source") or "").strip(),
+									str(res.get("day_significance") or "").strip(),
+									str(res.get("profession_group") or "").strip(),
+									str(res.get("leaf_back_note") or "").strip(),
+									datetime.now().isoformat(timespec="seconds"),
+								),
+							)
+						ui.session_state["_cal_flash_msg"] = f"✨ {sel_date.strftime('%d.%m.%Y')} takvim yaprağı yazısı Gemini AI ({used_m}) ile güncellendi."
+						ui.rerun()
+					else:
+						ui.error(f"Gemini hatası: {res.get('error')}")
 
 	# -----------------------------------------------------------------------
 	# 4. SEÇİLİ GÜNÜN ETKİNLİKLERİ & YENİ ETKİNLİK / TATİL OLUŞTURMA FORMU
+	# (Hata #5 düzeltmesi: Kategori seçimi canlı tepki verir ve form kaybolmaz)
 	# -----------------------------------------------------------------------
 	with ui.container(border=True):
 		ui.markdown(f"#### 📌 {sel_date.strftime('%d')} {month_name} {sel_date.year} — Etkinlik & Plan Yönetimi")
@@ -1818,21 +2158,29 @@ def _render_interactive_calendar_leaf(
 						ui.session_state["_cal_flash_msg"] = f"🗑️ '{ev['title']}' takvimden silindi."
 						ui.rerun()
 
-		with ui.expander(f"➕ {sel_date.strftime('%d.%m.%Y')} Gününe Yeni Etkinlik / Tatil / Sınav Ekle", expanded=(len(day_events) == 0)):
-			with ui.form(f"form_add_cal_event_{sel_iso}"):
+		# Etkinlik ekleme paneli her zaman açık/erişilebilir kalır (kayıt eklendikten sonra kapanıp kaybolmaz!)
+		with ui.expander(f"➕ {sel_date.strftime('%d.%m.%Y')} Gününe Yeni Etkinlik / Tatil / Sınav Ekle", expanded=True):
+			cat_keys = list(CATEGORY_LABELS.keys())
+			cat_disp = [CATEGORY_LABELS[k][0] for k in cat_keys]
+			sym_keys = list(SYMBOL_OPTIONS.keys())
+			sym_disp = [SYMBOL_OPTIONS[k] for k in sym_keys]
+
+			# Kategori seçiciyi form dışında tutuyoruz ki değiştirildiğinde sembol ve tatil kutucukları anında güncellensin! (Hata #5 düzeltmesi)
+			picked_cat_disp = ui.selectbox(
+				"Kategori Seçin",
+				cat_disp,
+				index=cat_keys.index("revir_etkinlik"),
+				key=f"cal_add_cat_live_{sel_iso}",
+			)
+			picked_cat = cat_keys[cat_disp.index(picked_cat_disp)]
+			default_sym = CATEGORY_LABELS[picked_cat][2]
+			default_hol = picked_cat in ("milli_bayram", "resmi_tatil", "yarim_gun", "secim_idari_tatil")
+			default_half = picked_cat == "yarim_gun"
+
+			with ui.form(f"form_add_cal_event_{sel_iso}_{picked_cat}"):
 				new_title = ui.text_input("Etkinlik / Tatil / Sınav Başlığı", placeholder="Örn: 3-A Sınıfı Boy-Kilo Taraması veya Seçim İdari İzni")
-				fc1, fc2 = ui.columns(2)
-				cat_keys = list(CATEGORY_LABELS.keys())
-				cat_disp = [CATEGORY_LABELS[k][0] for k in cat_keys]
-				with fc1:
-					picked_cat_disp = ui.selectbox("Kategori", cat_disp, index=cat_keys.index("revir_etkinlik"))
-					picked_cat = cat_keys[cat_disp.index(picked_cat_disp)]
-				sym_keys = list(SYMBOL_OPTIONS.keys())
-				sym_disp = [SYMBOL_OPTIONS[k] for k in sym_keys]
-				default_sym = CATEGORY_LABELS[picked_cat][2]
-				with fc2:
-					picked_sym_disp = ui.selectbox("Takvim Sembolü", sym_disp, index=sym_keys.index(default_sym))
-					picked_sym = sym_keys[sym_disp.index(picked_sym_disp)]
+				picked_sym_disp = ui.selectbox("Takvim Sembolü", sym_disp, index=sym_keys.index(default_sym))
+				picked_sym = sym_keys[sym_disp.index(picked_sym_disp)]
 
 				tc1, tc2 = ui.columns(2)
 				with tc1:
@@ -1842,12 +2190,12 @@ def _render_interactive_calendar_leaf(
 
 				hc1, hc2 = ui.columns(2)
 				with hc1:
-					new_is_hol = ui.checkbox("Devlet Memuru Resmi Tatili (Kırmızı Yaz)", value=(picked_cat in ("milli_bayram", "resmi_tatil", "yarim_gun")))
+					new_is_hol = ui.checkbox("Devlet Memuru Resmi Tatili (Kırmızı Yaz)", value=default_hol)
 				with hc2:
-					new_is_half = ui.checkbox("Yarım Gün Mesai (½ Rozeti)", value=(picked_cat == "yarim_gun"))
+					new_is_half = ui.checkbox("Yarım Gün Mesai (½ Rozeti)", value=default_half)
 
 				new_prof = ui.text_input("İlgili Meslek Grubu (Opsiyonel)", placeholder="Örn: Okul Hemşireleri ve Öğretmenler")
-				new_desc = ui.text_area("Açıklama / Not", placeholder="Günün anlamı veya planlanan etkinlik detayı...", height=65)
+				new_desc = ui.text_area("Açıklama / Not", placeholder="Günün anlamı veya planlanan etkinlik detayı...", height=60)
 
 				if ui.form_submit_button("💾 Takvime Kaydet", type="primary", use_container_width=True):
 					if not new_title.strip():
