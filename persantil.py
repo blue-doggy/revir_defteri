@@ -122,7 +122,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.9.0"
+_DEFAULT_APP_VERSION = "1.10.0"
 
 
 def _load_app_version() -> str:
@@ -463,16 +463,36 @@ def build_app_css(font_css: str, font_url: str, base_fsize: str, pad_top: str, t
 	.revir-alert-error { background: #450a0a !important; color: #fca5a5 !important; border-color: #991b1b !important; }
 	.revir-table thead th { background: #0f172a !important; color: #f8fafc !important; }
 	.revir-modal-card { background: var(--card-bg) !important; color: var(--text-main) !important; border-color: var(--line) !important; }
-	span[style*="background:#fef2f2"], div[style*="background:#fee2e2"] {
+	.revir-topbar { background: #0f172a !important; border-bottom-color: var(--line) !important; }
+	.revir-op-row { background: var(--card-bg) !important; border-color: var(--line) !important; color: var(--text-main) !important; }
+	.revir-dose-hero { background: rgba(20, 184, 166, 0.14) !important; border-color: var(--teal) !important; }
+	.revir-dose-hero.danger { background: rgba(239, 68, 68, 0.16) !important; border-color: #f87171 !important; }
+	.revir-dose-hero.danger .revir-dose-hero-val { color: #fca5a5 !important; }
+	div[style*="background-color:#ffffff"], div[style*="background:#ffffff"], div[style*="background: #ffffff"] {
+		background: var(--card-bg) !important; border-color: var(--line) !important; color: var(--text-main) !important;
+	}
+	span[style*="color:#0f172a"], span[style*="color: #0f172a"], span[style*="color:#334155"], span[style*="color: #334155"] {
+		color: var(--text-main) !important;
+	}
+	span[style*="background:#f1f5f9"], span[style*="background-color:#f1f5f9"], div[style*="background:#f1f5f9"], td[style*="background:#f8fafc"] {
+		background-color: #1e293b !important; color: #cbd5e1 !important; border-color: #334155 !important;
+	}
+	span[style*="background:#f5f3ff"], span[style*="background:#ede9fe"] {
+		background-color: #2e1065 !important; color: #ddd6fe !important; border-color: #6d28d9 !important;
+	}
+	span[style*="background:#fff7ed"] {
+		background-color: #431407 !important; color: #fdba74 !important; border-color: #9a3412 !important;
+	}
+	span[style*="background:#fef2f2"], span[style*="background:#fee2e2"], div[style*="background:#fee2e2"], div[style*="background:#fef2f2"] {
 		background-color: #450a0a !important; color: #fca5a5 !important; border-color: #991b1b !important;
 	}
-	span[style*="background:#f0fdf4"], div[style*="background:#dcfce7"] {
+	span[style*="background:#f0fdf4"], span[style*="background:#dcfce7"], div[style*="background:#dcfce7"] {
 		background-color: #052e16 !important; color: #86efac !important; border-color: #166534 !important;
 	}
-	span[style*="background:#eff6ff"], div[style*="background:#e0f2fe"] {
+	span[style*="background:#eff6ff"], span[style*="background:#e0f2fe"], span[style*="background-color:#e0f2fe"], div[style*="background:#e0f2fe"] {
 		background-color: #082f49 !important; color: #7dd3fc !important; border-color: #0369a1 !important;
 	}
-	span[style*="background:#fffbeb"] {
+	span[style*="background:#fffbeb"], span[style*="background:#fef3c7"], div[style*="background:#fffbeb"] {
 		background-color: #451a03 !important; color: #fcd34d !important; border-color: #92400e !important;
 	}
 	div[style*="background: rgba(0,0,0,0.03)"] { background: rgba(255, 255, 255, 0.06) !important; }
@@ -3503,6 +3523,22 @@ PAGE_SECTIONS_REGISTRY: dict[str, dict[str, Any]] = {
 			"name": "Kayıtlı Evraklar Listesi ve Önizleme",
 			"desc": "Yüklenen tüm belgelerin arşivi, indirme ve silme butonları",
 			"icon": "🗂️",
+			"default": True,
+			"essential": True,
+		},
+	},
+	"💉 İnsülin & Diyabet Yönetimi": {
+		"insulin_quick_chips": {
+			"name": "Diyabetli Öğrenci Hızlı Geçiş Hapları",
+			"desc": "Üstte diyabet takipli öğrencilere tek tıkla geçiş düğmeleri",
+			"icon": "💙",
+			"default": True,
+			"essential": True,
+		},
+		"insulin_ai_review": {
+			"name": "Gemini AI Pediatrik Diyabet Yorumu",
+			"desc": "Yaş, boy, kilo, WHO persantil ve menüye göre yapay zeka klinik denetimi",
+			"icon": "🤖",
 			"default": True,
 			"essential": True,
 		},
@@ -11308,7 +11344,46 @@ def _handle_floating_gemini_chat(payload: dict[str, Any], chat_history: list[dic
 	}
 
 
-def _sync_floating_chat_ui() -> None:
+def _build_context_chat_chips(cur_page: str) -> list[dict[str, str]]:
+	p_clean = cur_page.split(" ", 1)[-1] if " " in cur_page else cur_page
+	if p_clean == "İnsülin & Diyabet Yönetimi":
+		return [
+			{"label": "💉 Doz & Menü Yorumla", "prompt": "Seçili diyabetli öğrencinin boy/kilo, İKO/İDF ve bugünkü yemek menüsüne göre insülin doz güvenliğini özetle."},
+			{"label": "📉 Hipoglisemi Kalkanı", "prompt": "Seçili öğrenci için beden eğitimi ve hipoglisemi (15-15 kuralı) okul önlemlerini kısa maddelerle hazırla."},
+			{"label": "📄 Diyabet Raporu (Word)", "prompt": "Seçili öğrencinin kapsamlı sağlık ve diyabet profil raporunu Word (.docx) olarak hazırla."},
+			{"label": "📎 Menü/Tahlil Ekle", "action": "upload"},
+		]
+	if p_clean == "Revir Kaydı":
+		return [
+			{"label": "🚨 Triyaj Önerisi", "prompt": "Seçili kişinin sağlık profili, alerjileri ve son başvurularını dikkate alarak revir triyajında dikkat edilecek noktaları özetle."},
+			{"label": "📊 Bugünkü Defter (Excel)", "prompt": "Bugünkü revir başvurularını Excel (.xlsx) tablosu olarak hazırla ve özetle."},
+			{"label": "🩺 Kişiyi Özetle", "prompt": "Seçili kişinin sağlık, büyüme, özel gereksinim ve revir profilini kısaca özetle."},
+			{"label": "📎 Dosya Ekle", "action": "upload"},
+		]
+	if p_clean == "Okul Taraması":
+		return [
+			{"label": "🔍 Tarama Eksikleri", "prompt": "Okul taramasında eksik veya riskli bulguları özetle ve öncelikli takip önerisi sun."},
+			{"label": "♿ Özel Gereksinim Excel", "prompt": "Engelli veya özel gereksinimli öğrencilerin listesini Excel olarak çıkar."},
+			{"label": "📄 Kişi Word Raporu", "prompt": "Seçili kişinin kapsamlı sağlık raporunu Word (.docx) dosyası olarak hazırla."},
+			{"label": "📎 Dosya Ekle", "action": "upload"},
+		]
+	if p_clean == "İlaç Takip Sistemi":
+		return [
+			{"label": "💊 Etkileşim & Güvenlik", "prompt": "Seçili kişinin düzenli ilaçları, alerjileri ve kronik hastalıkları açısından okulda dikkat edilmesi gereken etkileşimleri özetle."},
+			{"label": "🩺 Kişiyi Özetle", "prompt": "Seçili kişinin sağlık, ilaç ve alerji profilini kısaca özetle."},
+			{"label": "📊 Bugünkü Başvurular", "prompt": "Bugünkü revir başvurularını Excel (.xlsx) tablosu olarak hazırla ve özetle."},
+			{"label": "📎 Reçete/Prospektüs Ekle", "action": "upload"},
+		]
+	return [
+		{"label": "🩺 Kişiyi Özetle", "prompt": "Seçili kişinin sağlık, büyüme, özel gereksinim ve revir profilini kısaca özetle."},
+		{"label": "📄 Word Raporu", "prompt": "Seçili kişinin kapsamlı sağlık raporunu Word (.docx) dosyası olarak hazırla."},
+		{"label": "📊 Bugünkü Excel", "prompt": "Bugünkü revir başvurularını Excel (.xlsx) tablosu olarak hazırla ve özetle."},
+		{"label": "♿ Özel Gereksinim Excel", "prompt": "Engelli veya özel gereksinimli öğrencilerin listesini Excel olarak çıkar."},
+		{"label": "📎 Dosya Ekle", "action": "upload"},
+	]
+
+
+def _sync_floating_chat_ui(cur_page: str = "") -> None:
 	cfg = get_app_settings()
 	is_on, _, model = _get_active_gemini_config()
 	float_on = is_on and (str(cfg.get("gemini_floating_chat", "1")).strip() != "0")
@@ -11318,11 +11393,13 @@ def _sync_floating_chat_ui() -> None:
 		sub_lbl = f"📌 Aktif Kişi Bağlamı ({active_p['class_name']}) · 🛡️ KVKK"
 	else:
 		sub_lbl = f"🛡️ KVKK Korumalı · {model}"
+	eff_page = cur_page or str(ui.session_state.get("main_menu_page") or "")
 	ui.configure_floating_chat(
 		enabled=float_on,
 		label=sub_lbl,
 		handler=_handle_floating_gemini_chat,
 		export_handler=_handle_floating_gemini_export_msg,
+		chips=_build_context_chat_chips(eff_page),
 	)
 
 
@@ -11873,7 +11950,7 @@ def _render_dossier_tab_measurements(person: sqlite3.Row, person_id: int) -> Non
 			ui.info("ℹ️ Kişi 19 yaşından büyük (yetişkin) olduğu için çocukluk çağı WHO büyüme eğrileri ve persantil kanalları uygulanmamaktadır.")
 	else:
 		if can_eval_hc:
-			chart_sub_tabs = ui.tabs(["📏 Boy", "⚖️ Kilo", "🧬 VKİ", "🧠 Baş Çevresi", "📊 Kronolojik Takip"])
+			chart_sub_tabs = ui.tabs(["📏 Boy", "⚖️ Kilo", "🧬 VKİ", "🧠 Baş Çevresi", "📊 Kronolojik Takip"], orientation="segmented")
 			with chart_sub_tabs[0]:
 				render_clinical_growth_curve(enriched_records, person, "height", "Boy_cm", "Boy", "cm", default_max_mo=228)
 			with chart_sub_tabs[1]:
@@ -11884,7 +11961,7 @@ def _render_dossier_tab_measurements(person: sqlite3.Row, person_id: int) -> Non
 				render_clinical_growth_curve(enriched_records, person, "head_circ", "Bas_Cevresi_cm", "Baş Çevresi", "cm", default_max_mo=60)
 			tab_chrono = chart_sub_tabs[4]
 		else:
-			chart_sub_tabs = ui.tabs(["📏 Boy", "⚖️ Kilo", "🧬 VKİ", "📊 Kronolojik Takip"])
+			chart_sub_tabs = ui.tabs(["📏 Boy", "⚖️ Kilo", "🧬 VKİ", "📊 Kronolojik Takip"], orientation="segmented")
 			with chart_sub_tabs[0]:
 				render_clinical_growth_curve(enriched_records, person, "height", "Boy_cm", "Boy", "cm", default_max_mo=228)
 			with chart_sub_tabs[1]:
@@ -13540,22 +13617,52 @@ def render_person_dossier_content(person_id: int, is_dialog: bool = False) -> No
 	if seizure_proto:
 		badge_htmls.append(f"<span style='background:#fef2f2;color:#7f1d1d;border:1px solid #f87171;padding:3px 9px;border-radius:12px;font-size:12px;font-weight:600;'>⚡ Nöbet Protokolü: {html.escape(seizure_proto)}</span>")
 
-	with ui.container(border=True):
-		hero_l, hero_r = ui.columns([2.2, 1.0])
-		with hero_l:
-			sno_badge = f" <span style='background:#e0f2fe;color:#0369a1;padding:2px 8px;border-radius:6px;font-size:13px;font-weight:600;'>No: {html.escape(str(person['student_no']))}</span>" if person["student_no"] else ""
-			ui.markdown(f"<h3 style='margin:0;padding:0;color:{theme['ink']};'>👤 {html.escape(person['full_name'])} <small style='color:{theme['teal']};font-size:16px;font-weight:600;'>· {html.escape(person['class_name'])}</small>{sno_badge}</h3>", unsafe_allow_html=True)
-			ui.markdown(f"🎂 **Doğum:** {person['birth_date'] or '—'} ({age_str}) &nbsp;·&nbsp; {sex_str} &nbsp;·&nbsp; 🩸 **Kan Grubu:** `{blood}`")
-			ui.caption(f"📞 **Veli / Yakını:** {guardian} ({phone}) &nbsp;·&nbsp; 📍 **Yerleşim:** {loc_str or addr}")
-		with hero_r:
-			ui.markdown(f"🏥 **Toplam Revir Başvurusu:** `{visit_stats['cnt']}`")
-			ui.markdown(f"📏 **Ölçüm:** `{meas_cnt}` &nbsp;·&nbsp; 💓 **Vital:** `{vital_cnt}`")
-			ui.caption(f"🗓️ **Son Başvuru Tarihi:** {visit_stats['last_date'] or 'Yok'}")
+	sno_badge = f" <span style='background:#e0f2fe;color:#0369a1;padding:2px 8px;border-radius:6px;font-size:13px;font-weight:600;'>No: {html.escape(str(person['student_no']))}</span>" if person["student_no"] else ""
+	badge_strip = f"<div style='margin-top:6px;display:flex;gap:7px;flex-wrap:wrap;'>{''.join(badge_htmls)}</div>" if badge_htmls else ""
+	ui.markdown(
+		f"<div class='revir-sticky-alert-bar'>"
+		f"<div style='display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;'>"
+		f"<div>"
+		f"<h3 style='margin:0;padding:0;color:var(--text-heading);'>👤 {html.escape(mask_kvkk_value(person['full_name'], 'name'))} <small style='color:var(--teal);font-size:15.5px;font-weight:700;'>· {html.escape(person['class_name'])}</small>{sno_badge}</h3>"
+		f"<div style='font-size:13px;margin-top:3px;color:var(--text-main);'>🎂 <b>Doğum:</b> {person['birth_date'] or '—'} ({age_str}) · {sex_str} · 🩸 <b>Kan:</b> <code>{html.escape(blood)}</code></div>"
+		f"<div style='font-size:12.2px;color:var(--text-muted);margin-top:2px;'>📞 <b>Veli/Yakını:</b> {html.escape(mask_kvkk_value(guardian, 'name'))} ({html.escape(mask_kvkk_value(phone, 'phone'))}) · 📍 {html.escape(loc_str or addr)}</div>"
+		f"</div>"
+		f"<div style='text-align:right;font-size:12.5px;color:var(--text-main);'>"
+		f"<div>🏥 <b>Revir:</b> <code>{visit_stats['cnt']}</code> · 📏 <b>Ölçüm:</b> <code>{meas_cnt}</code> · 💓 <b>Vital:</b> <code>{vital_cnt}</code></div>"
+		f"<div style='color:var(--text-muted);margin-top:2px;'>🗓️ Son Başvuru: {visit_stats['last_date'] or 'Yok'}</div>"
+		f"</div>"
+		f"</div>"
+		f"{badge_strip}"
+		f"</div>",
+		unsafe_allow_html=True,
+	)
 
-		if badge_htmls:
-			ui.markdown("<div style='margin-top:6px;display:flex;gap:8px;flex-wrap:wrap;'>" + "".join(badge_htmls) + "</div>", unsafe_allow_html=True)
-		if has_diab_hero:
-			if ui.button("💉 İnsülin Doz Hesaplayıcı & Aylık Yemek Planını Aç ↗️", key=f"dossier_goto_insulin_{person_id}", type="secondary"):
+	# Hızlı İşlem Şeridi (Kişi Dosyası içinden tek tıkla ilgili modüle geçiş)
+	qa_cols = ui.columns(4 if has_diab_hero else 3)
+	with qa_cols[0]:
+		if ui.button("🩺 Yeni Revir Kaydı", key=f"dos_qa_vis_{person_id}", type="primary", use_container_width=True):
+			set_active_person(person_id)
+			ui.session_state["target_page"] = "🩺 Revir Kaydı"
+			if is_dialog:
+				ui.close_dialog(all_dialogs=True)
+			ui.rerun()
+	with qa_cols[1]:
+		if ui.button("💓 Vital & Tahlil Gir", key=f"dos_qa_vit_{person_id}", type="secondary", use_container_width=True):
+			set_active_person(person_id)
+			ui.session_state["target_page"] = "💓 Vital Takip"
+			if is_dialog:
+				ui.close_dialog(all_dialogs=True)
+			ui.rerun()
+	with qa_cols[2]:
+		if ui.button("📏 Boy/Kilo & Persantil", key=f"dos_qa_meas_{person_id}", type="secondary", use_container_width=True):
+			set_active_person(person_id)
+			ui.session_state["target_page"] = "📏 Ölçüm ve Gelişim"
+			if is_dialog:
+				ui.close_dialog(all_dialogs=True)
+			ui.rerun()
+	if has_diab_hero:
+		with qa_cols[3]:
+			if ui.button("💉 İnsülin Hesapla ↗️", key=f"dossier_goto_insulin_{person_id}", type="secondary", use_container_width=True):
 				set_active_person(person_id)
 				ui.session_state["target_page"] = "💉 İnsülin & Diyabet Yönetimi"
 				if is_dialog:
@@ -13573,14 +13680,14 @@ def render_person_dossier_content(person_id: int, is_dialog: bool = False) -> No
 		("meas", f"📈 Büyüme & Persantil ({meas_cnt})"),
 		("vitals", f"💓 Vital Bulgular ({vital_cnt})"),
 		("labs", "🧪 Tahlil & Laboratuvar"),
-		("vax", "💉 Aşı Takvimi (Sağlık Bakanlığı)"),
-		("care", "📑 Sağlık Profili & Bakım Planı"),
+		("vax", "💉 Aşı Takvimi"),
+		("care", "📑 Sağlık Profili & Plan"),
 		("seizures", "⚡ Nöbet & Özel İzlem"),
-		("edit", "✏️ Kimlik & İletişim Düzenle"),
-		("print", "🖨️ Yazdırılabilir Sağlık Dosyası"),
+		("edit", "✏️ Kimlik & İletişim"),
+		("print", "🖨️ Yazdırılabilir Dosya"),
 	])
 
-	d_tabs = ui.tabs([lbl for _, lbl in tab_defs])
+	d_tabs = ui.tabs([lbl for _, lbl in tab_defs], orientation="vertical")
 	for tab_obj, (t_id, _t_lbl) in zip(d_tabs, tab_defs):
 		with tab_obj:
 			if t_id == "overview":
@@ -14854,7 +14961,7 @@ def render_outbreak_and_isolation_panel() -> None:
 				ui.dataframe(df_closed, width="stretch", hide_index=True)
 
 
-@ui.dialog("✏️ Revir Başvuru Kaydını Düzenle", width="large")
+@ui.dialog("✏️ Revir Başvuru Kaydını Düzenle", width="large", mode="drawer")
 def open_edit_visit_dialog(visit_id: int) -> None:
 	with connect_db() as connection:
 		v_row = connection.execute(
@@ -15116,23 +15223,112 @@ def render_overview() -> None:
 	if is_section_visible("overview_quick_links"):
 		with ui.container(border=True):
 			ui.markdown("##### ⚡ Hızlı Erişim ve İşlemler")
-			q_c1, q_c2, q_c3, q_c4 = ui.columns(4)
+			q_c1, q_c2, q_c3, q_c4, q_c5 = ui.columns(5)
 			with q_c1:
-				if ui.button("🩺 Yeni Revir Kaydı Aç", use_container_width=True, key="ov_quick_visit"):
+				if ui.button("🩺 Yeni Revir Kaydı", type="primary", use_container_width=True, key="ov_quick_visit"):
 					ui.session_state["target_page"] = "🩺 Revir Kaydı"
 					ui.rerun()
 			with q_c2:
-				if ui.button("👥 Öğrenci Listesine Git", use_container_width=True, key="ov_quick_stu"):
+				if ui.button("👥 Öğrenciler", use_container_width=True, key="ov_quick_stu"):
 					ui.session_state["target_page"] = "👥 Öğrenciler"
 					ui.rerun()
 			with q_c3:
-				if ui.button("🏫 Okul Taraması Başlat", use_container_width=True, key="ov_quick_scr"):
+				if ui.button("🏫 Okul Taraması", use_container_width=True, key="ov_quick_scr"):
 					ui.session_state["target_page"] = "🏫 Okul Taraması"
 					ui.rerun()
 			with q_c4:
-				if ui.button("💊 İlaç Takip Sistemine Git", use_container_width=True, key="ov_quick_med"):
+				if ui.button("💊 İlaç Takip", use_container_width=True, key="ov_quick_med"):
 					ui.session_state["target_page"] = "💊 İlaç Takip Sistemi"
 					ui.rerun()
+			with q_c5:
+				if ui.button("💉 İnsülin & Diyabet", use_container_width=True, key="ov_quick_ins"):
+					ui.session_state["target_page"] = "💉 İnsülin & Diyabet Yönetimi"
+					ui.rerun()
+
+	# Bugünün Hemşire Masası (2 Sütunlu Bento Panosu: Bekleyen İlaçlar + Diyabetli Öğrenciler + 14 Günlük Grafik)
+	bento_l, bento_r = ui.columns([1.05, 1.0], gap="medium")
+	with bento_l:
+		with ui.container(border=True):
+			b_med_h1, b_med_h2 = ui.columns([2.2, 1.1])
+			with b_med_h1:
+				ui.markdown("##### 💊 Bugünün İlaç Çizelgesi Özeti")
+			with b_med_h2:
+				if ui.button("Çizelgeye Git ↗", key="ov_bento_med_go", use_container_width=True):
+					ui.session_state["target_page"] = "💊 İlaç Takip Sistemi"
+					ui.rerun()
+			try:
+				today_doses = get_scheduled_doses_for_date(date.today())
+			except Exception:
+				today_doses = []
+			pend_doses = [d for d in today_doses if not d.get("is_logged")]
+			given_doses = [d for d in today_doses if d.get("is_logged") and d.get("log_status") == "Verildi"]
+			if not today_doses:
+				ui.caption("✅ Bugün için planlanmış öğrenci ilacı bulunmuyor.")
+			else:
+				ui.caption(f"Toplam **{len(today_doses)}** doz · ✅ Verilen: **{len(given_doses)}** · ⏳ Bekleyen: **{len(pend_doses)}**")
+				for pdose in pend_doses[:4]:
+					p_nm = mask_kvkk_value(pdose.get("full_name", ""), "name")
+					ui.markdown(
+						f"<div class='revir-op-row' style='padding:6px 10px;'>"
+						f"<span style='font-weight:800;color:var(--teal);'>🕒 {html.escape(str(pdose.get('scheduled_time') or ''))}</span>"
+						f"<strong>{html.escape(p_nm)}</strong>"
+						f"<span style='color:var(--text-muted);font-size:12.5px;'>· {html.escape(str(pdose.get('medication_name') or ''))} ({pdose.get('dose_amount', '')} {pdose.get('dose_unit', '')})</span>"
+						f"</div>",
+						unsafe_allow_html=True,
+					)
+				if len(pend_doses) > 4:
+					ui.caption(f"… ve {len(pend_doses) - 4} bekleyen doz daha.")
+
+		with ui.container(border=True):
+			b_diab_h1, b_diab_h2 = ui.columns([2.2, 1.1])
+			with b_diab_h1:
+				ui.markdown("##### 💙 Diyabet Takipli Öğrenciler (Hızlı Bolus)")
+			with b_diab_h2:
+				if ui.button("İnsülin Paneli ↗", key="ov_bento_ins_go", use_container_width=True):
+					ui.session_state["target_page"] = "💉 İnsülin & Diyabet Yönetimi"
+					ui.rerun()
+			diab_ov_rows = []
+			try:
+				with connect_db() as _dconn:
+					idm.ensure_diabetes_tables(_dconn)
+					diab_ov_rows = _dconn.execute(
+						"""SELECT dp.student_id, dp.diabetes_type, dp.icr_lunch, dp.isf, s.full_name, COALESCE(c.name, '—') AS class_name
+						   FROM diabetes_profiles dp JOIN students s ON s.id = dp.student_id
+						   LEFT JOIN classes c ON c.id = s.class_id
+						   WHERE dp.is_diabetic = 1 ORDER BY s.full_name LIMIT 6"""
+					).fetchall()
+			except Exception:
+				diab_ov_rows = []
+			if not diab_ov_rows:
+				ui.caption("Henüz diyabet profili tanımlanmış öğrenci yok. '💉 İnsülin & Diyabet Yönetimi' sayfasından ekleyebilirsiniz.")
+			else:
+				d_cols = ui.columns(min(2, len(diab_ov_rows)))
+				for di, drow in enumerate(diab_ov_rows):
+					with d_cols[di % len(d_cols)]:
+						dn = mask_kvkk_value(drow["full_name"], "name")
+						if ui.button(f"💉 {dn} ({drow['class_name']})", key=f"ov_diab_btn_{drow['student_id']}", use_container_width=True):
+							set_active_person(int(drow["student_id"]))
+							ui.session_state["target_page"] = "💉 İnsülin & Diyabet Yönetimi"
+							ui.rerun()
+
+	with bento_r:
+		if is_section_visible("overview_charts"):
+			try:
+				with connect_db() as conn:
+					v_df = pd.read_sql_query(
+						"SELECT visit_date, COUNT(*) as vizit_sayisi FROM visits WHERE visit_date >= ? AND visit_date <= ? GROUP BY visit_date ORDER BY visit_date DESC LIMIT 14",
+						conn,
+						params=(s_date, e_date)
+					)
+				with ui.container(border=True):
+					ui.markdown("##### 📊 Son 14 Günlük Vizit Yoğunluğu")
+					if not v_df.empty:
+						v_df = v_df.sort_values("visit_date")
+						ui.bar_chart(v_df.set_index("visit_date")["vizit_sayisi"], height=215, color="#0ea5e9")
+					else:
+						ui.caption("Son 14 gün için vizit verisi henüz oluşmadı.")
+			except Exception:
+				pass
 
 	render_gemini_overview_command_center(s_date, e_date)
 
@@ -15141,22 +15337,6 @@ def render_overview() -> None:
 
 	if is_section_visible("overview_outbreak_radar"):
 		render_outbreak_and_isolation_panel()
-
-	if is_section_visible("overview_charts"):
-		try:
-			with connect_db() as conn:
-				v_df = pd.read_sql_query(
-					"SELECT visit_date, COUNT(*) as vizit_sayisi FROM visits WHERE visit_date >= ? AND visit_date <= ? GROUP BY visit_date ORDER BY visit_date DESC LIMIT 14",
-					conn,
-					params=(s_date, e_date)
-				)
-			if not v_df.empty:
-				with ui.container(border=True):
-					ui.markdown("##### 📊 Son 14 Günlük Vizit Yoğunluğu")
-					v_df = v_df.sort_values("visit_date")
-					ui.bar_chart(v_df.set_index("visit_date")["vizit_sayisi"], height=200, color="#0ea5e9")
-		except Exception:
-			pass
 
 	if is_section_visible("overview_recent_ops"):
 		top_op1, top_op2 = ui.columns([4, 1.2])
@@ -15169,31 +15349,35 @@ def render_overview() -> None:
 			ui.info("Henüz revir başvurusu veya sağlık taraması kaydı bulunmuyor.")
 		else:
 			for op in recent_ops:
-				r_col, btn_col = ui.columns([12.5, 1.1])
+				r_col, dos_col, btn_col = ui.columns([11.4, 0.95, 0.95])
 				with r_col:
 					badges = []
 					if op["date_str"]:
-						badges.append(f"<span style='color:#64748b; font-size:12.5px; font-weight:600;'>{html.escape(op['date_str'])}</span>")
+						badges.append(f"<span style='color:var(--text-muted); font-size:12.5px; font-weight:600;'>{html.escape(op['date_str'])}</span>")
 					if op["class_name"] and op["class_name"] != "—":
-						badges.append(f"<span style='background-color:#e0f2fe; color:#0369a1; padding:2px 8px; border-radius:6px; font-weight:700; font-size:13.5px;'>{html.escape(op['class_name'])}</span>")
+						badges.append(f"<span style='background:#e0f2fe; color:#0369a1; padding:2px 8px; border-radius:6px; font-weight:700; font-size:13px;'>{html.escape(op['class_name'])}</span>")
 					disp_op_name = mask_kvkk_value(op["full_name"], "name")
-					badges.append(f"<span style='font-weight:700; color:#0f172a; font-size:15px;'>{html.escape(disp_op_name)}</span>")
+					badges.append(f"<span style='font-weight:700; color:var(--text-heading); font-size:14.5px;'>{html.escape(disp_op_name)}</span>")
 					if op["student_no"]:
-						badges.append(f"<span style='background-color:#f1f5f9; color:#475569; padding:2px 7px; border-radius:6px; font-weight:600; font-size:13px;'>{html.escape(op['student_no'])}</span>")
+						badges.append(f"<span style='background:#f1f5f9; color:#475569; padding:2px 7px; border-radius:6px; font-weight:600; font-size:12.5px;'>{html.escape(op['student_no'])}</span>")
 					if is_kvkk_privacy_active():
 						if op["details"]:
 							masked_med = mask_kvkk_value(" · ".join(op["details"]), "medical")
-							badges.append(f"<span style='color:#94a3b8;'>·</span><span style='color:#64748b; font-size:13.5px; font-weight:600;'>{html.escape(masked_med)}</span>")
+							badges.append(f"<span style='color:var(--text-muted);'>·</span><span style='color:var(--text-muted); font-size:13px; font-weight:600;'>{html.escape(masked_med)}</span>")
 					else:
 						for d in op["details"]:
 							clean_d = html.escape(d)
-							badges.append(f"<span style='color:#94a3b8;'>·</span><span style='color:#334155; font-size:14px; font-weight:500;'>{clean_d}</span>")
+							badges.append(f"<span style='color:var(--text-muted);'>·</span><span style='color:var(--text-main); font-size:13.5px; font-weight:500;'>{clean_d}</span>")
 
 					content_html = " ".join(badges)
 					ui.markdown(
-						f"<div style='background-color:#ffffff; border:1px solid #e2e8f0; border-radius:8px; padding:10px 14px; margin-bottom:6px; display:flex; flex-wrap:wrap; align-items:center; gap:8px; box-shadow:0 1px 2px rgba(0,0,0,0.03);'>{content_html}</div>",
+						f"<div class='revir-op-row'>{content_html}</div>",
 						unsafe_allow_html=True,
 					)
+				with dos_col:
+					if ui.button("📂", key=f"btn_dos_op_{op['key']}", help="Kişi Dosyasını Aç", use_container_width=True):
+						set_active_person(int(op["student_id"]))
+						open_person_dossier_dialog(int(op["student_id"]))
 				with btn_col:
 					if ui.button("✏️", key=f"btn_edit_op_{op['key']}", help="Bu işlemi düzenle", use_container_width=True):
 						if op["type"] == "visit":
@@ -15338,7 +15522,7 @@ def open_class_manager_dialog() -> None:
 				ui.rerun()
 
 
-@ui.dialog("➕ Yeni Profil ve İlk Ölçüm / Sağlık Kaydı", width="large")
+@ui.dialog("➕ Yeni Profil ve İlk Ölçüm / Sağlık Kaydı", width="large", mode="drawer")
 def open_new_profile_dialog(default_person_type: str = "Öğrenci") -> None:
 	top_l, top_r = ui.columns([8.5, 1.5])
 	with top_l:
@@ -15527,7 +15711,7 @@ def open_new_profile_dialog(default_person_type: str = "Öğrenci") -> None:
 				ui.rerun()
 
 
-@ui.dialog("✏️ Profili Düzenle / Sil", width="large")
+@ui.dialog("✏️ Profili Düzenle / Sil", width="large", mode="drawer")
 def open_edit_profile_dialog(edit_id: int, key_suffix: str = "modal") -> None:
 	person = get_person_by_id(edit_id)
 	if person is None:
@@ -15762,16 +15946,32 @@ def render_students() -> None:
 	cls_idx = cls_opts.index(saved_cls) if saved_cls in cls_opts else 0
 
 	if is_section_visible("students_filters"):
-		filter_col, search_col, pick_col = ui.columns([0.9, 1.1, 1.8])
+		filter_col, search_col = ui.columns([1.0, 2.2])
 		with filter_col:
 			selected_class = ui.selectbox("Sınıf filtresi", cls_opts, index=cls_idx, key="students_page_class_filter")
 			ui.session_state["active_class_filter"] = selected_class
 		with search_col:
-			search_q = ui.text_input("🔍 Hızlı Arama (Ad, Mahalle, Köy, Tel)", placeholder="Örn: Gevher Hatun, 0532, Recep...", key="students_page_search_q")
+			search_q = ui.text_input("🔍 Hızlı Arama (Ad, Okul No, Mahalle, Köy, Tel)", placeholder="Örn: Ahmet, 104, 0532...", key="students_page_search_q")
+		clin_filt_opts = [
+			"🌐 Tümü",
+			"🔴 Alerjili",
+			"🟠 Kronik",
+			"💉 Diyabetli",
+			"♿ Engelli / Özel Gereksinim",
+			"⚠️ Eksik Bilgi",
+		]
+		clin_filter = ui.radio(
+			"Klinik Hızlı Filtre",
+			clin_filt_opts,
+			index=0,
+			horizontal=True,
+			key="students_clinical_quick_filter",
+			label_visibility="collapsed",
+		)
 	else:
 		selected_class = saved_cls
 		search_q = ""
-		pick_col = None
+		clin_filter = "🌐 Tümü"
 
 	students = get_students_enriched(selected_class, person_type="Öğrenci").reset_index(drop=True)
 	if search_q.strip() and not students.empty:
@@ -15785,14 +15985,66 @@ def render_students() -> None:
 		)
 		students = students[mask].reset_index(drop=True)
 
+	# Hızlı klinik filtre uygulama
+	if clin_filter != "🌐 Tümü" and not students.empty:
+		with connect_db() as _fconn:
+			idm.ensure_diabetes_tables(_fconn)
+			if clin_filter == "🔴 Alerjili":
+				hit_ids = {int(r[0]) for r in _fconn.execute("SELECT student_id FROM health_profiles WHERE allergies IS NOT NULL AND trim(allergies) != ''").fetchall()}
+			elif clin_filter == "🟠 Kronik":
+				hit_ids = {int(r[0]) for r in _fconn.execute("SELECT student_id FROM health_profiles WHERE chronic_conditions IS NOT NULL AND trim(chronic_conditions) != ''").fetchall()}
+			elif clin_filter == "💉 Diyabetli":
+				hit_ids = {int(r[0]) for r in _fconn.execute("SELECT student_id FROM diabetes_profiles WHERE is_diabetic = 1").fetchall()}
+			elif clin_filter == "♿ Engelli / Özel Gereksinim":
+				hit_ids = {int(r[0]) for r in _fconn.execute("SELECT id FROM students WHERE COALESCE(has_disability, 0) = 1").fetchall()}
+				hit_ids |= {int(r[0]) for r in _fconn.execute("SELECT student_id FROM health_profiles WHERE COALESCE(has_disability, 0) = 1 OR (special_needs_codes IS NOT NULL AND trim(special_needs_codes) != '')").fetchall()}
+			else:  # ⚠️ Eksik Bilgi
+				hit_ids = {int(r[0]) for r in _fconn.execute("SELECT id FROM students WHERE birth_date IS NULL OR trim(birth_date) = '' OR sex IS NULL OR trim(sex) = '' OR guardian_phone IS NULL OR trim(guardian_phone) = ''").fetchall()}
+		students = students[students["id"].isin(hit_ids)].reset_index(drop=True)
+
 	display_students = students.drop(columns=["Kayıt Türü", "Görev / Statü"], errors="ignore") if not students.empty else students
 	if not display_students.empty:
 		display_students = display_students.copy()
 		if "📂 Dosya" not in display_students.columns:
 			display_students.insert(0, "📂 Dosya", "📂 Aç")
 
+	# Seçili öğrenci hızlı eylem şeridini tablonun hemen üstünde göster
+	if is_section_visible("students_selected_card"):
+		selected_person_id = ui.session_state.get("active_person_id")
+		active_person_obj = get_person_by_id(selected_person_id)
+		if active_person_obj is not None and active_person_obj["class_name"] != "Sivil / Diğer":
+			render_shared_person_summary(active_person_obj, "students_page")
+			_stu_diab = idm.get_diabetes_profile(connect_db, int(active_person_obj["id"]))
+			_is_stu_diab = bool(_stu_diab.get("_exists") and _stu_diab.get("is_diabetic"))
+			act_cols = ui.columns([1.8, 1.2, 1.15, 0.95, 1.15] if _is_stu_diab else [1.8, 1.3, 1.05, 1.25])
+			with act_cols[0]:
+				if ui.button(f"📂 {mask_kvkk_value(active_person_obj['full_name'], 'name')} Dosyasını Aç ↗️", type="primary", key="open_selected_profile_dossier", use_container_width=True):
+					open_person_dossier_dialog(active_person_obj["id"])
+			with act_cols[1]:
+				if ui.button("🩺 Revir Kaydı", type="secondary", key="stu_goto_visit_btn", use_container_width=True):
+					set_active_person(active_person_obj["id"])
+					ui.session_state["visit_person_mode"] = "🎒 Yalnızca Öğrenciler"
+					ui.session_state["target_page"] = "🩺 Revir Kaydı"
+					ui.rerun()
+			if _is_stu_diab:
+				with act_cols[2]:
+					if ui.button("💉 İnsülin", type="secondary", key="stu_goto_ins_btn", use_container_width=True):
+						set_active_person(active_person_obj["id"])
+						ui.session_state["target_page"] = "💉 İnsülin & Diyabet Yönetimi"
+						ui.rerun()
+				edit_col_i, json_col_i = 3, 4
+			else:
+				edit_col_i, json_col_i = 2, 3
+			with act_cols[edit_col_i]:
+				if ui.button("✏️ Düzenle", type="secondary", key="edit_selected_profile", use_container_width=True):
+					ui.session_state["edit_profile_loaded_id"] = None
+					open_edit_profile_dialog(active_person_obj["id"], "stu")
+			with act_cols[json_col_i]:
+				with ui.expander("📁 JSON Dosyası"):
+					render_person_data_file_editor(active_person_obj["id"], section_key="stu_page")
+
 	if is_section_visible("students_table"):
-		ui.caption(f"Toplam {len(students)} öğrenci listeleniyor · Sol kutudan öğrenciyi seçebilir, **📂 Aç** sembolüne tıklayarak Kişi Dosyasını açabilirsiniz.")
+		ui.caption(f"Toplam **{len(students)}** öğrenci listeleniyor ({clin_filter}) · Satıra tıklayarak seçin, **📂 Aç** ile Kişi Dosyasını açın.")
 		if is_kvkk_privacy_active():
 			ui.info("🛡️ **KVKK Gizlilik Modu Aktif:** Ekrandaki ad/soyad, veli adı, telefon ve klinik sağlık verileri maskelenmiştir. Word/Excel indirmeleri gerçek verilerle üretilmeye devam eder.")
 		app_cfg = get_app_settings()
@@ -15845,59 +16097,6 @@ def render_students() -> None:
 				if row_person_id != ui.session_state.get("active_person_id"):
 					set_active_person(row_person_id)
 					ui.rerun()
-
-	active_id = ui.session_state.get("active_person_id")
-	person_map = {
-		f"📂 {r['Sınıf']} · {r['Ad Soyad']}" + (f" (No: {r['Okul No']})" if r["Okul No"] != "—" else ""): int(r["id"])
-		for _, r in students.iterrows()
-	} if not students.empty else {}
-	id_to_label = {v: k for k, v in person_map.items()}
-	if pick_col is not None:
-		with pick_col:
-			if person_map:
-				labels_list = list(person_map.keys())
-				cur_lbl = id_to_label.get(active_id)
-				if (
-					"students_page_active_picker" not in ui.session_state
-					or ui.session_state.get("students_page_picker_synced_id") != active_id
-					or (ui.session_state.get("students_page_active_picker") is not None and ui.session_state.get("students_page_active_picker") not in person_map)
-				):
-					ui.session_state["students_page_active_picker"] = cur_lbl
-					ui.session_state["students_page_picker_synced_id"] = active_id
-				picked_lbl = ui.selectbox(
-					"Aktif Öğrenci (Tüm Pencerelerde Ortak Seçili)",
-					labels_list,
-					placeholder="Tablodan tıklayın veya buradan öğrenci arayın...",
-					key="students_page_active_picker",
-				)
-				if picked_lbl and person_map[picked_lbl] != active_id:
-					set_active_person(person_map[picked_lbl])
-					ui.session_state["students_page_picker_synced_id"] = person_map[picked_lbl]
-					active_id = person_map[picked_lbl]
-
-	if is_section_visible("students_selected_card"):
-		selected_person_id = ui.session_state.get("active_person_id")
-		active_person_obj = get_person_by_id(selected_person_id)
-		if active_person_obj is not None and active_person_obj["class_name"] != "Sivil / Diğer":
-			render_shared_person_summary(active_person_obj, "students_page")
-			act_c1, act_c_vis, act_c2, act_c3 = ui.columns([1.8, 1.3, 1.05, 1.25])
-			with act_c1:
-				if ui.button(f"📂 {active_person_obj['full_name']} Dosyasını Aç ↗️", type="primary", key="open_selected_profile_dossier", use_container_width=True):
-					open_person_dossier_dialog(active_person_obj["id"])
-			with act_c_vis:
-				if ui.button("🩺 Revir Kaydı Aç", type="secondary", key="stu_goto_visit_btn", use_container_width=True):
-					set_active_person(active_person_obj["id"])
-					ui.session_state["visit_person_mode"] = "🎒 Yalnızca Öğrenciler"
-					ui.session_state["target_page"] = "🩺 Revir Kaydı"
-					ui.rerun()
-			with act_c2:
-				if ui.button("✏️ Düzenle", type="secondary", key="edit_selected_profile", use_container_width=True):
-					ui.session_state["edit_profile_loaded_id"] = None
-					open_edit_profile_dialog(active_person_obj["id"], "stu")
-			with act_c3:
-				p_fpath = get_person_data_file_path(active_person_obj["id"], active_person_obj["full_name"])
-				with ui.expander("📁 JSON Dosyası"):
-					render_person_data_file_editor(active_person_obj["id"], section_key="stu_page")
 
 
 def render_civilians() -> None:
@@ -16463,7 +16662,7 @@ def _render_unified_visit_workspace(person: sqlite3.Row) -> None:
 	show_v_form = is_section_visible("visit_form")
 	show_v_history = is_section_visible("visit_history")
 	if show_v_form and show_v_history:
-		col_form, col_history = ui.columns([1.18, 0.82], gap="large")
+		col_form, col_history = ui.columns([1.18, 0.82], gap="large", sticky_last_col=True)
 	elif show_v_form:
 		col_form, col_history = ui.container(), None
 	elif show_v_history:
@@ -16474,35 +16673,33 @@ def _render_unified_visit_workspace(person: sqlite3.Row) -> None:
 	if col_form is not None:
 		with col_form:
 			with ui.container(border=True):
-				# Belirgin Öğrenci / Yetişkin Kimlik Bandı
-				disp_nm = mask_kvkk_value(person["full_name"], "name")
+				# Kompakt Klinik Mod Şeridi (İsim/sınıf üst özet kartta zaten gösterildiğinden tekrar etmez)
 				if is_adult:
 					role_lbl = str(person["notes"] or "Personel / Ziyaretçi").strip()
 					band_html = (
-						f"<div style='display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;"
-						f"border-left:4px solid #6366f1;padding:6px 12px;margin-bottom:10px;border-radius:8px;background:rgba(99,102,241,0.08);'>"
-						f"<div><span style='background:#4f46e5;color:#fff;padding:2px 9px;border-radius:999px;font-size:11.5px;font-weight:800;margin-right:8px;'>🧑‍💼 YETİŞKİN / PERSONEL</span>"
-						f"<strong style='font-size:1.05rem;'>{html.escape(disp_nm)}</strong> "
-						f"<span style='color:var(--text-muted);font-size:0.88rem;'>· {html.escape(role_lbl)}</span></div>"
-						f"<span style='font-size:11.5px;font-weight:700;color:#4f46e5;'>Yetişkin Vital & İş Kazası Modu</span></div>"
+						f"<div style='display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;"
+						f"border-left:4px solid #6366f1;padding:4px 10px;margin-bottom:8px;border-radius:7px;background:rgba(99,102,241,0.09);'>"
+						f"<div><span style='background:#4f46e5;color:#fff;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:800;margin-right:6px;'>🧑‍💼 YETİŞKİN / PERSONEL</span>"
+						f"<span style='color:var(--text-muted);font-size:0.84rem;font-weight:600;'>{html.escape(role_lbl)}</span></div>"
+						f"<span style='font-size:11px;font-weight:700;color:#6366f1;'>Tansiyon / Şeker & İş Kazası Modu</span></div>"
 					)
 				else:
-					sno_s = f" · No: {person['student_no']}" if person["student_no"] else ""
 					band_html = (
-						f"<div style='display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;"
-						f"border-left:4px solid var(--teal);padding:6px 12px;margin-bottom:10px;border-radius:8px;background:rgba(13,148,136,0.08);'>"
-						f"<div><span style='background:var(--teal);color:#fff;padding:2px 9px;border-radius:999px;font-size:11.5px;font-weight:800;margin-right:8px;'>🎒 ÖĞRENCİ</span>"
-						f"<strong style='font-size:1.05rem;'>{html.escape(disp_nm)}</strong> "
-						f"<span style='color:var(--text-muted);font-size:0.88rem;'>· {html.escape(str(person['class_name'] or ''))}{html.escape(sno_s)}</span></div>"
-						f"<span style='font-size:11.5px;font-weight:700;color:var(--teal);'>Pediatrik Triyaj & Veli Modu</span></div>"
+						f"<div style='display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;"
+						f"border-left:4px solid var(--teal);padding:4px 10px;margin-bottom:8px;border-radius:7px;background:rgba(13,148,136,0.09);'>"
+						f"<div><span style='background:var(--teal);color:#fff;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:800;'>🎒 ÖĞRENCİ REVİR FORMU</span></div>"
+						f"<span style='font-size:11px;font-weight:700;color:var(--teal);'>Pediatrik Triyaj & Veli Bilgilendirme Modu</span></div>"
 					)
 				ui.markdown(band_html, unsafe_allow_html=True)
 
-				# Tek-Tık Klinik Hızlı Şablon Hapları
+				# Tek-Tık Klinik Hızlı Şablon Hapları (Aktif şablon vurgulu)
+				active_qp_key = f"{pfx}_active_qp_{pid}"
 				qp_cols = ui.columns(4)
 				for q_i, (q_lbl, q_comp, q_sym, q_act) in enumerate(quick_presets):
 					with qp_cols[q_i]:
-						if ui.button(q_lbl, key=f"{pfx}_qp_{pid}_{q_i}", type="secondary", use_container_width=True):
+						is_qp_sel = (ui.session_state.get(active_qp_key) == q_i)
+						if ui.button(q_lbl, key=f"{pfx}_qp_{pid}_{q_i}", type=("primary" if is_qp_sel else "secondary"), use_container_width=True):
+							ui.session_state[active_qp_key] = q_i
 							ui.session_state[comp_key] = q_comp
 							ui.session_state[s_txt_key] = q_sym
 							ui.session_state[a_txt_key] = q_act
@@ -18438,18 +18635,14 @@ def render_medication_tracker() -> None:
 				key="med_tb_view_mode"
 			)
 		with tb_top_c3:
-			try:
-				docx_data = create_daily_medication_docx(selected_date, scheduled_doses)
-				ui.download_button(
-					"📄 Çizelgeyi Word İndir",
-					data=docx_data,
-					file_name=f"Ilac_Takip_Cizelgesi_{selected_date.isoformat()}.docx",
-					mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-					use_container_width=True,
-					key="btn_down_med_docx"
-				)
-			except Exception as e:
-				ui.caption(f"Word indirme hazırlanamadı: {e}")
+			ui.download_button(
+				"📄 Çizelgeyi Word İndir",
+				data=lambda _sd=selected_date, _doses=list(scheduled_doses): create_daily_medication_docx(_sd, _doses),
+				file_name=f"Ilac_Takip_Cizelgesi_{selected_date.isoformat()}.docx",
+				mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+				use_container_width=True,
+				key="btn_down_med_docx",
+			)
 
 		if not scheduled_doses:
 			ui.info(f"📅 **{day_label}** tarihinde verilecek planlanmış öğrenci ilacı bulunmamaktadır. Yukarıdaki '➕ Yeni İlaç ve Tedavi Planı Ekle' butonundan öğrenciye ilaç tanımlayabilirsiniz.")
@@ -18461,24 +18654,56 @@ def render_medication_tracker() -> None:
 				doses_by_hour.setdefault(t_str, []).append(d)
 
 			sorted_hours = sorted(doses_by_hour.keys())
+			now_mins = datetime.now().hour * 60 + datetime.now().minute if selected_date == date.today() else -9999
 
 			if view_mode == "Zaman Çizelgesi":
 				for h_time in sorted_hours:
 					h_doses = doses_by_hour[h_time]
 					h_given = sum(1 for d in h_doses if d["is_logged"] and d["log_status"] == "Verildi")
+					h_pending_list = [d for d in h_doses if not d["is_logged"]]
 					h_total = len(h_doses)
-					badge_color = "#10b981" if h_given == h_total else "#f59e0b"
+					is_near_now = False
+					if selected_date == date.today() and ":" in h_time:
+						try:
+							_hh, _mm = [int(x) for x in h_time.split(":")[:2]]
+							if abs((_hh * 60 + _mm) - now_mins) <= 45 and h_pending_list:
+								is_near_now = True
+						except Exception:
+							pass
+					badge_color = "#0d9488" if is_near_now else ("#10b981" if h_given == h_total else "#f59e0b")
 
 					time_display = f"🕒 Saat {h_time}" if h_time != "Gerektiğinde" else "🕒 İhtiyaç Halinde / Gerektiğinde (PRN)"
+					now_pill = " <span style='background:#0d9488;color:#fff;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:800;margin-left:6px;'>⏰ ŞİMDİ / YAKLAŞAN</span>" if is_near_now else ""
 					time_info = f"Toplam: {h_total} Doz | Verilen: {h_given} / {h_total}" if h_time != "Gerektiğinde" else f"Toplam: {h_total} Öğrenci | Verilen: {h_given} / {h_total} (Saat Sınırı Yoktur)"
 
-					ui.markdown(
-						f"""<div style='background: rgba(0,0,0,0.03); border-left: 4px solid {badge_color}; border-radius: 4px; padding: 6px 12px; margin-top: 14px; margin-bottom: 8px;'>
-							<span style='font-size: 1.15rem; font-weight: 700;'>{time_display}</span>
-							<span style='margin-left: 14px; font-size: 0.9rem; color: #64748b;'>{time_info}</span>
-						</div>""",
-						unsafe_allow_html=True
-					)
+					hb_c1, hb_c2 = ui.columns([3.2, 1.3], vertical_alignment="center")
+					with hb_c1:
+						ui.markdown(
+							f"""<div style='background: rgba(13,148,136,0.08); border-left: 4px solid {badge_color}; border-radius: 6px; padding: 7px 12px; margin-top: 12px; margin-bottom: 6px;'>
+								<span style='font-size: 1.1rem; font-weight: 800; color: var(--text-heading);'>{time_display}</span>{now_pill}
+								<span style='margin-left: 12px; font-size: 0.88rem; color: var(--text-muted);'>{time_info}</span>
+							</div>""",
+							unsafe_allow_html=True,
+						)
+					with hb_c2:
+						if len(h_pending_list) > 1 and h_time != "Gerektiğinde":
+							if ui.button(f"⚡ Tümünü Verildi İşle ({len(h_pending_list)})", key=f"btn_batch_give_{selected_date.isoformat()}_{h_time}", type="primary", use_container_width=True):
+								now_t = datetime.now().strftime("%H:%M")
+								for bd in h_pending_list:
+									log_medication_dose(
+										medication_id=bd["medication_id"],
+										student_id=bd["student_id"],
+										log_date=selected_date.isoformat(),
+										scheduled_time=bd["scheduled_time"],
+										given_time=now_t,
+										dose_given=bd["dose_amount"],
+										dose_unit=bd["dose_unit"],
+										status="Verildi",
+										administered_by=nurse_name,
+										notes="Toplu saatlik uygulama",
+									)
+								ui.success(f"✅ Saat {h_time} için {len(h_pending_list)} doz topluca verildi olarak işlendi.")
+								ui.rerun()
 
 					for dose_idx, dose in enumerate(h_doses):
 						card_key = f"dose_{dose['medication_id']}_{dose['scheduled_time']}_{selected_date.isoformat()}"
@@ -18487,12 +18712,15 @@ def render_medication_tracker() -> None:
 
 							with c_stu:
 								sno_txt = f" (No: {dose['student_no']})" if dose.get("student_no") else ""
-								ui.markdown(f"👤 **{dose['full_name']}**{sno_txt}")
+								ui.markdown(f"👤 **{mask_kvkk_value(dose['full_name'], 'name')}**{sno_txt}")
 								ui.caption(f"🏫 Sınıf: **{dose['class_name']}**")
 								if dose.get("allergies") and dose["allergies"].strip():
-									ui.markdown(f"<span style='color: #ef4444; font-size: 0.8rem; font-weight: 600;'>🚨 Alerji: {dose['allergies']}</span>", unsafe_allow_html=True)
+									ui.markdown(f"<span style='color: #ef4444; font-size: 0.8rem; font-weight: 600;'>🚨 Alerji: {html.escape(dose['allergies'])}</span>", unsafe_allow_html=True)
 								if dose.get("chronic_conditions") and dose["chronic_conditions"].strip():
 									ui.caption(f"🏥 Kronik: {dose['chronic_conditions']}")
+								if ui.button("📂 Dosya", key=f"btn_dose_dos_{card_key}", type="secondary"):
+									set_active_person(int(dose["student_id"]))
+									open_person_dossier_dialog(int(dose["student_id"]))
 
 							with c_med:
 								ui.markdown(f"💊 **{dose['medication_name']}**")
@@ -18615,7 +18843,7 @@ def render_medication_tracker() -> None:
 			with cab_hdr_r:
 				ui.download_button(
 					"📝 Boş Veli İlaç İzin Tutanağı (.docx)",
-					data=build_medication_consent_docx(),
+					data=lambda: build_medication_consent_docx(),
 					file_name="Bos_Veli_Ilac_Izin_Teslim_Tutanagi_Sablon.docx",
 					mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 					key="btn_dl_blank_med_consent_docx",
@@ -18742,7 +18970,7 @@ def render_medication_tracker() -> None:
 								ui.rerun()
 						ui.download_button(
 							"📝 Veli İlaç İzin & Teslim Tutanağı (.docx)",
-							data=build_medication_consent_docx(med_id=int(m_id), student_id=int(m_item["student_id"])),
+							data=lambda _mid=int(m_id), _sid=int(m_item["student_id"]): build_medication_consent_docx(med_id=_mid, student_id=_sid),
 							file_name=f"Veli_Ilac_Izin_Tutanagi_{_slugify_person_name(m_item.get('full_name', 'ogrenci'))}_{m_id}.docx",
 							mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 							key=f"btn_dl_med_consent_{m_id}",
@@ -18800,18 +19028,19 @@ def render_medication_tracker() -> None:
 			})
 			ui.dataframe(hist_df, use_container_width=True, hide_index=True)
 
-			# Excel Export
-			excel_buf = io.BytesIO()
-			with pd.ExcelWriter(excel_buf, engine="openpyxl") as writer:
-				hist_df.to_excel(writer, index=False, sheet_name="Ilac_Uygulama_Kayitlari")
-			excel_buf.seek(0)
+			# Lazy Excel Export
+			def _make_med_hist_xlsx(_df=hist_df.copy()):
+				_ebuf = io.BytesIO()
+				with pd.ExcelWriter(_ebuf, engine="openpyxl") as _wr:
+					_df.to_excel(_wr, index=False, sheet_name="Ilac_Uygulama_Kayitlari")
+				return _ebuf.getvalue()
 
 			ui.download_button(
 				"📥 İlaç Uygulama Defterini Excel Olarak İndir",
-				data=excel_buf,
+				data=_make_med_hist_xlsx,
 				file_name=f"Revir_Ilac_Defteri_{hist_start.isoformat()}_{hist_end.isoformat()}.xlsx",
 				mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-				key="btn_down_hist_excel"
+				key="btn_down_hist_excel",
 			)
 
 	with tab_supply:
@@ -19582,7 +19811,7 @@ def render_measurements() -> None:
 					"🧬 Yaşa Göre VKİ Eğrisi (WHO BMIFA)",
 					"🧠 Yaşa Göre Baş Çevresi Eğrisi (WHO HCFA)",
 					"📊 Kronolojik Persantil (%p) Seyri",
-				])
+				], orientation="segmented")
 				with chart_tabs[0]:
 					ui.markdown(f"###### 📏 Yaşa Göre Boy Persantil Eğrisi (0 - 228 Ay) · {sex_label}")
 					_render_clinical_growth_curve("height", "Boy_cm", "Boy", "cm", default_max_mo=228)
@@ -19602,7 +19831,7 @@ def render_measurements() -> None:
 					"⚖️ Yaşa Göre Kilo Eğrisi (WHO WFA)",
 					"🧬 Yaşa Göre VKİ Eğrisi (WHO BMIFA)",
 					"📊 Kronolojik Persantil (%p) Seyri",
-				])
+				], orientation="segmented")
 				with chart_tabs[0]:
 					ui.markdown(f"###### 📏 Yaşa Göre Boy Persantil Eğrisi (0 - 228 Ay) · {sex_label}")
 					_render_clinical_growth_curve("height", "Boy_cm", "Boy", "cm", default_max_mo=228)
@@ -19879,8 +20108,42 @@ def open_screening_dialog(student_id: int, class_name: str | None = None) -> Non
 		ui.markdown("##### 📝 Tarama Notu, Veli Bildirimi & Sevk Kararı")
 		scr_notes = ui.text_area("Özel Bulgular, Veli Bildirimi veya Uzman Hekim Sevk Notu", value=latest.get("notes") or "", height=70)
 
+		# Aynı sınıftaki sıradaki bekleyen öğrenciyi bul (seri tekil tarama için)
+		next_pending_stu = None
+		if stu_class and stu_class != "Belirtilmedi":
+			try:
+				with connect_db() as _nconn:
+					_cand_rows = _nconn.execute(
+						"""SELECT s.id, s.full_name, s.student_no
+						   FROM students s
+						   JOIN classes c ON c.id = s.class_id
+						   LEFT JOIN health_profiles h ON h.student_id = s.id
+						   WHERE c.name = ? AND s.id != ?
+						     AND h.last_screened_at IS NULL
+						     AND NOT EXISTS (SELECT 1 FROM school_screenings sc WHERE sc.student_id = s.id)
+						   ORDER BY s.student_no, s.full_name LIMIT 1""",
+						(stu_class, student_id),
+					).fetchone()
+					if _cand_rows:
+						next_pending_stu = dict(_cand_rows)
+			except Exception:
+				next_pending_stu = None
+
+		auto_open_next = False
+		if next_pending_stu:
+			auto_open_next = ui.checkbox(
+				f"➡️ Kaydettikten sonra sınıftaki sıradaki bekleyen öğrenciye geç: **{mask_kvkk_value(next_pending_stu['full_name'], 'name')}**",
+				value=True,
+				key=f"scr_auto_next_{student_id}",
+			)
+
 		# Submit button
-		submitted = ui.form_submit_button("💾 Sağlık Taramasını Kaydet ve Profile Eşitle", type="primary", use_container_width=True)
+		sub_lbl = (
+			"💾 Kaydet ve Sıradaki Öğrenciye Geç →"
+			if next_pending_stu
+			else "💾 Sağlık Taramasını Kaydet ve Profile Eşitle"
+		)
+		submitted = ui.form_submit_button(sub_lbl, type="primary", use_container_width=True)
 
 		if submitted:
 			new_h = normalize_height(new_h_raw) if ("height_cm" in visible_fields and new_h_raw) else None
@@ -19924,7 +20187,9 @@ def open_screening_dialog(student_id: int, class_name: str | None = None) -> Non
 			)
 			for _sk in (f"scr_dlg_{student_id}_h", f"scr_dlg_{student_id}_w", f"scr_dlg_{student_id}_hc", f"scr_dlg_{student_id}_t", f"scr_dlg_{student_id}_p", f"scr_dlg_{student_id}_s"):
 				ui.session_state.pop(_sk, None)
-			ui.success(f"✅ {student['full_name']} öğrencisinin sağlık taraması kaydedildi ve tüm profille senkronize edildi.")
+			ui.session_state["_scr_flash_msg"] = f"✅ {student['full_name']} öğrencisinin sağlık taraması kaydedildi!"
+			if auto_open_next and next_pending_stu:
+				ui.session_state["_pending_next_screening"] = (int(next_pending_stu["id"]), stu_class)
 			ui.rerun()
 
 
@@ -21466,10 +21731,9 @@ def render_school_screening() -> None:
 		with hdr_c3:
 			if ui.button("⚙️ Rapor İçeriği & Sütun Ayarları (Pop-up)", type="primary", use_container_width=True, key=f"btn_scr_cls_open_report_builder_{selected_class}"):
 				_trigger_open_report_builder("🏫 Okul Taraması", default_classes=[selected_class])
-			rep_docx = build_class_screening_report_docx(selected_class)
 			ui.download_button(
 				"📝 Hızlı Sınıf Tarama Formu (.docx)",
-				data=rep_docx,
+				data=lambda _sc=selected_class: build_class_screening_report_docx(_sc),
 				file_name=f"sinif_saglik_taramasi_{selected_class}_{date.today().isoformat()}.docx",
 				mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 				type="secondary",
@@ -21637,6 +21901,14 @@ def render_school_screening() -> None:
 		with tab_bulk_cls:
 			render_bulk_class_screening_tab(default_class=selected_class, key_ctx=f"cls_{selected_class}")
 
+	scr_flash = ui.session_state.pop("_scr_flash_msg", None)
+	if scr_flash:
+		ui.success(scr_flash)
+
+	pend_next_scr = ui.session_state.pop("_pending_next_screening", None)
+	if isinstance(pend_next_scr, tuple) and len(pend_next_scr) == 2:
+		open_screening_dialog(int(pend_next_scr[0]), pend_next_scr[1])
+
 	dlg_state_scr = ui.session_state.get("_dyn_rep_dialog_open")
 	if isinstance(dlg_state_scr, dict) and dlg_state_scr.get("owner_page") == "🏫 Okul Taraması":
 		open_report_config_dialog(
@@ -21703,7 +21975,7 @@ def save_report_settings(new_settings: dict[str, Any]) -> None:
 	save_app_settings({"report_custom_settings": _json.dumps(cur, ensure_ascii=False)})
 
 
-@ui.dialog("⚙️ Rapor Çıktı ve Yazdırma Ayarları", width="large")
+@ui.dialog("⚙️ Rapor Çıktı ve Yazdırma Ayarları", width="large", mode="drawer")
 def open_report_settings_dialog() -> None:
 	ui.caption("Kişi ve sınıf raporu çıktılarında (Word .docx ve yazdırma) hangi bölümlerin ve alt bilgilerin yer alacağını buradan özelleştirebilirsiniz.")
 	cur_cfg = get_report_settings()
@@ -26650,10 +26922,9 @@ button {{ padding: 12px 20px; background: #176b68; color: white; border: none; b
 
 			down_c1, down_c2 = ui.columns([2, 1])
 			with down_c1:
-				batch_docx = build_class_batch_report_docx(sel_cls_for_report, report_cfg=cls_rep_cfg)
 				ui.download_button(
 					f"📝 {sel_cls_for_report} - Tüm Sınıfın Word Raporunu İndir ({len(class_students)} Öğrenci, .docx)",
-					data=batch_docx,
+					data=lambda _cls=sel_cls_for_report, _rc=dict(cls_rep_cfg): build_class_batch_report_docx(_cls, report_cfg=_rc),
 					file_name=f"{clean_cls_slug}_tum_sinif_saglik_raporu.docx",
 					mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 					type="primary",
@@ -26799,10 +27070,9 @@ button {{ padding: 12px 20px; background: #176b68; color: white; border: none; b
 			single_body = build_student_report_section_html(student, inst_top, inst_school, inst_nurse, inst_princ, is_multi=False, report_cfg=single_rep_cfg)
 			print_html = css_header + single_body + "</body>\n</html>"
 			print_name = re.sub(r"[^A-Za-z0-9_-]+", "_", student["full_name"]).strip("_") or "kisi"
-			single_docx = build_student_report_docx(student, report_cfg=single_rep_cfg)
 			ui.download_button(
 				"📝 Kişi Sağlık Raporunu İndir (.docx)",
-				data=single_docx,
+				data=lambda _stu=dict(student), _rc=dict(single_rep_cfg): build_student_report_docx(_stu, report_cfg=_rc),
 				file_name=f"{print_name}_saglik_raporu.docx",
 				mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 				type="primary",
@@ -26815,67 +27085,74 @@ button {{ padding: 12px 20px; background: #176b68; color: white; border: none; b
 		else:
 			ui.info("💡 Raporunu görüntülemek ve Word (.docx) olarak indirmek istediğiniz kişiyi yukarıdaki kutudan seçin.")
 
-	with connect_db() as connection:
-		all_students = get_students_enriched().drop(columns=["id"], errors="ignore")
-		all_visits = pd.read_sql_query(
-			"SELECT c.name AS sinif, s.full_name AS ogrenci, v.visit_date AS tarih, v.visit_time AS saat, v.complaint AS basvuru, v.symptoms AS belirtiler, v.observation AS gozlem, v.action AS islem, v.guardian_contacted AS veli_bilgilendirildi, v.referral AS yonlendirme, v.follow_up AS izlem FROM visits v JOIN students s ON s.id=v.student_id JOIN classes c ON c.id=s.class_id ORDER BY v.visit_date DESC, v.visit_time DESC", connection
-		)
-		raw_all_meas = pd.read_sql_query(
-			"""SELECT c.name AS sinif, s.full_name AS ogrenci, s.sex AS cinsiyet, s.birth_date AS dogum_tarihi,
-					  m.measured_on AS tarih, m.height_cm AS boy_cm, m.weight_kg AS kilo_kg, m.head_circ_cm AS bas_cevresi_cm, m.age_months AS yas_ay, m.bmi
-			   FROM measurements m JOIN students s ON s.id=m.student_id JOIN classes c ON c.id=s.class_id
-			   ORDER BY m.measured_on DESC, m.id DESC""", connection
-		)
-		all_vitals = pd.read_sql_query(
-			"SELECT c.name AS sinif, s.full_name AS ogrenci, v.measured_at AS tarih_saat, v.systolic_mmhg AS buyuk_tansiyon, v.diastolic_mmhg AS kucuk_tansiyon, v.pulse_bpm AS nabiz, v.temperature_c AS ates_c, v.spo2_pct AS saturasyon_spo2, v.glucose_mg_dl AS kan_sekeri, v.glucose_context AS olcum_kosulu, v.notes AS notlar FROM vital_readings v JOIN students s ON s.id=v.student_id JOIN classes c ON c.id=s.class_id ORDER BY v.measured_at DESC", connection
-		)
-		all_labs = pd.read_sql_query(
-			"SELECT c.name AS sinif, s.full_name AS ogrenci, r.report_date AS tarih, r.file_name AS dosya, x.test_name AS test, x.value AS sonuc, x.unit AS birim, x.ref_low AS referans_alt, x.ref_high AS referans_ust, x.lab_flag AS rapor_isareti FROM lab_results x JOIN lab_reports r ON r.id=x.report_id JOIN students s ON s.id=r.student_id JOIN classes c ON c.id=s.class_id ORDER BY r.report_date DESC", connection
-		)
-		all_profiles = pd.read_sql_query(
-			"SELECT s.person_type AS kayit_turu, c.name AS sinif, s.full_name AS kisi, COALESCE(h.guardian_name,s.guardian_name) AS veli, COALESCE(h.guardian_phone,s.guardian_phone) AS telefon, h.allergies AS alerjiler, h.chronic_conditions AS kronik_hastaliklar, h.medical_history AS saglik_gecmisi, h.medications AS ilaclar, h.blood_group AS kan_grubu, h.emergency_notes AS acil_notlar, h.updated_at AS guncelleme, h.reviewed_by AS dogrulayan FROM students s JOIN classes c ON c.id=s.class_id LEFT JOIN health_profiles h ON h.student_id=s.id WHERE h.student_id IS NOT NULL OR s.guardian_name IS NOT NULL OR s.guardian_phone IS NOT NULL ORDER BY c.name, s.full_name", connection
-		)
-		all_plans = pd.read_sql_query(
-			"SELECT s.person_type AS kayit_turu, c.name AS sinif, s.full_name AS kisi, p.created_at AS tarih, p.nursing_diagnosis AS hemsirelik_degerlendirmesi, p.observed_facts AS olgular, p.goals AS hedefler, p.interventions AS girisimler, p.monitoring AS izlem, p.escalation AS yonlendirme, p.status AS durum, p.reviewed_by AS sorumlu FROM care_plans p JOIN students s ON s.id=p.student_id JOIN classes c ON c.id=s.class_id ORDER BY p.created_at DESC", connection
-		)
+	def _build_full_school_workbook_lazy() -> bytes:
+		with connect_db() as connection:
+			all_students = get_students_enriched().drop(columns=["id"], errors="ignore")
+			all_visits = pd.read_sql_query(
+				"SELECT c.name AS sinif, s.full_name AS ogrenci, v.visit_date AS tarih, v.visit_time AS saat, v.complaint AS basvuru, v.symptoms AS belirtiler, v.observation AS gozlem, v.action AS islem, v.guardian_contacted AS veli_bilgilendirildi, v.referral AS yonlendirme, v.follow_up AS izlem FROM visits v JOIN students s ON s.id=v.student_id JOIN classes c ON c.id=s.class_id ORDER BY v.visit_date DESC, v.visit_time DESC", connection
+			)
+			raw_all_meas = pd.read_sql_query(
+				"""SELECT c.name AS sinif, s.full_name AS ogrenci, s.sex AS cinsiyet, s.birth_date AS dogum_tarihi,
+						  m.measured_on AS tarih, m.height_cm AS boy_cm, m.weight_kg AS kilo_kg, m.head_circ_cm AS bas_cevresi_cm, m.age_months AS yas_ay, m.bmi
+				   FROM measurements m JOIN students s ON s.id=m.student_id JOIN classes c ON c.id=s.class_id
+				   ORDER BY m.measured_on DESC, m.id DESC""", connection
+			)
+			all_vitals = pd.read_sql_query(
+				"SELECT c.name AS sinif, s.full_name AS ogrenci, v.measured_at AS tarih_saat, v.systolic_mmhg AS buyuk_tansiyon, v.diastolic_mmhg AS kucuk_tansiyon, v.pulse_bpm AS nabiz, v.temperature_c AS ates_c, v.spo2_pct AS saturasyon_spo2, v.glucose_mg_dl AS kan_sekeri, v.glucose_context AS olcum_kosulu, v.notes AS notlar FROM vital_readings v JOIN students s ON s.id=v.student_id JOIN classes c ON c.id=s.class_id ORDER BY v.measured_at DESC", connection
+			)
+			all_labs = pd.read_sql_query(
+				"SELECT c.name AS sinif, s.full_name AS ogrenci, r.report_date AS tarih, r.file_name AS dosya, x.test_name AS test, x.value AS sonuc, x.unit AS birim, x.ref_low AS referans_alt, x.ref_high AS referans_ust, x.lab_flag AS rapor_isareti FROM lab_results x JOIN lab_reports r ON r.id=x.report_id JOIN students s ON s.id=r.student_id JOIN classes c ON c.id=s.class_id ORDER BY r.report_date DESC", connection
+			)
+			all_profiles = pd.read_sql_query(
+				"SELECT s.person_type AS kayit_turu, c.name AS sinif, s.full_name AS kisi, COALESCE(h.guardian_name,s.guardian_name) AS veli, COALESCE(h.guardian_phone,s.guardian_phone) AS telefon, h.allergies AS alerjiler, h.chronic_conditions AS kronik_hastaliklar, h.medical_history AS saglik_gecmisi, h.medications AS ilaclar, h.blood_group AS kan_grubu, h.emergency_notes AS acil_notlar, h.updated_at AS guncelleme, h.reviewed_by AS dogrulayan FROM students s JOIN classes c ON c.id=s.class_id LEFT JOIN health_profiles h ON h.student_id=s.id WHERE h.student_id IS NOT NULL OR s.guardian_name IS NOT NULL OR s.guardian_phone IS NOT NULL ORDER BY c.name, s.full_name", connection
+			)
+			all_plans = pd.read_sql_query(
+				"SELECT s.person_type AS kayit_turu, c.name AS sinif, s.full_name AS kisi, p.created_at AS tarih, p.nursing_diagnosis AS hemsirelik_degerlendirmesi, p.observed_facts AS olgular, p.goals AS hedefler, p.interventions AS girisimler, p.monitoring AS izlem, p.escalation AS yonlendirme, p.status AS durum, p.reviewed_by AS sorumlu FROM care_plans p JOIN students s ON s.id=p.student_id JOIN classes c ON c.id=s.class_id ORDER BY p.created_at DESC", connection
+			)
 
-	meas_export_rows = []
-	for _, mr in raw_all_meas.iterrows():
-		m_ay = int(mr["yas_ay"]) if pd.notna(mr["yas_ay"]) else (
-			age_in_months(mr["dogum_tarihi"], date.fromisoformat(str(mr["tarih"])[:10])) if mr["dogum_tarihi"] else None
-		)
-		h_v = float(mr["boy_cm"]) if pd.notna(mr["boy_cm"]) else None
-		w_v = float(mr["kilo_kg"]) if pd.notna(mr["kilo_kg"]) else None
-		hc_v = float(mr["bas_cevresi_cm"]) if (pd.notna(mr.get("bas_cevresi_cm")) and float(mr["bas_cevresi_cm"]) > 0) else None
-		b_v = float(mr["bmi"]) if pd.notna(mr["bmi"]) else ((w_v / ((h_v / 100.0) ** 2)) if (h_v and w_v) else None)
-		h_ev = evaluate_measurement(h_v, "height", mr["cinsiyet"], m_ay) if (mr["cinsiyet"] and m_ay is not None and h_v) else None
-		w_ev = evaluate_measurement(w_v, "weight", mr["cinsiyet"], m_ay) if (mr["cinsiyet"] and m_ay is not None and w_v) else None
-		b_ev = evaluate_measurement(b_v, "bmi", mr["cinsiyet"], m_ay) if (mr["cinsiyet"] and m_ay is not None and b_v) else None
-		hc_ev = evaluate_measurement(hc_v, "head_circ", mr["cinsiyet"], m_ay) if (mr["cinsiyet"] and m_ay is not None and hc_v) else None
-		meas_export_rows.append({
-			"sinif": mr["sinif"],
-			"ogrenci": mr["ogrenci"],
-			"cinsiyet": mr["cinsiyet"],
-			"tarih": mr["tarih"],
-			"yas_ay": m_ay,
-			"boy_cm": round(h_v, 1) if h_v is not None else None,
-			"boy_z_sds": round(h_ev["z"], 2) if h_ev else None,
-			"boy_persantil": round(h_ev["percentile"], 1) if h_ev else None,
-			"kilo_kg": round(w_v, 1) if w_v is not None else None,
-			"kilo_z_sds": round(w_ev["z"], 2) if w_ev else None,
-			"kilo_persantil": round(w_ev["percentile"], 1) if w_ev else None,
-			"bas_cevresi_cm": round(hc_v, 1) if hc_v is not None else None,
-			"bas_cevresi_z_sds": round(hc_ev["z"], 2) if hc_ev else None,
-			"bas_cevresi_persantil": round(hc_ev["percentile"], 1) if hc_ev else None,
-			"vki_bmi": round(b_v, 2) if b_v is not None else None,
-			"vki_z_sds": round(b_ev["z"], 2) if b_ev else None,
-			"vki_persantil": round(b_ev["percentile"], 1) if b_ev else None,
-			"gelisim_durumu": b_ev["status"] if b_ev else "—",
-		})
-	all_measurements = pd.DataFrame(meas_export_rows) if meas_export_rows else raw_all_meas
+		meas_export_rows = []
+		for _, mr in raw_all_meas.iterrows():
+			m_ay = int(mr["yas_ay"]) if pd.notna(mr["yas_ay"]) else (
+				age_in_months(mr["dogum_tarihi"], date.fromisoformat(str(mr["tarih"])[:10])) if mr["dogum_tarihi"] else None
+			)
+			h_v = float(mr["boy_cm"]) if pd.notna(mr["boy_cm"]) else None
+			w_v = float(mr["kilo_kg"]) if pd.notna(mr["kilo_kg"]) else None
+			hc_v = float(mr["bas_cevresi_cm"]) if (pd.notna(mr.get("bas_cevresi_cm")) and float(mr["bas_cevresi_cm"]) > 0) else None
+			b_v = float(mr["bmi"]) if pd.notna(mr["bmi"]) else ((w_v / ((h_v / 100.0) ** 2)) if (h_v and w_v) else None)
+			h_ev = evaluate_measurement(h_v, "height", mr["cinsiyet"], m_ay) if (mr["cinsiyet"] and m_ay is not None and h_v) else None
+			w_ev = evaluate_measurement(w_v, "weight", mr["cinsiyet"], m_ay) if (mr["cinsiyet"] and m_ay is not None and w_v) else None
+			b_ev = evaluate_measurement(b_v, "bmi", mr["cinsiyet"], m_ay) if (mr["cinsiyet"] and m_ay is not None and b_v) else None
+			hc_ev = evaluate_measurement(hc_v, "head_circ", mr["cinsiyet"], m_ay) if (mr["cinsiyet"] and m_ay is not None and hc_v) else None
+			meas_export_rows.append({
+				"sinif": mr["sinif"],
+				"ogrenci": mr["ogrenci"],
+				"cinsiyet": mr["cinsiyet"],
+				"tarih": mr["tarih"],
+				"yas_ay": m_ay,
+				"boy_cm": round(h_v, 1) if h_v is not None else None,
+				"boy_z_sds": round(h_ev["z"], 2) if h_ev else None,
+				"boy_persantil": round(h_ev["percentile"], 1) if h_ev else None,
+				"kilo_kg": round(w_v, 1) if w_v is not None else None,
+				"kilo_z_sds": round(w_ev["z"], 2) if w_ev else None,
+				"kilo_persantil": round(w_ev["percentile"], 1) if w_ev else None,
+				"bas_cevresi_cm": round(hc_v, 1) if hc_v is not None else None,
+				"bas_cevresi_z_sds": round(hc_ev["z"], 2) if hc_ev else None,
+				"bas_cevresi_persantil": round(hc_ev["percentile"], 1) if hc_ev else None,
+				"vki_bmi": round(b_v, 2) if b_v is not None else None,
+				"vki_z_sds": round(b_ev["z"], 2) if b_ev else None,
+				"vki_persantil": round(b_ev["percentile"], 1) if b_ev else None,
+				"gelisim_durumu": b_ev["status"] if b_ev else "—",
+			})
+		all_measurements = pd.DataFrame(meas_export_rows) if meas_export_rows else raw_all_meas
+		return workbook_download(all_students, all_visits, all_measurements, all_vitals, all_labs, all_profiles, all_plans)
 
-	ui.download_button("Tüm kişi, persantil, revir, vital, tahlil ve bakım planlarını Excel indir", workbook_download(all_students, all_visits, all_measurements, all_vitals, all_labs, all_profiles, all_plans),
-					   "revir_raporu.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	ui.download_button(
+		"📊 Tüm kişi, persantil, revir, vital, tahlil ve bakım planlarını Excel indir",
+		_build_full_school_workbook_lazy,
+		"revir_raporu.xlsx",
+		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		key="btn_dl_full_school_xlsx_lazy",
+	)
 
 
 
@@ -26884,7 +27161,7 @@ def render_academic_year_settings() -> None:
 	ui.caption("Eğitim öğretim yıllarını yönetebilir, arşive kaldırılan geçmiş yılların kayıtlarına tam bağımsız olarak göz atabilir ve yeni eğitim öğretim yılları başlatabilirsiniz. Her eğitim yılının öğrenci kadrosu ve revir kayıtları tamamen bağımsız klasör ve veritabanında saklanır; mezuniyet ve yeni öğrenci kayıtları yıllar arasında asla birbirine karışmaz.")
 
 	active_ay = get_active_academic_year()
-	all_years = get_all_academic_years()
+	all_years = get_all_academic_years() or [active_ay]
 	today_iso = date.today().isoformat()
 	is_arch = active_ay["end_date"] < today_iso
 
@@ -26925,7 +27202,7 @@ def render_academic_year_settings() -> None:
 				key="ay_active_year_radio",
 				label_visibility="collapsed"
 			)
-			picked_opt = next(opt for opt in year_options if opt["label"] == sel_label)
+			picked_opt = next((opt for opt in year_options if opt["label"] == sel_label), year_options[0])
 			if picked_opt["id"] != active_ay["id"]:
 				set_active_academic_year(picked_opt["id"])
 				ui.success(f"'{picked_opt['name']}' eğitim yılına geçildi. Tüm veriler güncellendi!")
@@ -27537,7 +27814,7 @@ def open_document_preview_dialog(file_path: Path) -> None:
 			ui.image(str(cov), use_container_width=True)
 
 
-@ui.dialog("📤 Yeni Evrak / Belge Yükle", width="large")
+@ui.dialog("📤 Yeni Evrak / Belge Yükle", width="large", mode="drawer")
 def open_upload_document_dialog() -> None:
 	ui.caption("Revir ile ilgili resmi belgeleri (Word, Excel, PowerPoint), PDF yönergeleri, formları veya fotoğrafları sürükleyip bırakabilir ya da dosya seçebilirsiniz:")
 	uploaded_files = ui.file_uploader(
@@ -27732,9 +28009,7 @@ def render_documents_depot() -> None:
 								open_document_preview_dialog(item["path"])
 						with la2:
 							mime_t = mimetypes.guess_type(item["path"])[0] or "application/octet-stream"
-							with open(item["path"], "rb") as f_dl:
-								f_bytes = f_dl.read()
-							ui.download_button("📥", data=f_bytes, file_name=item["name"], mime=mime_t, key=f"dl_list_{item_hash}", help="İndir", use_container_width=True)
+							ui.download_button("📥", data=lambda _p=item["path"]: _p.read_bytes(), file_name=item["name"], mime=mime_t, key=f"dl_list_{item_hash}", help="İndir", use_container_width=True)
 						with la3:
 							with ui.popover("✏️", use_container_width=True, help="Ad Değiştir"):
 								ui.markdown("##### ✏️ Yeniden Adlandır")
@@ -27812,11 +28087,9 @@ def render_documents_depot() -> None:
 									open_document_preview_dialog(item["path"])
 							with act_col1:
 								mime_t = mimetypes.guess_type(item["path"])[0] or "application/octet-stream"
-								with open(item["path"], "rb") as f_dl:
-									f_bytes = f_dl.read()
 								ui.download_button(
 									"📥",
-									data=f_bytes,
+									data=lambda _p=item["path"]: _p.read_bytes(),
 									file_name=item["name"],
 									mime=mime_t,
 									key=f"dl_btn_{item_hash}",
@@ -28068,1331 +28341,1091 @@ ie4uinit.exe -show
 
 
 
+SETTINGS_GROUPS_META: list[dict[str, str]] = [
+	{
+		"key": "🏫 Kurum, Yıl & Şube Yapısı",
+		"desc": "Okul anteti, eğitim öğretim yılı arşivi, şube yönetimi ve varsayılan konum",
+		"keywords": "okul kurum antet hemşire müdür eğitim yılı arşiv şube sınıf şablon konum il ilçe köy adres",
+	},
+	{
+		"key": "🎨 Görünüm & Çalışma Alanı",
+		"desc": "Görsel renk temaları, karanlık mod, yazı tipi, punto, yoğunluk ve dil",
+		"keywords": "tema renk dark mode karanlık mod aydınlık yazı tipi font punto boyut tablo yoğunluk dil görünüm",
+	},
+	{
+		"key": "🎛️ Modül & Form Görünürlüğü",
+		"desc": "Sayfa kartları, okul taraması ve ilaç takip form alanlarını sadeleştirin",
+		"keywords": "görünürlük sayfa ayarları tarama alanları ilaç takip gizle göster sadeleştir form kart",
+	},
+	{
+		"key": "🩺 Klinik Kütüphane & WHO",
+		"desc": "Hızlı şikayet/işlem şablonları, NANDA-I bakım protokolleri ve WHO referansları",
+		"keywords": "klinik şablon şikayet müdahale nanda bakım planı protokol who lms persantil referans büyüme",
+	},
+	{
+		"key": "🤖 Yapay Zekâ (Gemini) & KVKK",
+		"desc": "Gemini API anahtarı, model seçimi, yüzen sohbet balonu, mikrofon ve KVKK maskeleme",
+		"keywords": "gemini ai yapay zeka api anahtar model sohbet balon ses mikrofon kvkk gizlilik maskeleme",
+	},
+	{
+		"key": "💾 Veri, İçe Aktar & Sistem",
+		"desc": "Otomatik/ZIP yedekleme, e-Okul PDF/Excel liste aktarımı, güncelleme ve sıfırlama",
+		"keywords": "veritabanı yedek zip restore geri yükle e-okul excel pdf içe aktar sürüm güncelleme fabrika sıfırla",
+	},
+]
+
+
 def render_settings() -> None:
 	ui.markdown("## ⚙️ Sistem, Kurum ve Uygulama Ayarları")
 	current_cfg = get_app_settings()
 
-	# Master-Detail Dikey Ayarlar Paneli
-	nav_col, content_col = ui.columns([1.15, 3.4], gap="large")
+	# Üst Sistem Sağlık & Durum Panosu
+	active_ay = get_active_academic_year()
+	ai_on_cfg, _, ai_model_cfg = _get_active_gemini_config()
+	auto_bkps = list_auto_backups()
+	last_bkp_txt = auto_bkps[0]["modified_at"] if auto_bkps else "Henüz yok"
+	with connect_db() as _sconn:
+		_lms_cnt = _sconn.execute("SELECT COUNT(*) FROM lms_reference").fetchone()[0]
+	is_arch_ay = active_ay["end_date"] < date.today().isoformat()
+	ay_pill_color = "#d97706" if is_arch_ay else "var(--teal)"
+	ai_pill_txt = f"Aktif ({ai_model_cfg})" if ai_on_cfg else "Kapalı"
+	ui.markdown(
+		f"""<div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:14px;">
+			<div class="revir-card" style="padding:10px 14px;margin:0;">
+				<div style="font-size:11.5px;color:var(--text-muted);font-weight:600;">📅 Aktif Eğitim Yılı</div>
+				<div style="font-size:14.5px;font-weight:800;color:{ay_pill_color};margin-top:2px;">{html.escape(active_ay['name'])}{' (Arşiv)' if is_arch_ay else ''}</div>
+			</div>
+			<div class="revir-card" style="padding:10px 14px;margin:0;">
+				<div style="font-size:11.5px;color:var(--text-muted);font-weight:600;">🤖 Gemini Klinik AI</div>
+				<div style="font-size:14.5px;font-weight:800;color:var(--text-heading);margin-top:2px;">{html.escape(ai_pill_txt)}</div>
+			</div>
+			<div class="revir-card" style="padding:10px 14px;margin:0;">
+				<div style="font-size:11.5px;color:var(--text-muted);font-weight:600;">💾 Son Otomatik Yedek</div>
+				<div style="font-size:14px;font-weight:800;color:var(--text-heading);margin-top:2px;">{html.escape(str(last_bkp_txt))}</div>
+			</div>
+			<div class="revir-card" style="padding:10px 14px;margin:0;">
+				<div style="font-size:11.5px;color:var(--text-muted);font-weight:600;">📏 WHO LMS Referansı</div>
+				<div style="font-size:14.5px;font-weight:800;color:var(--text-heading);margin-top:2px;">{_lms_cnt:,} satır</div>
+			</div>
+		</div>""",
+		unsafe_allow_html=True,
+	)
+
+	# Eski kategori isimlerini yeni 6 gruba otomatik eşle (geriye uyumluluk)
+	legacy_map = {
+		"🤖 Yapay Zekâ (Gemini API) & KVKK": "🤖 Yapay Zekâ (Gemini) & KVKK",
+		"🏫 Okul Adı, Kurum & Rapor Anteti": "🏫 Kurum, Yıl & Şube Yapısı",
+		"📅 Eğitim Öğretim Yılı & Arşiv Yönetimi": "🏫 Kurum, Yıl & Şube Yapısı",
+		"📍 Varsayılan Konum & İl-İlçe-Köy": "🏫 Kurum, Yıl & Şube Yapısı",
+		"🗂️ Şube ayarları": "🏫 Kurum, Yıl & Şube Yapısı",
+		"🎨 Görünüm, Yazı Tipi & Dil": "🎨 Görünüm & Çalışma Alanı",
+		"📄 Sayfa Ayarları (Bölüm Görünürlüğü)": "🎛️ Modül & Form Görünürlüğü",
+		"🔍 Okul Taraması Alanları (Görünürlük)": "🎛️ Modül & Form Görünürlüğü",
+		"💊 İlaç Takip Alanları (Görünürlük)": "🎛️ Modül & Form Görünürlüğü",
+		"🩺 Klinik Şablonlar & WHO": "🩺 Klinik Kütüphane & WHO",
+		"📋 Bakım Planı Şablonları (NANDA-I)": "🩺 Klinik Kütüphane & WHO",
+		"📥 Liste İçe Aktar (Excel / PDF)": "💾 Veri, İçe Aktar & Sistem",
+		"💾 Veritabanı & Yedekleme": "💾 Veri, İçe Aktar & Sistem",
+		"🚀 Sürüm & Güncelleme Yönetimi": "💾 Veri, İçe Aktar & Sistem",
+	}
+	cur_nav_v = ui.session_state.get("settings_vertical_nav")
+	if cur_nav_v in legacy_map:
+		ui.session_state["settings_vertical_nav"] = legacy_map[cur_nav_v]
+
+	# Master-Detail Yapışkan Sol Ayarlar Paneli
+	nav_col, content_col = ui.columns([1.05, 3.45], gap="large", sticky_first_col=True)
 
 	with nav_col:
 		with ui.container(border=True):
-			ui.markdown("#### ⚙️ Ayarlar Menüsü")
-			ui.caption("Ayar kategorisini seçin:")
-			settings_sections = [
-				"🤖 Yapay Zekâ (Gemini API) & KVKK",
-				"🏫 Okul Adı, Kurum & Rapor Anteti",
-				"📅 Eğitim Öğretim Yılı & Arşiv Yönetimi",
-				"📥 Liste İçe Aktar (Excel / PDF)",
-				"🎨 Görünüm, Yazı Tipi & Dil",
-				"📄 Sayfa Ayarları (Bölüm Görünürlüğü)",
-				"📍 Varsayılan Konum & İl-İlçe-Köy",
-				"🩺 Klinik Şablonlar & WHO",
-				"📋 Bakım Planı Şablonları (NANDA-I)",
-				"🔍 Okul Taraması Alanları (Görünürlük)",
-				"💊 İlaç Takip Alanları (Görünürlük)",
-				"🗂️ Şube ayarları",
-				"💾 Veritabanı & Yedekleme",
-				"🚀 Sürüm & Güncelleme Yönetimi",
+			ui.markdown("#### ⚙️ Ayar Kategorileri")
+			cfg_q_raw = ui.text_input(
+				"Ayarlarda Ara",
+				placeholder="🔍 Ara... (tema, yedek, api, şube)",
+				key="settings_search_q",
+				label_visibility="collapsed",
+			).strip()
+			cfg_q = _tr_fold(cfg_q_raw)
+
+			matched_groups = [
+				g for g in SETTINGS_GROUPS_META
+				if not cfg_q or (cfg_q in _tr_fold(g["key"]) or cfg_q in _tr_fold(g["desc"]) or cfg_q in _tr_fold(g["keywords"]))
 			]
+			if not matched_groups:
+				ui.caption("Eşleşen ayar grubu bulunamadı.")
+				matched_groups = SETTINGS_GROUPS_META
+
+			section_keys = [g["key"] for g in matched_groups]
+			cur_sel = ui.session_state.get("settings_vertical_nav")
+			if cur_sel not in section_keys:
+				ui.session_state["settings_vertical_nav"] = section_keys[0]
 			active_sec = ui.radio(
 				"Ayar Menüsü",
-				settings_sections,
-				index=0,
+				section_keys,
+				index=section_keys.index(ui.session_state["settings_vertical_nav"]),
 				key="settings_vertical_nav",
-				label_visibility="collapsed"
+				label_visibility="collapsed",
 			)
+			sel_meta = next((g for g in SETTINGS_GROUPS_META if g["key"] == active_sec), None)
+			if sel_meta:
+				ui.divider()
+				ui.caption(f"💡 {sel_meta['desc']}")
 
 	with content_col:
-		# 🤖 Yapay Zekâ (Gemini API) & KVKK
-		if active_sec == "🤖 Yapay Zekâ (Gemini API) & KVKK":
-			render_gemini_ai_settings_panel(current_cfg)
+		# ======================================================================
+		# GRUP 1: KURUM, EĞİTİM YILI, ŞUBE & KONUM
+		# ======================================================================
+		if active_sec == "🏫 Kurum, Yıl & Şube Yapısı":
+			t_inst, t_ay, t_cls, t_loc = ui.tabs([
+				"🏛️ Kurum & Rapor Anteti",
+				"📅 Eğitim Yılı & Arşiv",
+				"🗂️ Şubeler & Sınıf Şablonları",
+				"📍 Varsayılan Konum",
+			], orientation="segmented")
 
-		# 📅 Eğitim Öğretim Yılı Yönetimi
-		elif active_sec == "📅 Eğitim Öğretim Yılı & Arşiv Yönetimi":
-			render_academic_year_settings()
+			with t_inst:
+				ui.markdown("### 🏫 Okul / Kurum Bilgileri, Revir Hemşiresi, Müdür ve Rapor Anteti")
+				ui.caption("Sol menüde, üst çubukta, sağlık profillerinde ve resmi yazdırılabilir raporlarda kullanılan kurum ve yetkili bilgilerini yönetin.")
+				in_c1, in_c2 = ui.columns(2)
+				with in_c1:
+					inst_school = ui.text_input("🏫 Okul / Kurum Adı", value=current_cfg.get("school_name", "Okul / Kurum Reviri"), placeholder="Örn: Atatürk İlkokulu", key="cfg_school_name")
+					inst_top = ui.text_input("🏛️ Üst Kurum Başlığı (Antet 1. Satır)", value=current_cfg.get("institution_top_header", "T.C. MİLLÎ EĞİTİM BAKANLIĞI"), key="cfg_inst_top")
+					inst_phone = ui.text_input("📞 Kurum / Revir İletişim Telefonu", value=current_cfg.get("institution_phone", ""), placeholder="Örn: 0312 000 00 00", key="cfg_inst_phone")
+				with in_c2:
+					inst_nurse = ui.text_input("👩‍⚕️ Okul Revir Sorumlusu / Hemşire Adı ve Ünvanı", value=current_cfg.get("nurse_name", "Okul Revir Sorumlusu"), key="cfg_nurse_name")
+					inst_princ = ui.text_input("👔 Okul Müdürü / İdareci Adı ve Ünvanı", value=current_cfg.get("principal_name", "Okul Müdürü"), key="cfg_principal_name")
 
-		# 🏫 Okul Adı, Kurum Bilgileri ve Rapor Anteti
-		elif active_sec == "🏫 Okul Adı, Kurum & Rapor Anteti":
-			ui.markdown("### 🏫 Okul / Kurum Bilgileri, Revir Hemşiresi, Müdür ve Rapor Anteti")
-			ui.caption("Sol menüde, üst bilgi alanında, revir kayıtlarında, sağlık profillerinde ve yazdırılabilir resmi raporlarda kullanılan okul adı, kurum başlığı, revir hemşiresi ve okul müdürü bilgilerini buradan düzenleyebilir ve senkronize edebilirsiniz.")
-			in_c1, in_c2 = ui.columns(2)
-			with in_c1:
-				inst_school = ui.text_input(
-					"🏫 Okul / Kurum Adı",
-					value=current_cfg.get("school_name", "Karaman Özel Eğitim Anaokulu"),
-					placeholder="Örn: Karaman Özel Eğitim Anaokulu",
-					key="cfg_school_name",
-				)
-				inst_top = ui.text_input(
-					"🏛️ Üst Kurum Başlığı (Antet 1. Satır)",
-					value=current_cfg.get("institution_top_header", "T.C. MİLLÎ EĞİTİM BAKANLIĞI"),
-					placeholder="Örn: T.C. MİLLÎ EĞİTİM BAKANLIĞI",
-					key="cfg_inst_top",
-				)
-				inst_phone = ui.text_input(
-					"📞 Kurum / Revir İletişim Telefonu",
-					value=current_cfg.get("institution_phone", ""),
-					placeholder="Örn: 0338 000 00 00",
-					key="cfg_inst_phone",
-				)
-			with in_c2:
-				inst_nurse = ui.text_input(
-					"👩‍⚕️ Okul Revir Sorumlusu / Hemşire Adı ve Ünvanı",
-					value=current_cfg.get("nurse_name", "Okul Revir Sorumlusu"),
-					placeholder="Örn: Okul Revir Sorumlusu Muhammet DOĞANÇAY",
-					key="cfg_nurse_name",
-				)
-				inst_princ = ui.text_input(
-					"👔 Okul Müdürü / İdareci Adı ve Ünvanı",
-					value=current_cfg.get("principal_name", "Okul Müdürü"),
-					placeholder="Örn: Okul Müdürü Murat KABAKÇI",
-					key="cfg_principal_name",
-				)
+				ti_c1, ti_c2 = ui.columns([1.5, 2])
+				with ti_c1:
+					if ui.button("💾 Bilgileri Kaydet ve Senkronize Et", type="primary", key="btn_save_inst_settings", use_container_width=True):
+						save_app_settings({
+							"institution_top_header": inst_top.strip(),
+							"school_name": inst_school.strip(),
+							"institution_phone": inst_phone.strip(),
+							"nurse_name": inst_nurse.strip(),
+							"principal_name": inst_princ.strip(),
+						})
+						sync_res = sync_nurse_and_principal_everywhere(inst_nurse.strip(), inst_princ.strip())
+						ui.success(f"Kurum, hemşire ve müdür bilgileri kaydedildi; {sync_res['health_profiles_updated']} sağlık profili ve {sync_res['json_files_synced']} dosya senkronize edildi.")
+						ui.rerun()
+				with ti_c2:
+					if ui.button("🔄 Tüm Sağlık Profillerini ve JSON Dosyalarını Eşitle", type="secondary", key="btn_sync_inst_to_all", use_container_width=True):
+						sync_res = sync_nurse_and_principal_everywhere(inst_nurse.strip(), inst_princ.strip())
+						ui.success(f"Tüm sistem tarandı: {sync_res['health_profiles_updated']} sağlık profili ve {sync_res['json_files_synced']} kişi dosyası eşitlendi.")
+						ui.rerun()
 
-			ti_c1, ti_c2 = ui.columns([1.5, 2])
-			with ti_c1:
-				if ui.button("💾 Bilgileri Kaydet ve Senkronize Et", type="primary", key="btn_save_inst_settings", use_container_width=True):
+			with t_ay:
+				render_academic_year_settings()
+
+			with t_cls:
+				top_gc1, top_gc2 = ui.columns([3, 1.3])
+				with top_gc1:
+					ui.markdown("### 🗂️ Şube ve Sınıf Yönetimi")
+					ui.caption("Mevcut sınıfları inceleyebilir, yeni sınıf/öğretmen ekleyebilir veya toplu öğrenci atama penceresini açabilirsiniz.")
+				with top_gc2:
+					if ui.button("🪟 Toplu Sınıf Atama", type="primary", key="cfg_open_cls_modal", use_container_width=True):
+						open_class_manager_dialog()
+
+				with connect_db() as connection:
+					grp_df = pd.read_sql_query(
+						"""SELECT c.id, c.name AS Sinif_Adi, COALESCE(c.teacher_name, '—') AS Ogretmen_Adi, COUNT(s.id) AS Ogrenci_Sayisi
+						   FROM classes c LEFT JOIN students s ON s.class_id = c.id
+						   WHERE c.name != 'Sivil / Diğer'
+						   GROUP BY c.id, c.name, c.teacher_name ORDER BY c.name""",
+						connection,
+					)
+				ui.dataframe(grp_df.drop(columns=["id"], errors="ignore").rename(columns={"Sinif_Adi": "Sınıf / Şube", "Ogretmen_Adi": "Sınıf Öğretmeni", "Ogrenci_Sayisi": "Öğrenci Sayısı"}), width="stretch", hide_index=True)
+
+				g_c1, g_c2 = ui.columns(2)
+				with g_c1:
+					with ui.container(border=True):
+						ui.markdown("##### ➕ Yeni Sınıf / Şube ve Öğretmen Ekle")
+						new_grp_name = ui.text_input("Sınıf Adı (virgülle çoklu eklenebilir)", placeholder="Örn: 1-A, 1-B", key="cfg_new_grp_name")
+						new_grp_teacher = ui.text_input("Sınıf Öğretmeni", placeholder="İsteğe bağlı", key="cfg_new_grp_teacher")
+						if ui.button("➕ Sınıfı Oluştur", type="primary", key="btn_create_grp", use_container_width=True):
+							parts = [p.strip() for p in new_grp_name.split(",") if p.strip()]
+							if parts:
+								with connect_db() as connection:
+									for p in parts:
+										connection.execute("INSERT OR IGNORE INTO classes(name, teacher_name) VALUES (?, ?)", (p, new_grp_teacher.strip() if new_grp_teacher.strip() else None))
+								clear_all_data_caches()
+								ui.success(f"{len(parts)} sınıf eklendi.")
+								ui.rerun()
+				with g_c2:
+					with ui.container(border=True):
+						ui.markdown("##### ✏️ Sınıf Düzenle veya Çıkar")
+						editable_grps = [r["Sinif_Adi"] for _, r in grp_df.iterrows() if r["Sinif_Adi"] not in {"Sivil / Diğer", "Sınıf Belirtilmedi"}]
+						if editable_grps:
+							sel_old_grp = ui.selectbox("İşlem Yapılacak Sınıf", editable_grps, key="cfg_old_grp")
+							tch_map_cfg = get_class_teacher_map()
+							new_rename_grp = ui.text_input("Sınıf Adı", value=sel_old_grp, key="cfg_rename_grp")
+							new_teacher_grp = ui.text_input("Sınıf Öğretmeni", value=tch_map_cfg.get(sel_old_grp, ""), key="cfg_rename_teacher")
+							confirm_del_cls = ui.checkbox("Bu sınıfı silmeyi onaylıyorum (öğrenciler 'Sınıf Belirtilmedi'ye taşınır)", value=False, key="cfg_confirm_del_cls")
+							b_ren, b_del = ui.columns(2)
+							with b_ren:
+								if ui.button("🔄 Güncelle", type="secondary", key="btn_rename_grp", use_container_width=True):
+									target_name = new_rename_grp.strip() or sel_old_grp
+									target_teacher = new_teacher_grp.strip() if new_teacher_grp.strip() else None
+									with connect_db() as connection:
+										old_row = connection.execute("SELECT id FROM classes WHERE name=?", (sel_old_grp,)).fetchone()
+										if old_row:
+											if target_name != sel_old_grp:
+												target_row = connection.execute("SELECT id FROM classes WHERE name=?", (target_name,)).fetchone()
+												if target_row:
+													connection.execute("UPDATE OR IGNORE students SET class_id=? WHERE class_id=?", (target_row["id"], old_row["id"]))
+													connection.execute("DELETE FROM classes WHERE id=?", (old_row["id"],))
+													connection.execute("UPDATE classes SET teacher_name=? WHERE id=?", (target_teacher, target_row["id"]))
+												else:
+													connection.execute("UPDATE classes SET name=?, teacher_name=? WHERE id=?", (target_name, target_teacher, old_row["id"]))
+											else:
+												connection.execute("UPDATE classes SET teacher_name=? WHERE id=?", (target_teacher, old_row["id"]))
+									sync_all_person_data_files()
+									ui.success(f"'{sel_old_grp}' bilgileri güncellendi.")
+									ui.rerun()
+							with b_del:
+								if ui.button("🗑️ Sınıfı Çıkar", type="secondary", disabled=not confirm_del_cls, key="btn_delete_grp_cfg", use_container_width=True):
+									with connect_db() as connection:
+										connection.execute("INSERT OR IGNORE INTO classes(name) VALUES ('Sınıf Belirtilmedi')")
+										unassigned_id = connection.execute("SELECT id FROM classes WHERE name='Sınıf Belirtilmedi'").fetchone()["id"]
+										old_row = connection.execute("SELECT id FROM classes WHERE name=?", (sel_old_grp,)).fetchone()
+										if old_row:
+											connection.execute("UPDATE OR IGNORE students SET class_id=? WHERE class_id=?", (unassigned_id, old_row["id"]))
+											connection.execute("DELETE FROM classes WHERE id=?", (old_row["id"],))
+									sync_all_person_data_files()
+									ui.success(f"'{sel_old_grp}' sınıfı çıkarıldı.")
+									ui.rerun()
+
+				with ui.expander("📋 Hazır Okul Kademesi & Özel Sınıf Şablonları", expanded=False):
+					all_templates = get_all_class_templates()
+					custom_templates = get_custom_class_templates()
+					current_classes_in_db = [r["Sinif_Adi"] for _, r in grp_df.iterrows() if r["Sinif_Adi"] not in {"Sivil / Diğer", "Sınıf Belirtilmedi"}]
+					tpl_col1, tpl_col2 = ui.columns([1.15, 1.0])
+					with tpl_col1:
+						selected_tpl_name = ui.selectbox("Kullanılacak Sınıf Şablonu", list(all_templates.keys()), key="cfg_sel_class_template")
+						tpl_classes = all_templates.get(selected_tpl_name, [])
+						chips_html = " ".join(f"<span style='display:inline-block;background:#e0f2fe;color:#0369a1;padding:3px 9px;border-radius:10px;margin:2px;font-weight:600;font-size:12.5px;'>{html.escape(c)}</span>" for c in tpl_classes)
+						ui.markdown(f"<div style='margin-bottom:10px;'>{chips_html}</div>", unsafe_allow_html=True)
+						btn_app1, btn_app2 = ui.columns(2)
+						with btn_app1:
+							if ui.button("➕ Mevcutlara Ekle", type="primary", key="btn_apply_template_keep", use_container_width=True):
+								added_cnt, _ = apply_class_template(tpl_classes, clear_empty=False)
+								ui.success(f"'{selected_tpl_name}' şablonundan {added_cnt} yeni sınıf eklendi.")
+								ui.rerun()
+						with btn_app2:
+							if ui.button("🔄 Boşları Temizle & Kur", type="secondary", key="btn_apply_template_clean", use_container_width=True):
+								added_cnt, del_cnt = apply_class_template(tpl_classes, clear_empty=True)
+								ui.success(f"{del_cnt} boş sınıf temizlendi, {added_cnt} yeni şablon sınıfı eklendi.")
+								ui.rerun()
+						raw_custom_name = selected_tpl_name.replace("⭐ ", "").replace(" (Özel Şablon)", "").strip()
+						if raw_custom_name in custom_templates:
+							if ui.button(f"🗑️ '{raw_custom_name}' Özel Şablonunu Sil", type="secondary", key=f"btn_del_cust_tpl_{raw_custom_name}"):
+								delete_custom_class_template(raw_custom_name)
+								ui.success(f"'{raw_custom_name}' özel şablonu silindi.")
+								ui.rerun()
+					with tpl_col2:
+						new_tpl_name_input = ui.text_input("Mevcut Sınıfları Yeni Şablon Olarak Kaydet", placeholder="Örn: 2026-2027 Şubelerimiz", key="cfg_save_current_as_tpl_name")
+						if ui.button("💾 Mevcut Sınıfları Kaydet", type="primary", key="btn_save_current_classes_tpl", use_container_width=True):
+							if not new_tpl_name_input.strip():
+								ui.error("Lütfen bir şablon adı yazın.")
+							elif not current_classes_in_db:
+								ui.warning("Kaydedilecek aktif sınıf bulunamadı.")
+							else:
+								save_custom_class_template(new_tpl_name_input.strip(), current_classes_in_db)
+								ui.success(f"'{new_tpl_name_input.strip()}' şablonu kaydedildi ({len(current_classes_in_db)} sınıf).")
+								ui.rerun()
+
+			with t_loc:
+				ui.markdown("### 📍 Varsayılan Konum & Türkiye İl-İlçe-Köy Veritabanı")
+				ui.caption("Yeni öğrenci ve sivil kayıt pencerelerinde varsayılan seçili gelecek ülke, il, ilçe ve köy/mahalle bilgisini belirleyin.")
+				loc_c1, loc_c2, loc_c3, loc_c4 = ui.columns(4)
+				cur_country = current_cfg.get("default_country", "Türkiye")
+				c_idx = COUNTRY_OPTIONS.index(cur_country) if cur_country in COUNTRY_OPTIONS else 0
+				with loc_c1:
+					sel_def_country = ui.selectbox("🌍 Ülke", COUNTRY_OPTIONS, index=c_idx, key="cfg_def_country")
+				if sel_def_country == "Türkiye":
+					provinces = get_tr_provinces()
+					cur_prov = current_cfg.get("default_province", "Ankara")
+					p_idx = provinces.index(cur_prov) if cur_prov in provinces else 0
+					with loc_c2:
+						sel_def_prov = ui.selectbox("🏙️ İl", provinces, index=p_idx, key="cfg_def_prov")
+					districts = get_tr_districts(sel_def_prov)
+					cur_dist = current_cfg.get("default_district", "Merkez")
+					d_idx = districts.index(cur_dist) if cur_dist in districts else 0
+					with loc_c3:
+						sel_def_dist = ui.selectbox("🏘️ İlçe", districts, index=d_idx, key="cfg_def_dist")
+					villages = get_tr_villages(sel_def_prov, sel_def_dist)
+					vil_opts = ["İlçe Merkezi / Belirtilmedi", *villages]
+					cur_vil = current_cfg.get("default_village", "")
+					v_idx = vil_opts.index(cur_vil) if cur_vil in vil_opts else 0
+					with loc_c4:
+						sel_def_vil_raw = ui.selectbox("🏡 Köy / Mahalle", vil_opts, index=v_idx, key="cfg_def_vil")
+						sel_def_vil = "" if sel_def_vil_raw == "İlçe Merkezi / Belirtilmedi" else sel_def_vil_raw
+				else:
+					with loc_c2:
+						sel_def_prov = ui.text_input("🏙️ İl / Eyalet", value=current_cfg.get("default_province", ""), key="cfg_def_prov_txt")
+					with loc_c3:
+						sel_def_dist = ui.text_input("🏘️ İlçe / Şehir", value=current_cfg.get("default_district", ""), key="cfg_def_dist_txt")
+					with loc_c4:
+						sel_def_vil = ui.text_input("🏡 Köy / Mahalle", value=current_cfg.get("default_village", ""), key="cfg_def_vil_txt")
+
+				if ui.button("💾 Varsayılan Konumu Kaydet", type="primary", key="btn_save_loc_settings"):
 					save_app_settings({
-						"institution_top_header": inst_top.strip(),
-						"school_name": inst_school.strip(),
-						"institution_phone": inst_phone.strip(),
-						"nurse_name": inst_nurse.strip(),
-						"principal_name": inst_princ.strip(),
+						"default_country": sel_def_country,
+						"default_province": (sel_def_prov or "").strip(),
+						"default_district": (sel_def_dist or "").strip(),
+						"default_village": (sel_def_vil or "").strip(),
 					})
-					sync_res = sync_nurse_and_principal_everywhere(inst_nurse.strip(), inst_princ.strip())
-					ui.success(f"Kurum, hemşire ve müdür bilgileri kaydedildi; {sync_res['health_profiles_updated']} sağlık profili ve {sync_res['json_files_synced']} dosya senkronize edildi.")
-					ui.rerun()
-			with ti_c2:
-				if ui.button("🔄 Tüm Sağlık Profillerini ve JSON Dosyalarını Eşitle", type="secondary", key="btn_sync_inst_to_all", use_container_width=True):
-					sync_res = sync_nurse_and_principal_everywhere(inst_nurse.strip(), inst_princ.strip())
-					ui.success(f"Tüm sistem tarandı: {sync_res['health_profiles_updated']} sağlık profili ve {sync_res['json_files_synced']} kişi dosyası eşitlendi.")
+					ui.success("Varsayılan konum ayarları kaydedildi.")
 					ui.rerun()
 
-		# 📥 Liste İçe Aktarma & Excel Şablonu
-		elif active_sec == "📥 Liste İçe Aktar (Excel / PDF)":
-			ui.markdown("### 📥 Öğrenci, Servis / Adres Listesi İçe Aktarma ve Şablon")
-			ui.caption("Excel, CSV veya e-Okul PDF öğrenci listesini sisteme yükleyebilir, şube ve öğretmen bilgilerini otomatik aktarabilir veya hazır şablonları indirebilirsiniz.")
+				ui.divider()
+				with connect_db() as connection:
+					loc_stats = connection.execute(
+						"SELECT COUNT(DISTINCT province) AS prov_cnt, COUNT(DISTINCT province || '|' || district) AS dist_cnt, COUNT(*) AS vil_cnt FROM tr_locations"
+					).fetchone()
+				st_c1, st_c2, st_c3, st_c4 = ui.columns([1, 1, 1, 1.3])
+				st_c1.metric("İl", loc_stats["prov_cnt"] if loc_stats else 0)
+				st_c2.metric("İlçe", loc_stats["dist_cnt"] if loc_stats else 0)
+				st_c3.metric("Köy / Mahalle", loc_stats["vil_cnt"] if loc_stats else 0)
+				with st_c4:
+					ui.write("")
+					if ui.button("🔄 Adres Veritabanını Yenile", type="secondary", key="btn_reload_tr_locations", use_container_width=True):
+						cnt = import_tr_locations_to_db(force=True)
+						get_tr_provinces.clear()
+						get_tr_districts.clear()
+						get_tr_villages.clear()
+						ui.success(f"Türkiye adres veritabanı güncellendi ({cnt} yerleşim yeri).")
+						ui.rerun()
 
-			tab_eokul_import, tab_std_import = ui.tabs([
-				"📑 e-Okul Şube Doğum Tarihleri ve Yaşları (PDF / Excel)",
-				"📋 Standart Öğrenci & Servis/Adres Listesi (Excel / CSV)",
-			])
+				with ui.expander("🔍 İl / İlçe / Köy Listesini İncele veya Özel Köy Ekle", expanded=False):
+					exp_c1, exp_c2 = ui.columns(2)
+					all_provs = get_tr_provinces()
+					b_p_idx = all_provs.index(sel_def_prov) if sel_def_prov in all_provs else 0
+					with exp_c1:
+						browse_prov = ui.selectbox("İl", all_provs, index=b_p_idx, key="browse_tr_prov")
+					b_dists = get_tr_districts(browse_prov)
+					b_d_idx = b_dists.index(sel_def_dist) if sel_def_dist in b_dists else 0
+					with exp_c2:
+						browse_dist = ui.selectbox("İlçe", b_dists, index=b_d_idx, key="browse_tr_dist")
+					b_villages = get_tr_villages(browse_prov, browse_dist)
+					ui.dataframe(pd.DataFrame({"İl": browse_prov, "İlçe": browse_dist, "Köy / Mahalle": b_villages}), width="stretch", hide_index=True, height=200)
+					add_c1, add_c2 = ui.columns([3, 1])
+					with add_c1:
+						custom_vil = ui.text_input("Özel köy / mahalle ekle", placeholder="Örn: Yeni Mahalle", key="custom_tr_vil_input")
+					with add_c2:
+						ui.write("")
+						if ui.button("➕ Ekle", key="btn_add_custom_tr_vil", use_container_width=True):
+							if custom_vil.strip():
+								with connect_db() as connection:
+									connection.execute("INSERT OR IGNORE INTO tr_locations(province, district, village) VALUES (?, ?, ?)", (browse_prov, browse_dist, custom_vil.strip()))
+								get_tr_villages.clear()
+								ui.success(f"{browse_prov} / {browse_dist} → {custom_vil.strip()} eklendi.")
+								ui.rerun()
 
-			with tab_eokul_import:
-				ui.markdown("#### 📑 e-Okul Şube Doğum Tarihleri ve Yaşları Listesi İçe Aktarma")
-				ui.caption(
-					"e-Okul Yönetim Bilgi Sistemi üzerinden toplu olarak alınan **'Şube Doğum Tarihleri ve Yaşları Listesi'** PDF veya Excel dosyasını yükleyin. "
-					"Sistem; **şube isimlerini**, **sınıf öğretmenlerini**, **öğrenci numaralarını**, **ad-soyadlarını**, **cinsiyetlerini** ve **doğum tarihlerini** "
-									"otomatik olarak okur, şubeleri öğretmenleriyle birlikte sisteme kaydeder ve öğrencileri ilgili sınıflara atar."
-				)
-
-				e_c1, e_c2 = ui.columns([2.3, 1.2])
-				with e_c1:
-					eokul_file = ui.file_uploader(
-						"e-Okul Şube Doğum Tarihleri Listesi Dosyasını Seçin (.pdf / .xlsx / .xls)",
-						type=["pdf", "xlsx", "xls"],
-						key="uploader_eokul_dob_file"
-					)
-				with e_c2:
-					ui.markdown("##### 📄 Örnek Şablon Evrak")
-					ui.caption("Excel ile veri aktarmak veya istenen veri tipini görmek için hazır şablon evrakı indirin:")
-					tpl_bytes = make_eokul_dogum_ve_yas_template()
-					ui.download_button(
-						"📄 e-Okul Şablonunu İndir (.xlsx)",
-						data=tpl_bytes,
-						file_name="e_okul_sube_dogum_ve_yas_sablonu.xlsx",
-						mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-						key="btn_download_eokul_dob_tpl",
-						use_container_width=True,
-					)
-
-				if eokul_file is not None:
-					try:
-						raw_bytes = eokul_file.getvalue()
-						parsed_data = parse_eokul_dob_and_age_data(raw_bytes, eokul_file.name)
-						total_stu_cnt = sum(len(c["students"]) for c in parsed_data)
-						total_tch_cnt = sum(1 for c in parsed_data if c.get("teacher_name"))
-
-						ui.success(f"✅ **Dosya Başarıyla Çözümlendi:** Toplam **{len(parsed_data)} Şube**, **{total_tch_cnt} Sınıf Öğretmeni** ve **{total_stu_cnt} Öğrenci Kaydı** tespit edildi.")
-
-						# Summary metrics
-						m_c1, m_c2, m_c3 = ui.columns(3)
-						m_c1.metric("Tespit Edilen Şube", len(parsed_data))
-						m_c2.metric("Sınıf Öğretmeni", total_tch_cnt)
-						m_c3.metric("Öğrenci Sayısı", total_stu_cnt)
-
-						ui.markdown("##### 🔍 Çıkarılan Şube ve Öğrenci Önizlemesi")
-						for c_idx, c_obj in enumerate(parsed_data):
-							c_nm = c_obj["class_name"]
-							t_nm = c_obj.get("teacher_name") or "Belirtilmedi"
-							st_cnt = len(c_obj["students"])
-							with ui.expander(f"🏫 **{c_nm}** · 👩‍🏫 Öğretmen: **{t_nm}** ({st_cnt} Öğrenci)", expanded=(c_idx == 0)):
-								if c_obj["students"]:
-									preview_df = pd.DataFrame([
-										{
-											"Okul No": s["student_no"],
-											"Adı Soyadı": s["full_name"],
-											"Cinsiyet": s["sex"],
-											"Doğum Tarihi": s["birth_date"],
-											"Yaş": s.get("age") or "—",
-										}
-										for s in c_obj["students"]
-									])
-									ui.dataframe(preview_df, hide_index=True, width="stretch")
-
-						ui.markdown("")
-						if ui.button(f"🚀 {total_stu_cnt} Öğrenciyi ve {len(parsed_data)} Şubeyi Sisteme Aktar", type="primary", key="btn_commit_eokul_import", use_container_width=True):
-							with ui.spinner("Şubeler, öğretmenler ve öğrenciler veritabanına işleniyor..."):
-								c_add, s_add, s_upd = import_eokul_classes_and_students(parsed_data)
-							ui.balloons()
-							ui.success(f"🎉 **Aktarım Başarıyla Tamamlandı!** {c_add} yeni şube/öğretmen kaydedildi. {s_add} yeni öğrenci eklendi, {s_upd} öğrenci bilgisi güncellendi.")
-							ui.rerun()
-
-					except Exception as e_err:
-						ui.error(f"Dosya ayrıştırma hatası: {e_err}")
-
-			with tab_std_import:
-				ui.markdown("#### 📋 Standart Öğrenci & Servis/Adres Listesi İçe Aktarma")
-				col_upload, col_template = ui.columns([2, 1])
-				with col_upload:
-					uploaded = ui.file_uploader(
-						"Öğrenci veya servis/adres listesini Excel/CSV olarak yükle (Öğrenci Adı, Sınıf, Okul No, Doğum Tarihi, Köy, Mahalle/Adres, Telefon)",
-						type=["xlsx", "xls", "csv"],
-						key="settings_roster_upload",
-					)
-					if uploaded is not None and ui.button("📥 Listeyi İçe Aktar", type="primary", key="settings_import_roster"):
-						try:
-							imported, skipped, issues = import_roster(uploaded)
-							sync_student_measurements()
-							ui.success(f"{imported} öğrenci eklendi veya güncellendi. {skipped} satır atlandı.")
-							for issue in issues[:8]:
-								ui.warning(issue)
-							ui.rerun()
-						except Exception as error:
-							ui.error(f"Dosya okunamadı: {error}")
-				with col_template:
-					ui.markdown("##### 📄 Boş Excel Şablonu")
-					ui.caption("Öğrenci ve servis listesini standart biçimde hazırlamak için hazır Excel şablonunu indirin:")
-					ui.download_button(
-						"📄 Excel Şablonunu İndir",
-						make_roster_template(),
-						"ogrenci_ve_servis_listesi_sablonu.xlsx",
-						"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-						key="settings_download_roster_template",
-						use_container_width=True,
-					)
-
-
-		# 🎨 Görünüm, Yazı Tipi, Boyut ve Dil
-		elif active_sec == "🎨 Görünüm, Yazı Tipi & Dil":
-			ui.markdown("### 🎨 Yazı Tipi, Pencere Teması, Punto ve Tablo Ayarları")
-			ui.caption("Uygulamanın yazı tipini, yazı boyutunu, pencere renk temasını, tablo yüksekliğini ve arayüz dilini özelleştirin.")
-			app_c1, app_c2, app_c3, app_c4 = ui.columns(4)
-			font_keys = list(FONT_OPTIONS.keys())
-			cur_font = current_cfg.get("font_family", "DM Sans")
-			f_idx = font_keys.index(cur_font) if cur_font in font_keys else 0
-			with app_c1:
-				sel_font = ui.selectbox("🔤 Yazı Tipi (Font)", font_keys, index=f_idx, key="cfg_font_family")
+		# ======================================================================
+		# GRUP 2: GÖRÜNÜM & ÇALIŞMA ALANI (GÖRSEL TEMA KARTLARI + CANLI ÖNİZLEME)
+		# ======================================================================
+		elif active_sec == "🎨 Görünüm & Çalışma Alanı":
+			ui.markdown("### 🎨 Görsel Tema Seçici, Karanlık Mod, Tipografi ve Yoğunluk")
+			ui.caption("Aşağıdaki renk teması kartlarından birine tıklayarak anında uygulayın veya yazı tipi, punto ve tablo yüksekliğini özelleştirin.")
 
 			theme_keys = list(THEME_PRESETS.keys())
 			cur_theme = current_cfg.get("theme_name", "Klinik Turkuaz (Varsayılan)")
-			t_idx = theme_keys.index(cur_theme) if cur_theme in theme_keys else 0
-			with app_c2:
-				sel_theme = ui.selectbox("🎨 Pencere Teması", theme_keys, index=t_idx, key="cfg_theme_name")
+			if cur_theme not in THEME_PRESETS:
+				cur_theme = theme_keys[0]
 
-			cur_dark_mode = current_cfg.get("dark_mode_adaptation", "Otomatik (Sistem Temasına ve Dark Mode'a Uyarla)")
-			dm_idx = DARK_MODE_OPTIONS.index(cur_dark_mode) if cur_dark_mode in DARK_MODE_OPTIONS else 0
-			with app_c3:
-				sel_dark_mode = ui.selectbox(
-					"🌓 Dark Mode & Sistem Uyumu",
-					DARK_MODE_OPTIONS,
-					index=dm_idx,
-					key="cfg_dark_mode_adaptation",
-					help="Sistem teması veya karanlık mod açıldığında yazıların ve kartların otomatik olarak yüksek kontrastlı ve okunabilir olmasını sağlar ya da sabit açık temada tutar."
+			# Görsel Tema Swatch Kartları (4'lü ızgara)
+			sw_cols = ui.columns(4)
+			for idx, t_name in enumerate(theme_keys):
+				tp = THEME_PRESETS[t_name]
+				is_sel_t = (t_name == cur_theme)
+				border_css = f"2px solid {tp['teal']}" if is_sel_t else "1px solid var(--line)"
+				chk_badge = "✓ Aktif" if is_sel_t else ""
+				with sw_cols[idx % 4]:
+					ui.markdown(
+						f"""<div style="border:{border_css};border-radius:12px;overflow:hidden;margin-bottom:6px;background:{tp['card_bg']};box-shadow:0 2px 8px rgba(0,0,0,0.05);">
+							<div style="height:44px;background:{tp['bg_grad']};display:flex;align-items:center;padding:6px 8px;gap:6px;border-bottom:1px solid {tp['line']};">
+								<span style="width:18px;height:28px;border-radius:5px;background:{tp['sidebar']};border:1px solid {tp['line']};display:inline-block;"></span>
+								<span style="flex:1;height:28px;border-radius:5px;background:{tp['card_bg']};border:1px solid {tp['line']};display:flex;align-items:center;padding:0 6px;gap:4px;">
+									<span style="width:14px;height:14px;border-radius:50%;background:{tp['teal']};display:inline-block;"></span>
+									<span style="flex:1;height:5px;border-radius:3px;background:{tp['ink']};opacity:0.25;"></span>
+								</span>
+							</div>
+							<div style="padding:6px 8px;display:flex;align-items:center;justify-content:space-between;">
+								<span style="font-size:11.8px;font-weight:700;color:{tp['ink']};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{html.escape(t_name)}</span>
+								<span style="font-size:10.5px;font-weight:800;color:{tp['teal']};">{chk_badge}</span>
+							</div>
+						</div>""",
+						unsafe_allow_html=True,
+					)
+					if ui.button("✓ Seçili" if is_sel_t else "Uygula", key=f"btn_pick_theme_{idx}", type=("primary" if is_sel_t else "secondary"), use_container_width=True):
+						save_app_settings({"theme_name": t_name})
+						ui.success(f"🎨 '{t_name}' teması uygulandı!")
+						ui.rerun()
+
+			ui.divider()
+			with ui.container(border=True):
+				ui.markdown("#### 🔤 Yazı Tipi, Karanlık Mod ve Ekran Yoğunluğu")
+				app_c1, app_c2, app_c3 = ui.columns(3)
+				font_keys = list(FONT_OPTIONS.keys())
+				cur_font = current_cfg.get("font_family", "DM Sans")
+				f_idx = font_keys.index(cur_font) if cur_font in font_keys else 0
+				with app_c1:
+					sel_font = ui.selectbox("🔤 Yazı Tipi (Font)", font_keys, index=f_idx, key="cfg_font_family")
+				cur_dark_mode = current_cfg.get("dark_mode_adaptation", "Otomatik (Sistem Temasına ve Dark Mode'a Uyarla)")
+				dm_idx = DARK_MODE_OPTIONS.index(cur_dark_mode) if cur_dark_mode in DARK_MODE_OPTIONS else 0
+				with app_c2:
+					sel_dark_mode = ui.selectbox("🌓 Karanlık Mod Uyumu", DARK_MODE_OPTIONS, index=dm_idx, key="cfg_dark_mode_adaptation")
+				cur_lang = current_cfg.get("language", "Türkçe (TR)")
+				l_idx = LANGUAGE_OPTIONS.index(cur_lang) if cur_lang in LANGUAGE_OPTIONS else 0
+				with app_c3:
+					sel_lang = ui.selectbox("🌐 Tarih & Rapor Yereli", LANGUAGE_OPTIONS, index=l_idx, key="cfg_language", help="Arayüz dili Türkçedir; bu tercih rapor başlığı ve tarih biçimi yereli için saklanır.")
+
+				ui_c1, ui_c2, ui_c3, ui_c4 = ui.columns(4)
+				fsize_opts = ["Küçük (13.5px)", "Normal (15px)", "Büyük (16.5px)"]
+				cur_fsize = current_cfg.get("font_size", "Normal (15px)")
+				fs_idx = fsize_opts.index(cur_fsize) if cur_fsize in fsize_opts else 1
+				with ui_c1:
+					sel_fsize = ui.selectbox("🔠 Yazı Boyutu", fsize_opts, index=fs_idx, key="cfg_font_size")
+				dens_opts = ["Kompakt", "Standart", "Geniş"]
+				cur_dens = current_cfg.get("ui_density", "Standart")
+				dn_idx = dens_opts.index(cur_dens) if cur_dens in dens_opts else 1
+				with ui_c2:
+					sel_dens = ui.selectbox("📐 Ekran Yoğunluğu", dens_opts, index=dn_idx, key="cfg_ui_density")
+				th_opts = ["320", "420", "550", "700"]
+				cur_th = current_cfg.get("default_table_height", "420")
+				th_idx = th_opts.index(cur_th) if cur_th in th_opts else 1
+				with ui_c3:
+					sel_th = ui.selectbox("📊 Tablo Yüksekliği (px)", th_opts, index=th_idx, key="cfg_tbl_height")
+				with ui_c4:
+					ui.write("")
+					sel_show_addr = ui.toggle("Özet kartta açık adres", value=(current_cfg.get("show_address_in_summary", "1") == "1"), key="cfg_show_addr")
+
+				# Canlı Mini Önizleme Kartı
+				prev_tp = THEME_PRESETS.get(cur_theme, THEME_PRESETS["Klinik Turkuaz (Varsayılan)"])
+				prev_font_css = FONT_OPTIONS.get(sel_font, FONT_OPTIONS["DM Sans"])[0]
+				prev_px = {"Küçük (13.5px)": "13.5px", "Normal (15px)": "15px", "Büyük (16.5px)": "16.5px"}.get(sel_fsize, "15px")
+				ui.markdown(
+					f"""<div style="margin:8px 0 12px 0;padding:12px 16px;border-radius:11px;border:1px solid {prev_tp['line']};background:{prev_tp['bg_grad']};font-family:{prev_font_css};font-size:{prev_px};color:{prev_tp['ink']};">
+						<div style="font-size:11px;font-weight:700;opacity:0.65;margin-bottom:4px;">👁️ CANLI TIPOGRAFI & KART ÖNİZLEMESİ ({html.escape(cur_theme)} · {html.escape(sel_font)} · {html.escape(sel_fsize)})</div>
+						<div style="background:{prev_tp['card_bg']};border:1px solid {prev_tp['line']};border-radius:9px;padding:10px 14px;display:flex;align-items:center;justify-content:space-between;gap:10px;">
+							<div><strong>Ahmet Yılmaz</strong> · <span style="color:{prev_tp['teal']};font-weight:700;">3-A</span> · Ateş: 36.6 °C · SpO2: %99</div>
+							<span style="background:{prev_tp['teal']};color:#fff;padding:4px 10px;border-radius:7px;font-size:12px;font-weight:700;">Örnek Buton</span>
+						</div>
+					</div>""",
+					unsafe_allow_html=True,
 				)
 
-			cur_lang = current_cfg.get("language", "Türkçe (TR)")
-			l_idx = LANGUAGE_OPTIONS.index(cur_lang) if cur_lang in LANGUAGE_OPTIONS else 0
-			with app_c4:
-				sel_lang = ui.selectbox("🌐 Uygulama Dili", LANGUAGE_OPTIONS, index=l_idx, key="cfg_language")
+				if ui.button("💾 Tipografi, Karanlık Mod ve Yoğunluk Ayarlarını Kaydet", type="primary", key="btn_save_ui_settings"):
+					save_app_settings({
+						"font_family": sel_font,
+						"font_size": sel_fsize,
+						"ui_density": sel_dens,
+						"dark_mode_adaptation": sel_dark_mode,
+						"language": sel_lang,
+						"default_table_height": sel_th,
+						"show_address_in_summary": "1" if sel_show_addr else "0",
+					})
+					ui.success("✅ Görünüm ve çalışma alanı ayarları kaydedildi.")
+					ui.rerun()
 
-			if sel_dark_mode == "Otomatik (Sistem Temasına ve Dark Mode'a Uyarla)":
-				ui.caption("🌓 **Otomatik Uyum:** Cihazınız veya tarayıcınız Karanlık Mod'a geçtiğinde arayüz otomatik olarak koyu renklere adapte olur, tüm metin ve başlıklar **yüksek kontrastlı ve net okunabilir açık renklere** çevrilir.")
-			elif sel_dark_mode == "Kapalı (Dark Mode'a Adapte Olma - Sabit Aydınlık)":
-				ui.caption("☀️ **Sabit Aydınlık:** Cihazınız karanlık modda olsa dahi uygulama daima standart açık temada ve koyu renkli net yazılarla kalır.")
-			else:
-				ui.caption("🌙 **Daima Karanlık:** Uygulama her zaman koyu tema ile çalışır ve yüksek kontrastlı beyaz/açık renkli yazılar kullanılır.")
-
-			ui_c1, ui_c2, ui_c3, ui_c4 = ui.columns(4)
-			fsize_opts = ["Küçük (13.5px)", "Normal (15px)", "Büyük (16.5px)"]
-			cur_fsize = current_cfg.get("font_size", "Normal (15px)")
-			fs_idx = fsize_opts.index(cur_fsize) if cur_fsize in fsize_opts else 1
-			with ui_c1:
-				sel_fsize = ui.selectbox("🔠 Yazı Boyutu (Punto)", fsize_opts, index=fs_idx, key="cfg_font_size")
-
-			dens_opts = ["Kompakt", "Standart", "Geniş"]
-			cur_dens = current_cfg.get("ui_density", "Standart")
-			dn_idx = dens_opts.index(cur_dens) if cur_dens in dens_opts else 1
-			with ui_c2:
-				sel_dens = ui.selectbox("📐 Ekran Yoğunluğu", dens_opts, index=dn_idx, key="cfg_ui_density")
-
-			th_opts = ["320", "420", "550", "700"]
-			cur_th = current_cfg.get("default_table_height", "420")
-			th_idx = th_opts.index(cur_th) if cur_th in th_opts else 1
-			with ui_c3:
-				sel_th = ui.selectbox("📊 Liste Tablosu Yüksekliği (px)", th_opts, index=th_idx, key="cfg_tbl_height")
-
-			with ui_c4:
-				ui.write("")
-				sel_show_addr = ui.checkbox(
-					"Özet kartta açık adresi göster",
-					value=(current_cfg.get("show_address_in_summary", "1") == "1"),
-					key="cfg_show_addr",
-				)
-
-			if ui.button("💾 Görünüm ve Tema Ayarlarını Kaydet", type="primary", key="btn_save_ui_settings"):
-				save_app_settings({
-					"font_family": sel_font,
-					"font_size": sel_fsize,
-					"ui_density": sel_dens,
-					"theme_name": sel_theme,
-					"dark_mode_adaptation": sel_dark_mode,
-					"language": sel_lang,
-					"default_table_height": sel_th,
-					"show_address_in_summary": "1" if sel_show_addr else "0",
-				})
-				ui.success("Görünüm, yazı tipi, tema, karanlık mod ve tablo ayarları kaydedildi.")
-				ui.rerun()
-
-
-
-		# 📄 Sayfa Ayarları ve Bölüm Görünürlüğü
-		elif active_sec == "📄 Sayfa Ayarları (Bölüm Görünürlüğü)":
+		# ======================================================================
+		# GRUP 3: MODÜL & FORM GÖRÜNÜRLÜĞÜ (3 GÖRÜNÜRLÜK AYARI TEK ÇATIDA)
+		# ======================================================================
+		elif active_sec == "🎛️ Modül & Form Görünürlüğü":
 			import json as _json
-			ui.markdown("### 📄 Sayfa Ayarları ve Bölüm Görünürlüğü")
-			ui.caption("Revir Defteri içerisindeki her bir sayfanın içinde hangi bölümlerin, kartların ve tabloların gösterileceğini buradan özelleştirebilirsiniz. İhtiyaç duymadığınız bölümleri kapatıp arayüzü daha sade, hızlı ve kullanıcı dostu hale getirebilirsiniz.")
+			t_v_pages, t_v_scr, t_v_med = ui.tabs([
+				"📄 Sayfa Bölümleri",
+				"🔍 Okul Taraması Alanları",
+				"💊 İlaç Takip Form Alanları",
+			], orientation="segmented")
 
-			cur_page_vis = get_page_sections_visibility()
-
-			pr_c1, pr_c2, _ = ui.columns([1.6, 2.2, 2.5])
-			with pr_c1:
-				if ui.button("✅ Tüm Bölümleri Göster", key="btn_sec_preset_all", use_container_width=True):
-					all_enabled = {sec_k: True for p, s_map in PAGE_SECTIONS_REGISTRY.items() for sec_k in s_map}
-					save_app_settings({"page_sections_visibility": _json.dumps(all_enabled, ensure_ascii=False)})
-					ui.success("Tüm sayfa bölümleri görünür yapıldı.")
-					ui.rerun()
-			with pr_c2:
-				if ui.button("⚡ Sade & Hızlı Çalışma Görünümü", key="btn_sec_preset_compact", use_container_width=True):
-					compact_map = {}
-					for p, s_map in PAGE_SECTIONS_REGISTRY.items():
-						for sec_k, sec_data in s_map.items():
-							compact_map[sec_k] = sec_data.get("essential", sec_data["default"])
-					save_app_settings({"page_sections_visibility": _json.dumps(compact_map, ensure_ascii=False)})
-					ui.success("Sade ve hızlı çalışma görünümü uygulandı.")
-					ui.rerun()
-
-			ui.markdown("---")
-			with ui.form("form_page_sections_cfg"):
-				new_vis_map = {}
-				for page_title, page_sections in PAGE_SECTIONS_REGISTRY.items():
-					with ui.expander(f"{page_title} Sayfası Bölümleri ({len(page_sections)} Bölüm)", expanded=True):
-						sec_cols = ui.columns(2)
-						items_list = list(page_sections.items())
-						for i, (sec_k, sec_info) in enumerate(items_list):
-							c_target = sec_cols[i % 2]
-							with c_target:
-								is_on = cur_page_vis.get(sec_k, sec_info["default"])
-								val = ui.checkbox(
-									f"{sec_info['icon']} **{sec_info['name']}**",
-									value=is_on,
-									key=f"sec_chk_{sec_k}",
-									help=sec_info["desc"]
-								)
-								ui.caption(f"<span style='color:var(--text-muted); font-size:12.5px; margin-left:26px;'>{sec_info['desc']}</span>", unsafe_allow_html=True)
-								new_vis_map[sec_k] = val
-
-				ui.write("")
-				if ui.form_submit_button("💾 Sayfa Görünüm Tercihlerini Kaydet", type="primary", use_container_width=True):
-					save_app_settings({"page_sections_visibility": _json.dumps(new_vis_map, ensure_ascii=False)})
-					ui.success("Sayfa ayarları ve bölüm görünürlükleri başarıyla kaydedildi!")
-					ui.rerun()
-
-
-		# 📍 Varsayılan Konum ve Türkiye İl-İlçe-Köy
-		elif active_sec == "📍 Varsayılan Konum & İl-İlçe-Köy":
-			ui.markdown("### 📍 Kurumun Bulunduğu Ülke, İl, İlçe ve Köy (Varsayılan Konum Ayarı)")
-			ui.caption("Burada seçtiğiniz ülke, il, ilçe ve köy/mahalle bilgisi yeni öğrenci ve sivil kayıt pencerelerinde **varsayılan seçili** olarak gelir. Kayıt sırasında kişi farklı bir ilçeden veya köyden geliyorsa değiştirilebilir.")
-
-			loc_c1, loc_c2, loc_c3, loc_c4 = ui.columns(4)
-			cur_country = current_cfg.get("default_country", "Türkiye")
-			c_idx = COUNTRY_OPTIONS.index(cur_country) if cur_country in COUNTRY_OPTIONS else 0
-			with loc_c1:
-				sel_def_country = ui.selectbox("🌍 Bulunduğu Ülke", COUNTRY_OPTIONS, index=c_idx, key="cfg_def_country")
-
-			if sel_def_country == "Türkiye":
-				provinces = get_tr_provinces()
-				cur_prov = current_cfg.get("default_province", "Karaman")
-				p_idx = provinces.index(cur_prov) if cur_prov in provinces else 0
-				with loc_c2:
-					sel_def_prov = ui.selectbox("🏙️ Varsayılan İl", provinces, index=p_idx, key="cfg_def_prov")
-
-				districts = get_tr_districts(sel_def_prov)
-				cur_dist = current_cfg.get("default_district", "Merkez")
-				d_idx = districts.index(cur_dist) if cur_dist in districts else 0
-				with loc_c3:
-					sel_def_dist = ui.selectbox("🏘️ Varsayılan İlçe", districts, index=d_idx, key="cfg_def_dist")
-
-				villages = get_tr_villages(sel_def_prov, sel_def_dist)
-				vil_opts = ["İlçe Merkezi / Belirtilmedi", *villages]
-				cur_vil = current_cfg.get("default_village", "")
-				v_idx = vil_opts.index(cur_vil) if cur_vil in vil_opts else 0
-				with loc_c4:
-					sel_def_vil_raw = ui.selectbox("🏡 Varsayılan Köy / Mahalle", vil_opts, index=v_idx, key="cfg_def_vil")
-					sel_def_vil = "" if sel_def_vil_raw == "İlçe Merkezi / Belirtilmedi" else sel_def_vil_raw
-			else:
-				with loc_c2:
-					sel_def_prov = ui.text_input("🏙️ Varsayılan İl / Eyalet", value=current_cfg.get("default_province", ""), key="cfg_def_prov_txt")
-				with loc_c3:
-					sel_def_dist = ui.text_input("🏘️ Varsayılan İlçe / Şehir", value=current_cfg.get("default_district", ""), key="cfg_def_dist_txt")
-				with loc_c4:
-					sel_def_vil = ui.text_input("🏡 Varsayılan Köy / Mahalle", value=current_cfg.get("default_village", ""), key="cfg_def_vil_txt")
-
-			if ui.button("💾 Varsayılan Konum Ayarlarını Kaydet", type="primary", key="btn_save_loc_settings"):
-				save_app_settings({
-					"default_country": sel_def_country,
-					"default_province": (sel_def_prov or "").strip(),
-					"default_district": (sel_def_dist or "").strip(),
-					"default_village": (sel_def_vil or "").strip(),
-				})
-				ui.success("Varsayılan ülke, il, ilçe ve köy ayarları kaydedildi.")
-				ui.rerun()
-
-			ui.divider()
-			ui.markdown("### 🗺️ Türkiye İl, İlçe ve Köy / Mahalle Veritabanı")
-			with connect_db() as connection:
-				loc_stats = connection.execute(
-					"""SELECT COUNT(DISTINCT province) AS prov_cnt,
-							  COUNT(DISTINCT province || '|' || district) AS dist_cnt,
-							  COUNT(*) AS vil_cnt
-					   FROM tr_locations"""
-				).fetchone()
-			st_c1, st_c2, st_c3, st_c4 = ui.columns([1, 1, 1, 1.2])
-			st_c1.metric("Kayıtlı İl Sayısı", loc_stats["prov_cnt"] if loc_stats else 0)
-			st_c2.metric("Kayıtlı İlçe Sayısı", loc_stats["dist_cnt"] if loc_stats else 0)
-			st_c3.metric("Kayıtlı Köy / Mahalle", loc_stats["vil_cnt"] if loc_stats else 0)
-			with st_c4:
-				ui.write("")
-				if ui.button("🔄 Türkiye İl-İlçe-Köy Veritabanını Yenile", type="secondary", key="btn_reload_tr_locations", use_container_width=True):
-					cnt = import_tr_locations_to_db(force=True)
-					get_tr_provinces.clear()
-					get_tr_districts.clear()
-					get_tr_villages.clear()
-					ui.success(f"Türkiye adres veritabanı güncellendi ({cnt} yerleşim yeri yüklendi).")
-					ui.rerun()
-
-			with ui.expander("🔍 Veritabanındaki İl, İlçe ve Köy / Mahalleleri İncele veya Yeni Köy Ekle", expanded=False):
-				exp_c1, exp_c2 = ui.columns(2)
-				all_provs = get_tr_provinces()
-				b_p_idx = all_provs.index(sel_def_prov) if sel_def_prov in all_provs else 0
-				with exp_c1:
-					browse_prov = ui.selectbox("İncelenecek İl", all_provs, index=b_p_idx, key="browse_tr_prov")
-				b_dists = get_tr_districts(browse_prov)
-				b_d_idx = b_dists.index(sel_def_dist) if sel_def_dist in b_dists else 0
-				with exp_c2:
-					browse_dist = ui.selectbox("İncelenecek İlçe", b_dists, index=b_d_idx, key="browse_tr_dist")
-				b_villages = get_tr_villages(browse_prov, browse_dist)
-				ui.caption(f"**{browse_prov} / {browse_dist}** ilçesine bağlı toplam **{len(b_villages)}** köy/mahalle kayıtlı:")
-				ui.dataframe(pd.DataFrame({"İl": browse_prov, "İlçe": browse_dist, "Köy / Mahalle / Belde": b_villages}), width="stretch", hide_index=True, height=220)
-
-				add_c1, add_c2 = ui.columns([3, 1])
-				with add_c1:
-					custom_vil = ui.text_input("Seçili ilçeye özel köy / mezra / mahalle ekle", placeholder="Örn: Yeni Mezra / Köy", key="custom_tr_vil_input")
-				with add_c2:
-					ui.write("")
-					if ui.button("➕ Veritabanına Ekle", key="btn_add_custom_tr_vil", use_container_width=True):
-						if custom_vil.strip():
-							with connect_db() as connection:
-								connection.execute(
-									"INSERT OR IGNORE INTO tr_locations(province, district, village) VALUES (?, ?, ?)",
-									(browse_prov, browse_dist, custom_vil.strip()),
-								)
-							get_tr_villages.clear()
-							ui.success(f"{browse_prov} / {browse_dist} -> {custom_vil.strip()} eklendi.")
-							ui.rerun()
-
-
-		# 🩺 Klinik Hızlı Şablonlar ve WHO
-		elif active_sec == "🩺 Klinik Şablonlar & WHO":
-			ui.markdown("### ⚡ Revir Kaydı Hızlı Şikayet ve İşlem Şablonları")
-			ui.caption("Revir Kaydı ve Yetişkinler sayfalarındaki çoklu seçim kutularında çıkan hazır şikayet ve müdahale seçeneklerini virgülle ayırarak özelleştirebilirsiniz.")
-			qt_c1, qt_c2 = ui.columns(2)
-			with qt_c1:
-				stu_syms = ui.text_area(
-					"Öğrenci Sık Şikayet Şablonları (Virgülle ayırın)",
-					value=current_cfg.get("custom_student_symptoms", DEFAULT_APP_SETTINGS["custom_student_symptoms"]),
-					height=100,
-					key="cfg_stu_syms",
-				)
-				stu_acts = ui.text_area(
-					"Öğrenci Sık Yapılan İşlem Şablonları (Virgülle ayırın)",
-					value=current_cfg.get("custom_student_actions", DEFAULT_APP_SETTINGS["custom_student_actions"]),
-					height=100,
-					key="cfg_stu_acts",
-				)
-			with qt_c2:
-				civ_syms = ui.text_area(
-					"Sivil / Personel Sık Şikayet Şablonları (Virgülle ayırın)",
-					value=current_cfg.get("custom_civilian_symptoms", DEFAULT_APP_SETTINGS["custom_civilian_symptoms"]),
-					height=100,
-					key="cfg_civ_syms",
-				)
-				civ_acts = ui.text_area(
-					"Sivil / Personel Sık Yapılan İşlem Şablonları (Virgülle ayırın)",
-					value=current_cfg.get("custom_civilian_actions", DEFAULT_APP_SETTINGS["custom_civilian_actions"]),
-					height=100,
-					key="cfg_civ_acts",
-				)
-
-			btn_qt_save, btn_qt_reset = ui.columns([2, 1])
-			with btn_qt_save:
-				if ui.button("💾 Hızlı Klinik Şablonları Kaydet", type="primary", key="btn_save_clin_templates", use_container_width=True):
-					save_app_settings({
-						"custom_student_symptoms": stu_syms.strip(),
-						"custom_student_actions": stu_acts.strip(),
-						"custom_civilian_symptoms": civ_syms.strip(),
-						"custom_civilian_actions": civ_acts.strip(),
-					})
-					ui.success("Klinik hızlı şikayet ve işlem şablonları güncellendi.")
-					ui.rerun()
-			with btn_qt_reset:
-				if ui.button("🔄 Varsayılan Şablonlara Dön", type="secondary", key="btn_reset_clin_templates", use_container_width=True):
-					save_app_settings({
-						"custom_student_symptoms": DEFAULT_APP_SETTINGS["custom_student_symptoms"],
-						"custom_student_actions": DEFAULT_APP_SETTINGS["custom_student_actions"],
-						"custom_civilian_symptoms": DEFAULT_APP_SETTINGS["custom_civilian_symptoms"],
-						"custom_civilian_actions": DEFAULT_APP_SETTINGS["custom_civilian_actions"],
-					})
-					ui.success("Klinik şablonlar varsayılan değerlere döndürüldü.")
-					ui.rerun()
-
-			ui.divider()
-			ui.markdown("### 📏 WHO LMS Persantil ve Büyüme Referans Tablosu")
-			with connect_db() as connection:
-				reference_count = connection.execute("SELECT COUNT(*) FROM lms_reference").fetchone()[0]
-			ui.metric("Kayıtlı WHO LMS Referans Satırı", reference_count)
-
-			col_load, col_file = ui.columns([1, 1])
-			with col_load:
-				ui.markdown("#### 📦 Hazır WHO Büyüme Referansları")
-				ui.write("`persantil veriler/` klasöründeki resmi WHO genişletilmiş büyüme verilerini (Boy, Kilo, VKİ ve Baş Çevresi) tek tıkla veritabanına aktarın.")
-				if ui.button("WHO Referanslarını Otomatik Yükle", type="secondary", key="btn_load_who"):
-					try:
-						cnt_lms, cnt_wfa = import_builtin_who_references()
-						ui.success(f"Başarılı! {cnt_lms} adet LMS referans satırı ve {cnt_wfa} adet WFA referansı yüklendi.")
+			with t_v_pages:
+				ui.markdown("### 📄 Sayfa Bölümleri Görünürlüğü")
+				ui.caption("Her sayfada hangi kart ve tabloların gösterileceğini açıp kapatın; kullanmadığınız bölümleri gizleyerek arayüzü sadeleştirin.")
+				cur_page_vis = get_page_sections_visibility()
+				pr_c1, pr_c2, pr_c3 = ui.columns([1.5, 1.8, 1.5])
+				with pr_c1:
+					if ui.button("✅ Tümünü Göster", key="btn_sec_preset_all", use_container_width=True):
+						all_enabled = {sec_k: True for _p, s_map in PAGE_SECTIONS_REGISTRY.items() for sec_k in s_map}
+						save_app_settings({"page_sections_visibility": _json.dumps(all_enabled, ensure_ascii=False)})
+						ui.success("Tüm sayfa bölümleri görünür yapıldı.")
 						ui.rerun()
-					except Exception as e:
-						ui.error(f"Referanslar yüklenirken hata oluştu: {e}")
+				with pr_c2:
+					if ui.button("⚡ Sade & Hızlı Görünüm", key="btn_sec_preset_compact", use_container_width=True):
+						compact_map = {sec_k: sec_data.get("essential", sec_data["default"]) for _p, s_map in PAGE_SECTIONS_REGISTRY.items() for sec_k, sec_data in s_map.items()}
+						save_app_settings({"page_sections_visibility": _json.dumps(compact_map, ensure_ascii=False)})
+						ui.success("Sade çalışma görünümü uygulandı.")
+						ui.rerun()
+				with pr_c3:
+					expand_all_pg = ui.toggle("📂 Tüm Grupları Aç", value=False, key="cfg_expand_all_page_vis")
 
-			with col_file:
-				ui.markdown("#### 📁 Özel LMS Dosyası Yükle")
-				uploaded = ui.file_uploader("Resmi LMS referans dosyası", type=["xlsx", "csv"], key="lms_upload")
-				if uploaded is not None and ui.button("Referansı doğrula ve kaydet", type="primary"):
-					try:
-						count, issues = parse_lms_file(uploaded)
-						ui.success(f"{count} LMS satırı kaydedildi.")
-						for issue in issues[:8]:
-							ui.warning(issue)
-					except Exception as error:
-						ui.error(f"Referans dosyası okunamadı: {error}")
+				with ui.form("form_page_sections_cfg"):
+					new_vis_map = {}
+					for p_idx, (page_title, page_sections) in enumerate(PAGE_SECTIONS_REGISTRY.items()):
+						active_cnt = sum(1 for sk, si in page_sections.items() if cur_page_vis.get(sk, si["default"]))
+						with ui.expander(f"{page_title} ({active_cnt}/{len(page_sections)} Aktif)", expanded=(expand_all_pg or p_idx == 0)):
+							sec_cols = ui.columns(2)
+							for i, (sec_k, sec_info) in enumerate(page_sections.items()):
+								with sec_cols[i % 2]:
+									is_on = cur_page_vis.get(sec_k, sec_info["default"])
+									val = ui.toggle(f"{sec_info['icon']} **{sec_info['name']}**", value=is_on, key=f"sec_chk_{sec_k}", help=sec_info["desc"])
+									ui.caption(sec_info["desc"])
+									new_vis_map[sec_k] = val
+					if ui.form_submit_button("💾 Sayfa Görünüm Tercihlerini Kaydet", type="primary", use_container_width=True):
+						save_app_settings({"page_sections_visibility": _json.dumps(new_vis_map, ensure_ascii=False)})
+						ui.success("✅ Sayfa bölüm görünürlükleri kaydedildi.")
+						ui.rerun()
 
-
-		# 📋 NANDA-I Bakım Planı Şablonları
-		elif active_sec == "📋 Bakım Planı Şablonları (NANDA-I)":
-			ui.markdown("### 📋 NANDA-I Hemşirelik Bakım Planı Şablonları & Kısayol Yönetimi")
-			ui.caption(
-				"Kişi Dosyası ve Sağlık Profili sayfalarında sunulan hemşirelik tanıları, gözlenen olgular, bakım hedefleri, "
-				"girişim protokolleri, izlem sıklıkları ve acil sevk kriterlerini her alan için ayrı ayrı özelleştirebilir veya yeni şablonlar ekleyebilirsiniz."
-			)
-
-			sub_tabs = ui.tabs([
-				"🩺 1. Hemşirelik Tanıları",
-				"🔍 2. Gözlenen Olgular",
-				"🎯 3. Bakım Hedefleri",
-				"🛠️ 4. Hemşirelik Girişimleri",
-				"⏱️ 5. İzlem Sıklıkları",
-				"🚨 6. Sevk Kriterleri",
-				"📑 Bütünleşik Protokoller (Tüm Plan)",
-			])
-
-			section_configs = [
-				("diagnoses", "Hemşirelik Tanısı (NANDA-I)", "🩺", "Örn: Doku Bütünlüğünde Bozulma Riski (NANDA: 00047)..."),
-				("facts", "Gözlenen Olgu & Klinik Belirti", "🔍", "Örn: Ciltte kuruluk, çatlak, bası izi ve hassasiyet..."),
-				("goals", "Bakım Hedefi (NOC)", "🎯", "Örn: 1. Doku bütünlüğünün korunması.\n2. Enfeksiyonun önlenmesi..."),
-				("interventions", "Hemşirelik Girişimi (NIC)", "🛠️", "Örn: 1. Günlük cilt muayenesi yapılır.\n2. Nemlendirici losyon sürülür..."),
-				("monitorings", "İzlem ve Değerlendirme Sıklığı", "⏱️", "Örn: Günlük pansuman kontrolü ve haftalık değerlendirme"),
-				("escalations", "Yönlendirme / Sevk / Acil Eylem Kriteri", "🚨", "Örn: Ciltte pürülan akıntı veya ateş gelişirse derhal hekime sevk"),
-			]
-
-			for idx, (sec_key, sec_title, sec_icon, sec_placeholder) in enumerate(section_configs):
-				with sub_tabs[idx]:
-					ui.markdown(f"#### {sec_icon} {sec_title} Şablonları")
-					sec_items = get_care_plan_section_templates(sec_key)
-					sec_keys = list(sec_items.keys())
-
-					s_col1, s_col2 = ui.columns([3, 1.2])
-					with s_col1:
-						sel_item_key = ui.selectbox(
-							f"Düzenlenecek / Silinecek {sec_title} Şablonunu Seçin:",
-							sec_keys,
-							key=f"cfg_sec_sel_{sec_key}",
-						)
-					if sel_item_key and sel_item_key in sec_items:
-						k_hash = sha256(sel_item_key.encode()).hexdigest()[:8]
-						with s_col2:
-							ui.write("")
-							ui.write("")
-						if ui.button(f"🗑️ Bu Şablonu Sil", key=f"btn_del_sec_{sec_key}_{k_hash}", type="secondary", use_container_width=True):
-							if len(sec_items) <= 1:
-								ui.error("Bu bölümde en az bir şablon kayıtlı kalmalıdır!")
-							else:
-								del sec_items[sel_item_key]
-								save_care_plan_section_templates(sec_key, sec_items)
-								ui.success(f"'{sel_item_key}' silindi.")
-								ui.rerun()
-
-						with ui.form(f"form_edit_sec_{sec_key}_{k_hash}"):
-							edit_k = ui.text_input("Şablon Başlığı", value=sel_item_key)
-							edit_v = ui.text_area("Şablon Metni (Forma Aktarılacak İçerik)", value=sec_items[sel_item_key], height=110)
-							if ui.form_submit_button("💾 Bu Şablondaki Değişiklikleri Kaydet", type="primary", use_container_width=True):
-								if not edit_k.strip():
-									ui.error("Şablon başlığı boş bırakılamaz.")
-								else:
-									if edit_k.strip() != sel_item_key:
-										del sec_items[sel_item_key]
-									sec_items[edit_k.strip()] = edit_v.strip()
-									save_care_plan_section_templates(sec_key, sec_items)
-									ui.success(f"'{edit_k.strip()}' şablonu güncellendi.")
-									ui.rerun()
-
-					# Add new snippet to section
-					with ui.expander(f"➕ Bu Bölüme Yeni {sec_title} Şablonu Ekle", expanded=False):
-						with ui.form(f"form_add_new_sec_{sec_key}"):
-							new_sec_k = ui.text_input("Yeni Şablon Başlığı", placeholder=f"Örn: {sec_icon} Yeni {sec_title}")
-							new_sec_v = ui.text_area("Şablon İçeriği", placeholder=sec_placeholder, height=90)
-							if ui.form_submit_button(f"➕ Yeni {sec_title} Şablonunu Ekle", type="primary", use_container_width=True):
-								if not new_sec_k.strip():
-									ui.error("Lütfen bir başlık girin.")
-								elif new_sec_k.strip() in sec_items:
-									ui.error("Bu başlıkla bir şablon zaten mevcut!")
-								else:
-									sec_items[new_sec_k.strip()] = new_sec_v.strip()
-									save_care_plan_section_templates(sec_key, sec_items)
-									ui.success(f"'{new_sec_k.strip()}' başarıyla eklendi.")
-									ui.rerun()
-
-					# Table of snippets in this section
-					sec_df = pd.DataFrame([{"Şablon Başlığı": k, "Şablon İçeriği": v} for k, v in sec_items.items()])
-					ui.dataframe(sec_df, width="stretch", hide_index=True)
-
-					r_col1, r_col2 = ui.columns([2.5, 1.5])
-					with r_col2:
-						if ui.button(f"🔄 Bu Bölümü Varsayılanlara Sıfırla", key=f"btn_reset_sec_{sec_key}", type="secondary", use_container_width=True):
-							reset_care_plan_section_templates(sec_key)
-							ui.success(f"{sec_title} şablonları varsayılanlara sıfırlandı.")
-							ui.rerun()
-
-			# Subtab 7: Master Complete Protocols
-			with sub_tabs[6]:
-				ui.markdown("#### 📑 Bütünleşik NANDA-I Bakım Protokolleri (Tüm Formu Tek Seferde Dolduran Şablonlar)")
-				ui.caption("Bu bölümdeki şablonlar, Kişi Dosyası ve Sağlık Profili sayfalarındaki '⚡ Tüm Alanları Dolduracak Hazır NANDA-I Protokolü' kutusundan seçildiğinde tüm formu tek tıkla doldurur.")
-
-				current_templates = get_care_plan_templates()
-				all_template_keys = list(current_templates.keys())
-				all_categories = sorted(list({t.get("category", "Genel Klinik") for t in current_templates.values() if t.get("category")}))
-
-				m1, m2 = ui.columns(2)
-				m1.metric("Kayıtlı Protokol Sayısı", len(current_templates))
-				m2.metric("Kategori Sayısı", len(all_categories))
-
-				col_sel, col_del = ui.columns([3, 1.2])
-				with col_sel:
-					selected_key = ui.selectbox(
-						"Düzenlenecek / Silinecek Bütünleşik Protokolü Seçin:",
-						all_template_keys,
-						key="cfg_cp_selected_tpl_master",
-					)
-
-				if selected_key and selected_key in current_templates:
-					tpl_data = current_templates[selected_key]
-					t_hash = sha256(selected_key.encode("utf-8")).hexdigest()[:8]
-
-					with col_del:
-						ui.write("")
-						ui.write("")
-						if ui.button("🗑️ Bu Protokolü Sil", key=f"cfg_cp_btn_del_{t_hash}", type="secondary", use_container_width=True):
-							if len(current_templates) <= 1:
-								ui.error("En az bir protokol sistemde kayıtlı kalmalıdır!")
-							else:
-								del current_templates[selected_key]
-								save_care_plan_templates(current_templates)
-								ui.success(f"'{selected_key}' silindi.")
-								ui.rerun()
-
-					with ui.form(key=f"cfg_cp_edit_form_{t_hash}"):
-						e_c1, e_c2 = ui.columns([2.5, 1.5])
-						with e_c1:
-							edit_title = ui.text_input("📌 Protokol Başlığı", value=selected_key)
-						with e_c2:
-							cur_cat = tpl_data.get("category", "Genel Klinik")
-							cat_options = sorted(list(set(all_categories + ["Genel Klinik", "Büyüme & Gelişme", "Beslenme & Metabolizma", "Solunum & Alerji", "Kronik Durumlar & Endokrin", "Kronik Durumlar & Nöroloji", "Akut Bakım & Enfeksiyon", "Akut Bakım & Travma", "Psikososyal & Yaşam Tarzı"])))
-							cat_idx = cat_options.index(cur_cat) if cur_cat in cat_options else 0
-							edit_cat = ui.selectbox("📂 Kategori", cat_options, index=cat_idx)
-
-						edit_diag = ui.text_area("1. 🩺 Hemşirelik Tanısı (NANDA-I)", value=tpl_data.get("diagnosis", ""), height=80)
-						edit_facts = ui.text_area("2. 🔍 Gözlenen Olgular & Bulgular", value=tpl_data.get("observed_facts", ""), height=80)
-						edit_goals = ui.text_area("3. 🎯 Bakım Hedefleri", value=tpl_data.get("goals", ""), height=80)
-						edit_interv = ui.text_area("4. 🛠️ Planlanan Hemşirelik Girişimleri", value=tpl_data.get("interventions", ""), height=100)
-						e_c3, e_c4 = ui.columns(2)
-						with e_c3:
-							edit_mon = ui.text_input("5. ⏱️ İzlem Sıklığı", value=tpl_data.get("monitoring", ""))
-						with e_c4:
-							edit_esc = ui.text_input("6. 🚨 Sevk Kriteri", value=tpl_data.get("escalation", ""))
-
-						status_opts = ["Aktif - İzlemde", "Taslak - Uzman İncelemesi Gerekli", "Uzman Değerlendirmesi Tamamlandı", "Tamamlandı - Hedefe Ulaşıldı", "İptal / İhtiyaç Kalmadı"]
-						cur_stat = tpl_data.get("status", "Aktif - İzlemde")
-						stat_idx = status_opts.index(cur_stat) if cur_stat in status_opts else 0
-						edit_stat = ui.selectbox("Varsayılan Durum", status_opts, index=stat_idx)
-
-						if ui.form_submit_button("💾 Protokol Değişikliklerini Kaydet", type="primary", use_container_width=True):
-							new_title = edit_title.strip()
-							if not new_title:
-								ui.error("Başlık boş bırakılamaz!")
-							else:
-								if new_title != selected_key and selected_key in current_templates:
-									del current_templates[selected_key]
-								current_templates[new_title] = {
-									"category": edit_cat.strip() if edit_cat else "Genel Klinik",
-									"diagnosis": edit_diag.strip(),
-									"observed_facts": edit_facts.strip(),
-									"goals": edit_goals.strip(),
-									"interventions": edit_interv.strip(),
-									"monitoring": edit_mon.strip(),
-									"escalation": edit_esc.strip(),
-									"status": edit_stat,
-								}
-								save_care_plan_templates(current_templates)
-								ui.success(f"'{new_title}' protokolü kaydedildi!")
-								ui.rerun()
-
-				with ui.expander("➕ Sisteme Yeni Bütünleşik NANDA-I Protokolü Ekle", expanded=False):
-					with ui.form("cfg_cp_add_master_form"):
-						an_c1, an_c2 = ui.columns([2.5, 1.5])
-						with an_c1:
-							new_title = ui.text_input("Protokol Başlığı (Örn: 🩹 Diyabetik Ayak Bakımı (NANDA: 00047))")
-						with an_c2:
-							new_cat = ui.text_input("Kategori", value="Genel Klinik")
-						new_diag = ui.text_area("1. 🩺 Hemşirelik Tanısı (NANDA-I)", height=75)
-						new_facts = ui.text_area("2. 🔍 Gözlenen Olgular", height=75)
-						new_goals = ui.text_area("3. 🎯 Bakım Hedefleri", height=75)
-						new_interv = ui.text_area("4. 🛠️ Hemşirelik Girişimleri", height=90)
-						an_c3, an_c4 = ui.columns(2)
-						with an_c3:
-							new_mon = ui.text_input("5. ⏱️ İzlem Sıklığı", placeholder="Örn: Haftalık takip")
-						with an_c4:
-							new_esc = ui.text_input("6. 🚨 Sevk Kriteri", placeholder="Örn: 112 Acil sevk")
-						new_stat = ui.selectbox("Varsayılan Durum", ["Aktif - İzlemde", "Taslak - Uzman İncelemesi Gerekli", "Uzman Değerlendirmesi Tamamlandı", "Tamamlandı - Hedefe Ulaşıldı", "İptal / İhtiyaç Kalmadı"])
-
-						if ui.form_submit_button("➕ Yeni Protokolü Sisteme Ekle", type="primary", use_container_width=True):
-							if not new_title.strip():
-								ui.error("Protokol başlığı girin.")
-							elif new_title.strip() in current_templates:
-								ui.error("Bu başlıkla bir protokol zaten var!")
-							else:
-								current_templates[new_title.strip()] = {
-									"category": new_cat.strip() if new_cat.strip() else "Genel Klinik",
-									"diagnosis": new_diag.strip(),
-									"observed_facts": new_facts.strip(),
-									"goals": new_goals.strip(),
-									"interventions": new_interv.strip(),
-									"monitoring": new_mon.strip(),
-									"escalation": new_esc.strip(),
-									"status": new_stat,
-								}
-								save_care_plan_templates(current_templates)
-								ui.success(f"'{new_title.strip()}' başarıyla eklendi!")
-								ui.rerun()
-
-				summary_rows = [
-					{
-						"Protokol Adı": k, "Kategori": v.get("category", "Genel Klinik"),
-						"Tanı Özeti": (v.get("diagnosis", "")[:80] + "...") if len(v.get("diagnosis", "")) > 80 else v.get("diagnosis", ""),
-						"Hedef Özeti": (v.get("goals", "")[:70] + "...") if len(v.get("goals", "")) > 70 else v.get("goals", ""),
-						"İzlem Sıklığı": v.get("monitoring", ""), "Sevk Kriteri": v.get("escalation", "")
+			with t_v_scr:
+				ui.markdown("### 🔍 Okul Sağlık Taraması Alanları")
+				ui.caption("Okul taraması formunda ve sınıf listesinde görünecek parametreleri seçin.")
+				cur_vis_list = get_screening_visible_fields()
+				sp_c1, sp_c2, _ = ui.columns([1.5, 1.5, 3])
+				with sp_c1:
+					if ui.button("✅ Tüm Alanlar", key="btn_scr_preset_all", use_container_width=True):
+						save_app_settings({"screening_visible_fields": ",".join(SCREENING_FIELDS_INFO.keys())})
+						ui.success("Tüm tarama alanları açıldı.")
+						ui.rerun()
+				with sp_c2:
+					if ui.button("🎯 Temel Alanlar", key="btn_scr_preset_basic", use_container_width=True):
+						save_app_settings({"screening_visible_fields": "height_cm,weight_kg,temperature_c,pulse_bpm,wears_glasses,hair_screening"})
+						ui.success("Temel tarama alanları seçildi.")
+						ui.rerun()
+				with ui.form("form_screening_fields_cfg"):
+					selected_field_keys = []
+					categories = {
+						"Antropometri": ["height_cm", "weight_kg", "head_circ_cm"],
+						"Vital Bulgular": ["temperature_c", "pulse_bpm", "spo2_pct"],
+						"Göz & Görme": ["wears_glasses", "vision_right", "vision_left"],
+						"Hijyen & İşitme": ["hair_screening", "hearing_right", "hearing_left"],
+						"Gelişim & Psikososyal": ["health_behavior", "harmful_habits", "psychosocial_status"],
 					}
-					for k, v in current_templates.items()
-				]
-				ui.dataframe(pd.DataFrame(summary_rows), width="stretch", hide_index=True)
-
-				r_col1, r_col2 = ui.columns([2.5, 1.5])
-				with r_col2:
-					if ui.button("🔄 Tüm Protokolleri Varsayılanlara Sıfırla", type="secondary", key="cfg_cp_btn_reset_all", use_container_width=True):
-						reset_care_plan_templates()
-						ui.success("Tüm protokoller varsayılanlara sıfırlandı!")
-						ui.rerun()
-
-
-		# 🔍 Okul Sağlık Taraması Alanları (Görünürlük)
-		elif active_sec == "🔍 Okul Taraması Alanları (Görünürlük)":
-			ui.markdown("### 🔍 Okul Sağlık Taraması Alanları ve Görünürlük Tercihleri")
-			ui.caption("Okul taraması ekranında ve açılır tarama formunda hangi alanların görüneceğini buradan seçebilirsiniz. Seçtiğiniz alanlar sınıf tarama listesinde ve tarama formunda aktif olacaktır.")
-
-			cur_vis_list = get_screening_visible_fields()
-
-			# Quick preset buttons
-			pr_c1, pr_c2, pr_c3 = ui.columns([1.5, 1.5, 3])
-			with pr_c1:
-				if ui.button("✅ Tüm Alanları Seç", key="btn_scr_preset_all", use_container_width=True):
-					save_app_settings({"screening_visible_fields": ",".join(SCREENING_FIELDS_INFO.keys())})
-					ui.success("Tüm tarama alanları görünür yapıldı.")
-					ui.rerun()
-			with pr_c2:
-				if ui.button("🎯 Temel Alanları Seç", key="btn_scr_preset_basic", use_container_width=True):
-					basic_f = ["height_cm", "weight_kg", "temperature_c", "pulse_bpm", "wears_glasses", "hair_screening"]
-					save_app_settings({"screening_visible_fields": ",".join(basic_f)})
-					ui.success("Temel alanlar seçildi.")
-					ui.rerun()
-
-			ui.markdown("---")
-			with ui.form("form_screening_fields_cfg"):
-				selected_field_keys = []
-
-				categories = {
-					"Antropometri (Büyüme & Fiziksel Gelişim)": ["height_cm", "weight_kg", "head_circ_cm"],
-					"Vital Bulgular (Yaşam Bulguları)": ["temperature_c", "pulse_bpm", "spo2_pct"],
-					"Göz & Görme Sağlığı": ["wears_glasses", "vision_right", "vision_left"],
-					"Hijyen & Parazit Taraması": ["hair_screening"],
-					"İşitme Sağlığı": ["hearing_right", "hearing_left"],
-					"Gelişim, Beslenme & Risk Faktörleri": ["health_behavior", "harmful_habits", "psychosocial_status"],
-				}
-
-				for cat_name, field_keys in categories.items():
-					ui.markdown(f"##### {cat_name}")
-					f_cols = ui.columns(len(field_keys))
-					for c_idx, fk in enumerate(field_keys):
-						f_info = SCREENING_FIELDS_INFO[fk]
-						is_checked = fk in cur_vis_list
-						with f_cols[c_idx]:
-							chk = ui.checkbox(
-								f"{f_info['icon']} **{f_info['name']}**",
-								value=is_checked,
-								key=f"scr_cfg_chk_{fk}",
-								help=f_info["desc"]
-							)
-							if chk:
-								selected_field_keys.append(fk)
-
-				ui.write("")
-				if ui.form_submit_button("💾 Tarama Alanı Tercihlerini Kaydet", type="primary", use_container_width=True):
-					if not selected_field_keys:
-						ui.error("En az bir tarama alanı seçmelisiniz.")
-					else:
-						save_app_settings({"screening_visible_fields": ",".join(selected_field_keys)})
-						ui.success("Okul taraması görünür alan tercihleri başarıyla kaydedildi.")
-						ui.rerun()
-
-
-		# 💊 İlaç Takip Sistemi Alanları (Görünürlük)
-		elif active_sec == "💊 İlaç Takip Alanları (Görünürlük)":
-			ui.markdown("### 💊 İlaç Takip Sistemi Alanları ve Görünürlük Tercihleri")
-			ui.caption("Yeni ilaç ve tedavi planı ekleme / düzenleme penceresinde hangi alanların görüneceğini buradan belirleyebilirsiniz. Kapattığınız alanlar modal pencerede gizlenerek formu daha sade ve hızlı hale getirir.")
-
-			cur_med_vis = get_medication_visible_fields()
-
-			mp_c1, mp_c2, mp_c3 = ui.columns([1.5, 1.5, 3])
-			with mp_c1:
-				if ui.button("🔘 Tüm Alanları Göster", key="btn_med_preset_all", use_container_width=True):
-					save_app_settings({"medication_visible_fields": ",".join(MEDICATION_FIELDS_INFO.keys())})
-					ui.success("Tüm ilaç takip alanları görünür yapıldı.")
-					ui.rerun()
-			with mp_c2:
-				if ui.button("⚡ Temel Alanları Göster", key="btn_med_preset_basic", use_container_width=True):
-					basic_med_f = ["med_route", "dosage_pattern", "dose_unit", "meal_relation", "duration_days", "active_days"]
-					save_app_settings({"medication_visible_fields": ",".join(basic_med_f)})
-					ui.success("Temel ilaç alanları seçildi.")
-					ui.rerun()
-
-			ui.markdown("---")
-			with ui.form("form_medication_fields_cfg"):
-				selected_med_field_keys = []
-
-				med_categories = {
-					"Temel İlaç & Doz Bilgileri": ["med_route", "dosage_pattern", "dose_unit"],
-					"Kullanım Koşulları & Güvenlik": ["meal_relation", "storage_condition", "guardian_consent", "expiry_date", "special_notes"],
-					"Stok ve Takvim": ["total_volume", "duration_days", "active_days"],
-				}
-
-				for cat_name, f_keys in med_categories.items():
-					ui.markdown(f"##### {cat_name}")
-					f_cols = ui.columns(len(f_keys))
-					for c_idx, fk in enumerate(f_keys):
-						f_info = MEDICATION_FIELDS_INFO[fk]
-						is_checked = fk in cur_med_vis
-						with f_cols[c_idx]:
-							chk = ui.checkbox(
-								f"{f_info.get('icon', '💊')} **{f_info.get('name') or f_info.get('label', fk)}**",
-								value=is_checked,
-								key=f"chk_med_field_{fk}",
-								help=f_info["desc"]
-							)
-							if chk:
-								selected_med_field_keys.append(fk)
-
-				ui.write("")
-				if ui.form_submit_button("💾 İlaç Alanı Görünürlük Ayarlarını Kaydet", type="primary", use_container_width=True):
-					save_app_settings({"medication_visible_fields": ",".join(selected_med_field_keys)})
-					ui.success("İlaç takip alanı görünürlük tercihleri başarıyla kaydedildi.")
-					ui.rerun()
-
-
-		# 🗂️ Okul Sınıfları ve Şubeleri Yönetimi
-		elif active_sec == "🗂️ Şube ayarları":
-			top_gc1, top_gc2 = ui.columns([3, 1.2])
-			with top_gc1:
-				ui.markdown("### 🏫 Şube Ayarları (Sınıflar ve Şubeler)")
-				ui.caption("Okuldaki mevcut sınıfları inceleyebilir, yeni sınıf/şube ekleyip çıkarabilir veya sağdaki pencere butonundan toplu sınıf ataması yapabilirsiniz. (İl, ilçe ve köy bilgileri sınıf filtresinde yer almaz.)")
-			with top_gc2:
-				if ui.button("🪟 Sınıf Yönetimi Penceresini Aç", type="primary", key="cfg_open_cls_modal", use_container_width=True):
-					open_class_manager_dialog()
-
-			with connect_db() as connection:
-				grp_df = pd.read_sql_query(
-					"""SELECT c.id, c.name AS Sinif_Adi, COALESCE(c.teacher_name, '—') AS Ogretmen_Adi, COUNT(s.id) AS Ogrenci_Sayisi
-					   FROM classes c LEFT JOIN students s ON s.class_id = c.id
-					   WHERE c.name != 'Sivil / Diğer'
-					   GROUP BY c.id, c.name, c.teacher_name ORDER BY c.name""",
-					connection,
-				)
-			ui.dataframe(grp_df.drop(columns=["id"], errors="ignore").rename(columns={"Sinif_Adi": "Sınıf / Şube", "Ogretmen_Adi": "Sınıf Öğretmeni", "Ogrenci_Sayisi": "Öğrenci Sayısı"}), width="stretch", hide_index=True)
-
-			g_c1, g_c2 = ui.columns(2)
-			with g_c1:
-				ui.markdown("##### ➕ Yeni Sınıf / Şube ve Öğretmen Ekle")
-				new_grp_name = ui.text_input("Sınıf Adı", placeholder="Örn: 1-A veya A Şubesi", key="cfg_new_grp_name")
-				new_grp_teacher = ui.text_input("Sınıf Öğretmeni", placeholder="Örn: Betül Cansu (İsteğe bağlı)", key="cfg_new_grp_teacher")
-				if ui.button("➕ Sınıfı Oluştur", type="primary", key="btn_create_grp"):
-					parts = [p.strip() for p in new_grp_name.split(",") if p.strip()]
-					if parts:
-						with connect_db() as connection:
-							for p in parts:
-								connection.execute("INSERT OR IGNORE INTO classes(name, teacher_name) VALUES (?, ?)", (p, new_grp_teacher.strip() if new_grp_teacher.strip() else None))
-						clear_all_data_caches()
-						ui.success(f"{len(parts)} sınıf eklendi.")
-						ui.rerun()
-			with g_c2:
-				ui.markdown("##### ✏️ Sınıf Adını Değiştir veya Sınıfı Çıkar")
-				editable_grps = [r["Sinif_Adi"] for _, r in grp_df.iterrows() if r["Sinif_Adi"] not in {"Sivil / Diğer", "Sınıf Belirtilmedi"}]
-				if editable_grps:
-					sel_old_grp = ui.selectbox("İşlem Yapılacak Sınıf", editable_grps, key="cfg_old_grp")
-					tch_map_cfg = get_class_teacher_map()
-					new_rename_grp = ui.text_input("Sınıf Adı", value=sel_old_grp, key="cfg_rename_grp")
-					new_teacher_grp = ui.text_input("Sınıf Öğretmeni", value=tch_map_cfg.get(sel_old_grp, ""), key="cfg_rename_teacher")
-					b_ren, b_del = ui.columns(2)
-					with b_ren:
-						if ui.button("🔄 Bilgileri Güncelle", type="secondary", key="btn_rename_grp", use_container_width=True):
-							target_name = new_rename_grp.strip() or sel_old_grp
-							target_teacher = new_teacher_grp.strip() if new_teacher_grp.strip() else None
-							with connect_db() as connection:
-								old_row = connection.execute("SELECT id FROM classes WHERE name=?", (sel_old_grp,)).fetchone()
-								if old_row:
-									if target_name != sel_old_grp:
-										target_row = connection.execute("SELECT id FROM classes WHERE name=?", (target_name,)).fetchone()
-										if target_row:
-											connection.execute("UPDATE OR IGNORE students SET class_id=? WHERE class_id=?", (target_row["id"], old_row["id"]))
-											connection.execute("DELETE FROM classes WHERE id=?", (old_row["id"],))
-											connection.execute("UPDATE classes SET teacher_name=? WHERE id=?", (target_teacher, target_row["id"]))
-										else:
-											connection.execute("UPDATE classes SET name=?, teacher_name=? WHERE id=?", (target_name, target_teacher, old_row["id"]))
-									else:
-										connection.execute("UPDATE classes SET teacher_name=? WHERE id=?", (target_teacher, old_row["id"]))
-							sync_all_person_data_files()
-							ui.success(f"'{sel_old_grp}' bilgileri güncellendi.")
-							ui.rerun()
-					with b_del:
-						if ui.button("🗑️ Sınıfı Çıkar", type="secondary", key="btn_delete_grp_cfg", use_container_width=True):
-							with connect_db() as connection:
-								connection.execute("INSERT OR IGNORE INTO classes(name) VALUES ('Sınıf Belirtilmedi')")
-								unassigned_id = connection.execute("SELECT id FROM classes WHERE name='Sınıf Belirtilmedi'").fetchone()["id"]
-								old_row = connection.execute("SELECT id FROM classes WHERE name=?", (sel_old_grp,)).fetchone()
-								if old_row:
-									connection.execute("UPDATE OR IGNORE students SET class_id=? WHERE class_id=?", (unassigned_id, old_row["id"]))
-									connection.execute("DELETE FROM classes WHERE id=?", (old_row["id"],))
-							sync_all_person_data_files()
-							ui.success(f"'{sel_old_grp}' sınıfı çıkarıldı.")
-							ui.rerun()
-
-			ui.divider()
-			ui.markdown("### 📋 Sınıf Adı Şablonları & Hazır Okul Kademeleri")
-			ui.caption("Anaokulu, İlkokul, Ortaokul ve Lise kademeleri için hazırlanmış standart sınıf şablonlarını tek tıkla sisteme ekleyebilir veya okulunuzdaki mevcut sınıfları tek tıkla yeni bir şablon olarak kaydedebilirsiniz.")
-
-			all_templates = get_all_class_templates()
-			custom_templates = get_custom_class_templates()
-
-			# Get current active classes from DB
-			current_classes_in_db = [
-				r["Sinif_Adi"] for _, r in grp_df.iterrows()
-				if r["Sinif_Adi"] not in {"Sivil / Diğer", "Sınıf Belirtilmedi"}
-			]
-
-			tpl_col1, tpl_col2 = ui.columns([1.15, 1.0])
-
-			with tpl_col1:
-				ui.markdown("##### ⚡ Şablon Seç ve Sisteme Uygula")
-				selected_tpl_name = ui.selectbox(
-					"Kullanılacak Sınıf Şablonu",
-					list(all_templates.keys()),
-					key="cfg_sel_class_template",
-				)
-				tpl_classes = all_templates.get(selected_tpl_name, [])
-				ui.markdown(f"**Şablon İçeriği ({len(tpl_classes)} Sınıf):**")
-				chips_html = " ".join([
-					f"<span style='display:inline-block; background-color:#e0f2fe; color:#0369a1; padding:3px 10px; border-radius:12px; margin:2px; font-weight:600; font-size:13px;'>{c}</span>"
-					for c in tpl_classes
-				])
-				ui.markdown(f"<div style='margin-bottom:12px;'>{chips_html}</div>", unsafe_allow_html=True)
-
-				btn_app1, btn_app2 = ui.columns(2)
-				with btn_app1:
-					if ui.button("➕ Şablonu Mevcutlara Ekle", type="primary", key="btn_apply_template_keep", use_container_width=True, help="Var olan sınıfları korur, şablondaki sınıflardan sistemde olmayanları ekler."):
-						added_cnt, _ = apply_class_template(tpl_classes, clear_empty=False)
-						ui.success(f"'{selected_tpl_name}' şablonundan {added_cnt} yeni sınıf eklendi.")
-						ui.rerun()
-				with btn_app2:
-					if ui.button("🔄 Boş Sınıfları Temizle & Kur", type="secondary", key="btn_apply_template_clean", use_container_width=True, help="İçinde öğrenci OLMAYAN boş sınıfları temizler ve bu şablonu kurar. Öğrencisi olan sınıflar kesinlikle silinmez."):
-						added_cnt, del_cnt = apply_class_template(tpl_classes, clear_empty=True)
-						ui.success(f"{del_cnt} boş sınıf temizlendi, {added_cnt} yeni şablon sınıfı eklendi.")
-						ui.rerun()
-
-				# Check if selected template is a custom user template
-				raw_custom_name = selected_tpl_name.replace("⭐ ", "").replace(" (Özel Şablon)", "").strip()
-				if raw_custom_name in custom_templates:
-					ui.write("")
-					if ui.button(f"🗑️ '{raw_custom_name}' Özel Şablonunu Sil", type="secondary", key=f"btn_del_cust_tpl_{raw_custom_name}"):
-						delete_custom_class_template(raw_custom_name)
-						ui.success(f"'{raw_custom_name}' özel şablonu silindi.")
-						ui.rerun()
-
-			with tpl_col2:
-				ui.markdown("##### 💾 Var Olan Sınıfları Şablon Olarak Kaydet")
-				ui.caption("Sisteminizde kayıtlı olan mevcut sınıfları tek tıkla özel şablon paketi olarak kaydedebilirsiniz.")
-
-				ui.markdown(f"**Sistemdeki Aktif Sınıflar ({len(current_classes_in_db)} adet):**")
-				if current_classes_in_db:
-					db_chips = " ".join([
-						f"<span style='display:inline-block; background-color:#f1f5f9; color:#334155; padding:3px 8px; border-radius:10px; margin:2px; font-size:12px;'>{c}</span>"
-						for c in current_classes_in_db
-					])
-					ui.markdown(f"<div style='margin-bottom:12px; max-height:100px; overflow-y:auto; border:1px solid #e2e8f0; padding:6px; border-radius:8px;'>{db_chips}</div>", unsafe_allow_html=True)
-				else:
-					ui.info("Henüz sisteme eklenmiş aktif sınıf bulunmuyor.")
-
-				new_tpl_name_input = ui.text_input(
-					"Yeni Şablon Adı",
-					placeholder="Örn: 2026-2027 Okulumuzun Şubeleri",
-					key="cfg_save_current_as_tpl_name"
-				)
-				if ui.button("💾 Mevcut Sınıfları Şablon Olarak Kaydet", type="primary", key="btn_save_current_classes_tpl", use_container_width=True):
-					if not new_tpl_name_input.strip():
-						ui.error("Lütfen kaydedilecek şablon için bir isim yazın.")
-					elif not current_classes_in_db:
-						ui.warning("Veritabanında kaydedilecek aktif sınıf bulunamadı.")
-					else:
-						save_custom_class_template(new_tpl_name_input.strip(), current_classes_in_db)
-						ui.success(f"'{new_tpl_name_input.strip()}' şablonu başarıyla kaydedildi! ({len(current_classes_in_db)} sınıf)")
-						ui.rerun()
-
-				if custom_templates:
-					with ui.expander(f"📁 Kayıtlı Özel Şablonlarınız ({len(custom_templates)})"):
-						for c_name, c_list in custom_templates.items():
-							ui.markdown(f"**{c_name}** ({len(c_list)} sınıf): `{', '.join(c_list)}`")
-
-
-		# 💾 Veritabanı Yedekleme ve Bakım
-		elif active_sec == "💾 Veritabanı & Yedekleme":
-			ui.markdown("### 💾 Veritabanı Yedekleme, Arşiv ve Sistem Bakımı")
-			active_ay = get_active_academic_year()
-			curr_db = get_current_db_path()
-			curr_pdir = get_current_person_data_dir()
-			pfile_count = len(list(curr_pdir.glob("kisi_*.json"))) if curr_pdir.exists() else 0
-			evrak_count = len([f for f in EVRAKLAR_DIR.iterdir() if f.is_file() and not f.name.startswith(".")]) if EVRAKLAR_DIR.exists() else 0
-
-			ui.info(f"📌 **Aktif Çalışma Yılı:** `{active_ay['name']}` · **Veritabanı Dosyası:** `{curr_db.name}` · **Kişi Dosyaları:** `{pfile_count} adet` · **Depo Evrakları:** `{evrak_count} adet`")
-
-			# Otomatik Yedekleme & Veri Kurtarma Merkezi
-			with ui.container(border=True):
-				ui.markdown("#### 💾 Otomatik Yedekleme & Veri Kurtarma Merkezi")
-				ui.caption(
-					f"Uygulama her gün ilk açılışta `{AUTO_BACKUP_DIR.name}/` klasörüne SQLite `backup()` API'siyle otomatik yedek alır (en fazla 15 güncel yedek saklanır)."
-				)
-				bkp_flash = ui.session_state.pop("_auto_backup_flash", None)
-				if isinstance(bkp_flash, str) and bkp_flash:
-					ui.success(bkp_flash)
-				bkp_rows = list_auto_backups()
-				act_bkp_c1, act_bkp_c2 = ui.columns([1.4, 2.2])
-				with act_bkp_c1:
-					if ui.button("⚡ Şimdi Manuel Yedek Oluştur", type="primary", key="btn_manual_auto_backup", use_container_width=True):
-						created_bkp = run_daily_auto_backup(max_backups=15, force=True)
-						if created_bkp:
-							ui.session_state["_auto_backup_flash"] = f"✅ Yeni veritabanı yedeği oluşturuldu: `{created_bkp.name}` ({format_file_size(created_bkp.stat().st_size)})"
-							ui.rerun()
+					for cat_name, field_keys in categories.items():
+						ui.markdown(f"##### {cat_name}")
+						f_cols = ui.columns(len(field_keys))
+						for c_idx, fk in enumerate(field_keys):
+							f_info = SCREENING_FIELDS_INFO[fk]
+							with f_cols[c_idx]:
+								if ui.toggle(f"{f_info['icon']} **{f_info['name']}**", value=(fk in cur_vis_list), key=f"scr_cfg_chk_{fk}", help=f_info["desc"]):
+									selected_field_keys.append(fk)
+					if ui.form_submit_button("💾 Tarama Alanlarını Kaydet", type="primary", use_container_width=True):
+						if not selected_field_keys:
+							ui.error("En az bir tarama alanı seçmelisiniz.")
 						else:
-							ui.warning("⚠️ Aktif veritabanı dosyası bulunamadığı için yedek oluşturulamadı.")
-				with act_bkp_c2:
-					ui.caption(f"📁 Yedek Klasörü: `{AUTO_BACKUP_DIR}` · Toplam Saklanan Yedek: **{len(bkp_rows)} / 15**")
+							save_app_settings({"screening_visible_fields": ",".join(selected_field_keys)})
+							ui.success("✅ Okul taraması görünür alanları kaydedildi.")
+							ui.rerun()
 
-				if bkp_rows:
-					bkp_table = pd.DataFrame([
-						{
-							"Yedek Dosyası": r["name"],
-							"Tarih / Saat": r["modified_at"],
-							"Boyut": r["size_str"],
-						}
-						for r in bkp_rows
-					])
-					ui.dataframe(bkp_table, width="stretch", hide_index=True, height=min(240, max(120, 48 + len(bkp_rows) * 35)))
+			with t_v_med:
+				ui.markdown("### 💊 İlaç Takip Form Alanları")
+				ui.caption("Yeni ilaç ekleme/düzenleme penceresinde görünecek alanları özelleştirin.")
+				cur_med_vis = get_medication_visible_fields()
+				mp_c1, mp_c2, _ = ui.columns([1.5, 1.5, 3])
+				with mp_c1:
+					if ui.button("🔘 Tüm Alanlar", key="btn_med_preset_all", use_container_width=True):
+						save_app_settings({"medication_visible_fields": ",".join(MEDICATION_FIELDS_INFO.keys())})
+						ui.success("Tüm ilaç alanları açıldı.")
+						ui.rerun()
+				with mp_c2:
+					if ui.button("⚡ Temel Alanlar", key="btn_med_preset_basic", use_container_width=True):
+						save_app_settings({"medication_visible_fields": "med_route,dosage_pattern,dose_unit,meal_relation,duration_days,active_days"})
+						ui.success("Temel ilaç alanları seçildi.")
+						ui.rerun()
+				with ui.form("form_medication_fields_cfg"):
+					selected_med_field_keys = []
+					med_categories = {
+						"Temel İlaç & Doz": ["med_route", "dosage_pattern", "dose_unit"],
+						"Kullanım & Güvenlik": ["meal_relation", "storage_condition", "guardian_consent", "expiry_date", "special_notes"],
+						"Stok & Takvim": ["total_volume", "duration_days", "active_days"],
+					}
+					for cat_name, f_keys in med_categories.items():
+						ui.markdown(f"##### {cat_name}")
+						f_cols = ui.columns(min(3, len(f_keys)))
+						for c_idx, fk in enumerate(f_keys):
+							f_info = MEDICATION_FIELDS_INFO[fk]
+							with f_cols[c_idx % len(f_cols)]:
+								if ui.toggle(f"{f_info.get('icon', '💊')} **{f_info.get('name') or f_info.get('label', fk)}**", value=(fk in cur_med_vis), key=f"chk_med_field_{fk}", help=f_info["desc"]):
+									selected_med_field_keys.append(fk)
+					if ui.form_submit_button("💾 İlaç Alanı Tercihlerini Kaydet", type="primary", use_container_width=True):
+						save_app_settings({"medication_visible_fields": ",".join(selected_med_field_keys)})
+						ui.success("✅ İlaç takip alanı tercihleri kaydedildi.")
+						ui.rerun()
 
-					bkp_map = {f"{r['name']} ({r['modified_at']} · {r['size_str']})": r for r in bkp_rows}
-					sel_bkp_lbl = ui.selectbox("İşlem Yapılacak Yedeği Seçin", list(bkp_map.keys()), key="sel_auto_backup_file")
-					sel_bkp = bkp_map[sel_bkp_lbl]
-					sel_bkp_path: Path = sel_bkp["path"]
+		# ======================================================================
+		# GRUP 4: KLİNİK KÜTÜPHANE & WHO REFERANSLARI
+		# ======================================================================
+		elif active_sec == "🩺 Klinik Kütüphane & WHO":
+			t_q_tpl, t_nanda, t_who = ui.tabs([
+				"⚡ Hızlı Şikayet & İşlem",
+				"📋 NANDA-I Bakım Protokolleri",
+				"📏 WHO Büyüme Referansları",
+			], orientation="segmented")
 
-					bkp_btn1, bkp_btn2 = ui.columns(2)
-					with bkp_btn1:
-						ui.download_button(
-							"📥 Seçili Yedeği Bilgisayara İndir",
-							data=sel_bkp_path.read_bytes() if sel_bkp_path.exists() else b"",
-							file_name=sel_bkp_path.name,
-							mime="application/octet-stream",
-							type="secondary",
-							key="btn_dl_selected_auto_backup",
-							use_container_width=True,
-						)
-					with bkp_btn2:
-						if ui.button("⏪ Seçili Yedeği Geri Yükle (Restore)", type="secondary", key="btn_restore_selected_auto_backup", use_container_width=True):
+			with t_q_tpl:
+				ui.markdown("### ⚡ Revir Kaydı Hızlı Şikayet ve İşlem Şablonları")
+				qt_c1, qt_c2 = ui.columns(2)
+				with qt_c1:
+					stu_syms = ui.text_area("Öğrenci Sık Şikayet Şablonları (Virgülle ayırın)", value=current_cfg.get("custom_student_symptoms", DEFAULT_APP_SETTINGS["custom_student_symptoms"]), height=105, key="cfg_stu_syms")
+					stu_acts = ui.text_area("Öğrenci Sık Yapılan İşlemler (Virgülle ayırın)", value=current_cfg.get("custom_student_actions", DEFAULT_APP_SETTINGS["custom_student_actions"]), height=105, key="cfg_stu_acts")
+				with qt_c2:
+					civ_syms = ui.text_area("Yetişkin / Personel Sık Şikayetler", value=current_cfg.get("custom_civilian_symptoms", DEFAULT_APP_SETTINGS["custom_civilian_symptoms"]), height=105, key="cfg_civ_syms")
+					civ_acts = ui.text_area("Yetişkin / Personel Sık İşlemler", value=current_cfg.get("custom_civilian_actions", DEFAULT_APP_SETTINGS["custom_civilian_actions"]), height=105, key="cfg_civ_acts")
+				btn_qt_save, btn_qt_reset = ui.columns([2, 1])
+				with btn_qt_save:
+					if ui.button("💾 Hızlı Klinik Şablonları Kaydet", type="primary", key="btn_save_clin_templates", use_container_width=True):
+						save_app_settings({
+							"custom_student_symptoms": stu_syms.strip(),
+							"custom_student_actions": stu_acts.strip(),
+							"custom_civilian_symptoms": civ_syms.strip(),
+							"custom_civilian_actions": civ_acts.strip(),
+						})
+						ui.success("Klinik hızlı şablonlar güncellendi.")
+						ui.rerun()
+				with btn_qt_reset:
+					if ui.button("🔄 Varsayılanlara Dön", type="secondary", key="btn_reset_clin_templates", use_container_width=True):
+						save_app_settings({
+							"custom_student_symptoms": DEFAULT_APP_SETTINGS["custom_student_symptoms"],
+							"custom_student_actions": DEFAULT_APP_SETTINGS["custom_student_actions"],
+							"custom_civilian_symptoms": DEFAULT_APP_SETTINGS["custom_civilian_symptoms"],
+							"custom_civilian_actions": DEFAULT_APP_SETTINGS["custom_civilian_actions"],
+						})
+						ui.success("Varsayılan klinik şablonlar yüklendi.")
+						ui.rerun()
+
+			with t_nanda:
+				ui.markdown("### 📋 NANDA-I Hemşirelik Bakım Planı Şablonları")
+				sub_tabs = ui.tabs([
+					"🩺 Tanılar",
+					"🔍 Olgular",
+					"🎯 Hedefler",
+					"🛠️ Girişimler",
+					"⏱️ İzlem",
+					"🚨 Sevk",
+					"📑 Bütünleşik Protokoller",
+				])
+				section_configs = [
+					("diagnoses", "Hemşirelik Tanısı (NANDA-I)", "🩺", "Örn: Doku Bütünlüğünde Bozulma Riski (NANDA: 00047)..."),
+					("facts", "Gözlenen Olgu & Klinik Belirti", "🔍", "Örn: Ciltte kuruluk, hassasiyet..."),
+					("goals", "Bakım Hedefi (NOC)", "🎯", "Örn: 1. Doku bütünlüğünün korunması..."),
+					("interventions", "Hemşirelik Girişimi (NIC)", "🛠️", "Örn: 1. Günlük muayene yapılır..."),
+					("monitorings", "İzlem Sıklığı", "⏱️", "Örn: Haftalık değerlendirme"),
+					("escalations", "Sevk / Acil Eylem Kriteri", "🚨", "Örn: Ateş gelişirse hekime sevk"),
+				]
+				for idx, (sec_key, sec_title, sec_icon, sec_placeholder) in enumerate(section_configs):
+					with sub_tabs[idx]:
+						sec_items = get_care_plan_section_templates(sec_key)
+						sec_keys = list(sec_items.keys())
+						s_col1, s_col2 = ui.columns([2.8, 1.4])
+						with s_col1:
+							sel_item_key = ui.selectbox(f"Düzenlenecek {sec_title}", sec_keys, key=f"cfg_sec_sel_{sec_key}")
+						if sel_item_key and sel_item_key in sec_items:
+							k_hash = sha256(sel_item_key.encode()).hexdigest()[:8]
+							with s_col2:
+								del_ok = ui.checkbox("Silmeyi onayla", value=False, key=f"chk_del_sec_{sec_key}_{k_hash}")
+								if ui.button("🗑️ Şablonu Sil", key=f"btn_del_sec_{sec_key}_{k_hash}", type="secondary", disabled=not del_ok, use_container_width=True):
+									if len(sec_items) <= 1:
+										ui.error("En az bir şablon kayıtlı kalmalıdır.")
+									else:
+										del sec_items[sel_item_key]
+										save_care_plan_section_templates(sec_key, sec_items)
+										ui.success(f"'{sel_item_key}' silindi.")
+										ui.rerun()
+							with ui.form(f"form_edit_sec_{sec_key}_{k_hash}"):
+								edit_k = ui.text_input("Şablon Başlığı", value=sel_item_key)
+								edit_v = ui.text_area("Şablon Metni", value=sec_items[sel_item_key], height=100)
+								if ui.form_submit_button("💾 Değişiklikleri Kaydet", type="primary", use_container_width=True):
+									if edit_k.strip():
+										if edit_k.strip() != sel_item_key:
+											del sec_items[sel_item_key]
+										sec_items[edit_k.strip()] = edit_v.strip()
+										save_care_plan_section_templates(sec_key, sec_items)
+										ui.success(f"'{edit_k.strip()}' güncellendi.")
+										ui.rerun()
+						with ui.expander(f"➕ Yeni {sec_title} Ekle", expanded=False):
+							with ui.form(f"form_add_new_sec_{sec_key}"):
+								new_sec_k = ui.text_input("Yeni Başlık", placeholder=f"Örn: {sec_icon} Yeni {sec_title}")
+								new_sec_v = ui.text_area("İçerik", placeholder=sec_placeholder, height=85)
+								if ui.form_submit_button("➕ Ekle", type="primary", use_container_width=True):
+									if new_sec_k.strip() and new_sec_k.strip() not in sec_items:
+										sec_items[new_sec_k.strip()] = new_sec_v.strip()
+										save_care_plan_section_templates(sec_key, sec_items)
+										ui.success(f"'{new_sec_k.strip()}' eklendi.")
+										ui.rerun()
+						ui.dataframe(pd.DataFrame([{"Başlık": k, "İçerik": v} for k, v in sec_items.items()]), width="stretch", hide_index=True, height=220)
+						if ui.button("🔄 Bu Bölümü Varsayılanlara Sıfırla", key=f"btn_reset_sec_{sec_key}", type="secondary"):
+							reset_care_plan_section_templates(sec_key)
+							ui.success(f"{sec_title} sıfırlandı.")
+							ui.rerun()
+
+				with sub_tabs[6]:
+					current_templates = get_care_plan_templates()
+					all_template_keys = list(current_templates.keys())
+					all_categories = sorted(list({t.get("category", "Genel Klinik") for t in current_templates.values() if t.get("category")}))
+					col_sel, col_del = ui.columns([2.8, 1.4])
+					with col_sel:
+						selected_key = ui.selectbox("Bütünleşik Protokol Seçin", all_template_keys, key="cfg_cp_selected_tpl_master")
+					if selected_key and selected_key in current_templates:
+						tpl_data = current_templates[selected_key]
+						t_hash = sha256(selected_key.encode("utf-8")).hexdigest()[:8]
+						with col_del:
+							del_p_ok = ui.checkbox("Silmeyi onayla", value=False, key=f"chk_del_cp_{t_hash}")
+							if ui.button("🗑️ Protokolü Sil", key=f"cfg_cp_btn_del_{t_hash}", type="secondary", disabled=not del_p_ok, use_container_width=True):
+								if len(current_templates) > 1:
+									del current_templates[selected_key]
+									save_care_plan_templates(current_templates)
+									ui.success(f"'{selected_key}' silindi.")
+									ui.rerun()
+						with ui.form(key=f"cfg_cp_edit_form_{t_hash}"):
+							e_c1, e_c2 = ui.columns([2.5, 1.5])
+							with e_c1:
+								edit_title = ui.text_input("📌 Protokol Başlığı", value=selected_key)
+							with e_c2:
+								cur_cat = tpl_data.get("category", "Genel Klinik")
+								cat_options = sorted(list(set(all_categories + ["Genel Klinik", "Büyüme & Gelişme", "Beslenme & Metabolizma", "Solunum & Alerji", "Kronik Durumlar & Endokrin", "Kronik Durumlar & Nöroloji", "Akut Bakım & Enfeksiyon", "Akut Bakım & Travma", "Psikososyal & Yaşam Tarzı"])))
+								edit_cat = ui.selectbox("📂 Kategori", cat_options, index=(cat_options.index(cur_cat) if cur_cat in cat_options else 0))
+							edit_diag = ui.text_area("1. 🩺 Hemşirelik Tanısı", value=tpl_data.get("diagnosis", ""), height=75)
+							edit_facts = ui.text_area("2. 🔍 Gözlenen Olgular", value=tpl_data.get("observed_facts", ""), height=75)
+							edit_goals = ui.text_area("3. 🎯 Bakım Hedefleri", value=tpl_data.get("goals", ""), height=75)
+							edit_interv = ui.text_area("4. 🛠️ Girişimler", value=tpl_data.get("interventions", ""), height=90)
+							e_c3, e_c4 = ui.columns(2)
+							with e_c3:
+								edit_mon = ui.text_input("5. ⏱️ İzlem Sıklığı", value=tpl_data.get("monitoring", ""))
+							with e_c4:
+								edit_esc = ui.text_input("6. 🚨 Sevk Kriteri", value=tpl_data.get("escalation", ""))
+							status_opts = ["Aktif - İzlemde", "Taslak - Uzman İncelemesi Gerekli", "Uzman Değerlendirmesi Tamamlandı", "Tamamlandı - Hedefe Ulaşıldı", "İptal / İhtiyaç Kalmadı"]
+							cur_stat = tpl_data.get("status", "Aktif - İzlemde")
+							edit_stat = ui.selectbox("Varsayılan Durum", status_opts, index=(status_opts.index(cur_stat) if cur_stat in status_opts else 0))
+							if ui.form_submit_button("💾 Protokolü Kaydet", type="primary", use_container_width=True):
+								new_title = edit_title.strip()
+								if new_title:
+									if new_title != selected_key and selected_key in current_templates:
+										del current_templates[selected_key]
+									current_templates[new_title] = {
+										"category": edit_cat or "Genel Klinik",
+										"diagnosis": edit_diag.strip(),
+										"observed_facts": edit_facts.strip(),
+										"goals": edit_goals.strip(),
+										"interventions": edit_interv.strip(),
+										"monitoring": edit_mon.strip(),
+										"escalation": edit_esc.strip(),
+										"status": edit_stat,
+									}
+									save_care_plan_templates(current_templates)
+									ui.success(f"'{new_title}' kaydedildi.")
+									ui.rerun()
+					with ui.expander("➕ Yeni Bütünleşik Protokol Ekle", expanded=False):
+						with ui.form("cfg_cp_add_master_form"):
+							an_c1, an_c2 = ui.columns([2.5, 1.5])
+							with an_c1:
+								new_title = ui.text_input("Protokol Başlığı")
+							with an_c2:
+								new_cat = ui.text_input("Kategori", value="Genel Klinik")
+							new_diag = ui.text_area("1. 🩺 Tanı", height=70)
+							new_facts = ui.text_area("2. 🔍 Olgular", height=70)
+							new_goals = ui.text_area("3. 🎯 Hedefler", height=70)
+							new_interv = ui.text_area("4. 🛠️ Girişimler", height=85)
+							an_c3, an_c4 = ui.columns(2)
+							with an_c3:
+								new_mon = ui.text_input("5. ⏱️ İzlem", placeholder="Örn: Haftalık")
+							with an_c4:
+								new_esc = ui.text_input("6. 🚨 Sevk", placeholder="Örn: 112 Acil")
+							new_stat = ui.selectbox("Durum", ["Aktif - İzlemde", "Taslak - Uzman İncelemesi Gerekli", "Uzman Değerlendirmesi Tamamlandı", "Tamamlandı - Hedefe Ulaşıldı", "İptal / İhtiyaç Kalmadı"])
+							if ui.form_submit_button("➕ Protokolü Ekle", type="primary", use_container_width=True):
+								if new_title.strip() and new_title.strip() not in current_templates:
+									current_templates[new_title.strip()] = {
+										"category": new_cat.strip() or "Genel Klinik",
+										"diagnosis": new_diag.strip(),
+										"observed_facts": new_facts.strip(),
+										"goals": new_goals.strip(),
+										"interventions": new_interv.strip(),
+										"monitoring": new_mon.strip(),
+										"escalation": new_esc.strip(),
+										"status": new_stat,
+									}
+									save_care_plan_templates(current_templates)
+									ui.success(f"'{new_title.strip()}' eklendi.")
+									ui.rerun()
+					if ui.button("🔄 Tüm Protokolleri Varsayılanlara Sıfırla", type="secondary", key="cfg_cp_btn_reset_all"):
+						reset_care_plan_templates()
+						ui.success("Tüm protokoller sıfırlandı.")
+						ui.rerun()
+
+			with t_who:
+				ui.markdown("### 📏 WHO LMS Persantil ve Büyüme Referans Tablosu")
+				ui.metric("Kayıtlı WHO LMS Referans Satırı", _lms_cnt)
+				col_load, col_file = ui.columns(2)
+				with col_load:
+					with ui.container(border=True):
+						ui.markdown("##### 📦 Hazır WHO Büyüme Referansları")
+						ui.caption("`persantil veriler/` klasöründeki resmi WHO genişletilmiş büyüme verilerini tek tıkla yükleyin.")
+						if ui.button("WHO Referanslarını Otomatik Yükle", type="primary", key="btn_load_who", use_container_width=True):
 							try:
-								ok_rst = restore_auto_backup_file(sel_bkp_path)
-								if ok_rst:
-									ui.session_state["_auto_backup_flash"] = f"✅ `{sel_bkp_path.name}` yedeği başarıyla geri yüklendi! Tüm önbellekler temizlendi."
+								cnt_lms, cnt_wfa = import_builtin_who_references()
+								ui.success(f"Başarılı! {cnt_lms} LMS ve {cnt_wfa} WFA referansı yüklendi.")
+								ui.rerun()
+							except Exception as e:
+								ui.error(f"Referans yükleme hatası: {e}")
+				with col_file:
+					with ui.container(border=True):
+						ui.markdown("##### 📁 Özel LMS Dosyası Yükle")
+						uploaded = ui.file_uploader("Resmi LMS dosyası (.xlsx / .csv)", type=["xlsx", "csv"], key="lms_upload")
+						if uploaded is not None and ui.button("Referansı Doğrula ve Kaydet", type="primary", use_container_width=True):
+							try:
+								count, issues = parse_lms_file(uploaded)
+								ui.success(f"{count} LMS satırı kaydedildi.")
+								for issue in issues[:6]:
+									ui.warning(issue)
+							except Exception as error:
+								ui.error(f"Dosya okunamadı: {error}")
+
+		# ======================================================================
+		# GRUP 5: YAPAY ZEKÂ (GEMINI) & KVKK GÜVENLİĞİ
+		# ======================================================================
+		elif active_sec == "🤖 Yapay Zekâ (Gemini) & KVKK":
+			render_gemini_ai_settings_panel(current_cfg)
+			with ui.container(border=True):
+				ui.markdown("#### 🛡️ KVKK Ekran Gizliliği Varsayılan Tercihi")
+				kvkk_def_val = ui.toggle(
+					"Uygulama açılışında KVKK ekran maskelemesini otomatik başlat",
+					value=(current_cfg.get("kvkk_default_on", "0") == "1"),
+					key="cfg_kvkk_default_on_toggle",
+					help="Açık olduğunda uygulama her başlatıldığında öğrenci isimleri, telefonlar ve tanılar otomatik yıldızlanır; üst çubuktan tek tıkla açıp kapatabilirsiniz.",
+				)
+				if ui.button("💾 KVKK Açılış Tercihini Kaydet", key="btn_save_kvkk_default_on", type="secondary"):
+					save_app_settings({"kvkk_default_on": "1" if kvkk_def_val else "0"})
+					ui.success("✅ KVKK açılış tercihi kaydedildi.")
+					ui.rerun()
+
+		# ======================================================================
+		# GRUP 6: VERİ, İÇE AKTAR & SİSTEM (ON-DEMAND ZIP + GÜVENLİ KURTARMA)
+		# ======================================================================
+		elif active_sec == "💾 Veri, İçe Aktar & Sistem":
+			t_bkp, t_imp, t_upd, t_rst = ui.tabs([
+				"💾 Yedekleme & Kurtarma",
+				"📥 Liste İçe Aktar (e-Okul / Excel)",
+				"🚀 Sürüm & Güncelleme",
+				"🧨 Fabrika Sıfırlama",
+			], orientation="segmented")
+
+			with t_bkp:
+				curr_db = get_current_db_path()
+				curr_pdir = get_current_person_data_dir()
+				pfile_count = len(list(curr_pdir.glob("kisi_*.json"))) if curr_pdir.exists() else 0
+				evrak_count = len([f for f in EVRAKLAR_DIR.iterdir() if f.is_file() and not f.name.startswith(".")]) if EVRAKLAR_DIR.exists() else 0
+				ui.info(f"📌 **Aktif Yıl:** `{active_ay['name']}` · **Veritabanı:** `{curr_db.name}` · **Kişi Dosyaları:** `{pfile_count}` · **Evraklar:** `{evrak_count}`")
+
+				with ui.container(border=True):
+					ui.markdown("#### 💾 Otomatik Yedekleme & Hızlı Geri Yükleme")
+					ui.caption(f"Her gün ilk açılışta `{AUTO_BACKUP_DIR.name}/` klasörüne otomatik yedek alınır (en fazla 15 güncel yedek).")
+					bkp_flash = ui.session_state.pop("_auto_backup_flash", None)
+					if isinstance(bkp_flash, str) and bkp_flash:
+						ui.success(bkp_flash)
+					bkp_rows = auto_bkps
+					act_bkp_c1, act_bkp_c2 = ui.columns([1.4, 2.2])
+					with act_bkp_c1:
+						if ui.button("⚡ Şimdi Manuel Yedek Oluştur", type="primary", key="btn_manual_auto_backup", use_container_width=True):
+							created_bkp = run_daily_auto_backup(max_backups=15, force=True)
+							if created_bkp:
+								ui.session_state["_auto_backup_flash"] = f"✅ Yeni yedek oluşturuldu: `{created_bkp.name}` ({format_file_size(created_bkp.stat().st_size)})"
+								ui.rerun()
+					with act_bkp_c2:
+						ui.caption(f"📁 Klasör: `{AUTO_BACKUP_DIR}` · Toplam: **{len(bkp_rows)} / 15**")
+					if bkp_rows:
+						ui.dataframe(pd.DataFrame([{"Yedek Dosyası": r["name"], "Tarih / Saat": r["modified_at"], "Boyut": r["size_str"]} for r in bkp_rows]), width="stretch", hide_index=True, height=min(220, max(110, 48 + len(bkp_rows) * 34)))
+						bkp_map = {f"{r['name']} ({r['modified_at']} · {r['size_str']})": r for r in bkp_rows}
+						sel_bkp = bkp_map[ui.selectbox("İşlem Yapılacak Yedek", list(bkp_map.keys()), key="sel_auto_backup_file")]
+						sel_bkp_path: Path = sel_bkp["path"]
+						confirm_auto_rst = ui.checkbox("Seçili yedeği aktif veritabanının üzerine geri yüklemeyi onaylıyorum", value=False, key="chk_confirm_auto_restore")
+						bkp_btn1, bkp_btn2 = ui.columns(2)
+						with bkp_btn1:
+							ui.download_button("📥 Seçili Yedeği İndir", data=(lambda _p=sel_bkp_path: _p.read_bytes() if _p.exists() else b""), file_name=sel_bkp_path.name, mime="application/octet-stream", type="secondary", key="btn_dl_selected_auto_backup", use_container_width=True)
+						with bkp_btn2:
+							if ui.button("⏪ Seçili Yedeği Geri Yükle", type="secondary", disabled=not confirm_auto_rst, key="btn_restore_selected_auto_backup", use_container_width=True):
+								try:
+									if restore_auto_backup_file(sel_bkp_path):
+										ui.session_state["_auto_backup_flash"] = f"✅ `{sel_bkp_path.name}` başarıyla geri yüklendi!"
+										ui.rerun()
+								except Exception as rst_exc:
+									ui.error(f"Geri yükleme hatası: {rst_exc}")
+
+				# ON-DEMAND TAM SİSTEM YEDEĞİ (.ZIP) — Sayfa açılışında donma yok!
+				with ui.container(border=True):
+					ui.markdown("#### 📦 Eksiksiz Sistem Yedeği (.ZIP Arşivi — İsteğe Bağlı Üretim)")
+					ui.caption("Veritabanı, tüm JSON kişi dosyaları ve tüm evrak deposu yalnızca aşağıdaki butona bastığınızda paketlenir (sayfa açılış hızı korunur).")
+					zc1, zc2 = ui.columns([1.4, 1.8])
+					with zc1:
+						if ui.button("⚙️ Tam Sistem ZIP Paketini Hazırla", type="primary", key="btn_prepare_full_zip", use_container_width=True):
+							import zipfile
+							zbuf = io.BytesIO()
+							with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as zf:
+								if curr_db.exists():
+									zf.write(curr_db, arcname="revir_defteri.db")
+								if curr_pdir.exists():
+									for pf in curr_pdir.glob("*.json"):
+										zf.write(pf, arcname=f"kisi_verileri/{pf.name}")
+								if EVRAKLAR_DIR.exists():
+									for ef in EVRAKLAR_DIR.iterdir():
+										if ef.is_file() and not ef.name.startswith("."):
+											zf.write(ef, arcname=f"revir_evraklari/{ef.name}")
+							ui.session_state["_prepared_full_zip"] = {
+								"bytes": zbuf.getvalue(),
+								"name": f"Revir_Defteri_Tam_Yedek_{active_ay['name'].replace('-', '_')}_{date.today().isoformat()}.zip",
+							}
+					prep_zip = ui.session_state.get("_prepared_full_zip")
+					with zc2:
+						if isinstance(prep_zip, dict) and prep_zip.get("bytes"):
+							ui.download_button(
+								f"📦 Hazır ZIP Yedeğini İndir ({format_file_size(len(prep_zip['bytes']))})",
+								data=prep_zip["bytes"],
+								file_name=prep_zip["name"],
+								mime="application/zip",
+								type="primary",
+								key="btn_dl_prepared_full_zip",
+								use_container_width=True,
+							)
+						else:
+							ui.caption("İndirme bağlantısı için soldaki **Hazırla** butonuna tıklayın.")
+
+				db_c1, db_c2 = ui.columns(2)
+				with db_c1:
+					with ui.container(border=True):
+						ui.markdown("##### 📥 Yalnızca SQLite (.db) & Senkronizasyon")
+						if curr_db.exists():
+							db_sz = curr_db.stat().st_size
+							ui.download_button(f"💾 SQLite .db İndir ({format_file_size(db_sz)})", data=lambda _p=curr_db: _p.read_bytes(), file_name=f"revir_defteri_{active_ay['name'].replace('-', '_')}_{date.today().isoformat()}.db", mime="application/octet-stream", type="secondary", use_container_width=True, key="btn_dl_cur_sqlite_db_lazy")
+						if ui.button("🔄 Kişi Dosyalarını & Persantilleri Eşitle (VACUUM)", use_container_width=True, key="btn_vacuum_sync"):
+							sync_student_measurements()
+							cnt_files = sync_all_person_data_files()
+							clear_all_data_caches()
+							with connect_db() as connection:
+								connection.execute("VACUUM")
+							ui.success(f"{cnt_files} kişi dosyası ve persantil ölçümleri senkronize edildi.")
+							ui.rerun()
+				with db_c2:
+					with ui.container(border=True):
+						ui.markdown("##### 📤 Harici Yedekten Geri Yükle (.db / .zip)")
+						restore_file = ui.file_uploader("`.db` veya `.zip` yedek dosyası seçin", type=["db", "sqlite", "sqlite3", "zip"], key="cfg_restore_db")
+						if restore_file is not None:
+							confirm_ext_rst = ui.checkbox("Aktif verilerin üzerine yazılmasını onaylıyorum", value=False, key="chk_confirm_ext_restore")
+							if ui.button("⚠️ Seçili Yedeği Geri Yükle", type="secondary", disabled=not confirm_ext_rst, use_container_width=True, key="btn_exec_ext_restore"):
+								import zipfile
+								raw_data = restore_file.getvalue()
+								if restore_file.name.endswith(".zip"):
+									try:
+										with zipfile.ZipFile(io.BytesIO(raw_data)) as r_zf:
+											for z_item in r_zf.namelist():
+												if z_item == "revir_defteri.db":
+													curr_db.write_bytes(r_zf.read(z_item))
+												elif z_item.startswith("kisi_verileri/") and z_item.endswith(".json"):
+													(curr_pdir / Path(z_item).name).write_bytes(r_zf.read(z_item))
+												elif z_item.startswith("revir_evraklari/") and not Path(z_item).name.startswith("."):
+													if Path(z_item).name:
+														(EVRAKLAR_DIR / Path(z_item).name).write_bytes(r_zf.read(z_item))
+										clear_all_data_caches()
+										ui.success("✅ ZIP yedeği geri yüklendi!")
+										ui.rerun()
+									except Exception as e:
+										ui.error(f"ZIP hatası: {e}")
+								elif raw_data[:15] == b"SQLite format 3":
+									curr_db.write_bytes(raw_data)
+									clear_all_data_caches()
+									ui.success("✅ SQLite veritabanı geri yüklendi!")
 									ui.rerun()
 								else:
-									ui.error("Yedek dosyası bulunamadı.")
-							except Exception as rst_exc:
-								ui.error(f"Geri yükleme hatası: {rst_exc}")
-				else:
-					ui.info("Henüz `oto_yedekler` klasöründe kayıtlı otomatik yedek yok. Yukarıdan hemen oluşturabilirsiniz.")
+									ui.error("Geçersiz yedek dosyası.")
 
-			ui.markdown("")
-			# 1. BÜYÜK TAM SİSTEM YEDEĞİ (.ZIP)
-			with ui.container(border=True):
-				ui.markdown("#### 📦 Eksiksiz Sistem Yedeği (.ZIP İndir)")
-				ui.caption("Aktif eğitim yılı veritabanı (`revir_defteri.db`), tüm bireysel öğrenci sağlık dosyaları (`kisi_verileri/*.json`) ve tüm evrak deposu tek bir sıkıştırılmış ZIP arşivinde toplanır.")
-
-				import zipfile
-				zip_buffer = io.BytesIO()
-				with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-					if curr_db.exists():
-						zf.write(curr_db, arcname="revir_defteri.db")
-					if curr_pdir.exists():
-						for pf in curr_pdir.glob("*.json"):
-							zf.write(pf, arcname=f"kisi_verileri/{pf.name}")
-					if EVRAKLAR_DIR.exists():
-						for ef in EVRAKLAR_DIR.iterdir():
-							if ef.is_file() and not ef.name.startswith("."):
-								zf.write(ef, arcname=f"revir_evraklari/{ef.name}")
-				full_zip_bytes = zip_buffer.getvalue()
-
-				zip_fn = f"Revir_Defteri_Tam_Yedek_{active_ay['name'].replace('-', '_')}_{date.today().isoformat()}.zip"
-				ui.download_button(
-					f"📦 Tüm Sistemi Tek Tıkla Yedekle (.ZIP İndir - {format_file_size(len(full_zip_bytes))})",
-					data=full_zip_bytes,
-					file_name=zip_fn,
-					mime="application/zip",
-					type="primary",
-					use_container_width=True,
-					help="Tüm veritabanını, öğrenci dosyalarını ve evrak deposunu tek arşiv olarak bilgisayarınıza indirir."
-				)
-
-			ui.markdown("")
-			db_c1, db_c2 = ui.columns(2)
-			with db_c1:
-				with ui.container(border=True):
-					ui.markdown("#### 📥 Yalnızca Veritabanı (.db)")
-					if curr_db.exists():
-						db_bytes = curr_db.read_bytes()
-						ui.download_button(
-							f"💾 SQLite .db İndir ({format_file_size(len(db_bytes))})",
-							data=db_bytes,
-							file_name=f"revir_defteri_{active_ay['name'].replace('-', '_')}_{date.today().isoformat()}.db",
-							mime="application/octet-stream",
-							type="secondary",
-							use_container_width=True,
-						)
-					ui.divider()
-					ui.markdown("#### 🔧 Veritabanı & Dosya Senkronizasyonu")
-					ui.caption(f"Aktif eğitim yılına ait `{pfile_count}` kişinin JSON dosyalarını ve WHO persantillerini yeniden denetler:")
-					if ui.button("🔄 Kişi Dosyalarını ve Persantilleri Eşitle", use_container_width=True):
-						sync_student_measurements()
-						cnt_files = sync_all_person_data_files()
-						clear_all_data_caches()
-						with connect_db() as connection:
-							connection.execute("VACUUM")
-						ui.success(f"{cnt_files} kişinin bireysel veri dosyası (`kisi_verileri/*.json`) ve persantil ölçümleri senkronize edildi.")
-						ui.rerun()
-
-			with db_c2:
-				with ui.container(border=True):
-					ui.markdown("#### 📤 Yedekten Geri Yükle (.db / .zip)")
-					restore_file = ui.file_uploader("Daha önce aldığınız `.db` veya `.zip` yedek dosyasını seçin", type=["db", "sqlite", "sqlite3", "zip"], key="cfg_restore_db")
-					if restore_file is not None:
-						if ui.button("⚠️ Seçili Yedeği Geri Yükle (Aktif Verilerin Üzerine Yazılır)", type="secondary", use_container_width=True):
-							raw_data = restore_file.getvalue()
-							if restore_file.name.endswith(".zip"):
-								try:
-									with zipfile.ZipFile(io.BytesIO(raw_data)) as r_zf:
-										for z_item in r_zf.namelist():
-											if z_item == "revir_defteri.db":
-												curr_db.write_bytes(r_zf.read(z_item))
-											elif z_item.startswith("kisi_verileri/") and z_item.endswith(".json"):
-												f_name = Path(z_item).name
-												(curr_pdir / f_name).write_bytes(r_zf.read(z_item))
-											elif z_item.startswith("revir_evraklari/") and not Path(z_item).name.startswith("."):
-												f_name = Path(z_item).name
-												if f_name:
-													(EVRAKLAR_DIR / f_name).write_bytes(r_zf.read(z_item))
-									clear_all_data_caches()
-									ui.success("✅ ZIP yedek arşivi (Veritabanı, kişi dosyaları ve evraklar) başarıyla geri yüklendi!")
-									ui.rerun()
-								except Exception as e:
-									ui.error(f"ZIP açma hatası: {e}")
-							elif raw_data[:15] == b"SQLite format 3":
-								curr_db.write_bytes(raw_data)
-								clear_all_data_caches()
-								ui.success("✅ SQLite veritabanı yedeği başarıyla geri yüklendi!")
-								ui.rerun()
-							else:
-								ui.error("Geçersiz yedek dosyası. Lütfen geçerli bir .db veya .zip dosyası yükleyin.")
-
-			ui.markdown("")
-			# 3. FABRİKA AYARLARINA DÖNDÜR
-			with ui.container(border=True):
-				ui.markdown("<h4 style='color: #ef4444; margin-bottom: 4px;'>🧨 Fabrika Ayarlarına Döndür (Tüm Verileri ve Ayarları Sıfırla)</h4>", unsafe_allow_html=True)
-				ui.caption(
-					"Bu işlem tüm öğrenci ve personel kayıtlarını, revir başvurularını, vital ölçümlerini, taramaları, aşıları, "
-					"tahlilleri ve evrak deposundaki tüm belgeleri kalıcı olarak siler; tüm uygulama ayarlarını ve tema seçimlerini ilk kurulumdaki varsayılan haline döndürür."
-				)
-				ui.warning(
-					"⚠️ **DİKKAT:** Bu işlem **geri alınamaz**! Sıfırlama yapmadan önce yukarıdaki **'Tüm Sistemi Tek Tıkla Yedekle (.ZIP İndir)'** "
-					"butonunu kullanarak mevcut verilerinizin yedeğini almanız önemle tavsiye edilir.\n\n"
-					"*Not: Resmi WHO büyüme persantilleri ve Türkiye il-ilçe-köy adres referansları silinmez ve korunur.*"
-				)
-
-				with ui.expander("🚨 Fabrika Ayarlarına Sıfırlama Panelini Aç", expanded=False):
-					ui.markdown("##### Sıfırlama Onayı")
-					confirm_chk = ui.checkbox(
-						"Tüm kayıtların, dosyaların ve sistem ayarlarının kalıcı olarak silineceğini ve geri getirilemeyeceğini biliyor ve onaylıyorum.",
-						key="chk_confirm_factory_reset"
-					)
-					confirm_word = ui.text_input(
-						"İşlemi başlatmak için onay kutusunu işaretleyin ve aşağıdaki alana büyük harflerle **SIFIRLA** yazın:",
-						placeholder="SIFIRLA",
-						key="txt_confirm_factory_reset"
-					)
-
-					reset_btn_disabled = not (confirm_chk and confirm_word.strip() == "SIFIRLA")
-					if ui.button("🔥 Fabrika Ayarlarına Döndür ve Tüm Sistemi Sıfırla", type="primary", disabled=reset_btn_disabled, key="btn_exec_factory_reset", use_container_width=True):
-						with ui.spinner("Tüm veritabanı tabloları, kişi dosyaları ve belgeler temizleniyor, ayarlar fabrika varsayılanına döndürülüyor..."):
-							ok, msg = perform_factory_reset()
-						if ok:
-							ui.balloons()
-							ui.success("✅ " + msg)
-							ui.rerun()
-						else:
-							ui.error("❌ " + msg)
-
-
-		# 🚀 Sürüm & Güncelleme Yönetimi
-		elif active_sec == "🚀 Sürüm & Güncelleme Yönetimi":
-			ui.markdown("### 🚀 Sistem Sürümü & Güncelleme Yönetimi")
-			ui.caption("Revir Defteri yazılımınızı doğrudan resmi güncelleme sunucusu üzerinden veya yerel yedek paketleriyle tek tıkla en son sürüme güncelleyin.")
-
-			git_info = get_git_info()
-
-			col_v1, col_v2, col_v3 = ui.columns([1.5, 1.8, 1.4])
-			with col_v1:
-				with ui.container(border=True):
-					ui.caption("📌 **Mevcut Sürüm**")
-					ui.markdown(f"### v{APP_VERSION}")
-					ui.caption(f"Aktif Dal: `{git_info['branch'] or 'main'}`")
-			with col_v2:
-				with ui.container(border=True):
-					ui.caption("🔖 **Son Yapılan İyileştirme**")
-					ui.markdown(f"**`{git_info['commit'] or 'Yerel Sürüm'}`**")
-					cmt_clean = git_info['commit_msg'] if len(git_info['commit_msg']) <= 35 else git_info['commit_msg'][:32] + "..."
-					ui.caption(cmt_clean or "En son commit")
-			with col_v3:
-				with ui.container(border=True):
-					ui.caption("🖥️ **Masaüstü Başlatıcı**")
-					if ui.button("🔄 Kısayolu Yenile", key="btn_refresh_desktop_sc", use_container_width=True):
-						sc_path = create_or_refresh_desktop_launcher()
-						ui.success(f"Masaüstü kısayolu yenilendi: `{sc_path.name}`")
-
-			ui.markdown("")
-
-			# Online Update Checking
-			with ui.container(border=True):
-				ui.markdown("#### ⚡ Sistem Güncellemeleri")
-				ui.caption("Resmi sunucudaki en son kararlı sürümü ve yeni özellikleri denetler, verilerinizi otomatik yedekleyerek sistemi güvenle günceller.")
-
-				btn_chk_c, _ = ui.columns([1.6, 3])
-				with btn_chk_c:
-					check_clicked = ui.button("🔍 Güncellemeleri Denetle", type="primary", key="btn_chk_updates", use_container_width=True)
-
-				if check_clicked:
-					with ui.spinner("Güncelleme sunucusu ile iletişim kuruluyor ve denetleniyor..."): 
-						update_status = check_for_git_updates()
-					ui.session_state["last_update_check_result"] = update_status
-
-				chk_res = ui.session_state.get("last_update_check_result")
-				if chk_res:
-					if not chk_res["success"]:
-						ui.warning(f"⚠️ {chk_res['message']}")
-					elif chk_res["has_updates"]:
-						ui.success(f"🟢 **Yeni Güncelleme Mevcut!** ({chk_res['behind']} yeni iyileştirme bulundu)")
-						ui.markdown("##### 📝 Yeni Geliştirmeler ve Notlar:")
-						for c in chk_res["commits"]:
-							ui.markdown(f"• `{c}`")
-
-						ui.markdown("")
-						if ui.button("⚡ Şimdi Güncelle ve Yeniden Başlat", type="primary", key="btn_apply_git_update", use_container_width=True):
-							with ui.spinner("Önce güvenlik yedeği alınıyor, ardından yeni kodlar yükleniyor..."):
-								ok, msg = perform_system_update()
-							if ok:
+			with t_imp:
+				ui.markdown("### 📥 Öğrenci, Şube ve Servis Listesi İçe Aktarma")
+				tab_eokul_import, tab_std_import = ui.tabs([
+					"📑 e-Okul Şube Doğum Tarihleri (PDF / Excel)",
+					"📋 Standart Excel / CSV Listesi",
+				])
+				with tab_eokul_import:
+					e_c1, e_c2 = ui.columns([2.3, 1.2])
+					with e_c1:
+						eokul_file = ui.file_uploader("e-Okul Şube Doğum Tarihleri Dosyası (.pdf / .xlsx / .xls)", type=["pdf", "xlsx", "xls"], key="uploader_eokul_dob_file")
+					with e_c2:
+						ui.download_button("📄 e-Okul Şablonunu İndir (.xlsx)", data=lambda: make_eokul_dogum_ve_yas_template(), file_name="e_okul_sube_dogum_ve_yas_sablonu.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="btn_download_eokul_dob_tpl", use_container_width=True)
+					if eokul_file is not None:
+						try:
+							parsed_data = parse_eokul_dob_and_age_data(eokul_file.getvalue(), eokul_file.name)
+							total_stu_cnt = sum(len(c["students"]) for c in parsed_data)
+							total_tch_cnt = sum(1 for c in parsed_data if c.get("teacher_name"))
+							ui.success(f"✅ **{len(parsed_data)} Şube**, **{total_tch_cnt} Öğretmen** ve **{total_stu_cnt} Öğrenci** tespit edildi.")
+							for c_idx, c_obj in enumerate(parsed_data):
+								with ui.expander(f"🏫 **{c_obj['class_name']}** · 👩‍🏫 {c_obj.get('teacher_name') or '—'} ({len(c_obj['students'])} Öğrenci)", expanded=(c_idx == 0)):
+									if c_obj["students"]:
+										ui.dataframe(pd.DataFrame([{"Okul No": s["student_no"], "Adı Soyadı": s["full_name"], "Cinsiyet": s["sex"], "Doğum Tarihi": s["birth_date"]} for s in c_obj["students"]]), hide_index=True, width="stretch")
+							if ui.button(f"🚀 {total_stu_cnt} Öğrenciyi ve {len(parsed_data)} Şubeyi Aktar", type="primary", key="btn_commit_eokul_import", use_container_width=True):
+								c_add, s_add, s_upd = import_eokul_classes_and_students(parsed_data)
 								ui.balloons()
-								ui.success("✅ Güncelleme başarıyla tamamlandı! Sistem yeniden başlatılıyor...")
-								ui.session_state.pop("last_update_check_result", None)
+								ui.success(f"🎉 Tamamlandı! {c_add} şube, {s_add} yeni öğrenci eklendi, {s_upd} güncellendi.")
 								ui.rerun()
-							else:
-								ui.error(f"Güncelleme başarısız: {msg}")
-					else:
-						ui.info(f"✅ {chk_res['message']}")
+						except Exception as e_err:
+							ui.error(f"Dosya ayrıştırma hatası: {e_err}")
+				with tab_std_import:
+					col_upload, col_template = ui.columns([2, 1])
+					with col_upload:
+						uploaded = ui.file_uploader("Standart Excel/CSV öğrenci listesi", type=["xlsx", "xls", "csv"], key="settings_roster_upload")
+						if uploaded is not None and ui.button("📥 Listeyi İçe Aktar", type="primary", key="settings_import_roster"):
+							try:
+								imported, skipped, issues = import_roster(uploaded)
+								sync_student_measurements()
+								ui.success(f"{imported} öğrenci eklendi/güncellendi, {skipped} atlandı.")
+								for issue in issues[:6]:
+									ui.warning(issue)
+								ui.rerun()
+							except Exception as error:
+								ui.error(f"Dosya okunamadı: {error}")
+					with col_template:
+						ui.download_button("📄 Excel Şablonunu İndir", lambda: make_roster_template(), "ogrenci_ve_servis_listesi_sablonu.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="settings_download_roster_template", use_container_width=True)
 
-			# Offline / ZIP Manual Update
-			ui.markdown("")
-			with ui.expander("📥 Çevrimdışı / Manuel Güncelleme Paketi Yükle (.ZIP)"):
-				ui.caption("İnternetsiz bir ortamda veya elden aldığınız güncel `.zip` paketini yükleyerek sistemi güncelleyebilirsiniz (Tüm öğrenci verileri, vizitler ve evraklar korunur).")
-				pkg_file = ui.file_uploader("Güncelleme Paketini Seçin (.zip)", type=["zip"], key="cfg_upload_update_pkg")
-				if pkg_file is not None:
-					if ui.button("🚀 Manuel Paketi Uygula", type="secondary", key="btn_apply_zip_pkg", use_container_width=True):
+			with t_upd:
+				ui.markdown("### 🚀 Sistem Sürümü & Güncelleme Yönetimi")
+				git_info = get_git_info()
+				col_v1, col_v2, col_v3 = ui.columns([1.4, 1.9, 1.4])
+				with col_v1:
+					with ui.container(border=True):
+						ui.caption("📌 **Mevcut Sürüm**")
+						ui.markdown(f"### v{APP_VERSION}")
+						ui.caption(f"Dal: `{git_info['branch'] or 'main'}`")
+				with col_v2:
+					with ui.container(border=True):
+						ui.caption("🔖 **Son İyileştirme**")
+						ui.markdown(f"**`{git_info['commit'] or 'Yerel Sürüm'}`**")
+						cmt_clean = git_info["commit_msg"] if len(git_info["commit_msg"]) <= 38 else git_info["commit_msg"][:35] + "..."
+						ui.caption(cmt_clean or "En son commit")
+				with col_v3:
+					with ui.container(border=True):
+						ui.caption("🖥️ **Masaüstü Başlatıcı**")
+						if ui.button("🔄 Kısayolu Yenile", key="btn_refresh_desktop_sc", use_container_width=True):
+							sc_path = create_or_refresh_desktop_launcher()
+							ui.success(f"Kısayol yenilendi: `{sc_path.name}`")
+				with ui.container(border=True):
+					if ui.button("🔍 Güncellemeleri Denetle", type="primary", key="btn_chk_updates"):
+						ui.session_state["last_update_check_result"] = check_for_git_updates()
+					chk_res = ui.session_state.get("last_update_check_result")
+					if chk_res:
+						if not chk_res["success"]:
+							ui.warning(f"⚠️ {chk_res['message']}")
+						elif chk_res["has_updates"]:
+							ui.success(f"🟢 **Yeni Güncelleme Mevcut!** ({chk_res['behind']} iyileştirme)")
+							for c in chk_res["commits"]:
+								ui.markdown(f"• `{c}`")
+							if ui.button("⚡ Şimdi Güncelle", type="primary", key="btn_apply_git_update"):
+								ok, msg = perform_system_update()
+								if ok:
+									ui.balloons()
+									ui.success("✅ Güncellendi!")
+									ui.session_state.pop("last_update_check_result", None)
+									ui.rerun()
+								else:
+									ui.error(f"Güncelleme hatası: {msg}")
+						else:
+							ui.info(f"✅ {chk_res['message']}")
+				with ui.expander("📥 Çevrimdışı / Manuel Güncelleme Paketi (.ZIP)", expanded=False):
+					pkg_file = ui.file_uploader("Güncelleme Paketi (.zip)", type=["zip"], key="cfg_upload_update_pkg")
+					if pkg_file is not None and ui.button("🚀 Manuel Paketi Uygula", type="secondary", key="btn_apply_zip_pkg", use_container_width=True):
 						try:
 							import zipfile
 							with zipfile.ZipFile(io.BytesIO(pkg_file.getvalue())) as zf:
@@ -29401,10 +29434,243 @@ def render_settings() -> None:
 										continue
 									zf.extract(z_name, APP_DIR)
 							clear_all_data_caches()
-							ui.success("Manuel güncelleme paketi başarıyla uygulandı!")
+							ui.success("Manuel güncelleme paketi uygulandı!")
 							ui.rerun()
 						except Exception as e:
-							ui.error(f"Paket yükleme hatası: {e}")
+							ui.error(f"Paket hatası: {e}")
+
+			with t_rst:
+				with ui.container(border=True):
+					ui.markdown("<h4 style='color:#ef4444;margin-bottom:4px;'>🧨 Fabrika Ayarlarına Döndür (Tüm Verileri ve Ayarları Sıfırla)</h4>", unsafe_allow_html=True)
+					ui.warning("⚠️ **DİKKAT:** Bu işlem **geri alınamaz**! Önce **Yedekleme & Kurtarma** sekmesinden `.ZIP` yedeği almanız önerilir. *(WHO persantilleri ve Türkiye adres referansları korunur.)*")
+					confirm_chk = ui.checkbox("Tüm kayıtların, dosyaların ve ayarların kalıcı olarak silineceğini onaylıyorum.", key="chk_confirm_factory_reset")
+					confirm_word = ui.text_input("Onaylamak için büyük harflerle **SIFIRLA** yazın:", placeholder="SIFIRLA", key="txt_confirm_factory_reset")
+					if ui.button("🔥 Fabrika Ayarlarına Döndür", type="primary", disabled=not (confirm_chk and confirm_word.strip() == "SIFIRLA"), key="btn_exec_factory_reset", use_container_width=True):
+						ok, msg = perform_factory_reset()
+						if ok:
+							ui.balloons()
+							ui.success("✅ " + msg)
+							ui.rerun()
+						else:
+							ui.error("❌ " + msg)
+
+# ==============================================================================
+# ÜST BAĞLAM ÇUBUĞU, GRUPLANMIŞ YAN MENÜ VE GLOBAL KOMUT PALETİ (Cmd/Ctrl+K)
+# ==============================================================================
+
+def _handle_topbar_action(act_key: str, act_val: Any) -> None:
+	if act_key == "toggle_kvkk":
+		ui.session_state["kvkk_privacy_mode"] = not bool(ui.session_state.get("kvkk_privacy_mode", False))
+		ui.rerun(scope="fragment")
+	elif act_key == "cycle_dark":
+		cfg = get_app_settings()
+		cur_dm = cfg.get("dark_mode_adaptation", DARK_MODE_OPTIONS[0])
+		is_dk = is_dark_mode_active(cfg)
+		nxt_dm = DARK_MODE_OPTIONS[1] if is_dk else DARK_MODE_OPTIONS[2]
+		if cur_dm == DARK_MODE_OPTIONS[2]:
+			nxt_dm = DARK_MODE_OPTIONS[1]
+		elif cur_dm == DARK_MODE_OPTIONS[1]:
+			nxt_dm = DARK_MODE_OPTIONS[2]
+		save_app_settings({"dark_mode_adaptation": nxt_dm})
+		clear_all_data_caches()
+		ui.rerun(scope="fragment")
+	elif act_key == "goto_page" and act_val in PAGES:
+		ui.close_dialog(all_dialogs=True)
+		ui.session_state["target_page"] = str(act_val)
+		ui.rerun()
+	elif act_key == "goto_settings_group":
+		ui.close_dialog(all_dialogs=True)
+		ui.session_state["settings_vertical_nav"] = str(act_val or SETTINGS_GROUPS_META[0]["key"])
+		ui.session_state["target_page"] = "⚙️ Ayarlar"
+		ui.rerun()
+	elif act_key == "open_active_dossier":
+		pid = ui.session_state.get("active_person_id")
+		if pid:
+			open_person_dossier_dialog(int(pid))
+
+
+def _tr_fold(text: Any) -> str:
+	s = str(text or "").replace("İ", "i").replace("I", "ı").lower().replace("\u0307", "")
+	return s.translate(str.maketrans("çğıöşü", "cgiosu"))
+
+
+def _handle_cmd_search(query: str) -> list[dict[str, Any]]:
+	q_raw = (query or "").strip()
+	q = _tr_fold(q_raw)
+	q_sql = q_raw.replace("İ", "i").replace("I", "ı").lower().replace("\u0307", "")
+	results: list[dict[str, Any]] = []
+
+	# 1. Hızlı İşlemler
+	quick_cmds = [
+		{"group": "⚡ Hızlı İşlemler", "kind": "page", "value": "🩺 Revir Kaydı", "icon": "🩺", "title": "Yeni Revir Kaydı Aç", "subtitle": "Öğrenci veya yetişkin revir başvurusu kaydet (Alt+V)", "tag": "Sayfa"},
+		{"group": "⚡ Hızlı İşlemler", "kind": "page", "value": "💉 İnsülin & Diyabet Yönetimi", "icon": "💉", "title": "İnsülin Dozu Hesapla & Yemek Menüsü", "subtitle": "Bolus hesaplayıcı, aylık okul menüsü ve Gemini diyabet yorumu", "tag": "Diyabet"},
+		{"group": "⚡ Hızlı İşlemler", "kind": "new_student", "value": "Öğrenci", "icon": "➕", "title": "Yeni Öğrenci Profili Ekle", "subtitle": "Sağ çekmecede hızlı profil ve ilk ölçüm formu", "tag": "Çekmece"},
+		{"group": "⚡ Hızlı İşlemler", "kind": "new_student", "value": "Sivil / diğer kişi", "icon": "🧑‍💼", "title": "Yeni Yetişkin / Personel Ekle", "subtitle": "Öğretmen, personel veya veli kaydı oluştur", "tag": "Çekmece"},
+		{"group": "⚡ Hızlı İşlemler", "kind": "class_mgr", "value": "", "icon": "🏫", "title": "Okul Sınıfları & Şube Yönetimi", "subtitle": "Sınıf ekle, çıkar veya öğrenci ata", "tag": "Pencere"},
+		{"group": "⚡ Hızlı İşlemler", "kind": "toggle_kvkk", "value": "", "icon": "🛡️", "title": "KVKK Ekran Gizliliğini Aç / Kapat", "subtitle": "İsim, telefon ve tıbbi verileri anında maskele", "tag": "Gizlilik"},
+		{"group": "⚡ Hızlı İşlemler", "kind": "open_chat", "value": "", "icon": "🤖", "title": "Gemini Klinik Asistanı Aç", "subtitle": "Sesli soru sor, Word/Excel ürettir veya tahlil yükle (⌘J)", "tag": "AI"},
+	]
+	for cmd in quick_cmds:
+		if not q or q in _tr_fold(cmd["title"]) or q in _tr_fold(cmd["subtitle"]) or q in _tr_fold(cmd["tag"]):
+			results.append(cmd)
+
+	# 2. Öğrenci ve Yetişkin Araması (Canlı SQLite — Diyabet & Engel rozetli)
+	try:
+		with connect_db() as conn:
+			idm.ensure_diabetes_tables(conn)
+			if q:
+				like_q = f"%{q_sql}%"
+				like_ascii = f"%{q}%"
+				rows = conn.execute(
+					"""SELECT s.id, s.full_name, s.student_no, s.person_type, COALESCE(s.has_disability, 0) AS has_dis,
+							  COALESCE(c.name, 'Sınıfsız') AS cls,
+							  hp.allergies, hp.chronic_conditions,
+							  COALESCE(dp.is_diabetic, 0) AS is_diab
+					   FROM students s
+					   LEFT JOIN classes c ON c.id = s.class_id
+					   LEFT JOIN health_profiles hp ON hp.student_id = s.id
+					   LEFT JOIN diabetes_profiles dp ON dp.student_id = s.id
+					   WHERE lower(s.full_name) LIKE ? OR lower(COALESCE(s.student_no, '')) LIKE ? OR lower(COALESCE(c.name, '')) LIKE ?
+					      OR (CASE WHEN COALESCE(dp.is_diabetic, 0) = 1 THEN 'diyabet insulin' ELSE '' END) LIKE ?
+					      OR (CASE WHEN COALESCE(s.has_disability, 0) = 1 THEN 'engelli ozel gereksinim' ELSE '' END) LIKE ?
+					   ORDER BY COALESCE(dp.is_diabetic, 0) DESC, s.full_name ASC LIMIT 10""",
+					(like_q, like_q, like_q, like_ascii, like_ascii),
+				).fetchall()
+			else:
+				rows = conn.execute(
+					"""SELECT s.id, s.full_name, s.student_no, s.person_type, COALESCE(s.has_disability, 0) AS has_dis,
+							  COALESCE(c.name, 'Sınıfsız') AS cls,
+							  hp.allergies, hp.chronic_conditions,
+							  COALESCE(dp.is_diabetic, 0) AS is_diab
+					   FROM students s
+					   LEFT JOIN classes c ON c.id = s.class_id
+					   LEFT JOIN health_profiles hp ON hp.student_id = s.id
+					   LEFT JOIN diabetes_profiles dp ON dp.student_id = s.id
+					   ORDER BY COALESCE(dp.is_diabetic, 0) DESC, s.id DESC LIMIT 6"""
+				).fetchall()
+		for r in rows:
+			disp_nm = mask_kvkk_value(r["full_name"], "name")
+			alerts = []
+			if int(r["is_diab"] or 0) == 1:
+				alerts.append("💙 Diyabet")
+			if int(r["has_dis"] or 0) == 1:
+				alerts.append("♿ Özel Gereksinim")
+			if r["allergies"]:
+				alerts.append(f"🔴 {mask_kvkk_value(r['allergies'], 'medical')}")
+			if r["chronic_conditions"]:
+				alerts.append(f"🟠 {mask_kvkk_value(r['chronic_conditions'], 'medical')}")
+			sno_s = f"No: {r['student_no']} · " if r["student_no"] else ""
+			sub_s = f"{r['cls']} · {sno_s}" + (" · ".join(alerts) if alerts else "Kişi Dosyasını Aç")
+			results.append({
+				"group": "👤 Öğrenciler & Kişiler",
+				"kind": "person",
+				"value": int(r["id"]),
+				"icon": "💙" if int(r["is_diab"] or 0) == 1 else ("🧑‍💼" if str(r["person_type"] or "") != "Öğrenci" else "👤"),
+				"title": disp_nm,
+				"subtitle": sub_s,
+				"tag": "Kişi Dosyası",
+			})
+	except Exception:
+		pass
+
+	# 3. Sayfalar
+	for p in PAGES:
+		if not q or q in _tr_fold(p):
+			ico, lbl = p.split(" ", 1) if " " in p else ("•", p)
+			results.append({
+				"group": "🧭 Sayfalar",
+				"kind": "page",
+				"value": p,
+				"icon": ico,
+				"title": lbl,
+				"subtitle": f"{p} modülüne git",
+				"tag": "Modül",
+			})
+
+	# 4. Ayar Kategorileri
+	for sg in SETTINGS_GROUPS_META:
+		if not q or q in _tr_fold(sg["key"]) or q in _tr_fold(sg["desc"]) or q in _tr_fold(sg["keywords"]):
+			ico, lbl = sg["key"].split(" ", 1) if " " in sg["key"] else ("⚙️", sg["key"])
+			results.append({
+				"group": "⚙️ Ayarlar",
+				"kind": "settings",
+				"value": sg["key"],
+				"icon": ico,
+				"title": lbl,
+				"subtitle": sg["desc"],
+				"tag": "Ayar",
+			})
+
+	return results[:24]
+
+
+def _handle_cmd_exec(item: dict[str, Any]) -> None:
+	kind = str(item.get("kind") or "")
+	val = item.get("value")
+	if kind == "person" and val:
+		pid = int(val)
+		set_active_person(pid)
+		open_person_dossier_dialog(pid)
+	elif kind == "page" and val in PAGES:
+		ui.close_dialog(all_dialogs=True)
+		ui.session_state["target_page"] = str(val)
+		ui.rerun()
+	elif kind == "settings":
+		ui.close_dialog(all_dialogs=True)
+		ui.session_state["settings_vertical_nav"] = str(val or SETTINGS_GROUPS_META[0]["key"])
+		ui.session_state["target_page"] = "⚙️ Ayarlar"
+		ui.rerun()
+	elif kind == "new_student":
+		open_new_profile_dialog(str(val or "Öğrenci"))
+	elif kind == "class_mgr":
+		open_class_manager_dialog()
+	elif kind == "toggle_kvkk":
+		ui.session_state["kvkk_privacy_mode"] = not bool(ui.session_state.get("kvkk_privacy_mode", False))
+		ui.rerun(scope="fragment")
+
+
+def _build_topbar_html(cur_page: str, active_person: dict | sqlite3.Row | None, is_dark: bool, ai_on: bool, ai_model: str) -> str:
+	active_ay = get_active_academic_year()
+	is_arch = active_ay["end_date"] < date.today().isoformat()
+	ay_cls = "revir-tb-pill archive" if is_arch else "revir-tb-pill"
+	ay_ico = "🏛️ ARŞİV:" if is_arch else "📅"
+	ay_txt = f"{ay_ico} {active_ay['name']}"
+
+	page_clean = cur_page.split(" ", 1)[-1] if " " in cur_page else cur_page
+	person_crumb = ""
+	if active_person:
+		p_nm = mask_kvkk_value(active_person["full_name"], "name")
+		person_crumb = (
+			f"<small>›</small> "
+			f"<button type='button' class='revir-tb-pill' style='padding:2px 8px;font-size:12px;' "
+			f"title='Aktif kişinin dosyasını aç' onclick=\"window.__revirTopbarAction('open_active_dossier', '')\">"
+			f"👤 {html.escape(p_nm)} ({html.escape(str(active_person['class_name'] or ''))})</button>"
+		)
+
+	kvkk_on = is_kvkk_privacy_active()
+	kvkk_cls = "revir-tb-pill kvkk-on" if kvkk_on else "revir-tb-pill"
+	kvkk_lbl = "🛡️ KVKK Açık" if kvkk_on else "🛡️ KVKK"
+	dk_ico = "☀️" if is_dark else "🌙"
+	dk_tip = "Aydınlık Moda Geç" if is_dark else "Karanlık Moda Geç"
+	ai_click = "window.__revirToggleChatBubble()" if ai_on else "window.__revirTopbarAction('goto_settings_group', '🤖 Yapay Zekâ (Gemini) & KVKK')"
+	ai_lbl = f"🤖 AI · {ai_model.replace('gemini-', '')}" if ai_on else "⚪ AI Kapalı"
+
+	return (
+		f'<div class="revir-tb-left">'
+		f'<button type="button" class="revir-tb-icon-btn" title="Yan Menüyü Daralt / Genişlet (Alt+B)" onclick="window.__revirToggleSidebar()">☰</button>'
+		f'<div class="revir-tb-crumb">{html.escape(page_clean)} {person_crumb}</div>'
+		f'<button type="button" class="{ay_cls}" title="Eğitim Yılını Değiştir" onclick="window.__revirTopbarAction(\'goto_settings_group\', \'🏫 Kurum, Yıl & Şube Yapısı\')">{html.escape(ay_txt)}</button>'
+		f'</div>'
+		f'<div class="revir-tb-center">'
+		f'<button type="button" class="revir-tb-search-btn" onclick="window.__revirOpenCmdPalette()">'
+		f'<span>🔍 Öğrenci, sayfa veya ayar ara...</span><span class="revir-kbd">⌘K</span></button>'
+		f'</div>'
+		f'<div class="revir-tb-right">'
+		f'<button type="button" class="{kvkk_cls}" title="KVKK Ekran Maskelemesini Aç / Kapat" onclick="window.__revirTopbarAction(\'toggle_kvkk\', \'\')">{kvkk_lbl}</button>'
+		f'<button type="button" class="revir-tb-icon-btn" title="{dk_tip}" onclick="window.__revirTopbarAction(\'cycle_dark\', \'\')">{dk_ico}</button>'
+		f'<button type="button" class="revir-tb-pill" title="Gemini Klinik Asistan (⌘J)" onclick="{ai_click}">{html.escape(ai_lbl)}</button>'
+		f'</div>'
+	)
 
 
 def render_insulin_diabetes() -> None:
@@ -29426,6 +29692,7 @@ def render_insulin_diabetes() -> None:
 			"format_disability_badge_text": format_disability_badge_text,
 			"sync_after_person_mutation": sync_after_person_mutation,
 			"clear_all_data_caches": clear_all_data_caches,
+			"is_section_visible": is_section_visible,
 		}
 	)
 
@@ -29435,18 +29702,22 @@ def main() -> None:
 	ui.set_page_config(page_title="Revir Defteri", page_icon=fav_icon, layout="wide", initial_sidebar_state="expanded")
 	ensure_db_initialized()
 	app_cfg = get_app_settings()
+
+	# Açılışta varsayılan KVKK tercihini bir kez uygula
+	if "kvkk_privacy_mode" not in ui.session_state:
+		ui.session_state["kvkk_privacy_mode"] = (app_cfg.get("kvkk_default_on", "0") == "1")
+
 	font_name = app_cfg.get("font_family", "DM Sans")
 	font_css, font_url = FONT_OPTIONS.get(font_name, FONT_OPTIONS["DM Sans"])
 	theme_name = app_cfg.get("theme_name", "Klinik Turkuaz (Varsayılan)")
 	theme = THEME_PRESETS.get(theme_name, THEME_PRESETS["Klinik Turkuaz (Varsayılan)"])
 	dark_mode_mode = app_cfg.get("dark_mode_adaptation", "Otomatik (Sistem Temasına ve Dark Mode'a Uyarla)")
 	is_dark = is_dark_mode_active(app_cfg)
-	muted_col = "#94a3b8" if is_dark else "#475569"
 
 	fsize_map = {"Küçük (13.5px)": "13.5px", "Normal (15px)": "15px", "Büyük (16.5px)": "16.5px"}
 	base_fsize = fsize_map.get(app_cfg.get("font_size", "Normal (15px)"), "15px")
-	dens_map = {"Kompakt": "1.2rem", "Standart": "2rem", "Geniş": "2.8rem"}
-	pad_top = dens_map.get(app_cfg.get("ui_density", "Standart"), "2rem")
+	dens_map = {"Kompakt": "1.0rem", "Standart": "1.35rem", "Geniş": "2.0rem"}
+	pad_top = dens_map.get(app_cfg.get("ui_density", "Standart"), "1.35rem")
 
 	app_style_tag = build_app_css(font_css, font_url, base_fsize, pad_top, theme, theme_name, dark_mode_mode)
 	ui.markdown(app_style_tag, unsafe_allow_html=True)
@@ -29468,59 +29739,96 @@ def main() -> None:
 
 	active_id = ui.session_state.get("active_person_id")
 	active_person = get_person_by_id(active_id) if active_id else None
-	_sync_floating_chat_ui()
+	_ai_on, _, _ai_m = _get_active_gemini_config()
+	_sync_floating_chat_ui(cur_page_val)
+
+	# Üst Bağlam Çubuğu & Global Komut Paleti (Cmd/Ctrl+K)
+	ui.configure_topbar(_build_topbar_html(cur_page_val, active_person, is_dark, _ai_on, _ai_m), action_handler=_handle_topbar_action)
+	ui.configure_command_palette(search_handler=_handle_cmd_search, exec_handler=_handle_cmd_exec)
+
+	# Yan menü canlı bildirim rozetleri
+	today_vis_badge = 0
+	active_meds_badge = 0
+	open_fup_badge = 0
+	diab_badge = 0
+	try:
+		with connect_db() as _bconn:
+			idm.ensure_diabetes_tables(_bconn)
+			today_iso = date.today().isoformat()
+			b_row = _bconn.execute(
+				"""SELECT (SELECT COUNT(*) FROM visits WHERE visit_date=?) tv,
+						  (SELECT COUNT(*) FROM student_medications WHERE status='Aktif') am,
+						  (SELECT COUNT(*) FROM visits WHERE follow_up_status='Açık' AND follow_up IS NOT NULL AND trim(follow_up)!='') fu,
+						  (SELECT COUNT(*) FROM diabetes_profiles WHERE is_diabetic=1) db""",
+				(today_iso,),
+			).fetchone()
+			if b_row:
+				today_vis_badge = int(b_row["tv"] or 0)
+				active_meds_badge = int(b_row["am"] or 0)
+				open_fup_badge = int(b_row["fu"] or 0)
+				diab_badge = int(b_row["db"] or 0)
+	except Exception:
+		pass
+
+	nav_groups = [
+		("GÜNLÜK KLİNİK", [
+			{"value": "📊 Genel Bakış", "icon": "📊", "label": "Genel Bakış", "badge": open_fup_badge or None},
+			{"value": "🩺 Revir Kaydı", "icon": "🩺", "label": "Revir Kaydı", "badge": today_vis_badge or None},
+			{"value": "💊 İlaç Takip Sistemi", "icon": "💊", "label": "İlaç Takip", "badge": active_meds_badge or None},
+			{"value": "💉 İnsülin & Diyabet Yönetimi", "icon": "💉", "label": "İnsülin & Diyabet", "badge": diab_badge or None},
+			{"value": "💓 Vital Takip", "icon": "💓", "label": "Vital Takip"},
+		]),
+		("KİŞİ & TARAMA", [
+			{"value": "👥 Öğrenciler", "icon": "👥", "label": "Öğrenciler"},
+			{"value": "🧑‍💼 Yetişkinler", "icon": "🧑‍💼", "label": "Yetişkinler"},
+			{"value": "🏫 Okul Taraması", "icon": "🏫", "label": "Okul Taraması"},
+		]),
+		("GELİŞİM & PLAN", [
+			{"value": "📋 Sağlık Profili ve Bakım Planı", "icon": "📋", "label": "Sağlık Profili & Plan"},
+			{"value": "📏 Ölçüm ve Gelişim", "icon": "📏", "label": "Ölçüm & Gelişim"},
+		]),
+		("BELGE & SİSTEM", [
+			{"value": "🖨️ Raporlar", "icon": "🖨️", "label": "Raporlar"},
+			{"value": "📁 Evraklar", "icon": "📁", "label": "Evraklar"},
+			{"value": "⚙️ Ayarlar", "icon": "⚙️", "label": "Ayarlar"},
+		]),
+	]
 
 	with ui.sidebar:
 		if APP_ICON_PATH.exists():
-			col_logo, col_ttl = ui.columns([1, 2.7])
+			col_logo, col_ttl = ui.columns([0.85, 2.8])
 			with col_logo:
 				ui.image(get_app_icon(), use_container_width=True)
 			with col_ttl:
-				ui.markdown("<h2 style='margin:0; padding-top:4px; font-weight:800; font-size:24px;'>Revir Defteri</h2>", unsafe_allow_html=True)
+				ui.markdown("<div style='font-weight:800;font-size:19px;line-height:1.2;padding-top:3px;'>Revir Defteri</div>", unsafe_allow_html=True)
 		else:
-			ui.markdown("# ✚ Revir Defteri")
+			ui.markdown("### ✚ Revir Defteri")
 		if school_title:
 			ui.caption(f"🏫 **{school_title}**" + (f" · 📍 {def_loc_str}" if def_loc_str else ""))
-		else:
-			ui.caption(f"Öğrenci & Okul Sağlık Takip Sistemi{f' · 📍 {def_loc_str}' if def_loc_str else ''}")
 		if nurse_title:
-			ui.caption(f"👩‍⚕️ **Revir:** {nurse_title}")
+			ui.caption(f"👩‍⚕️ {nurse_title}")
 
-		ui.toggle(
-			"🛡️ KVKK Gizlilik Modu",
-			key="kvkk_privacy_mode",
-			value=False,
-			help="Açıldığında tablolardaki isimler, telefonlar ve tıbbi tanılar yıldızlanarak maskelenir.",
-		)
-		_ai_on, _, _ai_m = _get_active_gemini_config()
-		if _ai_on:
-			ui.caption(f"🤖 **Gemini AI:** Aktif (`{_ai_m}` · KVKK Korumalı)")
-		else:
-			ui.caption("⚪ **Gemini AI:** Kapalı (Çevrimdışı)")
-
-		cur_idx = PAGES.index(cur_page_val)
-		page = ui.radio("Menü", PAGES, index=cur_idx, key="main_menu_page", label_visibility="collapsed")
+		page = ui.sidebar_nav_groups(nav_groups, key="main_menu_page", default_value=cur_page_val)
 		ui.divider()
+
 		if active_person:
 			with ui.container(border=True):
 				ui.caption("📌 **Aktif Seçili Kişi**")
 				ui.markdown(f"**{mask_kvkk_value(active_person['full_name'], 'name')}**")
-				sno_txt = f" · No: {active_person['student_no']}" if active_person['student_no'] else ""
+				sno_txt = f" · No: {active_person['student_no']}" if active_person["student_no"] else ""
 				ui.caption(f"{active_person['class_name']}{sno_txt}")
-			sb_c1, sb_c2 = ui.columns([1.5, 1])
+			sb_c1, sb_c2 = ui.columns([1.6, 1])
 			with sb_c1:
-				if ui.button("📂 Kişi Dosyası", key="sidebar_goto_dossier_btn", type="primary", use_container_width=True):
+				if ui.button("📂 Dosya", key="sidebar_goto_dossier_btn", type="primary", use_container_width=True):
 					open_person_dossier_dialog(active_person["id"])
 			with sb_c2:
 				if ui.button("Temizle", key="sidebar_clear_active_person", use_container_width=True):
 					set_active_person(None)
 					ui.rerun()
-		ui.caption("🔒 Veriler bu cihazda saklanır.")
-		ui.caption(f"🚀 **Sürüm:** v{APP_VERSION}")
 
-		# Sidebar Kapatma Butonu
+		ui.caption(f"🔒 Yerel Veri · 🚀 **v{APP_VERSION}**")
 		ui.markdown(
-			'<div class="revir-sidebar-close-btn" role="button" tabindex="0"><span>◀</span> <span>Menüyü Kapat</span></div>',
+			'<div class="revir-sidebar-close-btn" role="button" tabindex="0" title="Yan Menüyü Daralt / Genişlet (Alt+B)"><span>◀</span> <span>Menüyü Daralt</span></div>',
 			unsafe_allow_html=True,
 		)
 

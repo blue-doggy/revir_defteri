@@ -584,6 +584,9 @@ def _render_svg_altair_chart(chart: Any) -> str:
 		return []
 
 	is_temporal = False
+	is_nominal = False
+	nominal_labels: list[str] = []
+	nominal_index: dict[str, int] = {}
 	x_title = ""
 	y_title = ""
 	x_domain_fixed = None
@@ -596,6 +599,17 @@ def _render_svg_altair_chart(chart: Any) -> str:
 	all_xs: list[float] = []
 	all_ys: list[float] = []
 	parsed_layers: list[dict] = []
+
+	def _resolve_x_coord(raw_v: Any, temporal_flag: bool, nominal_flag: bool) -> float | None:
+		if raw_v is None or (isinstance(raw_v, float) and math.isnan(raw_v)):
+			return None
+		if nominal_flag:
+			key_s = str(raw_v)
+			if key_s not in nominal_index:
+				nominal_index[key_s] = len(nominal_labels)
+				nominal_labels.append(key_s)
+			return float(nominal_index[key_s])
+		return _parse_x_val(raw_v, temporal_flag)
 
 	for lay in layers:
 		rows = _resolve_rows(lay)
@@ -622,8 +636,11 @@ def _render_svg_altair_chart(chart: Any) -> str:
 		y_field = y_enc.get("field")
 		c_field = c_enc.get("field")
 
-		if x_enc.get("type") == "temporal":
+		x_t = x_enc.get("type")
+		if x_t == "temporal":
 			is_temporal = True
+		elif x_t in ("nominal", "ordinal"):
+			is_nominal = True
 		if x_enc.get("title") and not x_title:
 			x_title = str(x_enc["title"])
 		if y_enc.get("title") and not y_title:
@@ -631,7 +648,10 @@ def _render_svg_altair_chart(chart: Any) -> str:
 		if isinstance(x_enc.get("scale"), dict) and x_enc["scale"].get("domain") and x_domain_fixed is None:
 			dom = x_enc["scale"]["domain"]
 			if isinstance(dom, list) and len(dom) == 2:
-				x_domain_fixed = (float(dom[0]), float(dom[1]))
+				try:
+					x_domain_fixed = (float(dom[0]), float(dom[1]))
+				except Exception:
+					pass
 		if isinstance(y_enc.get("scale"), dict) and y_enc["scale"].get("domain") and y_domain_fixed is None:
 			dom = y_enc["scale"]["domain"]
 			if isinstance(dom, list) and len(dom) == 2:
@@ -644,7 +664,7 @@ def _render_svg_altair_chart(chart: Any) -> str:
 
 		for r in rows:
 			if x_field and x_field in r:
-				xv = _parse_x_val(r.get(x_field), is_temporal)
+				xv = _resolve_x_coord(r.get(x_field), is_temporal, is_nominal)
 				if xv is not None:
 					all_xs.append(xv)
 			if y_field and y_field in r:
@@ -732,19 +752,33 @@ def _render_svg_altair_chart(chart: Any) -> str:
 		svg.append(f'<text x="{pad_l - 8}" y="{py + 4:.1f}" text-anchor="end" class="revir-axis-lbl">{lbl_txt}</text>')
 
 	# X ekseni işaretleri
-	x_ticks = 6
-	for i in range(x_ticks + 1):
-		xv = xmin + (xmax - xmin) * (i / x_ticks)
-		px = _sx(xv)
-		svg.append(f'<line x1="{px:.1f}" y1="{pad_t}" x2="{px:.1f}" y2="{pad_t + plot_h}" class="revir-grid-line" opacity="0.5"/>')
-		if is_temporal:
-			try:
-				lbl_x = dt_mod.datetime.fromtimestamp(xv).strftime("%d.%m.%y")
-			except Exception:
-				lbl_x = ""
-		else:
-			lbl_x = f"{xv:.0f}"
-		svg.append(f'<text x="{px:.1f}" y="{pad_t + plot_h + 18}" text-anchor="middle" class="revir-axis-lbl">{lbl_x}</text>')
+	if is_nominal and nominal_labels:
+		n_nom = len(nominal_labels)
+		step_n = max(1, math.ceil(n_nom / 6.0))
+		tick_indices = list(range(0, n_nom, step_n))
+		if (n_nom - 1) not in tick_indices:
+			tick_indices.append(n_nom - 1)
+		for ti in tick_indices:
+			px = _sx(float(ti))
+			svg.append(f'<line x1="{px:.1f}" y1="{pad_t}" x2="{px:.1f}" y2="{pad_t + plot_h}" class="revir-grid-line" opacity="0.5"/>')
+			raw_l = nominal_labels[ti]
+			short_l = raw_l[5:16] if len(raw_l) >= 16 and raw_l[4] == "-" else (raw_l[:13] + "…" if len(raw_l) > 14 else raw_l)
+			svg.append(f'<text x="{px:.1f}" y="{pad_t + plot_h + 18}" text-anchor="middle" class="revir-axis-lbl">{html_lib.escape(short_l)}</text>')
+	else:
+		x_ticks = 6
+		short_time_span = is_temporal and ((xmax - xmin) <= 86400.0 * 4.5)
+		for i in range(x_ticks + 1):
+			xv = xmin + (xmax - xmin) * (i / x_ticks)
+			px = _sx(xv)
+			svg.append(f'<line x1="{px:.1f}" y1="{pad_t}" x2="{px:.1f}" y2="{pad_t + plot_h}" class="revir-grid-line" opacity="0.5"/>')
+			if is_temporal:
+				try:
+					lbl_x = dt_mod.datetime.fromtimestamp(xv).strftime("%d.%m %H:%M" if short_time_span else "%d.%m.%y")
+				except Exception:
+					lbl_x = ""
+			else:
+				lbl_x = f"{xv:.0f}"
+			svg.append(f'<text x="{px:.1f}" y="{pad_t + plot_h + 18}" text-anchor="middle" class="revir-axis-lbl">{lbl_x}</text>')
 
 	# Eksen başlıkları
 	if x_title:
@@ -777,10 +811,29 @@ def _render_svg_altair_chart(chart: Any) -> str:
 						svg.append(f'<line x1="{pad_l}" y1="{py:.1f}" x2="{w - pad_r}" y2="{py:.1f}" stroke="{rcol}" stroke-width="1.2"{dash_attr}/>')
 			continue
 
+		if mtype == "bar":
+			bcol_default = str(mcfg.get("color") or "#0ea5e9")
+			n_bars = max(1, len(rows))
+			bw = max(10.0, min(42.0, (plot_w / max(n_bars, 2)) * 0.56))
+			y_base = _sy(max(ymin, 0.0)) if ymin < 0.0 else (pad_t + plot_h)
+			for r in rows:
+				xv = _resolve_x_coord(r.get(xf), is_temporal, is_nominal) if xf else None
+				yv = _parse_x_val(r.get(yf), False) if yf else None
+				if xv is None or yv is None:
+					continue
+				col = _color_for(str(r.get(cf))) if cf else bcol_default
+				cx = _sx(xv)
+				cy = _sy(yv)
+				by = min(cy, y_base)
+				bh = max(2.0, abs(y_base - cy))
+				tip = html_lib.escape(_build_tip(r, tooltips), quote=True)
+				svg.append(f'<rect x="{cx - bw / 2.0:.1f}" y="{by:.1f}" width="{bw:.1f}" height="{bh:.1f}" rx="4" fill="{html_lib.escape(col, quote=True)}" class="revir-bar-rect" data-tip="{tip}"/>')
+			continue
+
 		if mtype == "line":
 			groups: OrderedDict[str, list[tuple[float, float, dict]]] = OrderedDict()
 			for r in rows:
-				xv = _parse_x_val(r.get(xf), is_temporal) if xf else None
+				xv = _resolve_x_coord(r.get(xf), is_temporal, is_nominal) if xf else None
 				yv = _parse_x_val(r.get(yf), False) if yf else None
 				if xv is None or yv is None:
 					continue
@@ -813,7 +866,7 @@ def _render_svg_altair_chart(chart: Any) -> str:
 			psize = float(mcfg.get("size") or 90)
 			radius = max(4.0, min(9.0, math.sqrt(psize / math.pi)))
 			for r in rows:
-				xv = _parse_x_val(r.get(xf), is_temporal) if xf else None
+				xv = _resolve_x_coord(r.get(xf), is_temporal, is_nominal) if xf else None
 				yv = _parse_x_val(r.get(yf), False) if yf else None
 				if xv is None or yv is None:
 					continue
@@ -854,7 +907,7 @@ class _AppSession:
 		self.sidebar_collapsed: bool = False
 		self.dialog_stack: list[_ActiveDialog] = []
 		self.uploaded_files: dict[str, list[UploadedFile]] = {}
-		self.downloads: OrderedDict[str, tuple[bytes, str, str]] = OrderedDict()
+		self.downloads: OrderedDict[str, tuple[Any, str, str]] = OrderedDict()
 		self.media: OrderedDict[str, tuple[bytes, str]] = OrderedDict()
 		self.dataframe_selections: dict[str, dict[str, Any]] = {}
 		self.editor_input_hashes: dict[str, str] = {}
@@ -864,6 +917,7 @@ class _AppSession:
 		self.last_html_payload: dict[str, Any] = {}
 		self.floating_chat_enabled: bool = False
 		self.floating_chat_label: str = "KVKK Korumalı"
+		self.floating_chat_chips: list[dict[str, str]] | None = None
 		self.floating_chat_handler: Callable | None = None
 		self.floating_chat_export_handler: Callable | None = None
 		self.chat_history: list[dict[str, str]] = []
@@ -897,9 +951,43 @@ class _AppSession:
 		token = f"dl_{h}"
 		self.downloads[token] = (data, file_name, mime)
 		self.downloads.move_to_end(token)
-		while len(self.downloads) > 200:
+		while len(self.downloads) > 260:
 			self.downloads.popitem(last=False)
 		return token
+
+	def register_lazy_download(self, factory: Callable[[], Any], file_name: str, mime: str, stable_key: str = "") -> str:
+		"""Dosya içeriğini yalnızca kullanıcı indir butonuna tıkladığında üreten tembel indirme kaydı."""
+		seed = f"lazy:{stable_key}:{file_name}:{mime}:{id(factory)}".encode("utf-8", errors="ignore")
+		token = f"ldl_{hashlib.sha1(seed).hexdigest()[:16]}"
+		self.downloads[token] = (factory, file_name, mime)
+		self.downloads.move_to_end(token)
+		while len(self.downloads) > 260:
+			self.downloads.popitem(last=False)
+		return token
+
+	def resolve_download_item(self, token: str) -> tuple[bytes, str, str] | None:
+		entry = self.downloads.get(token)
+		if entry is None:
+			return None
+		payload, fname, mime = entry
+		if callable(payload):
+			produced = payload()
+			if isinstance(produced, bytes):
+				raw = produced
+			elif isinstance(produced, bytearray):
+				raw = bytes(produced)
+			elif isinstance(produced, str):
+				raw = produced.encode("utf-8")
+			elif hasattr(produced, "getvalue"):
+				v = produced.getvalue()
+				raw = v.encode("utf-8") if isinstance(v, str) else bytes(v)
+			elif hasattr(produced, "read"):
+				v = produced.read()
+				raw = v.encode("utf-8") if isinstance(v, str) else bytes(v)
+			else:
+				raw = str(produced or "").encode("utf-8")
+			return (raw, fname, mime)
+		return (payload, fname, mime)
 
 	def register_media(self, data: bytes, mime: str) -> str:
 		h = hashlib.sha1(data[:4096] + str(len(data)).encode()).hexdigest()[:16]
@@ -1170,7 +1258,7 @@ class _UIContainer:
 		ctx = _get_ctx()
 		ctx.session.page_title = str(page_title or "Revir Defteri")
 
-	def columns(self, spec: int | Sequence[int | float], *, gap: str = "small", vertical_alignment: str = "top", sticky_first_col: bool = False) -> list[_UIContainer]:
+	def columns(self, spec: int | Sequence[int | float], *, gap: str = "small", vertical_alignment: str = "top", sticky_first_col: bool = False, sticky_last_col: bool = False) -> list[_UIContainer]:
 		ctx = _get_ctx()
 		if isinstance(spec, int):
 			weights = [1.0] * max(1, spec)
@@ -1182,7 +1270,7 @@ class _UIContainer:
 		align_css = {"top": "start", "center": "center", "bottom": "end"}.get(vertical_alignment, "start")
 
 		# Yer tutucu liste; render sırasında son HTML birleştirilir
-		placeholder = _LazyColumnsNode(col_lists, grid_tpl, gap_px, align_css, sticky_first_col=sticky_first_col)
+		placeholder = _LazyColumnsNode(col_lists, grid_tpl, gap_px, align_css, sticky_first_col=sticky_first_col, sticky_last_col=sticky_last_col)
 		ctx.current_nodes().append(placeholder)  # type: ignore[arg-type]
 		return [_UIContainer(target_list=cl) for cl in col_lists]
 
@@ -1532,22 +1620,25 @@ class _UIContainer:
 			with self:
 				return _root.download_button(label, data, file_name=file_name, mime=mime, key=key, help=help, type=type, disabled=disabled, use_container_width=use_container_width)
 		ctx = _get_ctx()
-		if isinstance(data, bytes):
-			raw = data
-		elif isinstance(data, bytearray):
-			raw = bytes(data)
-		elif isinstance(data, str):
-			raw = data.encode("utf-8")
-		elif hasattr(data, "getvalue"):
-			v = data.getvalue()
-			raw = v.encode("utf-8") if isinstance(v, str) else bytes(v)
-		elif hasattr(data, "read"):
-			v = data.read()
-			raw = v.encode("utf-8") if isinstance(v, str) else bytes(v)
-		else:
-			raw = str(data).encode("utf-8")
 		eff_mime = mime or mimetypes.guess_type(file_name)[0] or "application/octet-stream"
-		token = ctx.session.register_download(raw, file_name, eff_mime)
+		if callable(data):
+			token = ctx.session.register_lazy_download(data, file_name, eff_mime, stable_key=str(key or label))
+		else:
+			if isinstance(data, bytes):
+				raw = data
+			elif isinstance(data, bytearray):
+				raw = bytes(data)
+			elif isinstance(data, str):
+				raw = data.encode("utf-8")
+			elif hasattr(data, "getvalue"):
+				v = data.getvalue()
+				raw = v.encode("utf-8") if isinstance(v, str) else bytes(v)
+			elif hasattr(data, "read"):
+				v = data.read()
+				raw = v.encode("utf-8") if isinstance(v, str) else bytes(v)
+			else:
+				raw = str(data).encode("utf-8")
+			token = ctx.session.register_download(raw, file_name, eff_mime)
 		btn_type = "primary" if type == "primary" else "secondary"
 		cls = f"revir-btn revir-btn-{btn_type}" + (" revir-w-full" if use_container_width else "")
 		dis_attr = " disabled" if disabled else ""
@@ -1799,6 +1890,7 @@ class _UIContainer:
 			f'placeholder="{html_lib.escape(ph, quote=True)}" {"disabled" if disabled else ""} '
 			f'onfocus="this.select();window.__revirOpenCombo(\'{esc_wid}\', event)" '
 			f'onblur="window.__revirBlurCombo(\'{esc_wid}\', this)" '
+			f'onkeydown="window.__revirComboKey(\'{esc_wid}\', event)" '
 			f'oninput="window.__revirFilterCombo(\'{esc_wid}\', this.value)" autocomplete="off"/>'
 			f'{clear_btn}<span class="revir-combo-arrow">▾</span></div>'
 			f'<div class="revir-combo-menu" id="combo_{esc_wid}"></div>'
@@ -1861,7 +1953,7 @@ class _UIContainer:
 			f'<div class="revir-multi" data-key="{esc_wid}" data-kind="multiselect" data-selected="{sel_json}" data-options="{opts_json}"{in_form_attr}>'
 			f'<div class="revir-multi-control" onclick="window.__revirOpenMulti(\'{esc_wid}\', event)">'
 			f'{chips}<input type="text" class="revir-multi-search" placeholder="{html_lib.escape(ph, quote=True)}" {"disabled" if disabled else ""} '
-			f'onfocus="window.__revirOpenMulti(\'{esc_wid}\', event)" oninput="window.__revirFilterMulti(\'{esc_wid}\', this.value)" autocomplete="off"/>'
+			f'onfocus="window.__revirOpenMulti(\'{esc_wid}\', event)" onkeydown="window.__revirMultiKey(\'{esc_wid}\', event)" oninput="window.__revirFilterMulti(\'{esc_wid}\', this.value)" autocomplete="off"/>'
 			f'</div><div class="revir-combo-menu" id="multi_{esc_wid}"></div></div></div>'
 		)
 		return cur
@@ -2072,10 +2164,10 @@ class _UIContainer:
 			return list(files)
 		return files[0] if files else None
 
-	def dataframe(self, data: Any, *, width: Any = None, height: int | None = None, use_container_width: bool = False, hide_index: bool | None = None, column_order: Sequence[str] | None = None, column_config: dict[str, Any] | None = None, key: str | None = None, on_select: str = "ignore", selection_mode: Any = "multi-row") -> Any:
+	def dataframe(self, data: Any, *, width: Any = None, height: int | None = None, use_container_width: bool = False, hide_index: bool | None = None, column_order: Sequence[str] | None = None, column_config: dict[str, Any] | None = None, key: str | None = None, on_select: str = "ignore", selection_mode: Any = "multi-row", sticky_cols: int | None = None) -> Any:
 		if self._target_list is not None or self._is_sidebar:
 			with self:
-				return _root.dataframe(data, width=width, height=height, use_container_width=use_container_width, hide_index=hide_index, column_order=column_order, column_config=column_config, key=key, on_select=on_select, selection_mode=selection_mode)
+				return _root.dataframe(data, width=width, height=height, use_container_width=use_container_width, hide_index=hide_index, column_order=column_order, column_config=column_config, key=key, on_select=on_select, selection_mode=selection_mode, sticky_cols=sticky_cols)
 		ctx = _get_ctx()
 		if hasattr(data, "data") and isinstance(data.data, pd.DataFrame):
 			df = data.data
@@ -2095,6 +2187,14 @@ class _UIContainer:
 		show_idx = not bool(hide_index) if hide_index is not None else False
 		selectable = (on_select == "rerun")
 
+		# Geniş tablolarda ilk aksiyon/isim sütununu otomatik yapışkan yap
+		if sticky_cols is not None:
+			eff_sticky = max(0, min(2, int(sticky_cols)))
+		elif len(visible_cols) >= 6 and visible_cols and str(visible_cols[0]) in ("📂 Dosya", "Dosya", "📂"):
+			eff_sticky = 1
+		else:
+			eff_sticky = 0
+
 		sel_state = ctx.session.dataframe_selections.get(df_key, {"rows": [], "cells": []}) if selectable else {"rows": [], "cells": []}
 		sel_rows_set = set(sel_state.get("rows") or [])
 
@@ -2104,11 +2204,12 @@ class _UIContainer:
 		th_parts: list[str] = []
 		if show_idx:
 			th_parts.append("<th>#</th>")
-		for c in visible_cols:
+		for c_idx, c in enumerate(visible_cols):
 			cc = cfg_map.get(c)
 			lbl = cc.label if isinstance(cc, _ColumnConfig) and cc.label else str(c)
 			hlp = f' title="{html_lib.escape(cc.help, quote=True)}"' if isinstance(cc, _ColumnConfig) and cc.help else ""
-			th_parts.append(f'<th{hlp} onclick="window.__revirSortTable(this)">{html_lib.escape(lbl)} <span class="revir-sort-ind">⇅</span></th>')
+			st_cls = f' class="revir-sticky-th revir-sticky-c{c_idx}"' if c_idx < eff_sticky else ""
+			th_parts.append(f'<th{st_cls}{hlp} onclick="window.__revirSortTable(this)">{html_lib.escape(lbl)} <span class="revir-sort-ind">⇅</span></th>')
 
 		row_parts: list[str] = []
 		for r_pos in range(len(df)):
@@ -2116,21 +2217,23 @@ class _UIContainer:
 			tds: list[str] = []
 			if show_idx:
 				tds.append(f'<td class="revir-idx-cell">{html_lib.escape(str(df.index[r_pos]))}</td>')
-			for c in visible_cols:
+			for c_idx, c in enumerate(visible_cols):
 				val = df.iloc[r_pos][c]
 				cc = cfg_map.get(c)
 				txt = _format_df_cell(val, cc if isinstance(cc, _ColumnConfig) else None)
 				is_dosya = str(c) in ("📂 Dosya", "Dosya", "📂")
+				st_td = f" revir-sticky-td revir-sticky-c{c_idx}" if c_idx < eff_sticky else ""
 				if selectable:
 					safe_col = json.dumps(str(c))
 					click_attr = f" onclick='window.__revirDfSelect(\"{esc_key}\", {r_pos}, {html_lib.escape(safe_col, quote=True)})'"
-					cell_cls = " revir-cell-clickable revir-cell-action" if is_dosya else " revir-cell-clickable"
+					cell_cls = ("revir-cell-clickable revir-cell-action" if is_dosya else "revir-cell-clickable") + st_td
 					if is_dosya:
 						tds.append(f'<td class="{cell_cls}"{click_attr}><span class="revir-dosya-pill">{html_lib.escape(txt or "📂 Aç")}</span></td>')
 					else:
 						tds.append(f'<td class="{cell_cls}"{click_attr}>{html_lib.escape(txt)}</td>')
 				else:
-					tds.append(f"<td>{html_lib.escape(txt)}</td>")
+					cls_attr = f' class="{st_td.strip()}"' if st_td else ""
+					tds.append(f"<td{cls_attr}>{html_lib.escape(txt)}</td>")
 			row_parts.append(f'<tr class="{row_sel_cls}">{"".join(tds)}</tr>')
 
 		if not row_parts:
@@ -2264,9 +2367,9 @@ class _UIContainer:
 			render_rows.append(("added", a_idx, row_vals))
 
 		tr_parts: list[str] = []
-		for row_kind, row_id, row_vals in render_rows:
+		for vis_r_idx, (row_kind, row_id, row_vals) in enumerate(render_rows):
 			tds: list[str] = []
-			for c in visible_cols:
+			for c_idx, c in enumerate(visible_cols):
 				cc = cfg_map.get(c)
 				col_dis = disabled_all or (c in disabled_set) or (isinstance(cc, _ColumnConfig) and bool(cc.disabled))
 				val = row_vals.get(c)
@@ -2282,7 +2385,7 @@ class _UIContainer:
 					chk = " checked" if (val is True or str(val).lower() == "true") else ""
 					tds.append(
 						f'<td class="revir-ed-cell revir-ed-center">'
-						f'<input id="{cell_id}" type="checkbox"{chk} '
+						f'<input id="{cell_id}" type="checkbox"{chk} data-ed-row="{vis_r_idx}" data-ed-col="{c_idx}" '
 						f"onchange='window.__revirEditorCell(\"{esc_key}\", \"{row_kind}\", {row_id}, {safe_col}, this.checked, \"{cell_id}\")'/></td>"
 					)
 				elif isinstance(cc, _ColumnConfig) and cc.kind == "selectbox":
@@ -2299,7 +2402,7 @@ class _UIContainer:
 						opt_html.append(f'<option value="{html_lib.escape(cur_s, quote=True)}" selected>{html_lib.escape(cur_s)}</option>')
 					tds.append(
 						f'<td class="revir-ed-cell">'
-						f'<select id="{cell_id}" class="revir-ed-select" '
+						f'<select id="{cell_id}" class="revir-ed-select" data-ed-row="{vis_r_idx}" data-ed-col="{c_idx}" '
 						f"onchange='window.__revirEditorCell(\"{esc_key}\", \"{row_kind}\", {row_id}, {safe_col}, this.value, \"{cell_id}\")'>"
 						f'{"".join(opt_html)}</select></td>'
 					)
@@ -2310,10 +2413,11 @@ class _UIContainer:
 					tds.append(
 						f'<td class="revir-ed-cell">'
 						f'<input id="{cell_id}" type="text"{imode} class="revir-ed-input" '
+						f'data-ed-row="{vis_r_idx}" data-ed-col="{c_idx}" '
 						f'value="{html_lib.escape(disp_v, quote=True)}" '
 						f"oninput='window.__revirEditorDirty(\"{esc_key}\", \"{row_kind}\", {row_id}, {safe_col}, this.value)' "
 						f"onchange='window.__revirEditorCell(\"{esc_key}\", \"{row_kind}\", {row_id}, {safe_col}, this.value, \"{cell_id}\")' "
-						f'onkeydown="if(event.key===\'Enter\'){{event.preventDefault();this.blur();}}"/></td>'
+						f'onkeydown="if(event.key===\'Enter\'){{event.preventDefault();window.__revirEditorEnter(this);}}"/></td>'
 					)
 
 			if is_dynamic:
@@ -2341,17 +2445,20 @@ class _UIContainer:
 
 
 class _LazyColumnsNode:
-	def __init__(self, col_lists: list[list[str]], grid_tpl: str, gap_px: str, align_css: str, *, sticky_first_col: bool = False) -> None:
+	def __init__(self, col_lists: list[list[str]], grid_tpl: str, gap_px: str, align_css: str, *, sticky_first_col: bool = False, sticky_last_col: bool = False) -> None:
 		self.col_lists = col_lists
 		self.grid_tpl = grid_tpl
 		self.gap_px = gap_px
 		self.align_css = align_css
 		self.sticky_first_col = sticky_first_col
+		self.sticky_last_col = sticky_last_col
 
 	def render(self) -> str:
 		col_parts: list[str] = []
+		last_i = len(self.col_lists) - 1
 		for idx, cl in enumerate(self.col_lists):
-			cls = "revir-col revir-sticky-col" if (self.sticky_first_col and idx == 0) else "revir-col"
+			is_st = (self.sticky_first_col and idx == 0) or (self.sticky_last_col and idx == last_i)
+			cls = "revir-col revir-sticky-col" if is_st else "revir-col"
 			col_parts.append(f'<div class="{cls}">{_flatten_nodes(cl)}</div>')
 		return f'<div class="revir-cols" style="grid-template-columns:{self.grid_tpl}; gap:{self.gap_px}; align-items:{self.align_css};">{"".join(col_parts)}</div>'
 
@@ -2480,10 +2587,13 @@ def configure_floating_chat(
 	label: str = "KVKK Korumalı",
 	handler: Callable | None = None,
 	export_handler: Callable | None = None,
+	chips: list[dict[str, str]] | None = None,
 ) -> None:
 	ctx = _get_ctx()
 	ctx.session.floating_chat_enabled = bool(enabled)
 	ctx.session.floating_chat_label = str(label or "KVKK Korumalı")
+	if chips is not None:
+		ctx.session.floating_chat_chips = list(chips)
 	if handler is not None:
 		ctx.session.floating_chat_handler = handler
 	if export_handler is not None:
@@ -2853,6 +2963,7 @@ def _execute_render_cycle(app_fn: Callable[[], None], session: _AppSession, payl
 
 		result = {
 			"title": session.page_title,
+			"active_page": str(session.session_state.get("main_menu_page") or ""),
 			"topbar_html": session.topbar_html,
 			"sidebar_html": sidebar_html,
 			"main_html": main_html,
@@ -2867,6 +2978,7 @@ def _execute_render_cycle(app_fn: Callable[[], None], session: _AppSession, payl
 			"scripts_html": "\n".join(last_ctx.scripts_parts),
 			"floating_chat_enabled": session.floating_chat_enabled,
 			"floating_chat_label": session.floating_chat_label,
+			"floating_chat_chips": session.floating_chat_chips,
 		}
 		session.last_html_payload = result
 		return result
@@ -3184,8 +3296,9 @@ html, body {
 	padding: 7px 10px; border-radius: 6px; cursor: pointer; font-size: 0.89rem;
 	display: flex; align-items: center; gap: 8px; color: var(--text-main);
 }
-.revir-combo-opt:hover { background: var(--mint); }
+.revir-combo-opt:hover, .revir-combo-opt.kbd-active { background: var(--mint); }
 .revir-combo-opt.selected { background: rgba(13,148,136,0.14); font-weight: 700; color: var(--teal); }
+.revir-combo-opt.selected.kbd-active { background: rgba(13,148,136,0.22); }
 .revir-chip {
 	display: inline-flex; align-items: center; gap: 4px;
 	background: rgba(13,148,136,0.14); color: var(--teal);
@@ -3269,6 +3382,7 @@ html, body {
 	background: var(--card-bg); border: 1px solid var(--line); border-radius: 12px;
 	padding: 14px; box-shadow: 0 12px 34px rgba(0,0,0,0.22); z-index: 980;
 }
+.revir-popover-body.flip-up { top: auto; bottom: calc(100% + 6px); }
 .revir-popover-body.open { display: block; }
 
 /* Tablolar & Data Editor */
@@ -3283,7 +3397,12 @@ html, body {
 	font-weight: 700; text-align: left; padding: 9px 11px;
 	border-bottom: 1.5px solid var(--line); white-space: nowrap; cursor: pointer; user-select: none;
 }
-.revir-sort-ind { opacity: 0.4; font-size: 11px; margin-left: 3px; }
+.revir-sticky-th { position: sticky !important; left: 0; z-index: 5 !important; background: var(--sidebar-bg) !important; box-shadow: 2px 0 6px rgba(15,23,42,0.06); }
+.revir-sticky-td { position: sticky !important; left: 0; z-index: 2; background: var(--card-bg); box-shadow: 2px 0 6px rgba(15,23,42,0.05); }
+.revir-table tbody tr:hover td.revir-sticky-td { background: var(--mint); }
+.revir-row-selected td.revir-sticky-td { background: rgba(13,148,136,0.16) !important; }
+.revir-sort-ind { opacity: 0.45; font-size: 11px; margin-left: 3px; }
+.revir-sort-ind.active { opacity: 1; color: var(--teal); font-weight: 800; }
 .revir-table tbody td { padding: 7px 11px; border-bottom: 1px solid var(--line); vertical-align: middle; }
 .revir-table tbody tr:hover td { background: rgba(13,148,136,0.05); }
 .revir-row-selected td { background: rgba(13,148,136,0.13) !important; }
@@ -3469,27 +3588,66 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 	background: var(--sidebar-bg); font-size: 11.5px; color: var(--text-muted);
 }
 
-/* Tema Swatch Kartları & Kişi Dosyası Sabit Şerit */
+/* Tema Swatch Kartları, Klinik Rozetler & Sabit Şerit */
 .revir-sticky-alert-bar {
 	position: sticky; top: 0; z-index: 10;
 	background: var(--card-bg); border: 1px solid var(--line);
 	border-radius: 12px; padding: 11px 15px; margin-bottom: 12px;
 	box-shadow: 0 4px 14px rgba(15,23,42,0.06);
 }
+.revir-op-row {
+	background: var(--card-bg); border: 1px solid var(--line); color: var(--text-main);
+	border-radius: 9px; padding: 10px 14px; margin-bottom: 6px;
+	display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+	box-shadow: 0 1px 3px rgba(15,23,42,0.04);
+}
+.revir-dose-hero {
+	background: var(--mint); border: 2px solid var(--teal); border-radius: 13px;
+	padding: 14px 16px; text-align: center; margin-bottom: 10px; color: var(--text-main);
+}
+.revir-dose-hero.danger {
+	background: rgba(239,68,68,0.11); border-color: #ef4444;
+}
+.revir-dose-hero-val { font-size: 2rem; font-weight: 900; color: var(--teal); margin: 4px 0; }
+.revir-dose-hero.danger .revir-dose-hero-val { color: #dc2626; }
+.revir-hypo-timer {
+	display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+	background: rgba(239,68,68,0.10); border: 1.5px solid rgba(239,68,68,0.45);
+	border-radius: 11px; padding: 10px 14px; margin: 8px 0 10px 0;
+}
+.revir-hypo-clock { font-size: 1.35rem; font-weight: 900; font-variant-numeric: tabular-nums; color: #dc2626; }
 
-/* Bildirim Toast & Yükleme Çubuğu */
+/* Bildirim Toast & Yükleme Çubuğu / Göstergesi */
 #revir-busy-bar {
 	position: fixed; top: 0; left: 0; height: 3px; width: 0%;
 	background: var(--teal); z-index: 9999; transition: width 0.18s ease, opacity 0.2s;
 	opacity: 0; pointer-events: none;
 }
 #revir-busy-bar.active { width: 78%; opacity: 1; }
+#revir-loading-pill {
+	position: fixed; top: 62px; left: 50%; transform: translateX(-50%); z-index: 9998;
+	background: var(--card-bg); color: var(--text-heading);
+	border: 1.5px solid var(--teal); border-radius: 999px;
+	padding: 6px 15px; font-size: 12.8px; font-weight: 700;
+	box-shadow: 0 8px 24px rgba(15,23,42,0.18);
+	display: none; align-items: center; gap: 8px; pointer-events: none;
+}
+#revir-loading-pill.active { display: inline-flex; }
+.revir-spin-dot {
+	width: 13px; height: 13px; border-radius: 50%;
+	border: 2.2px solid rgba(13,148,136,0.25); border-top-color: var(--teal);
+	animation: revirSpin 0.7s linear infinite; display: inline-block;
+}
+@keyframes revirSpin { to { transform: rotate(360deg); } }
+body.revir-busy .revir-btn { pointer-events: none; }
 #revir-toast {
 	position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 99999;
-	background: #0f172a; color: #ffffff; padding: 10px 16px; border-radius: 10px;
-	font-size: 13.5px; font-weight: 600; box-shadow: 0 10px 28px rgba(0,0,0,0.25);
-	display: none;
+	background: #0f172a; color: #ffffff; padding: 10px 18px; border-radius: 10px;
+	font-size: 13.5px; font-weight: 600; box-shadow: 0 10px 28px rgba(0,0,0,0.28);
+	display: none; cursor: pointer; border-left: 4px solid var(--teal);
 }
+#revir-toast.toast-err { border-left-color: #ef4444; background: #7f1d1d; }
+#revir-toast.toast-warn { border-left-color: #f59e0b; background: #78350f; }
 
 /* Yüzen Gemini Sohbet Butonu & Konuşma Balonu */
 #revir-fab-btn {
@@ -3680,6 +3838,7 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 </head>
 <body>
 <div id="revir-busy-bar"></div>
+<div id="revir-loading-pill"><span class="revir-spin-dot"></span><span>İşlem yürütülüyor...</span></div>
 <button id="revir-sidebar-open" class="revir-sidebar-open-btn" type="button" title="Menüyü Aç" onclick="window.__revirSetSidebar(false)">❯</button>
 <div class="revir-app">
 	<aside id="revir-sidebar" class="revir-sidebar">__REVIR_INIT_SIDEBAR__</aside>
@@ -3715,15 +3874,15 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 		<div id="revir-cmd-results"></div>
 		<div class="revir-cmd-footer">
 			<span>↑↓ Gezin · ↵ Seç · ESC Kapat</span>
-			<span>Kısayollar: ⌘K Ara · Alt+V Yeni Vizit · Alt+B Menü</span>
+			<span>Kısayollar: ⌘K Ara · ⌘J Sohbet · Alt+V Yeni Vizit · Alt+B Menü</span>
 		</div>
 	</div>
 </div>
 <div id="revir-chart-tooltip"></div>
-<div id="revir-toast"></div>
+<div id="revir-toast" onclick="this.style.display='none'" title="Kapatmak için tıklayın"></div>
 
 <!-- Yüzen Gemini Sohbet Butonu ve Konuşma Balonu -->
-<button id="revir-fab-btn" type="button" title="Gemini Klinik Asistan ile Konuş" onclick="window.__revirToggleChatBubble()">
+<button id="revir-fab-btn" type="button" title="Gemini Klinik Asistan ile Konuş (⌘J / Alt+A)" onclick="window.__revirToggleChatBubble()">
 	<span class="revir-fab-icon">🤖</span>
 	<span>Gemini Asistan</span>
 </button>
@@ -3745,7 +3904,7 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 			<button type="button" class="revir-chat-hbtn" title="Küçült" onclick="window.__revirToggleChatBubble()">✕</button>
 		</div>
 	</div>
-	<div class="revir-chat-chips">
+	<div id="revir-chat-chips" class="revir-chat-chips">
 		<button type="button" class="revir-chat-qchip" onclick="window.__revirQuickPrompt('Seçili kişinin sağlık, büyüme, özel gereksinim ve revir profilini kısaca özetle.')">🩺 Kişiyi Özetle</button>
 		<button type="button" class="revir-chat-qchip" onclick="window.__revirQuickPrompt('Seçili kişinin kapsamlı sağlık raporunu Word (.docx) dosyası olarak hazırla.')">📄 Word Raporu</button>
 		<button type="button" class="revir-chat-qchip" onclick="window.__revirQuickPrompt('Bugünkü revir başvurularını Excel (.xlsx) tablosu olarak hazırla ve özetle.')">📊 Excel Liste</button>
@@ -3792,25 +3951,93 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 	var modalDirty = false;
 	var modalBackdropWarned = false;
 	var lastDialogSig = "";
+	var lastRenderedPage = "";
+	var loadingPillTimer = null;
 	var cmdItems = [];
 	var cmdActiveIdx = 0;
 	var cmdTimer = null;
+	var hypoTimers = {};
 
-	function showToast(msg) {
+	function showToast(msg, kind) {
 		var el = document.getElementById("revir-toast");
 		if (!el) return;
 		el.textContent = msg;
+		el.classList.remove("toast-err", "toast-warn");
+		var k = kind || (String(msg).indexOf("❌") !== -1 ? "err" : (String(msg).indexOf("⚠️") !== -1 ? "warn" : ""));
+		if (k === "err") el.classList.add("toast-err");
+		else if (k === "warn") el.classList.add("toast-warn");
 		el.style.display = "block";
 		clearTimeout(el.__t);
-		el.__t = setTimeout(function() { el.style.display = "none"; }, 3200);
+		el.__t = setTimeout(function() { el.style.display = "none"; }, 3600);
 	}
 
-	function setBusy(on) {
+	function setBusy(on, labelTxt) {
 		var bar = document.getElementById("revir-busy-bar");
-		if (!bar) return;
-		if (on) bar.classList.add("active");
-		else bar.classList.remove("active");
+		var pill = document.getElementById("revir-loading-pill");
+		if (bar) {
+			if (on) bar.classList.add("active");
+			else bar.classList.remove("active");
+		}
+		document.body.classList.toggle("revir-busy", !!on);
+		clearTimeout(loadingPillTimer);
+		if (on) {
+			if (pill && labelTxt) {
+				var sp = pill.querySelector("span:last-child");
+				if (sp) sp.textContent = labelTxt;
+			}
+			loadingPillTimer = setTimeout(function() {
+				if (pill && inflight) pill.classList.add("active");
+			}, 260);
+		} else {
+			if (pill) {
+				pill.classList.remove("active");
+				var sp2 = pill.querySelector("span:last-child");
+				if (sp2) sp2.textContent = "İşlem yürütülüyor...";
+			}
+		}
 	}
+
+	window.__revirStartHypoTimer = function(clockId, totalSec) {
+		var sec = parseInt(totalSec || 900, 10);
+		if (hypoTimers[clockId]) clearInterval(hypoTimers[clockId]);
+		var updateDisp = function() {
+			var el = document.getElementById(clockId);
+			if (!el) {
+				clearInterval(hypoTimers[clockId]);
+				delete hypoTimers[clockId];
+				return;
+			}
+			var mm = Math.floor(sec / 60);
+			var ss = sec % 60;
+			el.textContent = (mm < 10 ? "0" : "") + mm + ":" + (ss < 10 ? "0" : "") + ss;
+		};
+		updateDisp();
+		showToast("⏱️ 15-15 Hipoglisemi sayacı başlatıldı — 15 dk sonra KŞ tekrar ölçülecek!", "warn");
+		hypoTimers[clockId] = setInterval(function() {
+			sec -= 1;
+			if (sec <= 0) {
+				sec = 0;
+				updateDisp();
+				clearInterval(hypoTimers[clockId]);
+				delete hypoTimers[clockId];
+				showToast("🚨 15 DAKİKA DOLDU! Öğrencinin kan şekerini şimdi tekrar ölçün!", "err");
+				try {
+					if (window.__revirSpeakText) window.__revirSpeakText("Dikkat, hipoglisemi on beş dakika sayacı doldu. Öğrencinin kan şekerini tekrar ölçün.", null);
+				} catch (e) {}
+				return;
+			}
+			updateDisp();
+		}, 1000);
+	};
+
+	window.__revirResetHypoTimer = function(clockId) {
+		if (hypoTimers[clockId]) {
+			clearInterval(hypoTimers[clockId]);
+			delete hypoTimers[clockId];
+		}
+		var el = document.getElementById(clockId);
+		if (el) el.textContent = "15:00";
+	};
 
 	function sendAction(payload, opts) {
 		opts = opts || {};
@@ -3889,7 +4116,10 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 		if (mainInner) mainInner.innerHTML = data.main_html || "";
 
 		var mainEl = document.getElementById("revir-main");
-		if (mainEl) mainEl.scrollTop = mainScroll;
+		var nextPage = String(data.active_page || "");
+		var pageChanged = !!(lastRenderedPage && nextPage && nextPage !== lastRenderedPage);
+		lastRenderedPage = nextPage || lastRenderedPage;
+		if (mainEl) mainEl.scrollTop = pageChanged ? 0 : mainScroll;
 
 		var backdrop = document.getElementById("revir-modal-backdrop");
 		var card = document.getElementById("revir-modal-card");
@@ -3979,6 +4209,17 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 		if (chatSub && data.floating_chat_label) {
 			chatSub.textContent = data.floating_chat_label;
 		}
+		var chatChipsEl = document.getElementById("revir-chat-chips");
+		if (chatChipsEl && Array.isArray(data.floating_chat_chips) && data.floating_chat_chips.length) {
+			var chipParts = data.floating_chat_chips.map(function(ch) {
+				if (ch.action === "upload") {
+					return '<button type="button" class="revir-chat-qchip" onclick="document.getElementById(\'revir-chat-file-inp\').click()">' + escHtml(ch.label || "📎 Dosya Ekle") + "</button>";
+				}
+				var pJson = JSON.stringify(String(ch.prompt || ""));
+				return '<button type="button" class="revir-chat-qchip" onclick=\'window.__revirQuickPrompt(' + escHtml(pJson) + ')\'>' + escHtml(ch.label || "") + "</button>";
+			});
+			chatChipsEl.innerHTML = chipParts.join("");
+		}
 
 		// Düzenleyici odağını koru
 		if (refocusId) {
@@ -4052,7 +4293,7 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 		sendAction({ action: "form_submit", form_id: formId, form_values: vals });
 	};
 
-	// Aranabilir Selectbox
+	// Aranabilir Selectbox (Klavye ↑↓↵ + Fare Destekli)
 	function renderComboMenu(key, filterTxt) {
 		var wrap = document.querySelector('.revir-combo[data-key="' + CSS.escape(key) + '"]');
 		var menu = document.getElementById("combo_" + key);
@@ -4065,12 +4306,44 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 			var txt = String(opts[i]);
 			if (q && txt.toLocaleLowerCase("tr-TR").indexOf(q) === -1) continue;
 			var sel = String(i) === curVal ? " selected" : "";
-			html.push('<div class="revir-combo-opt' + sel + '" onmousedown="window.__revirSelectPick(\'' + key.replace(/'/g, "\\'") + '\', ' + i + ', event)">' + escHtml(txt) + '</div>');
+			var kbdCls = html.length === 0 ? " kbd-active" : "";
+			html.push('<div class="revir-combo-opt' + sel + kbdCls + '" data-opt-idx="' + i + '" onmousedown="window.__revirSelectPick(\'' + key.replace(/'/g, "\\'") + '\', ' + i + ', event)">' + escHtml(txt) + '</div>');
 			if (html.length >= 200) break;
 		}
 		if (!html.length) html.push('<div class="revir-combo-opt" style="color:var(--text-muted);cursor:default;">Sonuç bulunamadı</div>');
 		menu.innerHTML = html.join("");
 	}
+
+	window.__revirComboKey = function(key, ev) {
+		var menu = document.getElementById("combo_" + key);
+		if (!menu) return;
+		if (ev.key === "Escape") {
+			menu.classList.remove("open");
+			return;
+		}
+		if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+			ev.preventDefault();
+			if (!menu.classList.contains("open")) {
+				renderComboMenu(key, "");
+				menu.classList.add("open");
+			}
+			var items = Array.prototype.slice.call(menu.querySelectorAll(".revir-combo-opt[data-opt-idx]"));
+			if (!items.length) return;
+			var curI = items.findIndex(function(x) { return x.classList.contains("kbd-active"); });
+			items.forEach(function(x) { x.classList.remove("kbd-active"); });
+			var nxt = ev.key === "ArrowDown" ? (curI + 1) % items.length : (curI <= 0 ? items.length - 1 : curI - 1);
+			items[nxt].classList.add("kbd-active");
+			if (items[nxt].scrollIntoView) { try { items[nxt].scrollIntoView({ block: "nearest" }); } catch (e) {} }
+			return;
+		}
+		if (ev.key === "Enter") {
+			var act = menu.querySelector(".revir-combo-opt.kbd-active[data-opt-idx]");
+			if (act && menu.classList.contains("open")) {
+				ev.preventDefault();
+				window.__revirSelectPick(key, parseInt(act.dataset.optIdx, 10), ev);
+			}
+		}
+	};
 
 	window.__revirOpenCombo = function(key, ev) {
 		if (ev) ev.stopPropagation();
@@ -4122,7 +4395,7 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 		sendAction({ action: "change", key: key, value: null });
 	};
 
-	// Multiselect
+	// Multiselect (Klavye ↑↓↵ Destekli)
 	function renderMultiMenu(key, filterTxt) {
 		var wrap = document.querySelector('.revir-multi[data-key="' + CSS.escape(key) + '"]');
 		var menu = document.getElementById("multi_" + key);
@@ -4135,13 +4408,39 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 			var txt = String(opts[i]);
 			if (q && txt.toLocaleLowerCase("tr-TR").indexOf(q) === -1) continue;
 			var isSel = sel.indexOf(i) !== -1;
-			html.push('<div class="revir-combo-opt' + (isSel ? " selected" : "") + '" onmousedown="window.__revirMultiToggle(\'' + key.replace(/'/g, "\\'") + '\', ' + i + ', event)">'
+			var kbdCls = html.length === 0 ? " kbd-active" : "";
+			html.push('<div class="revir-combo-opt' + (isSel ? " selected" : "") + kbdCls + '" data-opt-idx="' + i + '" onmousedown="window.__revirMultiToggle(\'' + key.replace(/'/g, "\\'") + '\', ' + i + ', event)">'
 				+ '<span>' + (isSel ? "☑" : "☐") + '</span><span>' + escHtml(txt) + '</span></div>');
 			if (html.length >= 200) break;
 		}
 		if (!html.length) html.push('<div class="revir-combo-opt" style="color:var(--text-muted);">Sonuç bulunamadı</div>');
 		menu.innerHTML = html.join("");
 	}
+
+	window.__revirMultiKey = function(key, ev) {
+		var menu = document.getElementById("multi_" + key);
+		if (!menu) return;
+		if (ev.key === "Escape") { menu.classList.remove("open"); return; }
+		if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+			ev.preventDefault();
+			if (!menu.classList.contains("open")) { renderMultiMenu(key, ""); menu.classList.add("open"); }
+			var items = Array.prototype.slice.call(menu.querySelectorAll(".revir-combo-opt[data-opt-idx]"));
+			if (!items.length) return;
+			var curI = items.findIndex(function(x) { return x.classList.contains("kbd-active"); });
+			items.forEach(function(x) { x.classList.remove("kbd-active"); });
+			var nxt = ev.key === "ArrowDown" ? (curI + 1) % items.length : (curI <= 0 ? items.length - 1 : curI - 1);
+			items[nxt].classList.add("kbd-active");
+			if (items[nxt].scrollIntoView) { try { items[nxt].scrollIntoView({ block: "nearest" }); } catch (e) {} }
+			return;
+		}
+		if (ev.key === "Enter") {
+			var act = menu.querySelector(".revir-combo-opt.kbd-active[data-opt-idx]");
+			if (act && menu.classList.contains("open")) {
+				ev.preventDefault();
+				window.__revirMultiToggle(key, parseInt(act.dataset.optIdx, 10), ev);
+			}
+		}
+	};
 
 	window.__revirOpenMulti = function(key, ev) {
 		if (ev) ev.stopPropagation();
@@ -4209,14 +4508,23 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 		}).catch(function(){});
 	};
 
-	// Popover
+	// Popover (Ekran alt kenarında otomatik yukarı açılma destekli)
 	window.__revirTogglePopover = function(popId, ev) {
 		if (ev) ev.stopPropagation();
 		var el = document.getElementById("pop_" + popId);
 		if (!el) return;
 		var wasOpen = el.classList.contains("open");
 		closeAllMenus();
-		if (!wasOpen) el.classList.add("open");
+		if (!wasOpen) {
+			el.classList.remove("flip-up");
+			el.classList.add("open");
+			try {
+				var rect = el.getBoundingClientRect();
+				if (rect.bottom > window.innerHeight - 16) {
+					el.classList.add("flip-up");
+				}
+			} catch (e) {}
+		}
 	};
 
 	function closeAllMenus(exceptId) {
@@ -4230,7 +4538,7 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 		sendAction({ action: "df_select", key: key, value: { rows: [rowIdx], cells: [[rowIdx, colName]] } });
 	};
 
-	// İstemci tarafı tablo sıralama
+	// İstemci tarafı tablo sıralama (görsel yön oku destekli)
 	window.__revirSortTable = function(th) {
 		var tbl = th.closest("table");
 		if (!tbl || tbl.classList.contains("revir-editor-table")) return;
@@ -4238,7 +4546,20 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 		if (!tbody) return;
 		var idx = Array.prototype.indexOf.call(th.parentNode.children, th);
 		var asc = th.dataset.sortDir !== "asc";
+		Array.prototype.forEach.call(th.parentNode.children, function(sib) {
+			if (sib !== th) sib.dataset.sortDir = "";
+			var ind = sib.querySelector(".revir-sort-ind");
+			if (ind) {
+				ind.textContent = "⇅";
+				ind.classList.remove("active");
+			}
+		});
 		th.dataset.sortDir = asc ? "asc" : "desc";
+		var curInd = th.querySelector(".revir-sort-ind");
+		if (curInd) {
+			curInd.textContent = asc ? "▲" : "▼";
+			curInd.classList.add("active");
+		}
 		var rows = Array.prototype.slice.call(tbody.querySelectorAll("tr"));
 		rows.sort(function(a, b) {
 			var av = (a.children[idx] ? a.children[idx].textContent : "").trim();
@@ -4253,7 +4574,29 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 		rows.forEach(function(r) { tbody.appendChild(r); });
 	};
 
-	// Data Editor
+	// Data Editor (Excel tarzı Enter ile alt satıra geçiş)
+	var nextEditorFocusId = null;
+	window.__revirEditorEnter = function(inp) {
+		if (!inp) return;
+		var tbl = inp.closest("table.revir-editor-table");
+		var r = parseInt(inp.dataset.edRow || "-1", 10);
+		var c = parseInt(inp.dataset.edCol || "-1", 10);
+		if (tbl && r >= 0 && c >= 0) {
+			var nextEl = tbl.querySelector('[data-ed-row="' + (r + 1) + '"][data-ed-col="' + c + '"]');
+			if (nextEl && nextEl.id) {
+				nextEditorFocusId = nextEl.id;
+			}
+		}
+		inp.blur();
+		if (nextEditorFocusId) {
+			var targetNow = document.getElementById(nextEditorFocusId);
+			if (targetNow && !inflight) {
+				try { targetNow.focus(); if (targetNow.select) targetNow.select(); } catch (e) {}
+				nextEditorFocusId = null;
+			}
+		}
+	};
+
 	window.__revirEditorDirty = function(key, rowKind, rowId, col, val) {
 		pendingEditorCells.push({ key: key, op: "cell", row_kind: rowKind, row_id: rowId, col: col, val: val });
 	};
@@ -4262,9 +4605,11 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 		pendingEditorCells = pendingEditorCells.filter(function(m) {
 			return !(m.key === key && m.row_kind === rowKind && m.row_id === rowId && m.col === col);
 		});
+		var targetFocus = nextEditorFocusId || cellId;
+		nextEditorFocusId = null;
 		sendAction(
 			{ action: "data_editor", key: key, value: { op: "cell", row_kind: rowKind, row_id: rowId, col: col, val: val } },
-			{ refocusId: cellId }
+			{ refocusId: targetFocus }
 		);
 	};
 
@@ -4319,12 +4664,13 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 		sendAction({ action: "clear_upload", key: key, value: fileId });
 	};
 
-	// Yerel Masaüstü Dosya İndirme (Native Save Dialog destekli)
+	// Yerel Masaüstü Dosya İndirme (Native Save Dialog + Tembel Üretim destekli)
 	window.__revirDownload = function(token, fileName) {
+		showToast("⏳ Dosya hazırlanıyor: " + (fileName || "rapor"));
 		if (window.pywebview && window.pywebview.api && window.pywebview.api.save_download) {
 			window.pywebview.api.save_download(token, fileName).then(function(res) {
 				if (res && res.saved) showToast("✅ Kaydedildi: " + res.path);
-				else if (res && res.error) showToast("❌ İndirme hatası: " + res.error);
+				else if (res && res.error) showToast("❌ İndirme hatası: " + res.error, "err");
 			}).catch(function() {
 				fallbackDownload(token, fileName);
 			});
@@ -4529,6 +4875,14 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 			var cmdBd = document.getElementById("revir-cmd-backdrop");
 			if (cmdBd && cmdBd.classList.contains("open")) window.__revirCloseCmdPalette();
 			else window.__revirOpenCmdPalette();
+			return;
+		}
+		if (((ev.metaKey || ev.ctrlKey) && (ev.key === "j" || ev.key === "J")) || (ev.altKey && (ev.key === "a" || ev.key === "A"))) {
+			ev.preventDefault();
+			var fabEl = document.getElementById("revir-fab-btn");
+			if (fabEl && fabEl.classList.contains("visible")) {
+				window.__revirToggleChatBubble();
+			}
 			return;
 		}
 		if (ev.altKey && (ev.key === "b" || ev.key === "B")) {
@@ -5513,7 +5867,7 @@ class LocalUIServer:
 					return
 				if path.startswith("/api/download/"):
 					token = urllib.parse.unquote(path[len("/api/download/"):])
-					item = server_ref.session.downloads.get(token)
+					item = server_ref.session.resolve_download_item(token)
 					if item is None:
 						self._send_bytes(HTTPStatus.NOT_FOUND, "text/plain", b"Not Found")
 						return
@@ -5713,7 +6067,7 @@ class LocalUIServer:
 			pass
 
 	def get_download_item(self, token: str) -> tuple[bytes, str, str] | None:
-		return self.session.downloads.get(token)
+		return self.session.resolve_download_item(token)
 
 
 def reset_session() -> None:
