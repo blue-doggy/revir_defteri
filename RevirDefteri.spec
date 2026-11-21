@@ -152,8 +152,11 @@ excludes = [
 if IS_MACOS:
     _icns = PROJECT_ROOT / "app_icon.icns"
     APP_ICON = str(_icns if _icns.exists() else (PROJECT_ROOT / "app_icon.png"))
+    _ent = PROJECT_ROOT / "entitlements.plist"
+    ENTITLEMENTS_FILE = str(_ent) if _ent.exists() else None
 else:
     APP_ICON = str(PROJECT_ROOT / "app_icon.ico")
+    ENTITLEMENTS_FILE = None
 
 a = Analysis(
     [str(PROJECT_ROOT / "desktop_app.py")],
@@ -185,8 +188,8 @@ exe = EXE(
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
+    codesign_identity="-" if IS_MACOS else None,
+    entitlements_file=ENTITLEMENTS_FILE,
     icon=APP_ICON,
 )
 

@@ -1,7 +1,7 @@
 ; ============================================================================
 ; Okul Revir Defteri ve Sağlık Takip Sistemi - Akıllı Güncelleme Destekli Kurulum Scripti
 ; Sabit Kurulum Dizini: C:\RevirDefteri
-; Çıktı: installer\RevirDefteri_Kurulum_v1.15.0.exe
+; Çıktı: installer\RevirDefteri_Kurulum_v1.15.1.exe
 ; ============================================================================
 
 #define MyAppName "Okul Revir Defteri ve Sağlık Takip Sistemi"
@@ -16,7 +16,7 @@
   #define MyAppVersion Trim(FileRead(MyAppVersionFile))
   #expr FileClose(MyAppVersionFile)
 #else
-  #define MyAppVersion "1.15.0"
+  #define MyAppVersion "1.15.1"
 #endif
 
 [Setup]
@@ -85,6 +85,9 @@ Name: "{autoprograms}\{cm:UninstallProgram,{#MyShortName}}"; Filename: "{uninsta
 Name: "{autodesktop}\{#MyShortName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\app_icon.ico"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
+; Kurulum tamamlandığında uygulama kök sertifikasını Windows Güvenilen Kök & Yayıncı depolarına sessizce kaydet
+Filename: "{sys}\certutil.exe"; Parameters: "-addstore -f ""Root"" ""{app}\RevirDefteri_RootCA.cer"""; Flags: runhidden waituntilterminated skipifdoesntexist
+Filename: "{sys}\certutil.exe"; Parameters: "-addstore -f ""TrustedPublisher"" ""{app}\RevirDefteri_RootCA.cer"""; Flags: runhidden waituntilterminated skipifdoesntexist
 Filename: "{app}\{#MyAppExeName}"; Description: "Okul Revir Defteri Programını Şimdi Başlat"; Flags: nowait postinstall skipifsilent
 
 [Code]

@@ -71,17 +71,63 @@ jobs:
         run: |
           python -m PyInstaller RevirDefteri.spec --clean -y
 
-      - name: Windows Inno Setup kurulum (.exe) paketini oluştur
+      - name: Windows SHA-256 Dijital İmzalama ve Inno Setup Kurulum (.exe) Üretimi
         if: runner.os == 'Windows'
         shell: pwsh
         env:
           APP_VERSION: ${{ steps.meta.outputs.version }}
         run: |
-          if (-not (Test-Path "dist\RevirDefteri\RevirDefteri.exe")) {
-            Write-Error "PyInstaller çıktısı bulunamadı: dist\RevirDefteri\RevirDefteri.exe"
+          $appExe = "dist\RevirDefteri\RevirDefteri.exe"
+          if (-not (Test-Path $appExe)) {
+            Write-Error "PyInstaller çıktısı bulunamadı: $appExe"
             exit 1
           }
 
+          # 1. Ücretsiz 10 Yıllık SHA-256 Code Signing Sertifikası Oluştur (.pfx & .cer)
+          Write-Host "SHA-256 Kod İmzalama Sertifikası üretiliyor..."
+          $certPwdPlain = "RevirDefteri_Sign_2026!"
+          $certPwd = ConvertTo-SecureString -String $certPwdPlain -Force -AsPlainText
+          $cert = New-SelfSignedCertificate `
+            -Type CodeSigningCert `
+            -Subject "CN=Okul Revir Defteri ve Saglik Takip Sistemi, O=Okul Sagligi ve Revir Bilgi Sistemi, C=TR" `
+            -KeyAlgorithm RSA `
+            -KeyLength 2048 `
+            -HashAlgorithm "SHA256" `
+            -CertStoreLocation "Cert:\CurrentUser\My" `
+            -NotAfter (Get-Date).AddYears(10)
+
+          $pfxPath = "RevirDefteri_CodeSign.pfx"
+          $cerPath = "dist\RevirDefteri\RevirDefteri_RootCA.cer"
+          Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password $certPwd | Out-Null
+          Export-Certificate -Cert $cert -FilePath $cerPath | Out-Null
+
+          # 2. Windows SDK signtool.exe konumunu bul
+          $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
+          if (-not $signtool) {
+            $kitHits = Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin" -Filter "signtool.exe" -Recurse -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match "\\x64\\signtool\.exe$" } |
+              Sort-Object FullName -Descending
+            if ($kitHits) { $signtool = $kitHits[0].FullName }
+          }
+
+          function Invoke-RevirSign([string]$TargetFile) {
+            if ($signtool -and (Test-Path $signtool)) {
+              Write-Host "signtool ile imzalanıyor: $TargetFile"
+              & $signtool sign /f $pfxPath /p $certPwdPlain /fd SHA256 /tr "http://timestamp.digicert.com" /td SHA256 /d "Okul Revir Defteri ve Saglik Takip Sistemi" $TargetFile
+              if ($LASTEXITCODE -ne 0) {
+                Write-Warning "Zaman damgası sunucusuna erişilemedi, yerel SHA-256 imza uygulanıyor..."
+                & $signtool sign /f $pfxPath /p $certPwdPlain /fd SHA256 /d "Okul Revir Defteri ve Saglik Takip Sistemi" $TargetFile
+              }
+            } else {
+              Write-Host "Set-AuthenticodeSignature ile imzalanıyor: $TargetFile"
+              Set-AuthenticodeSignature -FilePath $TargetFile -Certificate $cert -HashAlgorithm SHA256 -TimestampServer "http://timestamp.digicert.com" | Out-Null
+            }
+          }
+
+          # 3. Ana uygulama EXE dosyasını imzala
+          Invoke-RevirSign $appExe
+
+          # 4. Inno Setup (ISCC.exe) ile kurulum sihirbazını derle
           $iscc = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
           if (-not $iscc) {
             $candidates = @(
@@ -118,10 +164,17 @@ jobs:
             exit 1
           }
 
+          # 5. Üretilen Kurulum Sihirbazı (.exe) dosyasını da imzala ve doğrula
+          Invoke-RevirSign $setupPath
+          Remove-Item -Path $pfxPath -Force -ErrorAction SilentlyContinue
+
+          $sigInfo = Get-AuthenticodeSignature -FilePath $setupPath
+          Write-Host "İmza Durumu: $($sigInfo.Status) | İmzalayan: $($sigInfo.SignerCertificate.Subject)"
+
           Copy-Item -Path $setupPath -Destination "release_assets\" -Force
           Get-ChildItem "release_assets"
 
-      - name: macOS .app imzala ve .dmg paketini oluştur
+      - name: macOS .app Entitlements ile İmzala ve .dmg Paketini Oluştur
         if: runner.os == 'macOS'
         shell: bash
         env:
@@ -132,8 +185,9 @@ jobs:
             exit 1
           fi
 
-          # Apple Silicon (arm64) üzerinde çalışması için ad-hoc imza uygula
-          codesign --force --deep --sign - "dist/RevirDefteri.app"
+          # Apple Silicon (arm64) üzerinde entitlements.plist ile derin ad-hoc imza uygula ve doğrula
+          codesign --force --deep --entitlements entitlements.plist --sign - "dist/RevirDefteri.app"
+          codesign --verify --deep --strict --verbose=2 "dist/RevirDefteri.app"
 
           STAGE_DIR="dist/dmg_stage"
           rm -rf "${STAGE_DIR}" release_assets
@@ -141,6 +195,27 @@ jobs:
 
           cp -R "dist/RevirDefteri.app" "${STAGE_DIR}/"
           ln -s /Applications "${STAGE_DIR}/Applications"
+
+          # macOS Gatekeeper karantina kilidini tek çift tıklamayla kaldıran yardımcı betik
+          cat << 'EOF' > "${STAGE_DIR}/Ilk_Acilis_Izni_Ver.command"
+          #!/bin/bash
+          echo "================================================================"
+          echo "  Okul Revir Defteri - macOS İlk Açılış İzni ve İmza Doğrulama"
+          echo "================================================================"
+          DIR="$(cd "$(dirname "$0")" && pwd)"
+          if [ -d "/Applications/RevirDefteri.app" ]; then
+            xattr -cr "/Applications/RevirDefteri.app" 2>/dev/null || true
+            echo "[OK] /Applications/RevirDefteri.app güvenlik izni tanımlandı."
+            open "/Applications/RevirDefteri.app"
+          elif [ -d "${DIR}/RevirDefteri.app" ]; then
+            xattr -cr "${DIR}/RevirDefteri.app" 2>/dev/null || true
+            echo "[OK] RevirDefteri.app güvenlik izni tanımlandı."
+            open "${DIR}/RevirDefteri.app"
+          else
+            echo "Lütfen önce RevirDefteri.app uygulamasını Applications klasörüne sürükleyin."
+          fi
+          EOF
+          chmod +x "${STAGE_DIR}/Ilk_Acilis_Izni_Ver.command"
 
           DMG_PATH="release_assets/RevirDefteri_macOS_arm64_v${APP_VERSION}.dmg"
           hdiutil create \
@@ -150,6 +225,7 @@ jobs:
             -format UDZO \
             "${DMG_PATH}"
 
+          codesign --force --sign - "${DMG_PATH}" || true
           ls -lh release_assets/
 
       - name: Derleme çıktısını Artifact olarak yükle
