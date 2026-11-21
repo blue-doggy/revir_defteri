@@ -153,6 +153,69 @@ class TestPersantilDeepCRUDAndExports(unittest.TestCase):
             self.assertIsNotNone(stf_row)
             self.assertEqual(stf_row["person_type"], "Öğretmen")
 
+    def test_gemini_chat_requires_confirmation_before_write_or_delete_and_preserves_classes(self):
+        import json
+        import gemini_assistant
+
+        with self.connect() as c:
+            c.execute("INSERT INTO classes(name) VALUES ('Mevcut-1A')")
+            c.execute("INSERT INTO classes(name) VALUES ('Silinecek-Bos')")
+            c.commit()
+
+        # 1. Simulate chat create_profiles -> MUST return write_proposal and NOT mutate DB yet
+        create_payload = {
+            "action": "create_profiles",
+            "classes": [{"name": "Yeni-2A", "teacher_name": "Kemal Demir"}],
+            "students": [{"full_name": "Ece Yılmaz", "class_name": "Yeni-2A", "student_no": "501", "sex": "K"}],
+        }
+        fake_reply = f"Yeni-2A sınıfı ve Ece Yılmaz eklenecek. Onaylıyor musunuz?\n[[REVIR_EXPORT:{json.dumps(create_payload, ensure_ascii=False)}]]"
+        with mock.patch.object(persantil, "_get_active_gemini_config", return_value=(True, "k", "gemini-3-flash-preview")), \
+             mock.patch.object(gemini_assistant, "chat_with_gemini_assistant", return_value=(True, "Yeni-2A sınıfı eklenecek.", "gemini-3-flash-preview", "", create_payload, None)):
+            res = persantil._handle_floating_gemini_chat({"message": "Yeni-2A ekle"}, [])
+
+        self.assertTrue(res["ok"])
+        self.assertIsNotNone(res.get("write_proposal"))
+        self.assertEqual(res["write_proposal"]["mode"], "batch_action")
+        self.assertFalse(res["write_proposal"]["is_destructive"])
+        with self.connect() as c:
+            self.assertIsNone(c.execute("SELECT id FROM classes WHERE name='Yeni-2A'").fetchone())
+
+        # Confirm -> now DB mutates, AND Mevcut-1A is still preserved
+        apply_res = persantil._handle_floating_gemini_apply_write({"token": res["write_proposal"]["token"]})
+        self.assertTrue(apply_res["ok"])
+        with self.connect() as c:
+            self.assertIsNotNone(c.execute("SELECT id FROM classes WHERE name='Yeni-2A'").fetchone())
+            self.assertIsNotNone(c.execute("SELECT id FROM classes WHERE name='Mevcut-1A'").fetchone())
+            self.assertIsNotNone(c.execute("SELECT id FROM students WHERE full_name='Ece Yılmaz'").fetchone())
+
+        # 2. Simulate chat delete_records -> MUST return destructive write_proposal and NOT delete yet
+        del_payload = {"action": "delete_records", "classes": ["Silinecek-Bos"]}
+        with mock.patch.object(persantil, "_get_active_gemini_config", return_value=(True, "k", "gemini-3-flash-preview")), \
+             mock.patch.object(gemini_assistant, "chat_with_gemini_assistant", return_value=(True, "Silinecek-Bos silinecek. Onaylıyor musunuz?", "gemini-3-flash-preview", "", del_payload, None)):
+            res_del = persantil._handle_floating_gemini_chat({"message": "Silinecek-Bos şubesini sil"}, [])
+
+        self.assertTrue(res_del["write_proposal"]["is_destructive"])
+        with self.connect() as c:
+            self.assertIsNotNone(c.execute("SELECT id FROM classes WHERE name='Silinecek-Bos'").fetchone())
+
+        apply_del = persantil._handle_floating_gemini_apply_write({"token": res_del["write_proposal"]["token"]})
+        self.assertTrue(apply_del["ok"])
+        with self.connect() as c:
+            self.assertIsNone(c.execute("SELECT id FROM classes WHERE name='Silinecek-Bos'").fetchone())
+            self.assertIsNotNone(c.execute("SELECT id FROM classes WHERE name='Mevcut-1A'").fetchone())
+            self.assertIsNotNone(c.execute("SELECT id FROM classes WHERE name='Yeni-2A'").fetchone())
+
+    def test_text_selection_enabled_in_desktop_and_css(self):
+        desktop_src = (PROJECT_ROOT / "desktop_app.py").read_text(encoding="utf-8")
+        self.assertIn("text_select=True", desktop_src)
+        css = persantil.build_app_css(
+            "'DM Sans', sans-serif", "", "15px", "1.4rem",
+            persantil.THEME_PRESETS["Klinik Turkuaz (Varsayılan)"],
+            "Klinik Turkuaz (Varsayılan)",
+            "Otomatik (Sistem Temasına ve Dark Mode'a Uyarla)",
+        )
+        self.assertIn("user-select: text", css)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

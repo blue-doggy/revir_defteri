@@ -124,7 +124,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.16.9"
+_DEFAULT_APP_VERSION = "1.16.10"
 
 
 def _load_app_version() -> str:
@@ -382,8 +382,9 @@ def build_app_css(font_css: str, font_url: str, base_fsize: str, pad_top: str, t
 		--text-heading: {theme['ink']};
 		--text-muted: #475569;
 	}}
-	html, body {{ font-family: {effective_font_css}; color: var(--text-main); font-size: {base_fsize}; }}
-	h1, h2, h3, h4, h5, h6 {{ font-family: {effective_font_css}; letter-spacing: 0; color: var(--text-heading); font-weight: 700; }}
+	html, body {{ font-family: {effective_font_css}; color: var(--text-main); font-size: {base_fsize}; user-select: text !important; -webkit-user-select: text !important; }}
+	.revir-main, .revir-card, .revir-md, .revir-alert, .revir-cmsg, .revir-chat-msgs, .revir-table, .revir-table td, .revir-table th, .revir-metric, .revir-caption {{ user-select: text !important; -webkit-user-select: text !important; }}
+	h1, h2, h3, h4, h5, h6 {{ font-family: {effective_font_css}; letter-spacing: 0; color: var(--text-heading); font-weight: 700; user-select: text !important; -webkit-user-select: text !important; }}
 	.revir-app {{ background: var(--bg-page); }}
 	.revir-main {{ padding-top: {pad_top} !important; padding-bottom: 2.5rem !important; }}
 	.revir-sidebar {{ background: var(--sidebar-bg); border-right: 1px solid var(--line); }}
@@ -11732,6 +11733,83 @@ def _execute_gemini_chat_export(export_spec: dict[str, Any], active_pid: int | N
 				return [], "\n\n✅ **Belgeden oluşturuldu / güncellendi:** " + ", ".join(parts)
 			return [], "\n\nℹ️ *Belirtilen sınıf ve profiller sistemde zaten mevcuttu.*"
 
+		if action == "add_calendar_events":
+			evs = export_spec.get("events") if isinstance(export_spec.get("events"), list) else []
+			added_cal = school_calendar.save_ai_generated_events_to_db(evs, connect_db, upsert=True)
+			clear_all_data_caches()
+			if added_cal > 0:
+				return [], f"\n\n📅 **{added_cal} takvim etkinliği/günü kaydedildi.**"
+			return [], "\n\nℹ️ *Takvime eklenecek geçerli veya yeni etkinlik bulunamadı.*"
+
+		if action == "delete_records":
+			cls_names = [str(c).strip() for c in (export_spec.get("classes") or []) if str(c).strip()]
+			del_empty_all = bool(export_spec.get("delete_empty_classes", False))
+			stu_items = export_spec.get("students") if isinstance(export_spec.get("students"), list) else []
+			cal_items = export_spec.get("calendar_events") if isinstance(export_spec.get("calendar_events"), list) else []
+			del_cls_cnt = 0
+			del_stu_cnt = 0
+			del_cal_cnt = 0
+			protected_cls = {"Sivil / Diğer", "Sınıf Belirtilmedi"}
+			with connect_db() as conn:
+				conn.execute("INSERT OR IGNORE INTO classes(name) VALUES ('Sınıf Belirtilmedi')")
+				unassigned_r = conn.execute("SELECT id FROM classes WHERE name='Sınıf Belirtilmedi'").fetchone()
+				unassigned_id = unassigned_r["id"] if unassigned_r else None
+				if del_empty_all:
+					empty_rows = conn.execute(
+						"""SELECT c.id, c.name FROM classes c
+						   LEFT JOIN students s ON s.class_id = c.id
+						   WHERE c.name NOT IN ('Sivil / Diğer', 'Sınıf Belirtilmedi')
+						   GROUP BY c.id HAVING COUNT(s.id) = 0"""
+					).fetchall()
+					for er in empty_rows:
+						conn.execute("DELETE FROM classes WHERE id=?", (er["id"],))
+						del_cls_cnt += 1
+				for cn in cls_names:
+					if cn in protected_cls:
+						continue
+					cr = conn.execute("SELECT id FROM classes WHERE lower(name)=lower(?)", (cn,)).fetchone()
+					if cr:
+						if unassigned_id:
+							conn.execute("UPDATE OR IGNORE students SET class_id=? WHERE class_id=?", (unassigned_id, cr["id"]))
+						conn.execute("DELETE FROM classes WHERE id=?", (cr["id"],))
+						del_cls_cnt += 1
+				for st_ref in stu_items:
+					st_id = st_ref.get("id") if isinstance(st_ref, dict) else None
+					st_name = (st_ref.get("full_name") or st_ref.get("name") or "") if isinstance(st_ref, dict) else str(st_ref or "")
+					st_name = str(st_name).strip()
+					if st_id is not None:
+						cur_d = conn.execute("DELETE FROM students WHERE id=?", (int(st_id),))
+						del_stu_cnt += max(0, cur_d.rowcount)
+					elif st_name:
+						cur_d = conn.execute("DELETE FROM students WHERE lower(full_name)=lower(?)", (st_name,))
+						del_stu_cnt += max(0, cur_d.rowcount)
+				for cev in cal_items:
+					if isinstance(cev, dict):
+						edate = str(cev.get("event_date") or "").strip()[:10]
+						etitle = str(cev.get("title") or "").strip()
+						if edate and etitle:
+							cur_c = conn.execute("DELETE FROM calendar_events WHERE event_date=? AND lower(title)=lower(?)", (edate, etitle))
+							del_cal_cnt += max(0, cur_c.rowcount)
+						elif etitle:
+							cur_c = conn.execute("DELETE FROM calendar_events WHERE lower(title)=lower(?)", (etitle,))
+							del_cal_cnt += max(0, cur_c.rowcount)
+			if del_stu_cnt:
+				try:
+					sync_all_person_data_files()
+				except Exception:
+					pass
+			clear_all_data_caches()
+			summary_del = []
+			if del_cls_cnt:
+				summary_del.append(f"**{del_cls_cnt} şube/sınıf**")
+			if del_stu_cnt:
+				summary_del.append(f"**{del_stu_cnt} kişi profili**")
+			if del_cal_cnt:
+				summary_del.append(f"**{del_cal_cnt} takvim kaydı**")
+			if summary_del:
+				return [], "\n\n🗑️ **Onaylanan silme işlemi tamamlandı:** " + ", ".join(summary_del) + " silindi."
+			return [], "\n\nℹ️ *Silinecek eşleşen kayıt bulunamadı.*"
+
 		if action == "custom_doc":
 			secs = export_spec.get("sections") if isinstance(export_spec.get("sections"), list) else None
 			tbl_spec = export_spec.get("table") if isinstance(export_spec.get("table"), dict) else None
@@ -11887,12 +11965,103 @@ def _summarize_write_spec_items(ws: dict[str, Any]) -> list[str]:
 	return items
 
 
+_MUTATING_CHAT_EXPORT_ACTIONS = {"create_classes", "create_profiles", "add_calendar_events", "delete_records"}
+
+
+def _build_export_write_proposal(export_spec: dict[str, Any]) -> dict[str, Any]:
+	"""Veri yazma veya silme içeren Gemini komutları için kullanıcı onay kartı özeti üretir."""
+	act = str(export_spec.get("action") or "").strip().lower()
+	items: list[str] = []
+	is_destructive = (act == "delete_records")
+	title = "Veritabanına İşlenecek Değişiklikler (Onay Gerekli)"
+	confirm_label = "✅ Onayla ve İşlemi Uygula"
+
+	if act in ("create_classes", "create_profiles"):
+		title = "Sınıf, Öğretmen ve Öğrenci Profili İşlemleri (Onay Gerekli)"
+		cls_list = export_spec.get("classes") if isinstance(export_spec.get("classes"), list) else []
+		stu_list = export_spec.get("students") if isinstance(export_spec.get("students"), list) else []
+		staff_list = export_spec.get("staff") if isinstance(export_spec.get("staff"), list) else (
+			export_spec.get("teachers") if isinstance(export_spec.get("teachers"), list) else []
+		)
+		cls_names: list[str] = []
+		tch_pairs: list[str] = []
+		for c_it in cls_list[:120]:
+			cn = str(c_it.get("name") if isinstance(c_it, dict) else c_it or "").strip()
+			tn = str(c_it.get("teacher_name") or "").strip() if isinstance(c_it, dict) else ""
+			if cn and cn != "Sivil / Diğer":
+				cls_names.append(cn)
+				if tn:
+					tch_pairs.append(f"{cn} → {tn}")
+		if cls_names:
+			items.append(f"🏫 Oluşturulacak / kontrol edilecek şubeler ({len(cls_names)}): {', '.join(cls_names[:12])}{'...' if len(cls_names) > 12 else ''}")
+		if tch_pairs:
+			items.append(f"👩‍🏫 Atanacak sınıf öğretmenleri ({len(tch_pairs)}): {', '.join(tch_pairs[:8])}{'...' if len(tch_pairs) > 8 else ''}")
+		stu_names = [str(s.get("full_name") or s.get("name") or "").strip() for s in stu_list if isinstance(s, dict) and str(s.get("full_name") or s.get("name") or "").strip()]
+		if stu_names:
+			items.append(f"🎓 Eklenecek öğrenci profilleri ({len(stu_names)}): {', '.join(stu_names[:10])}{'...' if len(stu_names) > 10 else ''}")
+		stf_names = [str(s.get("full_name") or s.get("name") or "").strip() for s in staff_list if isinstance(s, dict) and str(s.get("full_name") or s.get("name") or "").strip()]
+		if stf_names:
+			items.append(f"👨‍🏫 Eklenecek öğretmen / personel profilleri ({len(stf_names)}): {', '.join(stf_names[:10])}{'...' if len(stf_names) > 10 else ''}")
+		items.append("🛡️ Mevcut şubeler ve kayıtlı öğrenciler silinmeden korunur.")
+	elif act == "add_calendar_events":
+		title = "Takvime Eklenecek Etkinlikler (Onay Gerekli)"
+		evs = [e for e in (export_spec.get("events") or []) if isinstance(e, dict) and str(e.get("title") or "").strip()]
+		for e in evs[:12]:
+			t_str = f" {e.get('start_time')}" if str(e.get("start_time") or "").strip() else ""
+			items.append(f"📅 {str(e.get('event_date') or '')[:10]}{t_str} · {e.get('title')}")
+		if len(evs) > 12:
+			items.append(f"...ve {len(evs) - 12} etkinlik daha (Toplam {len(evs)})")
+	elif act == "delete_records":
+		title = "Kayıt Silme İşlemi (Dikkat — Onay Gerekli)"
+		confirm_label = "🗑️ Onayla ve Seçili Kayıtları Sil"
+		cls_names = [str(c).strip() for c in (export_spec.get("classes") or []) if str(c).strip()]
+		del_empty_all = bool(export_spec.get("delete_empty_classes", False))
+		stu_items = export_spec.get("students") if isinstance(export_spec.get("students"), list) else []
+		cal_items = export_spec.get("calendar_events") if isinstance(export_spec.get("calendar_events"), list) else []
+		if del_empty_all:
+			items.append("⚠️ Öğrencisi bulunmayan tüm boş şubeler silinecek.")
+		if cls_names:
+			items.append(f"⚠️ Silinecek şubeler ({len(cls_names)}): {', '.join(cls_names[:15])} (varsa öğrencileri 'Sınıf Belirtilmedi' grubuna aktarılır)")
+		if stu_items:
+			s_lbls = [str(s.get("full_name") or s.get("name") or s) if isinstance(s, dict) else str(s) for s in stu_items[:12]]
+			items.append(f"⚠️ Silinecek kişi profilleri ({len(stu_items)}): {', '.join(s_lbls)}")
+		if cal_items:
+			c_lbls = [str(c.get("title") or c) if isinstance(c, dict) else str(c) for c in cal_items[:12]]
+			items.append(f"⚠️ Silinecek takvim kayıtları ({len(cal_items)}): {', '.join(c_lbls)}")
+
+	if not items:
+		items.append(f"⚙️ Uygulanacak komut: {act}")
+	return {
+		"mode": "batch_action",
+		"is_destructive": is_destructive,
+		"title": title,
+		"confirm_label": confirm_label,
+		"items": items,
+	}
+
+
 def _handle_floating_gemini_apply_write(payload: dict[str, Any]) -> dict[str, Any]:
-	"""Yüzen sohbet balonundaki 1-tık onay kartından gelen klinik veriyi SQLite'a işler ve tüm ekranları eşitler."""
+	"""Yüzen sohbet balonundaki 1-tık onay kartından gelen veri yazma/silme işlemini SQLite'a uygular ve tüm ekranları eşitler."""
 	tok = str(payload.get("token") or "").strip()
 	pending = ui.pop_pending_chat_write(tok)
 	if not pending:
 		return {"ok": False, "error": "Onay isteği zaman aşımına uğradı veya zaten işlendi."}
+
+	if pending.get("kind") == "export_mutation":
+		exp_spec = pending.get("export_spec") or {}
+		ctx_pid = pending.get("context_pid")
+		fb_reply = str(pending.get("fallback_reply") or "")
+		try:
+			_dls, exp_note = _execute_gemini_chat_export(exp_spec, int(ctx_pid) if ctx_pid else None, fb_reply)
+			clean_sum = re.sub(r"[*`]+", "", (exp_note or "").strip()).lstrip("✅🗑️📅ℹ️ ").strip() or "Onaylanan veritabanı işlemi uygulandı."
+			return {
+				"ok": True,
+				"refresh_ui": True,
+				"summary": clean_sum,
+			}
+		except Exception as exc:
+			return {"ok": False, "error": f"İşlem hatası: {exc}"}
+
 	try:
 		target_pid = int(payload.get("student_id") or payload.get("person_id") or pending.get("default_student_id") or 0)
 	except Exception:
@@ -12043,16 +12212,35 @@ def _handle_floating_gemini_chat(payload: dict[str, Any], chat_history: list[dic
 
 	downloads: list[dict[str, str]] = []
 	refresh_ui = False
-	if export_spec:
-		downloads, exp_note = _execute_gemini_chat_export(export_spec, int(context_pid) if context_pid else None, reply_txt)
-		if exp_note:
-			reply_txt = (reply_txt + exp_note).strip()
-		if str(export_spec.get("action") or "").strip().lower() == "create_classes":
-			refresh_ui = True
+	write_proposal: dict[str, Any] | None = None
+	if isinstance(export_spec, dict) and export_spec:
+		exp_act = str(export_spec.get("action") or "").strip().lower()
+		if exp_act in _MUTATING_CHAT_EXPORT_ACTIONS:
+			prop_meta = _build_export_write_proposal(export_spec)
+			cw_token = ui.register_pending_chat_write({
+				"kind": "export_mutation",
+				"export_spec": export_spec,
+				"context_pid": int(context_pid) if context_pid else None,
+				"fallback_reply": reply_txt,
+			})
+			write_proposal = {
+				"token": cw_token,
+				"mode": prop_meta["mode"],
+				"is_destructive": prop_meta["is_destructive"],
+				"title": prop_meta["title"],
+				"confirm_label": prop_meta["confirm_label"],
+				"items": prop_meta["items"],
+				"candidates": [],
+				"default_student_id": None,
+				"has_attachment": False,
+			}
+		else:
+			downloads, exp_note = _execute_gemini_chat_export(export_spec, int(context_pid) if context_pid else None, reply_txt)
+			if exp_note:
+				reply_txt = (reply_txt + exp_note).strip()
 
 	# 2. Yapılandırılmış Veri / Belge Yazma Önerisi (Onay Kartı Hazırla)
-	write_proposal: dict[str, Any] | None = None
-	if isinstance(write_spec, dict) and write_spec:
+	if write_proposal is None and isinstance(write_spec, dict) and write_spec:
 		ws_items = _summarize_write_spec_items(write_spec)
 		if ws_items:
 			# Ses çözümü veya write_spec ipuçlarından yerel adayları sırala

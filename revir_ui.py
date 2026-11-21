@@ -4791,8 +4791,12 @@ body.revir-busy .revir-btn { pointer-events: none; }
 		});
 	}
 
-	// Dataframe seçimi
+	// Dataframe seçimi (metin seçilip kopyalanıyorsa tıklama tetikleme)
 	window.__revirDfSelect = function(key, rowIdx, colName) {
+		try {
+			var sel = window.getSelection && window.getSelection();
+			if (sel && String(sel.toString() || "").trim().length > 0) return;
+		} catch (_e) {}
 		sendAction({ action: "df_select", key: key, value: { rows: [rowIdx], cells: [[rowIdx, colName]] } });
 	};
 
@@ -5392,11 +5396,18 @@ body.revir-busy .revir-btn { pointer-events: none; }
 		div.className = "revir-cmsg " + (role === "user" ? "revir-cmsg-user" : "revir-cmsg-ai");
 		div.innerHTML = htmlContent;
 		if (role === "ai" && writeProposal && writeProposal.token) {
+			var isBatch = (writeProposal.mode === "batch_action");
+			var isDestructive = !!writeProposal.is_destructive;
 			var wc = document.createElement("div");
 			wc.className = "revir-cmsg-write-card";
-			var hdr = '<div style="font-weight:800;margin-bottom:4px;">📝 ' + escHtml(writeProposal.title || "Kişi Dosyasına İşlenecek Veriler") + "</div>";
+			if (isDestructive) {
+				wc.style.borderColor = "#ef4444";
+				wc.style.background = "rgba(254,242,242,0.85)";
+			}
+			var hdrIcon = isDestructive ? "⚠️ " : "📝 ";
+			var hdr = '<div style="font-weight:800;margin-bottom:4px;' + (isDestructive ? 'color:#b91c1c;' : '') + '">' + hdrIcon + escHtml(writeProposal.title || "Veritabanı İşlem Onayı") + "</div>";
 			var selHtml = "";
-			if (Array.isArray(writeProposal.candidates) && writeProposal.candidates.length) {
+			if (!isBatch && Array.isArray(writeProposal.candidates) && writeProposal.candidates.length) {
 				selHtml += '<label style="font-size:11.5px;font-weight:700;color:var(--text-muted);">🎯 Hedef Öğrenci / Kişi:</label>';
 				selHtml += '<select class="revir-cw-target">';
 				writeProposal.candidates.forEach(function(c) {
@@ -5409,12 +5420,13 @@ body.revir-busy .revir-btn { pointer-events: none; }
 			if (Array.isArray(writeProposal.items) && writeProposal.items.length) {
 				itemsHtml = '<ul class="revir-cmsg-write-list">' + writeProposal.items.map(function(it) { return "<li>" + escHtml(it) + "</li>"; }).join("") + "</ul>";
 			}
-			var archHtml = writeProposal.has_attachment
+			var archHtml = (!isBatch && writeProposal.has_attachment)
 				? '<label style="display:flex;align-items:center;gap:6px;font-size:11.5px;margin:4px 0;"><input type="checkbox" class="revir-cw-arch" checked/> 📁 Ekli belgeyi Evrak Deposuna da arşivle</label>'
 				: "";
+			var confirmLabel = writeProposal.confirm_label || (isBatch ? "✅ Onayla ve İşlemi Uygula" : "✅ Onayla ve Kişiye İşle");
 			wc.innerHTML = hdr + selHtml + itemsHtml + archHtml
 				+ '<div class="revir-cmsg-write-actions">'
-				+ '<button type="button" class="confirm">✅ Onayla ve Kişiye İşle</button>'
+				+ '<button type="button" class="confirm"' + (isDestructive ? ' style="background:#dc2626;border-color:#dc2626;"' : '') + '>' + escHtml(confirmLabel) + '</button>'
 				+ '<button type="button" class="cancel">✖ İptal</button>'
 				+ "</div>";
 			var okBtn = wc.querySelector("button.confirm");
@@ -5426,7 +5438,7 @@ body.revir-busy .revir-btn { pointer-events: none; }
 					var targetId = selEl ? parseInt(selEl.value, 10) : (writeProposal.default_student_id || null);
 					okBtn.disabled = true;
 					if (noBtn) noBtn.disabled = true;
-					okBtn.textContent = "⏳ İşleniyor...";
+					okBtn.textContent = "⏳ Uygulanıyor...";
 					fetch("/api/gemini_chat_apply_write", {
 						method: "POST",
 						headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
@@ -5440,27 +5452,27 @@ body.revir-busy .revir-btn { pointer-events: none; }
 					.then(function(ares) {
 						if (ares && ares.ok) {
 							wc.classList.add("done");
-							wc.innerHTML = '<div style="font-weight:800;color:#059669;">✅ ' + escHtml(ares.summary || "Veriler kişi dosyasına işlendi ve tüm ekranlar eşitlendi!") + "</div>";
-							showToast("✅ " + (ares.summary || "Kişi dosyasına işlendi!"));
+							wc.innerHTML = '<div style="font-weight:800;color:#059669;">✅ ' + escHtml(ares.summary || "İşlem başarıyla uygulandı ve ekranlar eşitlendi!") + "</div>";
+							showToast("✅ " + (ares.summary || "İşlem uygulandı!"));
 							sendAction({ action: "refresh" });
 						} else {
 							okBtn.disabled = false;
 							if (noBtn) noBtn.disabled = false;
-							okBtn.textContent = "✅ Onayla ve Kişiye İşle";
-							showToast("❌ " + ((ares && ares.error) || "İşleme başarısız."), "err");
+							okBtn.textContent = confirmLabel;
+							showToast("❌ " + ((ares && ares.error) || "İşlem başarısız."), "err");
 						}
 					})
 					.catch(function(err) {
 						okBtn.disabled = false;
 						if (noBtn) noBtn.disabled = false;
-						okBtn.textContent = "✅ Onayla ve Kişiye İşle";
+						okBtn.textContent = confirmLabel;
 						showToast("❌ Bağlantı hatası: " + String(err), "err");
 					});
 				};
 			}
 			if (noBtn) {
 				noBtn.onclick = function() {
-					wc.innerHTML = '<div style="color:var(--text-muted);font-size:11.5px;">✖ Veri işleme iptal edildi.</div>';
+					wc.innerHTML = '<div style="color:var(--text-muted);font-size:11.5px;">✖ İşlem iptal edildi (veritabanında değişiklik yapılmadı).</div>';
 				};
 			}
 			div.appendChild(wc);

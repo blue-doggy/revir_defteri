@@ -34,7 +34,7 @@ def _ensure_standard_streams() -> None:
 
 _ensure_standard_streams()
 
-_DEFAULT_APP_VERSION = "1.16.9"
+_DEFAULT_APP_VERSION = "1.16.10"
 
 
 def _load_app_version() -> str:
@@ -366,6 +366,7 @@ def launch_desktop_app() -> int:
 		height=saved_win.get("height", WINDOW_HEIGHT),
 		min_size=(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT),
 		resizable=True,
+		text_select=True,
 	)
 	if "x" in saved_win and "y" in saved_win:
 		create_kwargs["x"] = saved_win["x"]
