@@ -124,7 +124,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.12.2"
+_DEFAULT_APP_VERSION = "1.13.0"
 
 
 def _load_app_version() -> str:
@@ -147,6 +147,7 @@ DB_PATH = APP_DIR / "revir_defteri.db"
 PERSON_DATA_DIR = APP_DIR / "kisi_verileri"
 PERSANTIL_DATA_DIR = _resolve_bundled_asset("persantil veriler")
 TR_LOCATIONS_PATH = _resolve_bundled_asset("turkiye-il-ilce-mahalle-koy.json")
+GEMINI_API_GUIDE_PDF_PATH = _resolve_bundled_asset("gemini_api_anahtari_kilavuzu.pdf")
 EVRAKLAR_DIR = APP_DIR / "revir_evraklari"
 EGITIM_YILLARI_DIR = APP_DIR / "egitim_yillari"
 AUTO_BACKUP_DIR = APP_DIR / "oto_yedekler"
@@ -12286,6 +12287,65 @@ def _render_student_ai_report_editor(person_id: int, key_prefix: str = "stu_rep"
 		return True, (edited_txt or "").strip()
 
 
+@ui.cache_data(show_spinner=False)
+def _render_gemini_api_guide_a4_html(pdf_path_str: str) -> tuple[int, str]:
+	"""Gemini API Anahtarı kılavuz PDF'sinin tüm sayfalarını A4 kâğıt HTML önizlemesine çevirir."""
+	p_obj = Path(pdf_path_str)
+	if not p_obj.exists():
+		return 0, ""
+	import pymupdf
+	doc = pymupdf.open(p_obj)
+	num_pages = len(doc)
+	chunks: list[str] = []
+	for idx in range(num_pages):
+		page = doc[idx]
+		pix = page.get_pixmap(dpi=135)
+		b64_img = base64.b64encode(pix.tobytes("png")).decode("ascii")
+		chunks.append(
+			f"<span class='revir-a4-page-badge'>📄 A4 · Sayfa {idx + 1} / {num_pages}</span>"
+			f"<div class='revir-a4-sheet-img'><img src='data:image/png;base64,{b64_img}' alt='API Kılavuz Sayfa {idx + 1}'/></div>"
+		)
+		del page, pix
+	doc.close()
+	del doc
+	return num_pages, f"<div class='revir-a4-stage'>{''.join(chunks)}</div>"
+
+
+@ui.dialog("📘 Gemini API Anahtarı Nasıl Alınır? (Görsel Kılavuz)", width="large")
+def open_gemini_api_guide_dialog() -> None:
+	guide_pdf = _resolve_bundled_asset("gemini_api_anahtari_kilavuzu.pdf")
+	if not guide_pdf.exists():
+		ui.error("Kılavuz PDF dosyası (`gemini_api_anahtari_kilavuzu.pdf`) uygulama klasöründe bulunamadı.")
+		return
+
+	gc1, gc2 = ui.columns([1.4, 1.0])
+	with gc1:
+		ui.link_button(
+			"🌐 Google AI Studio'yu Tarayıcıda Aç (API Anahtarı Al) ↗",
+			"https://aistudio.google.com/welcome",
+			type="primary",
+			use_container_width=True,
+			help="Bilgisayarınızın varsayılan tarayıcısında https://aistudio.google.com/welcome adresini açar.",
+		)
+	with gc2:
+		ui.download_button(
+			"📥 Kılavuzu PDF Olarak İndir",
+			data=lambda _p=guide_pdf: _p.read_bytes(),
+			file_name="Gemini_API_Anahtari_Nasil_Alinir_Kilavuzu.pdf",
+			mime="application/pdf",
+			type="secondary",
+			use_container_width=True,
+			key="dl_gemini_api_guide_pdf_modal",
+		)
+
+	try:
+		num_pages, a4_html = _render_gemini_api_guide_a4_html(str(guide_pdf))
+		ui.caption(f"📑 Toplam **{num_pages}** sayfa · Adım adım Google AI Studio API anahtarı alma kılavuzu (A4 önizleme):")
+		ui.markdown(a4_html, unsafe_allow_html=True)
+	except Exception as exc:
+		ui.error(f"Kılavuz PDF önizlenemedi: {exc}")
+
+
 def render_gemini_ai_settings_panel(current_cfg: dict[str, str]) -> None:
 	ui.markdown("### 🤖 Yapay Zekâ (Gemini API) & KVKK Anonimleştirme Ayarları")
 	ui.caption(
@@ -12363,6 +12423,60 @@ def render_gemini_ai_settings_panel(current_cfg: dict[str, str]) -> None:
 					ui.success(f"✅ Bağlantı Başarılı ({used_m}): {msg}")
 				else:
 					ui.error(f"❌ Bağlantı Hatası: {msg}")
+
+	# API Anahtarı Alma & Görsel PDF Kılavuz Bölümü
+	guide_pdf_path = _resolve_bundled_asset("gemini_api_anahtari_kilavuzu.pdf")
+	with ui.container(border=True):
+		ui.markdown("#### 🔑 API Anahtarı Alma & Nasıl Alınır Kılavuzu")
+		api_get_col, api_guide_col = ui.columns(2)
+		with api_get_col:
+			ui.markdown("##### 🌐 API Anahtarı Al (Google AI Studio)")
+			ui.caption(
+				"Henüz bir Gemini API anahtarınız yoksa aşağıdaki butona tıklayarak bilgisayarınızın web tarayıcısında Google AI Studio'yu açıp ücretsiz anahtar oluşturabilirsiniz."
+			)
+			ui.link_button(
+				"🌐 Google AI Studio'yu Tarayıcıda Aç (API Anahtarı Al) ↗",
+				"https://aistudio.google.com/welcome",
+				type="primary",
+				use_container_width=True,
+				help="Bilgisayarınızın varsayılan tarayıcısında https://aistudio.google.com/welcome sayfasını açar.",
+			)
+			ui.caption("🔗 Adres: `https://aistudio.google.com/welcome`")
+		with api_guide_col:
+			ui.markdown("##### 📘 API Anahtarı Nasıl Alınır? (Görsel PDF Kılavuz)")
+			ui.caption(
+				"Adım adım ekran görüntülü 5 sayfalık Türkçe kılavuzu inceleyerek anahtarınızı 1 dakikada oluşturup yukarıdaki kutuya yapıştırabilirsiniz."
+			)
+			gb1, gb2 = ui.columns([1.45, 0.85])
+			with gb1:
+				if ui.button(
+					"📖 Kılavuz PDF'yi Göster (A4)",
+					type="secondary",
+					use_container_width=True,
+					disabled=not guide_pdf_path.exists(),
+					key="btn_open_gemini_api_guide_pdf",
+				):
+					open_gemini_api_guide_dialog()
+			with gb2:
+				if guide_pdf_path.exists():
+					ui.download_button(
+						"📥 PDF İndir",
+						data=lambda _p=guide_pdf_path: _p.read_bytes(),
+						file_name="Gemini_API_Anahtari_Nasil_Alinir_Kilavuzu.pdf",
+						mime="application/pdf",
+						type="secondary",
+						use_container_width=True,
+						key="dl_gemini_api_guide_pdf_inline",
+					)
+
+		if guide_pdf_path.exists():
+			if ui.toggle("📄 Kılavuz PDF'yi Sayfa İçinde Göster (5 Sayfa A4)", value=False, key="cfg_show_api_guide_inline"):
+				try:
+					n_pg, a4_guide_html = _render_gemini_api_guide_a4_html(str(guide_pdf_path))
+					ui.caption(f"📑 {n_pg} sayfalık adım adım görsel kılavuz:")
+					ui.markdown(a4_guide_html, unsafe_allow_html=True)
+				except Exception as exc_g:
+					ui.error(f"Kılavuz PDF görüntülenemedi: {exc_g}")
 
 	with ui.expander("🛡️ KVKK Kişisel Veri Anonimleştirme Mimarisi Nasıl Çalışır?", expanded=True):
 		ui.info(

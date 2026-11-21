@@ -15,6 +15,7 @@ revir_evraklari/
 egitim_yillari/
 *.pdf
 *.PDF
+!gemini_api_anahtari_kilavuzu.pdf
 *.xlsx
 *.xls
 
