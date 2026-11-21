@@ -962,6 +962,9 @@ Tablolar:
 - infirmary_inventory(id, item_name, category, quantity, unit, min_threshold, expiry_date, storage_location, notes)
 - lab_reports(id, student_id, report_date, file_name, extracted_text)
 - lab_results(id, report_id, test_name, value, unit, ref_low, ref_high, lab_flag)
+- diabetes_profiles(student_id, is_diabetic, diabetes_type, insulin_brand, basal_insulin, delivery_method, pen_increment, icr_breakfast, icr_lunch, icr_snack, isf, target_bg, correction_threshold, hypo_threshold, hyper_ketone_threshold, insulin_duration_hours, tdd_units, max_single_bolus, cgm_device, glucagon_location, physician_name, emergency_protocol)
+- school_meal_menus(id, year_month, menu_date, meal_type, items_json, total_carbs_g, source_note)
+- insulin_bolus_logs(id, student_id, log_date, log_time, meal_type, bg_mg_dl, ketone_status, menu_carbs_g, menu_consumed_pct, extra_carbs_g, total_carbs_g, activity_level, activity_duration_min, activity_reduction_pct, icr_used, isf_used, iob_units, carb_dose_units, correction_dose_units, calculated_dose_units, applied_dose_units, injection_site, meal_summary, ai_commentary, administered_by, notes)
 """
 
 _FORBIDDEN_SQL_RE = re.compile(
@@ -1104,7 +1107,9 @@ def chat_with_gemini_assistant(
 		"   {\"action\":\"sql_export\",\"format\":\"xlsx\" veya \"docx\" veya \"both\",\"title\":\"Rapor Başlığı\",\"sql\":\"SELECT ...\"}\n"
 		"   Not: SQL yalnızca güvenli salt-okunur SELECT olmalı, Türkçe sütun takma adları kullanmalı ve en fazla LIMIT 200 olmalı.\n"
 		"10) Özel metin/dilekçe/veli mektubu/BEP uyarlama/özel tablo belgesi (Word veya Excel):\n"
-		"   {\"action\":\"custom_doc\",\"format\":\"docx\" veya \"xlsx\" veya \"both\",\"title\":\"Belge Başlığı\",\"subtitle\":\"Alt Başlık\",\"sections\":[{\"heading\":\"Başlık\",\"body\":\"İçerik...\"}],\"table\":{\"headers\":[\"Sütun1\",\"Sütun2\"],\"rows\":[[\"Değer1\",\"Değer2\"]]}}\n\n"
+		"   {\"action\":\"custom_doc\",\"format\":\"docx\" veya \"xlsx\" veya \"both\",\"title\":\"Belge Başlığı\",\"subtitle\":\"Alt Başlık\",\"sections\":[{\"heading\":\"Başlık\",\"body\":\"İçerik...\"}],\"table\":{\"headers\":[\"Sütun1\",\"Sütun2\"],\"rows\":[[\"Değer1\",\"Değer2\"]]}}\n"
+		"11) Seçili öğrencinin aylık yemek menüsüne göre tahmini insülin planı (Word/Excel): {\"action\":\"insulin_monthly_plan\",\"format\":\"docx\" veya \"xlsx\" veya \"both\",\"year_month\":\"YYYY-MM\"}\n"
+		"12) Seçili öğrencinin insülin & kan şekeri izlem defteri raporu (Word/Excel): {\"action\":\"insulin_log_report\",\"format\":\"docx\" veya \"xlsx\" veya \"both\"}\n\n"
 		"Kullanıcı dosya/Word/Excel/rapor çıktısı istemiyorsa [[REVIR_EXPORT:...]] etiketini EKLEME. "
 		"Kısa, maddeli ve okunması kolay yanıtlar üret."
 	)
@@ -1211,4 +1216,302 @@ def chat_with_gemini_assistant(
 		clean_reply = (clean_reply[:m_exp.start()] + clean_reply[m_exp.end():]).strip()
 
 	return True, clean_reply, used_model, transcribed, export_spec
+
+
+# ==============================================================================
+# 11. PEDİATRİK DİYABET & İNSÜLİN DOZ HESAPLAMA YAPAY ZEKÂ MODÜLLERİ
+# ==============================================================================
+
+def parse_monthly_school_menu_with_gemini(
+	*,
+	api_key: str,
+	model: str,
+	year_month: str,
+	file_bytes: bytes | None = None,
+	file_name: str = "",
+	raw_text: str = "",
+	default_meal_type: str = "Öğle Yemeği",
+) -> tuple[bool, list[dict[str, Any]], str]:
+	"""
+	Aylık okul yemek programını (PDF, Fotoğraf, Excel, Word veya düz metin) Gemini ile okuyup
+	gün gün yemek kalemlerine ve Türk okul porsiyonu tahmini karbonhidrat (g) değerlerine ayrıştırır.
+	"""
+	inline_files: list[tuple[bytes, str]] = []
+	extra_txt = (raw_text or "").strip()
+
+	if file_bytes and file_name:
+		item, txt_blk = _extract_attachment_context(file_name, "", file_bytes, sensitive_names=None)
+		if item is not None:
+			inline_files.append(item)
+		if txt_blk and not item:
+			extra_txt = (extra_txt + "\n\n" + txt_blk).strip()
+
+	if not inline_files and not extra_txt:
+		return False, [], "Lütfen aylık yemek listesi dosyası yükleyin veya menü metnini yapıştırın."
+
+	sys_inst = (
+		"Sen çocuk endokrinolojisi ve okul beslenmesi alanında uzman bir Türk pediatrik diyetisyenisin. "
+		"Türk okul yemekhanelerindeki standart çocuk porsiyonlarına (1 kase çorba, 1 porsiyon ana yemek, 1 küçük kase pilav/makarna, 1 dilim ekmek, 1 küçük meyve/yoğurt) "
+		"göre gerçekçi, güvenilir karbonhidrat (gram) tahminleri ve glisemik indeks (Düşük/Orta/Yüksek) sınıflandırması yaparsın."
+	)
+	txt_section = f"\n[YEMEK LİSTESİ METNİ / TABLOSU]:\n{extra_txt[:15000]}" if extra_txt else ""
+	prompt = f"""Ekli veya aşağıda verilen aylık okul yemek listesini dikkatlice incele ve '{year_month}' ayı için gün gün yemekleri ve her yemeğin çocuk porsiyonu tahmini karbonhidrat (gram) değerini çıkar.
+Varsayılan öğün türü: '{default_meal_type}' (belgede Kahvaltı / İkindi ayrı verilmişse ilgili `meal_type` değerini yaz).{txt_section}
+
+Yanıtı YALNIZCA aşağıdaki JSON formatında döndür:
+{{
+  "days": [
+    {{
+      "menu_date": "{year_month}-01",
+      "meal_type": "{default_meal_type}",
+      "items": [
+        {{
+          "name": "Mercimek Çorbası",
+          "portion": "1 orta kase (200 ml)",
+          "carbs_g": 18,
+          "gi": "Orta",
+          "fat_protein_note": ""
+        }},
+        {{
+          "name": "Pirinç Pilavı",
+          "portion": "4-5 yemek kaşığı",
+          "carbs_g": 30,
+          "gi": "Yüksek",
+          "fat_protein_note": ""
+        }}
+      ]
+    }}
+  ]
+}}
+
+Kurallar:
+- `menu_date` mutlaka `YYYY-MM-DD` biçiminde olsun (belgede yalnızca gün numarası varsa `{year_month}-GG` olarak tamamla).
+- Ekmek menüde yazmasa bile listede yer alan her kalemi ayrı öğe olarak gir; su/çay gibi 0g karb içerenleri 0 yaz.
+- Yağlı/hamur işi/pizza/börek/kızartma/mantı gibi gecikmeli kan şekeri yükselişi yapan yemeklerde `fat_protein_note` alanına kısa uyarı yaz (örn: "Yağ/protein yüksek - geç yükseliş riski").
+- Sadece belgede yer alan günleri döndür."""
+
+	ok, raw, used_m = call_gemini(
+		prompt,
+		api_key=api_key,
+		model=model,
+		system_instruction=sys_inst,
+		expect_json=True,
+		inline_files=inline_files if inline_files else None,
+		temperature=0.15,
+		timeout=40.0,
+	)
+	if not ok:
+		return False, [], raw
+
+	parsed = _parse_json_response(raw)
+	days = parsed.get("days") if isinstance(parsed, dict) else None
+	if not isinstance(days, list) or not days:
+		return False, [], "Belgeden gün bazlı yemek listesi ayrıştırılamadı. Lütfen daha net bir dosya veya metin deneyin."
+
+	cleaned_days: list[dict[str, Any]] = []
+	for d in days:
+		if not isinstance(d, dict):
+			continue
+		mdate = str(d.get("menu_date") or "").strip()[:10]
+		if not re.match(r"^\d{4}-\d{2}-\d{2}$", mdate):
+			continue
+		mtype = str(d.get("meal_type") or default_meal_type).strip() or default_meal_type
+		raw_items = d.get("items") or []
+		clean_items: list[dict[str, Any]] = []
+		for it in raw_items:
+			if not isinstance(it, dict):
+				continue
+			nm = str(it.get("name") or "").strip()
+			if not nm:
+				continue
+			try:
+				cg = max(0.0, round(float(str(it.get("carbs_g") or 0).replace(",", ".")), 1))
+			except Exception:
+				cg = 0.0
+			clean_items.append({
+				"name": nm,
+				"portion": str(it.get("portion") or "1 porsiyon").strip(),
+				"carbs_g": cg,
+				"gi": str(it.get("gi") or "Orta").strip(),
+				"fat_protein_note": str(it.get("fat_protein_note") or "").strip(),
+			})
+		if clean_items:
+			cleaned_days.append({
+				"menu_date": mdate,
+				"meal_type": mtype,
+				"items": clean_items,
+				"total_carbs_g": round(sum(x["carbs_g"] for x in clean_items), 1),
+			})
+	return True, cleaned_days, used_m
+
+
+def estimate_extra_foods_carbs_with_gemini(
+	*,
+	api_key: str,
+	model: str,
+	food_description: str = "",
+	file_bytes: bytes | None = None,
+	file_name: str = "",
+	student_age_years: float | None = None,
+) -> tuple[bool, dict[str, Any], str]:
+	"""Ekstra yiyecek metni veya tabak/atıştırmalık fotoğrafından karbonhidrat (g) ve glisemik etki hesaplar."""
+	inline_files: list[tuple[bytes, str]] = []
+	if file_bytes and file_name:
+		mime = mimetypes.guess_type(file_name)[0] or "image/jpeg"
+		inline_files.append((file_bytes, mime))
+	desc = (food_description or "").strip()
+	if not desc and not inline_files:
+		return False, {"error": "Yiyecek açıklaması yazın veya yemek fotoğrafı yükleyin."}, ""
+
+	age_hint = f"Öğrenci yaşı: yaklaşık {student_age_years:.1f} yaş." if student_age_years else ""
+	prompt = f"""Bir pediatrik diyabet diyetisyeni olarak aşağıdaki ekstra yiyecek / atıştırmalık açıklamasını ve/veya ekli yemek fotoğrafını analiz et, her yiyeceğin karbonhidrat miktarını (gram) hesapla.
+{age_hint}
+[YİYECEK AÇIKLAMASI]: {desc or 'Ekli fotoğraftaki yiyecekleri ve porsiyonlarını tahmin et.'}
+
+Yalnızca şu JSON şemasıyla Türkçe yanıt ver:
+{{
+  "items": [
+    {{"name": "Yiyecek adı", "portion": "Tahmini porsiyon", "carbs_g": 15.0, "gi": "Düşük | Orta | Yüksek"}}
+  ],
+  "total_carbs_g": 15.0,
+  "glycemic_note": "Glisemik hız, yağ/protein gecikmeli yükseliş riski veya porsiyon uyarısı (1-2 cümle)"
+}}"""
+
+	ok, raw, used_m = call_gemini(
+		prompt,
+		api_key=api_key,
+		model=model,
+		expect_json=True,
+		inline_files=inline_files if inline_files else None,
+		temperature=0.15,
+		timeout=25.0,
+	)
+	if not ok:
+		return False, {"error": raw}, used_m
+	parsed = _parse_json_response(raw)
+	raw_items = parsed.get("items") or []
+	clean_items: list[dict[str, Any]] = []
+	for it in raw_items:
+		if not isinstance(it, dict):
+			continue
+		nm = str(it.get("name") or "").strip()
+		if not nm:
+			continue
+		try:
+			cg = max(0.0, round(float(str(it.get("carbs_g") or 0).replace(",", ".")), 1))
+		except Exception:
+			cg = 0.0
+		clean_items.append({
+			"name": nm,
+			"portion": str(it.get("portion") or "1 porsiyon").strip(),
+			"carbs_g": cg,
+			"gi": str(it.get("gi") or "Orta").strip(),
+		})
+	tot = round(sum(x["carbs_g"] for x in clean_items), 1)
+	return True, {
+		"items": clean_items,
+		"total_carbs_g": tot,
+		"glycemic_note": str(parsed.get("glycemic_note") or "").strip(),
+	}, used_m
+
+
+def analyze_insulin_dose_with_gemini(
+	*,
+	api_key: str,
+	model: str,
+	anon_student_context: str,
+	growth_info: dict[str, Any],
+	diabetes_profile: dict[str, Any],
+	calc_result: dict[str, Any],
+	meal_details: dict[str, Any],
+	recent_bg_trend: list[dict[str, Any]] | None = None,
+	school_name: str = "Okul Reviri",
+	nurse_name: str = "Okul Revir Sorumlusu",
+	extra_instruction: str = "",
+) -> tuple[bool, dict[str, str], str]:
+	"""
+	Python tarafından kesin matematikle hesaplanan insülin dozunu; öğrencinin yaşı, boyu, kilosu,
+	WHO persantil/Z-skoru, TDD/kg oranı, özel gereksinim/alerji profili, yemek menüsü, ekstra yiyecekleri,
+	fiziksel aktivitesi ve son kan şekeri eğilimi ışığında pediatrik hemşirelik açısından yorumlar.
+	"""
+	sys_inst = (
+		"Sen çocuk endokrinolojisi ve okulda diyabet hemşireliği (ISPAD / T.C. Sağlık Bakanlığı Okulda Diyabet Programı) "
+		"konusunda uzman bir klinik karar destek asistanısın. "
+		"Matematiksel doz hesabını değiştirme veya yeni reçete yazma; sistemin hekim parametreleriyle (İKO/İDF) hesapladığı "
+		"dozu öğrencinin yaşı, boyu, kilosu, büyüme persantili, günlük insülin/kg (TDD/kg) oranı, yemek içeriğinin glisemik/yağ-protein profili, "
+		"fiziksel aktivitesi, aktif insülini (IOB) ve varsa engellilik/alerji/çölyak durumuna göre klinik güvenlik açısından değerlendir."
+	)
+	inst_line = f"\n[HEMŞİRENİN ÖZEL SORUSU / NOTU]: {extra_instruction.strip()}" if extra_instruction and extra_instruction.strip() else ""
+	prompt = f"""Aşağıdaki anonim pediatrik diyabet öğrencisinin güncel öğün, aktivite ve insülin hesaplama verilerini değerlendir:
+
+[ANONİM ÖĞRENCİ KLİNİK & ENGEL/ALERJİ PROFİLİ]:
+{anon_student_context}
+
+[YAŞ, BOY, KİLO, VKİ & WHO PERSANTİL BİLGİSİ]:
+{json.dumps(growth_info, ensure_ascii=False, default=str)}
+
+[HEKİM DİYABET & İNSÜLİN PARAMETRELERİ]:
+{json.dumps(diabetes_profile, ensure_ascii=False, default=str)}
+
+[ÖĞÜN MENÜSÜ, EKSTRA YİYECEKLER & FİZİKSEL AKTİVİTE]:
+{json.dumps(meal_details, ensure_ascii=False, default=str)}
+
+[SİSTEMİN HESAPLADIĞI KESİN DOZ & GÜVENLİK BAYRAKLARI]:
+{json.dumps(calc_result, ensure_ascii=False, default=str)}
+
+[SON KAN ŞEKERİ & İNSÜLİN KAYIT EĞİLİMİ]:
+{json.dumps((recent_bg_trend or [])[:10], ensure_ascii=False, default=str)}{inst_line}
+
+Yanıtı YALNIZCA şu JSON şemasıyla Türkçe döndür:
+{{
+  "safety_badge": "✅ Uygun / Güvenli Aralıkta | ⚠️ Yakın İzlem Önerilir | 🚨 Kritik Klinik Dikkat!",
+  "anthropometry_tdd_comment": "Öğrencinin yaşı, boyu, kilosu, VKİ/persantil durumu ve (varsa) TDD/kg oranına göre insülin gereksinimi ve güvenlik uyumu yorumu (2-3 cümle)",
+  "meal_glycemic_comment": "Menüdeki yemekler + ekstra yediklerinin karbonhidrat yükü, glisemik hızı, yağ/protein gecikmeli yükseliş olasılığı, varsa çölyak/alerji/tüketim yüzdesi ve enjeksiyon zamanlaması önerisi (2-3 cümle)",
+  "activity_hypo_comment": "Planlanan veya yapılan fiziksel aktivite/beden eğitiminin kan şekerine etkisi, IOB (aktif insülin) etkileşimi ve hipoglisemi/keton koruma uyarısı (2 cümle)",
+  "nurse_action_plan": "Okul hemşiresi için somut adımlar: enjeksiyon öncesi/sonrası kontrol saati (örn. 2. saat KŞ ölçümü), enjeksiyon bölgesi rotasyonu veya engellilik/özel durum uyarlaması (maddeli, kısa)",
+  "guardian_sms_draft": "Veliye gönderilecek sakin, net bilgilendirme mesajı (Ölçülen KŞ, tüketilen karb, aktivite notu ve uygulanan/planlanan doz özeti; isim yerine [ÖĞRENCİ_ADI] kullan; Kurum: {school_name}, İmza: {nurse_name})"
+}}"""
+
+	ok, raw, used_m = call_gemini(
+		prompt,
+		api_key=api_key,
+		model=model,
+		system_instruction=sys_inst,
+		expect_json=True,
+		temperature=0.2,
+		timeout=24.0,
+	)
+	if not ok:
+		return False, {"error": raw}, used_m
+	parsed = _parse_json_response(raw)
+	if not parsed:
+		return False, {"error": "Gemini diyabet klinik yorumu JSON olarak ayrıştırılamadı."}, used_m
+	return True, {k: str(v or "") for k, v in parsed.items()}, used_m
+
+
+def analyze_glycemic_trend_with_gemini(
+	*,
+	api_key: str,
+	model: str,
+	anon_student_context: str,
+	growth_info: dict[str, Any],
+	tir_stats: dict[str, Any],
+	logs_summary: list[dict[str, Any]],
+) -> tuple[bool, str, str]:
+	"""Öğrencinin son 14-30 günlük okul içi kan şekeri ve insülin kayıtlarını analiz edip hekim/veli kontrol özeti üretir."""
+	prompt = f"""Çocuk endokrinolojisi kontrolüne veya veli bilgilendirmesine destek olmak üzere aşağıdaki anonim öğrencinin okul içi kan şekeri, Hedef Aralıkta Kalma (TIR) ve insülin uygulama kayıtlarını analiz et:
+
+[ANONİM PROFİL]: {anon_student_context}
+[YAŞ / BOY / KİLO / PERSANTİL]: {json.dumps(growth_info, ensure_ascii=False, default=str)}
+[GLİSEMİK İSTATİSTİKLER (TIR)]: {json.dumps(tir_stats, ensure_ascii=False, default=str)}
+[SON KAYITLAR]: {json.dumps(logs_summary[:30], ensure_ascii=False, default=str)}
+
+Türkçe olarak şu 4 kısa başlıkla raporla (kod bloğu kullanma):
+1. **📊 Glisemik Seyir & Hedef Aralık (TIR) Değerlendirmesi**
+2. **⚠️ Tekrarlayan Hipoglisemi / Hiperglisemi Saatleri ve Olası Tetikleyiciler** (öğünler, ekstra yiyecekler veya beden eğitimi ilişkisi)
+3. **💉 Enjeksiyon Rotasyonu, Doz Uyumu & Büyüme (Yaş/Kilo) İlişkisi**
+4. **👩‍⚕️ Hekim Kontrolü & Okul İçi İzlem İçin Önerilen Notlar**"""
+
+	return call_gemini(prompt, api_key=api_key, model=model, temperature=0.25, timeout=24.0)
+
 

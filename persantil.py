@@ -24,6 +24,7 @@ from typing import Any, Iterator
 import pandas as pd
 import revir_ui as ui
 import gemini_assistant as gai
+import insulin_diabetes as idm
 
 # Ağır kütüphaneler (altair, openpyxl, python-docx) açılışta değil, ilk kullanıldıklarında tembel yüklenir.
 docx = None
@@ -121,7 +122,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.8.0"
+_DEFAULT_APP_VERSION = "1.9.0"
 
 
 def _load_app_version() -> str:
@@ -158,6 +159,7 @@ PAGES = [
 	"🏫 Okul Taraması",
 	"🩺 Revir Kaydı",
 	"💊 İlaç Takip Sistemi",
+	"💉 İnsülin & Diyabet Yönetimi",
 	"💓 Vital Takip",
 	"📋 Sağlık Profili ve Bakım Planı",
 	"📏 Ölçüm ve Gelişim",
@@ -1436,17 +1438,20 @@ def initialize_db() -> None:
 			if v_col_name not in visit_columns:
 				connection.execute(f"ALTER TABLE visits ADD COLUMN {v_col_name} {v_col_def}")
 
+		# Pediatrik Diyabet & İnsülin Yönetimi tabloları
+		idm.ensure_diabetes_tables(connection)
+
 		# Resilient person_type normalization
 		connection.execute("UPDATE students SET person_type='Öğrenci' WHERE person_type LIKE '%renci%'")
 		connection.execute(
-			"INSERT INTO app_settings(key, value) VALUES ('db_schema_version', '1.3') "
+			"INSERT INTO app_settings(key, value) VALUES ('db_schema_version', '1.4') "
 			"ON CONFLICT(key) DO UPDATE SET value=excluded.value"
 		)
 
 
 @ui.cache_resource(show_spinner=False)
 def ensure_db_initialized() -> bool:
-	"""Tek seferlik veritabanı şema ve başlangıç kontrolü (Hızlı başlangıç: db_schema_version == '1.3' ise tam taramayı atlar)."""
+	"""Tek seferlik veritabanı şema ve başlangıç kontrolü (Hızlı başlangıç: db_schema_version == '1.4' ise tam taramayı atlar)."""
 	db_path = get_current_db_path()
 	needs_init = True
 	if db_path and db_path.exists() and db_path.stat().st_size > 0:
@@ -1456,7 +1461,7 @@ def ensure_db_initialized() -> bool:
 			row = check_conn.execute(
 				"SELECT value FROM app_settings WHERE key='db_schema_version'"
 			).fetchone()
-			if row and str(row[0]) == "1.3":
+			if row and str(row[0]) == "1.4":
 				needs_init = False
 		except Exception:
 			needs_init = True
@@ -10450,6 +10455,18 @@ def _build_person_anon_bundle(person_id: int) -> tuple[str, list[str], str]:
 		latest_measurement=dict(m_row) if m_row else None,
 		active_medications=[dict(x) for x in meds] if meds else None,
 	)
+	try:
+		dp_diab = idm.get_diabetes_profile(connect_db, int(person_id))
+		if dp_diab.get("_exists") and dp_diab.get("is_diabetic"):
+			anon_ctx += (
+				f" | DİYABET & İNSÜLİN PROFİLİ: {dp_diab['diabetes_type']}, "
+				f"Bolus: {dp_diab['insulin_brand']}, "
+				f"İKO (Sabah/Öğle/Ara): 1/{dp_diab['icr_breakfast']:.0f}g - 1/{dp_diab['icr_lunch']:.0f}g - 1/{dp_diab['icr_snack']:.0f}g, "
+				f"İDF: {dp_diab['isf']:.0f}, Hedef KŞ: {dp_diab['target_bg']:.0f} mg/dL, "
+				f"TDD: {dp_diab.get('tdd_units') or 0:.1f} Ü"
+			)
+	except Exception:
+		pass
 	return anon_ctx, sensitive, full_name
 
 
@@ -11132,6 +11149,42 @@ def _execute_gemini_chat_export(export_spec: dict[str, Any], active_pid: int | N
 				downloads.append({"token": tok_d, "file_name": fn_d, "label": f"📄 Word İndir ({len(df_res)} kayıt, .docx)", "kind": "docx"})
 			return downloads, extra_note
 
+		if action == "insulin_monthly_plan":
+			if not active_pid:
+				return [], "\n\n⚠️ *Aylık insülin yemek planı için önce bir öğrenci seçin.*"
+			p_obj = get_person_by_id(int(active_pid))
+			ym_arg = str(export_spec.get("year_month") or date.today().strftime("%Y-%m"))[:7]
+			p_df, p_prof = idm.build_monthly_insulin_plan_df(connect_db, int(active_pid), ym_arg)
+			if p_df.empty:
+				return [], f"\n\n⚠️ *{ym_arg} ayı için kayıtlı yemek menüsü bulunamadı.*"
+			p_ttl = f"{p_obj['full_name'] if p_obj else 'Öğrenci'} — {ym_arg} Aylık Yemek & İnsülin Planı"
+			p_sub = f"Öğle İKO: 1/{p_prof['icr_lunch']:.0f}g | İDF: {p_prof['isf']:.0f} | Hedef: {p_prof['target_bg']:.0f} mg/dL"
+			if fmt in ("docx", "word", "both"):
+				bd = build_ai_custom_report_docx(p_ttl, subtitle=p_sub, df=p_df)
+				fn_d = f"aylik_insulin_plani_{ym_arg}.docx"
+				downloads.append({"token": ui.register_download(bd, fn_d, docx_mime), "file_name": fn_d, "label": f"📄 Aylık İnsülin Planı Word ({ym_arg}, .docx)", "kind": "docx"})
+			if fmt in ("xlsx", "excel", "both"):
+				bx = build_ai_custom_report_excel(p_ttl, df=p_df)
+				fn_x = f"aylik_insulin_plani_{ym_arg}.xlsx"
+				downloads.append({"token": ui.register_download(bx, fn_x, xlsx_mime), "file_name": fn_x, "label": f"📊 Aylık İnsülin Planı Excel ({ym_arg}, .xlsx)", "kind": "xlsx"})
+			return downloads, extra_note
+
+		if action == "insulin_log_report":
+			if not active_pid:
+				return [], "\n\n⚠️ *İnsülin izlem defteri için önce bir öğrenci seçin.*"
+			p_obj = get_person_by_id(int(active_pid))
+			l_df = idm.get_student_bolus_logs_df(connect_db, int(active_pid), days_back=30).drop(columns=["id"], errors="ignore")
+			l_ttl = f"{p_obj['full_name'] if p_obj else 'Öğrenci'} — Son 30 Gün İnsülin & Kan Şekeri Defteri"
+			if fmt in ("docx", "word", "both"):
+				bd = build_ai_custom_report_docx(l_ttl, df=l_df)
+				fn_d = f"insulin_defteri_{today_slug}.docx"
+				downloads.append({"token": ui.register_download(bd, fn_d, docx_mime), "file_name": fn_d, "label": "📄 İnsülin Defteri Word (.docx)", "kind": "docx"})
+			if fmt in ("xlsx", "excel", "both"):
+				bx = build_ai_custom_report_excel(l_ttl, df=l_df)
+				fn_x = f"insulin_defteri_{today_slug}.xlsx"
+				downloads.append({"token": ui.register_download(bx, fn_x, xlsx_mime), "file_name": fn_x, "label": "📊 İnsülin Defteri Excel (.xlsx)", "kind": "xlsx"})
+			return downloads, extra_note
+
 		if action == "custom_doc":
 			secs = export_spec.get("sections") if isinstance(export_spec.get("sections"), list) else None
 			tbl_spec = export_spec.get("table") if isinstance(export_spec.get("table"), dict) else None
@@ -11217,6 +11270,10 @@ def _handle_floating_gemini_chat(payload: dict[str, Any], chat_history: list[dic
 			f"Kayıtlı Kişi: {c_row['total_stu']} (Özel Gereksinim/Engelli: {c_row['dis_cnt']}) | "
 			f"Bugünkü Başvuru: {c_row['today_vis']} | Aktif İzolasyon: {c_row['active_iso']}"
 		)
+		today_menu = idm.get_school_menu_for_date(connect_db, today_iso, "Öğle Yemeği")
+		if today_menu and today_menu.get("items"):
+			m_items_s = ", ".join(f"{it['name']} ({it.get('carbs_g', 0)}g)" for it in today_menu["items"][:8])
+			school_ctx += f" | Bugünkü Okul Menüsü ({today_menu['meal_type']}, Toplam {today_menu['total_carbs_g']}g karb): {m_items_s}"
 	except Exception:
 		pass
 
@@ -13454,8 +13511,15 @@ def render_person_dossier_content(person_id: int, is_dialog: bool = False) -> No
 
 	dp_hero = get_person_disability_profile(person_id, person=person, hp=hp)
 	has_dis_tab = bool(dp_hero.get("has_disability"))
+	diab_hero = idm.get_diabetes_profile(connect_db, person_id)
+	has_diab_hero = bool(diab_hero.get("_exists") and diab_hero.get("is_diabetic"))
 
 	badge_htmls = []
+	if has_diab_hero:
+		badge_htmls.append(
+			f"<span style='background:#e0f2fe;color:#0369a1;border:1.5px solid #7dd3fc;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:700;'>"
+			f"💉 {html.escape(str(diab_hero['diabetes_type']))} · İKO 1/{diab_hero['icr_lunch']:.0f}g · İDF {diab_hero['isf']:.0f} · Hedef {diab_hero['target_bg']:.0f}</span>"
+		)
 	if has_dis_tab:
 		dp_badge_txt = format_disability_badge_text(dp_hero)
 		badge_htmls.append(f"<span style='background:#f5f3ff;color:#5b21b6;border:1.5px solid #c4b5fd;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:700;'>♿ Engel / Fonksiyon: {html.escape(dp_badge_txt)}</span>")
@@ -13490,6 +13554,13 @@ def render_person_dossier_content(person_id: int, is_dialog: bool = False) -> No
 
 		if badge_htmls:
 			ui.markdown("<div style='margin-top:6px;display:flex;gap:8px;flex-wrap:wrap;'>" + "".join(badge_htmls) + "</div>", unsafe_allow_html=True)
+		if has_diab_hero:
+			if ui.button("💉 İnsülin Doz Hesaplayıcı & Aylık Yemek Planını Aç ↗️", key=f"dossier_goto_insulin_{person_id}", type="secondary"):
+				set_active_person(person_id)
+				ui.session_state["target_page"] = "💉 İnsülin & Diyabet Yönetimi"
+				if is_dialog:
+					ui.close_dialog(all_dialogs=True)
+				ui.rerun()
 
 	tab_defs: list[tuple[str, str]] = [
 		("overview", "📋 360° Genel Özet"),
@@ -29336,6 +29407,29 @@ def render_settings() -> None:
 							ui.error(f"Paket yükleme hatası: {e}")
 
 
+def render_insulin_diabetes() -> None:
+	idm.render_insulin_diabetes_page(
+		{
+			"connect_db": connect_db,
+			"get_person_by_id": get_person_by_id,
+			"set_active_person": set_active_person,
+			"get_app_settings": get_app_settings,
+			"_get_active_gemini_config": _get_active_gemini_config,
+			"_build_person_anon_bundle": _build_person_anon_bundle,
+			"get_person_latest_measurements": get_person_latest_measurements,
+			"evaluate_measurement": evaluate_measurement,
+			"age_in_months": age_in_months,
+			"build_ai_custom_report_docx": build_ai_custom_report_docx,
+			"build_ai_custom_report_excel": build_ai_custom_report_excel,
+			"mask_kvkk_value": mask_kvkk_value,
+			"get_person_disability_profile": get_person_disability_profile,
+			"format_disability_badge_text": format_disability_badge_text,
+			"sync_after_person_mutation": sync_after_person_mutation,
+			"clear_all_data_caches": clear_all_data_caches,
+		}
+	)
+
+
 def main() -> None:
 	fav_icon = get_app_icon()
 	ui.set_page_config(page_title="Revir Defteri", page_icon=fav_icon, layout="wide", initial_sidebar_state="expanded")
@@ -29448,6 +29542,8 @@ def main() -> None:
 		render_visit()
 	elif page_clean == "İlaç Takip Sistemi":
 		render_medication_tracker()
+	elif page_clean == "İnsülin & Diyabet Yönetimi":
+		render_insulin_diabetes()
 	elif page_clean == "Vital Takip":
 		render_vital_tracking()
 	elif page_clean == "Sağlık Profili ve Bakım Planı":

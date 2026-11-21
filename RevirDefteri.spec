@@ -23,6 +23,7 @@ datas = [
     (str(PROJECT_ROOT / "persantil.py"), "."),
     (str(PROJECT_ROOT / "revir_ui.py"), "."),
     (str(PROJECT_ROOT / "gemini_assistant.py"), "."),
+    (str(PROJECT_ROOT / "insulin_diabetes.py"), "."),
     (str(PROJECT_ROOT / "VERSION"), "."),
     (str(PROJECT_ROOT / "app_icon.png"), "."),
     (str(PROJECT_ROOT / "app_icon.ico"), "."),
@@ -34,6 +35,8 @@ binaries = []
 hiddenimports = [
     "revir_ui",
     "persantil",
+    "gemini_assistant",
+    "insulin_diabetes",
     "sqlite3",
     "pandas",
     "numpy",
