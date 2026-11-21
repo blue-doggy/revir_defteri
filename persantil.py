@@ -124,7 +124,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.16.10"
+_DEFAULT_APP_VERSION = "1.16.11"
 
 
 def _load_app_version() -> str:

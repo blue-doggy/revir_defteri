@@ -3804,18 +3804,18 @@ body.revir-busy .revir-btn { pointer-events: none; }
 /* Yüzen Gemini Sohbet Butonu & Konuşma Balonu */
 #revir-fab-btn {
 	position: fixed; bottom: 22px; right: 24px; z-index: 3400;
-	height: 54px; min-width: 54px; padding: 0 18px; border-radius: 999px;
+	width: 56px; height: 56px; min-width: 56px; padding: 0; border-radius: 50%;
 	border: 1.5px solid rgba(255,255,255,0.45);
 	background: linear-gradient(135deg, var(--teal, #0d9488) 0%, #0284c7 100%);
-	color: #ffffff; font-size: 14.5px; font-weight: 700; font-family: inherit;
-	display: none; align-items: center; justify-content: center; gap: 8px;
+	color: #ffffff; font-family: inherit;
+	display: none; align-items: center; justify-content: center;
 	cursor: pointer; box-shadow: 0 10px 28px rgba(13,148,136,0.38);
 	transition: transform 0.2s cubic-bezier(0.34,1.56,0.64,1), box-shadow 0.2s ease;
 	user-select: none;
 }
 #revir-fab-btn.visible { display: inline-flex; }
-#revir-fab-btn:hover { transform: translateY(-3px) scale(1.03); box-shadow: 0 14px 34px rgba(2,132,199,0.45); }
-#revir-fab-btn .revir-fab-icon { font-size: 22px; line-height: 1; }
+#revir-fab-btn:hover { transform: translateY(-3px) scale(1.05); box-shadow: 0 14px 34px rgba(2,132,199,0.45); }
+#revir-fab-btn svg { width: 28px; height: 28px; display: block; }
 
 #revir-chat-bubble {
 	position: fixed; bottom: 88px; right: 24px; z-index: 3450;
@@ -4034,23 +4034,27 @@ body.revir-busy .revir-btn { pointer-events: none; }
 <div id="revir-toast" onclick="this.style.display='none'" title="Kapatmak için tıklayın"></div>
 
 <!-- Yüzen Gemini Sohbet Butonu ve Konuşma Balonu -->
-<button id="revir-fab-btn" type="button" title="Gemini Klinik Asistan ile Konuş (⌘J / Alt+A)" onclick="window.__revirToggleChatBubble()">
-	<span class="revir-fab-icon">🤖</span>
-	<span>Gemini Asistan</span>
+<button id="revir-fab-btn" type="button" title="Gemini Klinik Asistan ile Konuş (⌘J / Alt+A)" aria-label="Gemini Klinik Asistan" onclick="window.__revirToggleChatBubble()">
+	<svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+		<path d="M12 2L14.6 9.4L22 12L14.6 14.6L12 22L9.4 14.6L2 12L9.4 9.4L12 2Z" fill="currentColor"/>
+		<circle cx="19" cy="5" r="1.4" fill="currentColor" opacity="0.85"/>
+	</svg>
 </button>
 
 <div id="revir-chat-bubble" ondragover="event.preventDefault()" ondrop="window.__revirChatDropFiles(event)">
 	<div class="revir-chat-hdr">
 		<div class="revir-chat-hdr-left">
-			<div class="revir-chat-avatar">🤖</div>
+			<div class="revir-chat-avatar">
+				<svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true">
+					<path d="M12 2L14.6 9.4L22 12L14.6 14.6L12 22L9.4 14.6L2 12L9.4 9.4L12 2Z" fill="currentColor"/>
+				</svg>
+			</div>
 			<div class="revir-chat-title-wrap">
 				<div class="revir-chat-title">Gemini Klinik Asistan</div>
-				<div id="revir-chat-sub" class="revir-chat-sub">🛡️ KVKK Korumalı · Ses & Dosya Destekli</div>
+				<div id="revir-chat-sub" class="revir-chat-sub">🛡️ KVKK Korumalı · Akıllı Asistan &amp; Dosya Destekli</div>
 			</div>
 		</div>
 		<div class="revir-chat-hdr-btns">
-			<button id="revir-chat-stop-tts-btn" type="button" class="revir-chat-hbtn stop-tts" title="Sesli Okumayı Hemen Durdur" onclick="window.__revirStopSpeaking()">⏹️ Durdur</button>
-			<button id="revir-chat-tts-btn" type="button" class="revir-chat-hbtn" title="Otomatik Sesli Okuma (Aç / Kapat)" onclick="window.__revirToggleChatTTS()">🔇</button>
 			<button type="button" class="revir-chat-hbtn" title="Sohbeti Temizle" onclick="window.__revirClearChat()">🗑️</button>
 			<button type="button" class="revir-chat-hbtn" title="Pencereyi Büyüt / Küçült" onclick="window.__revirExpandChat()">⤢</button>
 			<button type="button" class="revir-chat-hbtn" title="Küçült" onclick="window.__revirToggleChatBubble()">✕</button>
@@ -4066,28 +4070,16 @@ body.revir-busy .revir-btn { pointer-events: none; }
 	<div id="revir-chat-messages" class="revir-chat-msgs">
 		<div class="revir-cmsg revir-cmsg-ai">
 			<p>Merhaba! Ben <strong>Gemini Klinik Asistan</strong>. 🩺</p>
-			<p>Bana yazılı veya <strong>🎙️ sesli</strong> soru sorabilir (konuşmanız bitince otomatik gönderilir), <strong>📎 dosya</strong> ekleyebilir veya <em>"Bu öğrencinin raporunu Word yap"</em> / <em>"Son başvuruları Excel olarak ver"</em> diyerek doğrudan indirilebilir <strong>Word / Excel</strong> raporları hazırlatabilirsiniz.</p>
-		</div>
-	</div>
-	<div id="revir-voice-bar" class="revir-voice-bar">
-		<div class="revir-voice-top">
-			<span id="revir-voice-status">🎙️ Dinleniyor... Konuşabilirsiniz</span>
-			<span id="revir-voice-timer">0.0s</span>
-		</div>
-		<div class="revir-voice-meter"><div id="revir-voice-meter-fill" class="revir-voice-meter-fill"></div></div>
-		<div class="revir-voice-actions">
-			<button type="button" class="revir-voice-abtn cancel" onclick="window.__revirCancelVoice()">✖ İptal</button>
-			<button type="button" class="revir-voice-abtn send" onclick="window.__revirStopAndSendVoice()">📤 Durdur ve Gönder</button>
+			<p>Bana yazılı soru sorabilir, <strong>📎 dosya / PDF</strong> ekleyebilir veya <em>"Bu öğrencinin raporunu Word yap"</em> / <em>"Ekli PDF'den sınıfları ve öğrencileri oluştur"</em> diyerek işlem başlatabilirsiniz.</p>
 		</div>
 	</div>
 	<div id="revir-chat-files" class="revir-chat-files"></div>
 	<div class="revir-chat-composer">
 		<label class="revir-chat-ibtn" title="Dosya / Tahlil / Görsel Ekle (.pdf, .png, .jpg, .xlsx, .docx, .csv)">
 			📎
-			<input id="revir-chat-file-inp" type="file" multiple style="display:none" accept=".pdf,.png,.jpg,.jpeg,.webp,.xlsx,.xls,.csv,.docx,.txt,.mp3,.wav,.webm,.m4a,.ogg" onchange="window.__revirChatAddFiles(this.files);this.value='';"/>
+			<input id="revir-chat-file-inp" type="file" multiple style="display:none" accept=".pdf,.png,.jpg,.jpeg,.webp,.xlsx,.xls,.csv,.docx,.txt" onchange="window.__revirChatAddFiles(this.files);this.value='';"/>
 		</label>
-		<button id="revir-chat-mic-btn" type="button" class="revir-chat-ibtn" title="Sesli Konuş (Başlat / Gönder)" onclick="window.__revirToggleVoiceMic()">🎙️</button>
-		<textarea id="revir-chat-inp" rows="1" placeholder="Mesaj yazın, dosya sürükleyin veya 🎙️ konuşun..." onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault();window.__revirSendChat();}"></textarea>
+		<textarea id="revir-chat-inp" rows="1" placeholder="Mesaj yazın veya dosya sürükleyin..." onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault();window.__revirSendChat();}"></textarea>
 		<button id="revir-chat-send-btn" type="button" class="revir-chat-ibtn" title="Gönder" onclick="window.__revirSendChat()">➤</button>
 	</div>
 </div>
@@ -5129,6 +5121,13 @@ body.revir-busy .revir-btn { pointer-events: none; }
 		if (!ev.target.closest(".revir-combo") && !ev.target.closest(".revir-multi") && !ev.target.closest(".revir-combo-menu") && !ev.target.closest(".revir-popover-wrap")) {
 			closeAllMenus();
 		}
+		var chatBubble = document.getElementById("revir-chat-bubble");
+		if (chatBubble && chatBubble.classList.contains("open") && ev.target && document.contains(ev.target)) {
+			var insideChat = ev.target.closest && ev.target.closest("#revir-chat-bubble, #revir-fab-btn");
+			if (!insideChat) {
+				chatBubble.classList.remove("open");
+			}
+		}
 	});
 
 	document.addEventListener("keydown", function(ev) {
@@ -5187,58 +5186,7 @@ body.revir-busy .revir-btn { pointer-events: none; }
 
 	// İlk yükleme (Sunucu tarafından önceden işlenmiş veri varsa anında uygula)
 	var chatFiles = [];
-	var chatTtsEnabled = false;
 	var chatBusy = false;
-	var ttsPlaying = false;
-	var ttsActiveBtn = null;
-	var ttsPollTimer = null;
-	var voiceRec = null;
-	var mediaRecorder = null;
-	var audioChunks = [];
-	var isRecordingVoice = false;
-	var voicePollTimer = null;
-	var voiceStopping = false;
-
-	function setTtsVisualState(playing, btnEl) {
-		ttsPlaying = !!playing;
-		var stopBtn = document.getElementById("revir-chat-stop-tts-btn");
-		if (stopBtn) {
-			stopBtn.classList.toggle("speaking", ttsPlaying);
-		}
-		if (ttsActiveBtn && ttsActiveBtn !== btnEl) {
-			ttsActiveBtn.textContent = "🔊 Dinle";
-			ttsActiveBtn.classList.remove("speaking");
-			ttsActiveBtn = null;
-		}
-		if (ttsPlaying && btnEl) {
-			ttsActiveBtn = btnEl;
-			ttsActiveBtn.textContent = "⏹️ Durdur";
-			ttsActiveBtn.classList.add("speaking");
-		} else if (!ttsPlaying && ttsActiveBtn) {
-			ttsActiveBtn.textContent = "🔊 Dinle";
-			ttsActiveBtn.classList.remove("speaking");
-			ttsActiveBtn = null;
-		}
-		if (!ttsPlaying && ttsPollTimer) {
-			clearInterval(ttsPollTimer);
-			ttsPollTimer = null;
-		}
-	}
-
-	window.__revirStopSpeaking = function(silent) {
-		setTtsVisualState(false, null);
-		if (window.speechSynthesis) {
-			try { window.speechSynthesis.cancel(); } catch (e) {}
-		}
-		fetch("/api/tts_stop", {
-			method: "POST",
-			headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
-			body: "{}"
-		}).catch(function(){});
-		if (!silent) {
-			showToast("⏹️ Sesli okuma durduruldu");
-		}
-	};
 
 	window.__revirToggleChatBubble = function() {
 		var b = document.getElementById("revir-chat-bubble");
@@ -5253,78 +5201,6 @@ body.revir-busy .revir-btn { pointer-events: none; }
 	window.__revirExpandChat = function() {
 		var b = document.getElementById("revir-chat-bubble");
 		if (b) b.classList.toggle("expanded");
-	};
-
-	window.__revirToggleChatTTS = function() {
-		chatTtsEnabled = !chatTtsEnabled;
-		var btn = document.getElementById("revir-chat-tts-btn");
-		if (btn) {
-			btn.textContent = chatTtsEnabled ? "🔊" : "🔇";
-			btn.classList.toggle("active", chatTtsEnabled);
-		}
-		if (!chatTtsEnabled || ttsPlaying) {
-			window.__revirStopSpeaking(true);
-		}
-		showToast(chatTtsEnabled ? "🔊 Otomatik sesli okuma açıldı" : "🔇 Otomatik sesli okuma kapatıldı");
-	};
-
-	window.__revirSpeakText = function(txt, btnEl) {
-		if (!txt) return;
-		if (ttsPlaying && btnEl && ttsActiveBtn === btnEl) {
-			window.__revirStopSpeaking(false);
-			return;
-		}
-		window.__revirStopSpeaking(true);
-		var clean = String(txt)
-			.replace(/```[\s\S]*?```/g, " ")
-			.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-			.replace(/[*#_`~>|]+/g, " ")
-			.replace(/\s+/g, " ")
-			.trim();
-		if (!clean) return;
-		setTtsVisualState(true, btnEl || null);
-		fetch("/api/tts_speak", {
-			method: "POST",
-			headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
-			body: JSON.stringify({ text: clean })
-		}).then(function(r) { return r.json(); }).then(function(res) {
-			if (!ttsPlaying) return;
-			if (res && res.handled) {
-				if (ttsPollTimer) clearInterval(ttsPollTimer);
-				ttsPollTimer = setInterval(function() {
-					if (!ttsPlaying) {
-						clearInterval(ttsPollTimer);
-						ttsPollTimer = null;
-						return;
-					}
-					fetch("/api/tts_status", {
-						method: "POST",
-						headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
-						body: "{}"
-					}).then(function(r2) { return r2.json(); }).then(function(st) {
-						if (!st || !st.speaking) {
-							setTtsVisualState(false, null);
-						}
-					}).catch(function() {});
-				}, 650);
-			} else if (window.speechSynthesis) {
-				try {
-					window.speechSynthesis.cancel();
-					var utt = new SpeechSynthesisUtterance(clean);
-					utt.lang = "tr-TR";
-					utt.rate = 1.04;
-					utt.onend = function() { setTtsVisualState(false, null); };
-					utt.onerror = function() { setTtsVisualState(false, null); };
-					window.speechSynthesis.speak(utt);
-				} catch (e) {
-					setTtsVisualState(false, null);
-				}
-			} else {
-				setTtsVisualState(false, null);
-			}
-		}).catch(function() {
-			setTtsVisualState(false, null);
-		});
 	};
 
 	window.__revirExportChatMsg = function(plainText, fmt) {
@@ -5494,12 +5370,6 @@ body.revir-busy .revir-btn { pointer-events: none; }
 		if (role === "ai" && plainText) {
 			var tools = document.createElement("div");
 			tools.className = "revir-cmsg-tools";
-			var spkBtn = document.createElement("button");
-			spkBtn.type = "button";
-			spkBtn.className = "revir-cmsg-tbtn";
-			spkBtn.textContent = "🔊 Dinle";
-			spkBtn.onclick = function() { window.__revirSpeakText(plainText, spkBtn); };
-
 			var docBtn = document.createElement("button");
 			docBtn.type = "button";
 			docBtn.className = "revir-cmsg-tbtn";
@@ -5522,7 +5392,6 @@ body.revir-busy .revir-btn { pointer-events: none; }
 				if (navigator.clipboard) navigator.clipboard.writeText(plainText);
 				showToast("📋 Yanıt panoya kopyalandı");
 			};
-			tools.appendChild(spkBtn);
 			tools.appendChild(docBtn);
 			tools.appendChild(xlsBtn);
 			tools.appendChild(cpBtn);
@@ -5540,7 +5409,6 @@ body.revir-busy .revir-btn { pointer-events: none; }
 	};
 
 	window.__revirClearChat = function() {
-		window.__revirStopSpeaking(true);
 		var box = document.getElementById("revir-chat-messages");
 		if (box) {
 			box.innerHTML = '<div class="revir-cmsg revir-cmsg-ai"><p>Sohbet geçmişi temizlendi. Size nasıl yardımcı olabilirim?</p></div>';
@@ -5552,14 +5420,13 @@ body.revir-busy .revir-btn { pointer-events: none; }
 		}).catch(function(){});
 	};
 
-	window.__revirSendChat = function(voicePayload) {
+	window.__revirSendChat = function() {
 		if (chatBusy) return;
 		var inp = document.getElementById("revir-chat-inp");
 		var msgTxt = inp ? inp.value.trim() : "";
 		var filesToSend = chatFiles.slice();
-		var hasVoice = !!(voicePayload && voicePayload.data_b64);
 
-		if (!msgTxt && !filesToSend.length && !hasVoice) return;
+		if (!msgTxt && !filesToSend.length) return;
 
 		if (inp) inp.value = "";
 		chatFiles = [];
@@ -5567,7 +5434,6 @@ body.revir-busy .revir-btn { pointer-events: none; }
 
 		var badges = [];
 		filesToSend.forEach(function(f) { badges.push("📎 " + escHtml(f.name)); });
-		if (hasVoice) badges.push("🎙️ Sesli Mesaj");
 		var userHtml = "";
 		if (badges.length) {
 			userHtml += '<div style="font-size:11.5px;opacity:0.9;margin-bottom:4px;">' + badges.join(" · ") + "</div>";
@@ -5575,7 +5441,7 @@ body.revir-busy .revir-btn { pointer-events: none; }
 		if (msgTxt) {
 			userHtml += "<p>" + escHtml(msgTxt) + "</p>";
 		}
-		var userBubble = appendChatMsg("user", userHtml || "<p>🎙️ Sesli mesaj işleniyor...</p>", "");
+		appendChatMsg("user", userHtml, "");
 		var waitBubble = appendChatMsg("ai", '<p style="color:var(--text-muted);">⏳ <em>Gemini yanıt hazırlıyor...</em></p>', "");
 		chatBusy = true;
 
@@ -5584,19 +5450,14 @@ body.revir-busy .revir-btn { pointer-events: none; }
 			headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
 			body: JSON.stringify({
 				message: msgTxt,
-				attachments: filesToSend,
-				voice_audio_b64: hasVoice ? voicePayload.data_b64 : "",
-				voice_audio_mime: hasVoice ? (voicePayload.mime || "audio/wav") : ""
+				attachments: filesToSend
 			})
 		})
 		.then(function(r) { return r.json(); })
 		.then(function(res) {
 			if (waitBubble) waitBubble.remove();
-			if (res.transcribed && userBubble && !msgTxt) {
-				userBubble.innerHTML = '<div style="font-size:11.5px;opacity:0.9;margin-bottom:4px;">🎙️ Sesli Mesaj</div><p>' + escHtml(res.transcribed) + "</p>";
-			}
 			if (res.ok) {
-				var msgDiv = appendChatMsg(
+				appendChatMsg(
 					"ai",
 					res.reply_html || ("<p>" + escHtml(res.reply_text || "") + "</p>"),
 					res.reply_text || "",
@@ -5605,10 +5466,6 @@ body.revir-busy .revir-btn { pointer-events: none; }
 				);
 				if (res.refresh_ui) {
 					sendAction({ action: "refresh" });
-				}
-				if (chatTtsEnabled) {
-					var btnInMsg = msgDiv ? msgDiv.querySelector(".revir-cmsg-tbtn") : null;
-					window.__revirSpeakText(res.reply_text || "", btnInMsg);
 				}
 			} else {
 				appendChatMsg("ai", '<p style="color:#dc2626;">❌ ' + escHtml(res.error || "Yanıt alınamadı.") + "</p>", "");
@@ -5622,214 +5479,6 @@ body.revir-busy .revir-btn { pointer-events: none; }
 			chatBusy = false;
 		});
 	};
-
-	function setVoiceBarVisible(visible, statusText, levelPct, elapsedSec) {
-		var bar = document.getElementById("revir-voice-bar");
-		var stEl = document.getElementById("revir-voice-status");
-		var tmEl = document.getElementById("revir-voice-timer");
-		var fillEl = document.getElementById("revir-voice-meter-fill");
-		if (bar) bar.classList.toggle("active", !!visible);
-		if (stEl && statusText) stEl.textContent = statusText;
-		if (tmEl && typeof elapsedSec === "number") tmEl.textContent = elapsedSec.toFixed(1) + "s";
-		if (fillEl && typeof levelPct === "number") fillEl.style.width = Math.max(4, Math.min(100, Math.round(levelPct))) + "%";
-	}
-
-	function stopVoicePoll() {
-		if (voicePollTimer) {
-			clearInterval(voicePollTimer);
-			voicePollTimer = null;
-		}
-	}
-
-	// Sesli Konuşma: Otomatik Sessizlik Algılamalı (VAD) Python Yerel Mikrofon + Manuel Durdur & Gönder
-	window.__revirToggleVoiceMic = function() {
-		if (isRecordingVoice) {
-			stopVoiceCapture(false);
-			return;
-		}
-		if (chatBusy || voiceStopping) return;
-		window.__revirStopSpeaking(true);
-		var micBtn = document.getElementById("revir-chat-mic-btn");
-
-		fetch("/api/voice_start", {
-			method: "POST",
-			headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
-			body: "{}"
-		})
-		.then(function(r) { return r.json(); })
-		.then(function(res) {
-			if (res && res.ok) {
-				window.__revirUsingNativeMic = true;
-				isRecordingVoice = true;
-				voiceStopping = false;
-				if (micBtn) { micBtn.classList.add("recording"); micBtn.textContent = "⏹️"; }
-				setVoiceBarVisible(true, "🎙️ Dinliyorum (" + (res.device || "Mikrofon") + ")... Konuşabilirsiniz", 6, 0.0);
-				stopVoicePoll();
-				voicePollTimer = setInterval(function() {
-					if (!isRecordingVoice || voiceStopping) return;
-					fetch("/api/voice_status", {
-						method: "POST",
-						headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
-						body: "{}"
-					})
-					.then(function(r2) { return r2.json(); })
-					.then(function(st) {
-						if (!isRecordingVoice || voiceStopping || !st) return;
-						var elSec = typeof st.elapsed === "number" ? st.elapsed : 0;
-						var lvl = typeof st.level === "number" ? st.level : 0;
-						if (st.error) {
-							window.__revirCancelVoice();
-							showToast("⚠️ Mikrofon hatası: " + st.error);
-							return;
-						}
-						if (st.auto_stopped) {
-							setVoiceBarVisible(true, "✅ Konuşma tamamlandı, Gemini'ye gönderiliyor...", 8, elSec);
-							stopVoiceCapture(false);
-							return;
-						}
-						var msgSt = st.speech_detected
-							? "🗣️ Konuşma algılandı — susunca otomatik gönderilecek"
-							: "🎙️ Dinliyorum — konuşmaya başlayabilirsiniz...";
-						setVoiceBarVisible(true, msgSt, lvl, elSec);
-					})
-					.catch(function() {});
-				}, 180);
-			} else {
-				window.__revirUsingNativeMic = false;
-				startBrowserMediaCapture(res && res.error ? res.error : "");
-			}
-		})
-		.catch(function() {
-			window.__revirUsingNativeMic = false;
-			startBrowserMediaCapture("");
-		});
-	};
-
-	window.__revirStopAndSendVoice = function() {
-		stopVoiceCapture(false);
-	};
-
-	window.__revirCancelVoice = function() {
-		stopVoicePoll();
-		isRecordingVoice = false;
-		voiceStopping = false;
-		setVoiceBarVisible(false);
-		var micBtn = document.getElementById("revir-chat-mic-btn");
-		if (micBtn) { micBtn.classList.remove("recording"); micBtn.textContent = "🎙️"; }
-		if (window.__revirUsingNativeMic) {
-			window.__revirUsingNativeMic = false;
-			fetch("/api/voice_cancel", {
-				method: "POST",
-				headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
-				body: "{}"
-			}).catch(function() {});
-		}
-		if (mediaRecorder && mediaRecorder.state !== "inactive") {
-			try { mediaRecorder.onstop = null; mediaRecorder.stop(); } catch (e) {}
-			mediaRecorder = null;
-		}
-		showToast("✖ Ses kaydı iptal edildi");
-	};
-
-	function startBrowserMediaCapture(nativeErr) {
-		var micBtn = document.getElementById("revir-chat-mic-btn");
-		if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-			showToast("⚠️ Mikrofon başlatılamadı: " + (nativeErr || "Ses aygıtı bulunamadı."));
-			return;
-		}
-		navigator.mediaDevices.getUserMedia({ audio: true }).then(function(stream) {
-			audioChunks = [];
-			var mime = "audio/webm";
-			if (window.MediaRecorder && MediaRecorder.isTypeSupported) {
-				if (MediaRecorder.isTypeSupported("audio/webm")) mime = "audio/webm";
-				else if (MediaRecorder.isTypeSupported("audio/mp4")) mime = "audio/mp4";
-				else if (MediaRecorder.isTypeSupported("audio/wav")) mime = "audio/wav";
-			}
-			mediaRecorder = new MediaRecorder(stream);
-			isRecordingVoice = true;
-			if (micBtn) { micBtn.classList.add("recording"); micBtn.textContent = "⏹️"; }
-			setVoiceBarVisible(true, "🎙️ Ses kaydediliyor... Bitince Gönder'e basın", 20, 0.0);
-
-			mediaRecorder.ondataavailable = function(e) {
-				if (e.data && e.data.size > 0) audioChunks.push(e.data);
-			};
-			mediaRecorder.onstop = function() {
-				stream.getTracks().forEach(function(t) { t.stop(); });
-				isRecordingVoice = false;
-				setVoiceBarVisible(false);
-				if (micBtn) { micBtn.classList.remove("recording"); micBtn.textContent = "🎙️"; }
-				if (!audioChunks.length) return;
-				var blob = new Blob(audioChunks, { type: mime });
-				var reader = new FileReader();
-				reader.onload = function() {
-					var b64 = String(reader.result || "").split(",")[1] || "";
-					if (b64) {
-						window.__revirSendChat({ data_b64: b64, mime: mime });
-					}
-				};
-				reader.readAsDataURL(blob);
-			};
-			mediaRecorder.start();
-		}).catch(function(err) {
-			isRecordingVoice = false;
-			setVoiceBarVisible(false);
-			if (micBtn) { micBtn.classList.remove("recording"); micBtn.textContent = "🎙️"; }
-			showToast("⚠️ Mikrofon izni alınamadı: " + err.message);
-		});
-	}
-
-	function stopVoiceCapture(cancelled) {
-		if (voiceStopping) return;
-		voiceStopping = true;
-		stopVoicePoll();
-		var micBtn = document.getElementById("revir-chat-mic-btn");
-		isRecordingVoice = false;
-		if (micBtn) { micBtn.classList.remove("recording"); micBtn.textContent = "🎙️"; }
-		setVoiceBarVisible(false);
-
-		if (window.__revirUsingNativeMic) {
-			window.__revirUsingNativeMic = false;
-			if (cancelled) {
-				voiceStopping = false;
-				fetch("/api/voice_cancel", {
-					method: "POST",
-					headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
-					body: "{}"
-				}).catch(function() {});
-				return;
-			}
-			showToast("⏳ Ses kaydı hazırlanıyor...");
-			fetch("/api/voice_stop", {
-				method: "POST",
-				headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
-				body: "{}"
-			})
-			.then(function(r) { return r.json(); })
-			.then(function(res) {
-				voiceStopping = false;
-				if (res && res.ok && res.data_b64) {
-					window.__revirSendChat({ data_b64: res.data_b64, mime: res.mime || "audio/wav" });
-				} else {
-					showToast("⚠️ " + ((res && res.error) || "Ses kaydı çok kısa veya sessiz."));
-				}
-			})
-			.catch(function(err) {
-				voiceStopping = false;
-				showToast("❌ Ses kaydı durdurma hatası: " + err);
-			});
-			return;
-		}
-
-		voiceStopping = false;
-		if (voiceRec) {
-			try { voiceRec.stop(); } catch (e) {}
-			voiceRec = null;
-		}
-		if (mediaRecorder && mediaRecorder.state !== "inactive") {
-			try { mediaRecorder.stop(); } catch (e) {}
-			mediaRecorder = null;
-		}
-	}
 
 	var INITIAL_DATA = __REVIR_INITIAL_JSON__;
 	function bootInitial() {

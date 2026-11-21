@@ -151,6 +151,15 @@ class TestRevirUI(unittest.TestCase):
                 self.assertEqual(resp.status, 200)
                 body = resp.read().decode("utf-8")
                 self.assertIn("<!DOCTYPE html>", body)
+                # Gemini FAB button is image/SVG only (no visible text label),
+                # voice mic / auto-TTS controls removed, and outside-click closes chat bubble
+                fab_section = body.split('<button id="revir-fab-btn"')[1].split("</button>")[0]
+                self.assertIn("<svg", fab_section)
+                self.assertNotIn("Gemini Asistan", fab_section)
+                self.assertNotIn("revir-chat-mic-btn", body)
+                self.assertNotIn("revir-chat-tts-btn", body)
+                self.assertNotIn('id="revir-voice-bar"', body)
+                self.assertIn('ev.target.closest("#revir-chat-bubble, #revir-fab-btn")', body)
         finally:
             srv.stop()
 
