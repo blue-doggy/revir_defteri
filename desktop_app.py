@@ -34,7 +34,7 @@ def _ensure_standard_streams() -> None:
 
 _ensure_standard_streams()
 
-_DEFAULT_APP_VERSION = "1.16.14"
+_DEFAULT_APP_VERSION = "1.16.15"
 
 
 def _load_app_version() -> str:
