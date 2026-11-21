@@ -2542,6 +2542,26 @@ def render_overview_calendar_widget(
 				ui.rerun()
 
 		active_weeks = get_active_meb_weeks_for_date(today_d)
+		hijri_today = gregorian_to_hijri_str(today_d)
+		wd_today = TR_WEEKDAY_NAMES[today_d.weekday()]
+		today_hol = any(str(r["event_date"])[:10] == today_iso and bool(r["is_civil_holiday"]) for r in rows)
+		if today_hol:
+			st_badge = "<span style='background:#fee2e2;color:#dc2626;padding:2px 8px;border-radius:999px;font-size:10.5px;font-weight:800;'>🇹🇷 RESMİ TATİL</span>"
+		elif today_d.weekday() >= 5:
+			st_badge = "<span style='background:#e2e8f0;color:#475569;padding:2px 8px;border-radius:999px;font-size:10.5px;font-weight:800;'>🏖️ HAFTA SONU</span>"
+		else:
+			st_badge = "<span style='background:#d1fae5;color:#047857;padding:2px 8px;border-radius:999px;font-size:10.5px;font-weight:800;'>🏢 İŞ GÜNÜ</span>"
+
+		ui.markdown(
+			f"""<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;
+			padding:7px 10px;border-radius:8px;background:var(--bg-card);border:1px solid var(--line);margin-bottom:6px;">
+				<span style="font-size:12px;font-weight:800;color:var(--text-heading);">
+					🗓️ {today_d.day:02d} {TR_MONTH_NAMES[today_d.month]} {today_d.year} {wd_today} · <span style="color:var(--text-muted);font-weight:700;">🌙 {html.escape(hijri_today)}</span>
+				</span>
+				{st_badge}
+			</div>""",
+			unsafe_allow_html=True,
+		)
 		if active_weeks:
 			wk_titles = " · ".join(w["title"] for w in active_weeks[:2])
 			ui.caption(f"🏫 **Bu Hafta:** {wk_titles}")
@@ -2550,7 +2570,7 @@ def render_overview_calendar_widget(
 			ui.caption("Önümüzdeki 14 gün içinde kayıtlı takvim etkinliği veya resmi tatil bulunmuyor. Sağ üstteki **➕** butonuyla hemen ekleyebilirsiniz.")
 			return
 
-		for r in rows[:7]:
+		for r in rows[:6]:
 			ev_id = int(r["id"])
 			ev_d_str = str(r["event_date"])[:10]
 			try:
@@ -2592,7 +2612,7 @@ def render_overview_calendar_widget(
 						conn.execute("UPDATE calendar_events SET is_completed = ? WHERE id = ?", (0 if is_done else 1, ev_id))
 					ui.rerun()
 
-		if len(rows) > 7:
-			ui.caption(f"… ve önümüzdeki 14 gün içinde {len(rows) - 7} takvim kaydı daha.")
+		if len(rows) > 6:
+			ui.caption(f"… ve önümüzdeki 14 gün içinde {len(rows) - 6} takvim kaydı daha.")
 
 

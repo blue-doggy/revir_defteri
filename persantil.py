@@ -124,7 +124,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.16.2"
+_DEFAULT_APP_VERSION = "1.16.3"
 
 
 def _load_app_version() -> str:
@@ -3330,13 +3330,6 @@ PAGE_SECTIONS_REGISTRY: dict[str, dict[str, Any]] = {
 			"icon": "⚡",
 			"default": True,
 			"essential": True,
-		},
-		"overview_charts": {
-			"name": "Vizit & Başvuru Yoğunluk Grafiği",
-			"desc": "Son 14 günün günlük revir başvuru dağılımı çubuk grafiği",
-			"icon": "📊",
-			"default": True,
-			"essential": False,
 		},
 		"overview_calendar_events": {
 			"name": "Takvim & Yaklaşan Etkinlikler Özeti",
@@ -16006,8 +15999,8 @@ def render_overview() -> None:
 					ui.session_state["target_page"] = "💉 İnsülin & Diyabet Yönetimi"
 					ui.rerun()
 
-	# Bugünün Hemşire Masası (2 Sütunlu Bento Panosu: Bekleyen İlaçlar + Diyabetli Öğrenciler + 14 Günlük Grafik)
-	bento_l, bento_r = ui.columns([1.05, 1.0], gap="medium")
+	# Bugünün Hemşire Masası (2 Eşit Sütunlu Bento Panosu: Sol = İlaç + Diyabet | Sağ = Takvim & Yaklaşan Etkinlikler)
+	bento_l, bento_r = ui.columns([1.0, 1.0], gap="medium")
 	with bento_l:
 		with ui.container(border=True):
 			b_med_h1, b_med_h2 = ui.columns([2.2, 1.1])
@@ -16027,18 +16020,18 @@ def render_overview() -> None:
 				ui.caption("✅ Bugün için planlanmış öğrenci ilacı bulunmuyor.")
 			else:
 				ui.caption(f"Toplam **{len(today_doses)}** doz · ✅ Verilen: **{len(given_doses)}** · ⏳ Bekleyen: **{len(pend_doses)}**")
-				for pdose in pend_doses[:4]:
+				for pdose in pend_doses[:3]:
 					p_nm = mask_kvkk_value(pdose.get("full_name", ""), "name")
 					ui.markdown(
-						f"<div class='revir-op-row' style='padding:6px 10px;'>"
+						f"<div class='revir-op-row' style='padding:5px 9px;'>"
 						f"<span style='font-weight:800;color:var(--teal);'>🕒 {html.escape(str(pdose.get('scheduled_time') or ''))}</span>"
 						f"<strong>{html.escape(p_nm)}</strong>"
-						f"<span style='color:var(--text-muted);font-size:12.5px;'>· {html.escape(str(pdose.get('medication_name') or ''))} ({pdose.get('dose_amount', '')} {pdose.get('dose_unit', '')})</span>"
+						f"<span style='color:var(--text-muted);font-size:12px;'>· {html.escape(str(pdose.get('medication_name') or ''))} ({pdose.get('dose_amount', '')} {pdose.get('dose_unit', '')})</span>"
 						f"</div>",
 						unsafe_allow_html=True,
 					)
-				if len(pend_doses) > 4:
-					ui.caption(f"… ve {len(pend_doses) - 4} bekleyen doz daha.")
+				if len(pend_doses) > 3:
+					ui.caption(f"… ve {len(pend_doses) - 3} bekleyen doz daha.")
 
 		with ui.container(border=True):
 			b_diab_h1, b_diab_h2 = ui.columns([2.2, 1.1])
@@ -16073,24 +16066,6 @@ def render_overview() -> None:
 							ui.rerun()
 
 	with bento_r:
-		if is_section_visible("overview_charts"):
-			try:
-				with connect_db() as conn:
-					v_df = pd.read_sql_query(
-						"SELECT visit_date, COUNT(*) as vizit_sayisi FROM visits WHERE visit_date >= ? AND visit_date <= ? GROUP BY visit_date ORDER BY visit_date DESC LIMIT 14",
-						conn,
-						params=(s_date, e_date)
-					)
-				with ui.container(border=True):
-					ui.markdown("##### 📊 Son 14 Günlük Vizit Yoğunluğu")
-					if not v_df.empty:
-						v_df = v_df.sort_values("visit_date")
-						ui.bar_chart(v_df.set_index("visit_date")["vizit_sayisi"], height=215, color="#0ea5e9")
-					else:
-						ui.caption("Son 14 gün için vizit verisi henüz oluşmadı.")
-			except Exception:
-				pass
-
 		if is_section_visible("overview_calendar_events"):
 			try:
 				from school_calendar import render_overview_calendar_widget
