@@ -188,6 +188,8 @@ class TestPersantilCoreAndUI(unittest.TestCase):
         self.assertIn("Ad Soyad", html)
         self.assertIn("Cinsiyet", html)
         self.assertIn("10 yıl", html)
+        for hidden_col in ("Boy (cm)", "Kilo (kg)", "Doğum Tarihi", "VKİ (BMI)", "📂 Dosya"):
+            self.assertNotIn(hidden_col, html)
 
         # Simulate clicking the "Ad Soyad" cell on row 0 -> opens dossier dialog
         out_click = revir_ui.run_action_headless(

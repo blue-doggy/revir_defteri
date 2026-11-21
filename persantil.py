@@ -124,7 +124,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.16.8"
+_DEFAULT_APP_VERSION = "1.16.9"
 
 
 def _load_app_version() -> str:
@@ -17252,11 +17252,8 @@ def render_students() -> None:
 				lambda m: f"{int(float(m) // 12)} yıl" if pd.notna(m) and float(m) >= 0 else "—"
 			)
 			display_students = display_students.drop(columns=["Yaş (Ay)"], errors="ignore")
-		if "📂 Dosya" not in display_students.columns:
-			display_students.insert(0, "📂 Dosya", "📂 Aç")
-		front_cols = [c for c in ("id", "📂 Dosya", "Şube Adı", "Okul No", "Ad Soyad", "Cinsiyet", "Yaş") if c in display_students.columns]
-		other_cols = [c for c in display_students.columns if c not in front_cols]
-		display_students = display_students[front_cols + other_cols]
+		visible_cols = [c for c in ("id", "Şube Adı", "Okul No", "Ad Soyad", "Cinsiyet", "Yaş") if c in display_students.columns]
+		display_students = display_students[visible_cols]
 
 	# Seçili öğrenci hızlı eylem şeridini tablonun hemen üstünde göster
 	if is_section_visible("students_selected_card"):
