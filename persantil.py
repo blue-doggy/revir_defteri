@@ -124,7 +124,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.16.3"
+_DEFAULT_APP_VERSION = "1.16.4"
 
 
 def _load_app_version() -> str:
@@ -3330,6 +3330,13 @@ PAGE_SECTIONS_REGISTRY: dict[str, dict[str, Any]] = {
 			"icon": "⚡",
 			"default": True,
 			"essential": True,
+		},
+		"overview_charts": {
+			"name": "Vizit & Başvuru Yoğunluk Grafiği",
+			"desc": "Son 14 günün günlük revir başvuru dağılımı çubuk grafiği",
+			"icon": "📊",
+			"default": True,
+			"essential": False,
 		},
 		"overview_calendar_events": {
 			"name": "Takvim & Yaklaşan Etkinlikler Özeti",
@@ -15964,7 +15971,7 @@ def render_overview() -> None:
 			(today, s_date, e_date, s_date, e_date),
 		).fetchone()
 
-	ui.markdown(f"## 📊 Revir Genel Durumu ve Göstergeler ({active_ay['name']})")
+	ui.markdown(f"<div id='revir-overview-resizable-anchor' style='display:none;'></div>\n\n## 📊 Revir Genel Durumu ve Göstergeler ({active_ay['name']})", unsafe_allow_html=True)
 	if is_section_visible("overview_stats"):
 		metric_cols = ui.columns(6)
 		metric_cols[0].metric("Kayıtlı Kişi", counts["students"])
@@ -15999,8 +16006,8 @@ def render_overview() -> None:
 					ui.session_state["target_page"] = "💉 İnsülin & Diyabet Yönetimi"
 					ui.rerun()
 
-	# Bugünün Hemşire Masası (2 Eşit Sütunlu Bento Panosu: Sol = İlaç + Diyabet | Sağ = Takvim & Yaklaşan Etkinlikler)
-	bento_l, bento_r = ui.columns([1.0, 1.0], gap="medium")
+	# Bugünün Hemşire Masası (2 Sütunlu Bento Panosu: Bekleyen İlaçlar + Diyabetli Öğrenciler + 14 Günlük Grafik)
+	bento_l, bento_r = ui.columns([1.05, 1.0], gap="medium")
 	with bento_l:
 		with ui.container(border=True):
 			b_med_h1, b_med_h2 = ui.columns([2.2, 1.1])
@@ -16020,18 +16027,18 @@ def render_overview() -> None:
 				ui.caption("✅ Bugün için planlanmış öğrenci ilacı bulunmuyor.")
 			else:
 				ui.caption(f"Toplam **{len(today_doses)}** doz · ✅ Verilen: **{len(given_doses)}** · ⏳ Bekleyen: **{len(pend_doses)}**")
-				for pdose in pend_doses[:3]:
+				for pdose in pend_doses[:4]:
 					p_nm = mask_kvkk_value(pdose.get("full_name", ""), "name")
 					ui.markdown(
-						f"<div class='revir-op-row' style='padding:5px 9px;'>"
+						f"<div class='revir-op-row' style='padding:6px 10px;'>"
 						f"<span style='font-weight:800;color:var(--teal);'>🕒 {html.escape(str(pdose.get('scheduled_time') or ''))}</span>"
 						f"<strong>{html.escape(p_nm)}</strong>"
-						f"<span style='color:var(--text-muted);font-size:12px;'>· {html.escape(str(pdose.get('medication_name') or ''))} ({pdose.get('dose_amount', '')} {pdose.get('dose_unit', '')})</span>"
+						f"<span style='color:var(--text-muted);font-size:12.5px;'>· {html.escape(str(pdose.get('medication_name') or ''))} ({pdose.get('dose_amount', '')} {pdose.get('dose_unit', '')})</span>"
 						f"</div>",
 						unsafe_allow_html=True,
 					)
-				if len(pend_doses) > 3:
-					ui.caption(f"… ve {len(pend_doses) - 3} bekleyen doz daha.")
+				if len(pend_doses) > 4:
+					ui.caption(f"… ve {len(pend_doses) - 4} bekleyen doz daha.")
 
 		with ui.container(border=True):
 			b_diab_h1, b_diab_h2 = ui.columns([2.2, 1.1])
@@ -16066,6 +16073,24 @@ def render_overview() -> None:
 							ui.rerun()
 
 	with bento_r:
+		if is_section_visible("overview_charts"):
+			try:
+				with connect_db() as conn:
+					v_df = pd.read_sql_query(
+						"SELECT visit_date, COUNT(*) as vizit_sayisi FROM visits WHERE visit_date >= ? AND visit_date <= ? GROUP BY visit_date ORDER BY visit_date DESC LIMIT 14",
+						conn,
+						params=(s_date, e_date)
+					)
+				with ui.container(border=True):
+					ui.markdown("##### 📊 Son 14 Günlük Vizit Yoğunluğu")
+					if not v_df.empty:
+						v_df = v_df.sort_values("visit_date")
+						ui.bar_chart(v_df.set_index("visit_date")["vizit_sayisi"], height=215, color="#0ea5e9")
+					else:
+						ui.caption("Son 14 gün için vizit verisi henüz oluşmadı.")
+			except Exception:
+				pass
+
 		if is_section_visible("overview_calendar_events"):
 			try:
 				from school_calendar import render_overview_calendar_widget
@@ -16130,6 +16155,227 @@ def render_overview() -> None:
 							open_edit_visit_dialog(op["id"])
 						elif op["type"] == "screening":
 							open_screening_dialog(op["student_id"], op["class_name"])
+
+	# Genel Bakış Pencereleri İçin Tıkla-Basılı Tut / Sürükle Yeniden Boyutlandırma Sistemi
+	ui.markdown(
+		"""<style>
+		.revir-ov-resizable {
+			position: relative !important;
+			overflow: auto !important;
+			transition: box-shadow 0.15s ease;
+		}
+		.revir-ov-resizable.revir-ov-resizing {
+			outline: 2px dashed var(--teal, #0d9488) !important;
+			box-shadow: 0 10px 28px rgba(13, 148, 136, 0.18) !important;
+			user-select: none !important;
+		}
+		.revir-ov-handle-r {
+			position: absolute;
+			top: 8px;
+			right: 0;
+			width: 8px;
+			bottom: 14px;
+			cursor: ew-resize;
+			z-index: 15;
+		}
+		.revir-ov-handle-b {
+			position: absolute;
+			left: 8px;
+			right: 14px;
+			bottom: 0;
+			height: 8px;
+			cursor: ns-resize;
+			z-index: 15;
+		}
+		.revir-ov-handle-se {
+			position: absolute;
+			right: 2px;
+			bottom: 2px;
+			width: 16px;
+			height: 16px;
+			cursor: nwse-resize;
+			z-index: 16;
+			border-radius: 0 0 8px 0;
+			background: linear-gradient(135deg, transparent 48%, rgba(13,148,136,0.45) 50%, transparent 56%, rgba(13,148,136,0.7) 75%);
+			opacity: 0.65;
+			transition: opacity 0.15s ease;
+		}
+		.revir-ov-resizable:hover .revir-ov-handle-se {
+			opacity: 1;
+		}
+		.revir-ov-size-badge {
+			position: fixed;
+			z-index: 99999;
+			background: #0f172a;
+			color: #ffffff;
+			font-size: 11px;
+			font-weight: 800;
+			padding: 3px 8px;
+			border-radius: 6px;
+			pointer-events: none;
+			box-shadow: 0 4px 12px rgba(0,0,0,0.22);
+		}
+		</style>
+		<script>
+		(function() {
+			function initOverviewResizableCards() {
+				if (!document.getElementById('revir-overview-resizable-anchor')) return;
+				var cards = document.querySelectorAll('.revir-main .revir-card');
+				var storeKey = 'revir_ov_card_sizes_v1';
+				var saved = {};
+				try { saved = JSON.parse(localStorage.getItem(storeKey) || '{}') || {}; } catch (e) { saved = {}; }
+
+				function saveSizes() {
+					try { localStorage.setItem(storeKey, JSON.stringify(saved)); } catch (e) {}
+				}
+
+				cards.forEach(function(card, idx) {
+					if (card.dataset.ovResizeInit === '1') return;
+					card.dataset.ovResizeInit = '1';
+					card.classList.add('revir-ov-resizable');
+
+					var cardId = 'ov_card_' + idx;
+					if (saved[cardId]) {
+						if (saved[cardId].h) card.style.height = saved[cardId].h + 'px';
+						if (saved[cardId].wPct) {
+							var colWrap = card.parentElement;
+							var colsRow = colWrap && colWrap.parentElement;
+							if (colsRow && colsRow.classList.contains('revir-columns') && colsRow.children.length === 2) {
+								var cIdx = Array.prototype.indexOf.call(colsRow.children, colWrap);
+								var p1 = Math.max(25, Math.min(75, saved[cardId].wPct));
+								if (cIdx === 0) colsRow.style.gridTemplateColumns = p1 + 'fr ' + (100 - p1) + 'fr';
+								else if (cIdx === 1) colsRow.style.gridTemplateColumns = (100 - p1) + 'fr ' + p1 + 'fr';
+							} else {
+								card.style.width = saved[cardId].wPct + '%';
+							}
+						}
+					}
+
+					function startResize(e, mode) {
+						e.preventDefault();
+						e.stopPropagation();
+						var startX = e.clientX;
+						var startY = e.clientY;
+						var rect = card.getBoundingClientRect();
+						var startW = rect.width;
+						var startH = rect.height;
+						var colWrap = card.parentElement;
+						var colsRow = colWrap && colWrap.parentElement;
+						var isTwoCol = !!(colsRow && colsRow.classList.contains('revir-columns') && colsRow.children.length === 2);
+						var rowW = isTwoCol ? colsRow.getBoundingClientRect().width : (card.parentElement ? card.parentElement.getBoundingClientRect().width : window.innerWidth);
+						var colIndex = isTwoCol ? Array.prototype.indexOf.call(colsRow.children, colWrap) : -1;
+
+						card.classList.add('revir-ov-resizing');
+						var badge = document.createElement('div');
+						badge.className = 'revir-ov-size-badge';
+						document.body.appendChild(badge);
+
+						function onMove(mv) {
+							var dx = mv.clientX - startX;
+							var dy = mv.clientY - startY;
+							var newH = Math.round(Math.max(110, startH + dy));
+							var newW = Math.round(Math.max(220, startW + (colIndex === 1 ? -dx : dx)));
+
+							if (mode === 'b' || mode === 'se' || mode === 'hold') {
+								card.style.height = newH + 'px';
+								saved[cardId] = saved[cardId] || {};
+								saved[cardId].h = newH;
+							}
+							if (mode === 'r' || mode === 'se' || mode === 'hold') {
+								if (isTwoCol && rowW > 0) {
+									var pct = Math.max(25, Math.min(75, Math.round((newW / rowW) * 100)));
+									if (colIndex === 0) colsRow.style.gridTemplateColumns = pct + 'fr ' + (100 - pct) + 'fr';
+									else if (colIndex === 1) colsRow.style.gridTemplateColumns = (100 - pct) + 'fr ' + pct + 'fr';
+									saved[cardId] = saved[cardId] || {};
+									saved[cardId].wPct = pct;
+								} else if (rowW > 0) {
+									var wp = Math.max(35, Math.min(100, Math.round((newW / rowW) * 100)));
+									card.style.width = wp + '%';
+									saved[cardId] = saved[cardId] || {};
+									saved[cardId].wPct = wp;
+								}
+							}
+							var curR = card.getBoundingClientRect();
+							badge.textContent = Math.round(curR.width) + ' × ' + Math.round(curR.height) + ' px';
+							badge.style.left = (mv.clientX + 12) + 'px';
+							badge.style.top = (mv.clientY + 12) + 'px';
+						}
+
+						function onUp() {
+							card.classList.remove('revir-ov-resizing');
+							if (badge && badge.parentNode) badge.parentNode.removeChild(badge);
+							saveSizes();
+							window.removeEventListener('pointermove', onMove);
+							window.removeEventListener('pointerup', onUp);
+						}
+
+						window.addEventListener('pointermove', onMove);
+						window.addEventListener('pointerup', onUp);
+					}
+
+					// Sağ kenar, alt kenar ve sağ-alt köşe tutamaçları
+					var hR = document.createElement('div');
+					hR.className = 'revir-ov-handle-r';
+					hR.title = 'Genişliği ayarlamak için basılı tutup sürükleyin';
+					hR.addEventListener('pointerdown', function(e) { startResize(e, 'r'); });
+
+					var hB = document.createElement('div');
+					hB.className = 'revir-ov-handle-b';
+					hB.title = 'Yüksekliği ayarlamak için basılı tutup sürükleyin';
+					hB.addEventListener('pointerdown', function(e) { startResize(e, 'b'); });
+
+					var hSE = document.createElement('div');
+					hSE.className = 'revir-ov-handle-se';
+					hSE.title = 'Boyutlandırmak için basılı tutup sürükleyin · Sıfırlamak için çift tıklayın';
+					hSE.addEventListener('pointerdown', function(e) { startResize(e, 'se'); });
+					hSE.addEventListener('dblclick', function(e) {
+						e.stopPropagation();
+						card.style.height = '';
+						card.style.width = '';
+						var colWrap = card.parentElement;
+						var colsRow = colWrap && colWrap.parentElement;
+						if (colsRow && colsRow.classList.contains('revir-columns')) {
+							colsRow.style.gridTemplateColumns = '';
+						}
+						delete saved[cardId];
+						saveSizes();
+					});
+
+					card.appendChild(hR);
+					card.appendChild(hB);
+					card.appendChild(hSE);
+
+					// Kartın boş bir yerine tıklayıp basılı tutunca (320ms) doğrudan boyutlandırma modu!
+					card.addEventListener('pointerdown', function(e) {
+						if (e.button !== 0) return;
+						var tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : '';
+						if (['button', 'input', 'select', 'textarea', 'a', 'label', 'svg', 'path'].indexOf(tag) !== -1) return;
+						if (e.target && e.target.closest && e.target.closest('button, a, input, select, textarea, .revir-ov-handle-r, .revir-ov-handle-b, .revir-ov-handle-se')) return;
+						var holdEvent = { clientX: e.clientX, clientY: e.clientY, preventDefault: function(){}, stopPropagation: function(){} };
+						var holdTimer = setTimeout(function() {
+							startResize(holdEvent, 'hold');
+						}, 320);
+						function cancelHold() {
+							clearTimeout(holdTimer);
+							window.removeEventListener('pointerup', cancelHold);
+							window.removeEventListener('pointermove', moveCheck);
+						}
+						function moveCheck(mv) {
+							if (Math.abs(mv.clientX - e.clientX) > 6 || Math.abs(mv.clientY - e.clientY) > 6) {
+								cancelHold();
+							}
+						}
+						window.addEventListener('pointerup', cancelHold);
+						window.addEventListener('pointermove', moveCheck);
+					});
+				});
+			}
+			initOverviewResizableCards();
+			setTimeout(initOverviewResizableCards, 120);
+		})();
+		</script>""",
+		unsafe_allow_html=True,
+	)
 
 
 @ui.dialog("🏫 Okul Sınıfları Yönetimi (Ekle / Çıkar / Öğrenci Ata)", width="large")
