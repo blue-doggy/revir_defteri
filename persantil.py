@@ -124,7 +124,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.16.12"
+_DEFAULT_APP_VERSION = "1.16.13"
 
 
 def _load_app_version() -> str:
@@ -22339,36 +22339,64 @@ def parse_screening_image_ocr(image_bytes: bytes) -> list[dict[str, Any]]:
 	return records
 
 
+def _extract_docx_screening_tables_and_lines(file_bytes: bytes) -> tuple[list[tuple[str, pd.DataFrame]], list[str]]:
+	"""Word (.docx) belgesindeki tüm tabloları (varsa üst başlık sınıf ipucuyla) ve paragraf satırlarını çıkarır."""
+	if not _ensure_docx_loaded() or docx is None:
+		raise RuntimeError("Word (.docx) okuma kütüphanesi (python-docx) yüklenemedi.")
+	doc_obj = docx.Document(io.BytesIO(file_bytes))
+	tables_out: list[tuple[str, pd.DataFrame]] = []
+	last_cls_hint = ""
+	tbl_map = {t._element: t for t in doc_obj.tables}
+	para_map = {p._element: p for p in doc_obj.paragraphs}
+	hdr_words = ("ad", "isim", "soyad", "sınıf", "sinif", "şube", "sube", "boy", "kilo", "cinsiyet", "doğum", "dogum")
+
+	def _detect_cls_heading(txt: str) -> str:
+		clean = re.sub(r"\s+", " ", txt or "").strip()
+		if not clean or len(clean) > 80:
+			return ""
+		if re.search(r"(\d+\s*[-/ ]?\s*[A-ZÇĞİÖŞÜ]|anasınıfı|ana\s*sınıfı|şube|sube)", clean, flags=re.IGNORECASE):
+			if not any(w in clean.lower() for w in ("boy (cm)", "kilo (kg)", "ad soyad")):
+				return clean
+		return ""
+
+	for child in doc_obj.element.body:
+		if child in para_map:
+			ptxt = (para_map[child].text or "").strip()
+			h_cls = _detect_cls_heading(ptxt)
+			if h_cls:
+				last_cls_hint = h_cls
+		elif child in tbl_map:
+			tbl = tbl_map[child]
+			raw_rows: list[list[str]] = []
+			for r in tbl.rows:
+				row_vals = [re.sub(r"\s+", " ", (c.text or "").strip()) for c in r.cells]
+				if any(row_vals):
+					raw_rows.append(row_vals)
+			if not raw_rows:
+				continue
+			first_low = " ".join(raw_rows[0]).lower()
+			if any(k in first_low for k in hdr_words) and len(raw_rows) >= 2:
+				cols = [c or f"Sutun_{i+1}" for i, c in enumerate(raw_rows[0])]
+				df_t = pd.DataFrame(raw_rows[1:], columns=cols)
+			else:
+				cols = [f"Sutun_{i+1}" for i in range(len(raw_rows[0]))]
+				df_t = pd.DataFrame(raw_rows, columns=cols)
+			tables_out.append((last_cls_hint, df_t))
+
+	para_lines = [re.sub(r"\s+", " ", (p.text or "").strip()) for p in doc_obj.paragraphs if (p.text or "").strip()]
+	return tables_out, para_lines
+
+
 def parse_screening_file_or_image(file_bytes: bytes, file_name: str) -> list[dict[str, Any]]:
 	lower_fn = file_name.lower()
 	if lower_fn.endswith((".png", ".jpg", ".jpeg", ".bmp", ".webp")):
 		return parse_screening_image_ocr(file_bytes)
-
-	if lower_fn.endswith((".xlsx", ".xls")):
-		df = pd.read_excel(io.BytesIO(file_bytes), dtype=object)
-	elif lower_fn.endswith((".csv", ".txt")):
-		try:
-			df = pd.read_csv(io.BytesIO(file_bytes), sep=None, engine="python", dtype=object)
-		except Exception:
-			df = pd.read_csv(io.BytesIO(file_bytes), dtype=object)
-	else:
-		raise ValueError(f"Desteklenmeyen dosya formatı: {file_name}")
 
 	def clean_val(v):
 		if v is None or pd.isna(v):
 			return None
 		s = str(v).strip()
 		return s if s else None
-
-	def parse_num(v):
-		if v is None or pd.isna(v):
-			return None
-		s = str(v).strip().replace(",", ".")
-		try:
-			val = float(s)
-			return val if val > 0 else None
-		except ValueError:
-			return None
 
 	def parse_date_str(v):
 		if v is None or pd.isna(v):
@@ -22381,8 +22409,7 @@ def parse_screening_file_or_image(file_bytes: bytes, file_name: str) -> list[dic
 			parts = m.group(1).split("-")
 			if len(parts[0]) == 4:
 				return f"{parts[0]}-{parts[1].zfill(2)}-{parts[2].zfill(2)}"
-			else:
-				return f"{parts[2]}-{parts[1].zfill(2)}-{parts[0].zfill(2)}"
+			return f"{parts[2]}-{parts[1].zfill(2)}-{parts[0].zfill(2)}"
 		return None
 
 	def parse_sex_str(v):
@@ -22401,51 +22428,104 @@ def parse_screening_file_or_image(file_bytes: bytes, file_name: str) -> list[dic
 		s = s.translate(trans)
 		return re.sub(r"[^a-z0-9]", "", s)
 
-	col_map = {}
-	for col in df.columns:
-		norm = normalize_col(col)
-		if "sinif" in norm or "sube" in norm or norm in ["class", "grade"]:
-			col_map["class_name"] = col
-		elif any(k in norm for k in ["adsoyad", "adisoyadi", "isim", "ogrenciadi", "fullname", "name"]):
-			col_map["full_name"] = col
-		elif "cinsiyet" in norm or norm in ["sex", "gender"]:
-			col_map["sex"] = col
-		elif any(k in norm for k in ["dogumtarihi", "dogum", "dogumgunu", "bdate", "birthdate", "dob"]):
-			col_map["birth_date"] = col
-		elif "boy" in norm or "height" in norm:
-			col_map["height_cm"] = col
-		elif "kilo" in norm or "agirlik" in norm or "weight" in norm:
-			col_map["weight_kg"] = col
+	def _extract_records_from_df(df_in: pd.DataFrame, fallback_class: str = "") -> list[dict[str, Any]]:
+		if df_in is None or df_in.empty:
+			return []
+		col_map = {}
+		for col in df_in.columns:
+			norm = normalize_col(col)
+			if "sinif" in norm or "sube" in norm or norm in ["class", "grade"]:
+				col_map["class_name"] = col
+			elif any(k in norm for k in ["adsoyad", "adisoyadi", "isim", "ogrenciadi", "fullname", "name"]):
+				col_map["full_name"] = col
+			elif "cinsiyet" in norm or norm in ["sex", "gender"]:
+				col_map["sex"] = col
+			elif any(k in norm for k in ["dogumtarihi", "dogum", "dogumgunu", "bdate", "birthdate", "dob"]):
+				col_map["birth_date"] = col
+			elif "boy" in norm or "height" in norm:
+				col_map["height_cm"] = col
+			elif "kilo" in norm or "agirlik" in norm or "weight" in norm:
+				col_map["weight_kg"] = col
 
-	if "full_name" not in col_map and len(df.columns) >= 2:
-		cols = list(df.columns)
-		col_map["class_name"] = cols[0]
-		col_map["full_name"] = cols[1]
-		if len(cols) >= 3: col_map["sex"] = cols[2]
-		if len(cols) >= 4: col_map["birth_date"] = cols[3]
-		if len(cols) >= 5: col_map["height_cm"] = cols[4]
-		if len(cols) >= 6: col_map["weight_kg"] = cols[5]
+		if "full_name" not in col_map and len(df_in.columns) >= 2:
+			cols = list(df_in.columns)
+			# İlk sütun sıra numarası (1, 2, 3...) veya tarih/ad olabilir; tipik şablon düzeni:
+			if "class_name" not in col_map and len(cols) >= 6:
+				col_map["class_name"] = cols[0]
+				col_map["full_name"] = cols[1]
+				col_map["sex"] = cols[2]
+				col_map["birth_date"] = cols[3]
+				col_map["height_cm"] = cols[4]
+				col_map["weight_kg"] = cols[5]
+			elif len(cols) >= 5 and fallback_class:
+				col_map["full_name"] = cols[0]
+				col_map["sex"] = cols[1]
+				col_map["birth_date"] = cols[2]
+				col_map["height_cm"] = cols[3]
+				col_map["weight_kg"] = cols[4]
+			else:
+				col_map["class_name"] = cols[0]
+				col_map["full_name"] = cols[1]
+				if len(cols) >= 3:
+					col_map["sex"] = cols[2]
+				if len(cols) >= 4:
+					col_map["birth_date"] = cols[3]
+				if len(cols) >= 5:
+					col_map["height_cm"] = cols[4]
+				if len(cols) >= 6:
+					col_map["weight_kg"] = cols[5]
 
-	records = []
-	for _, row in df.iterrows():
-		fn = clean_val(row.get(col_map.get("full_name")))
-		if not fn or str(fn).lower() in ["nan", "none", "ad soyad", "isim"]:
-			continue
-		cls = clean_val(row.get(col_map.get("class_name"))) or ""
-		sx = parse_sex_str(row.get(col_map.get("sex")))
-		dob = parse_birth_date(row.get(col_map.get("birth_date"))) or parse_date_str(row.get(col_map.get("birth_date")))
-		h = normalize_height(row.get(col_map.get("height_cm")))
-		w = normalize_weight(row.get(col_map.get("weight_kg")), is_adult=False)
+		out_recs = []
+		for _, row in df_in.iterrows():
+			fn = clean_val(row.get(col_map.get("full_name")))
+			if not fn or str(fn).lower() in ["nan", "none", "ad soyad", "adı soyadı", "isim"]:
+				continue
+			cls = clean_val(row.get(col_map.get("class_name"))) or fallback_class or ""
+			sx = parse_sex_str(row.get(col_map.get("sex")))
+			dob = parse_birth_date(row.get(col_map.get("birth_date"))) or parse_date_str(row.get(col_map.get("birth_date")))
+			h = normalize_height(row.get(col_map.get("height_cm")))
+			w = normalize_weight(row.get(col_map.get("weight_kg")), is_adult=False)
 
-		records.append({
-			"class_name": cls,
-			"full_name": fn,
-			"sex": sx,
-			"birth_date": dob,
-			"height_cm": h,
-			"weight_kg": w
-		})
-	return records
+			out_recs.append({
+				"class_name": cls,
+				"full_name": fn,
+				"sex": sx,
+				"birth_date": dob,
+				"height_cm": h,
+				"weight_kg": w,
+			})
+		return out_recs
+
+	if lower_fn.endswith(".docx"):
+		tables_found, para_lines = _extract_docx_screening_tables_and_lines(file_bytes)
+		all_recs: list[dict[str, Any]] = []
+		for cls_hint, df_t in tables_found:
+			all_recs.extend(_extract_records_from_df(df_t, fallback_class=cls_hint))
+		if not all_recs and para_lines:
+			delim_lines = [ln for ln in para_lines if any(sep in ln for sep in (";", "|", "\t", ","))]
+			if delim_lines:
+				sep_use = next((s for s in ("|", "\t", ";", ",") if s in delim_lines[0]), ",")
+				try:
+					df_p = pd.read_csv(io.StringIO("\n".join(delim_lines)), sep=sep_use, dtype=object)
+					all_recs.extend(_extract_records_from_df(df_p))
+				except Exception:
+					pass
+		return all_recs
+
+	if lower_fn.endswith(".doc"):
+		raise ValueError("Eski .doc formatı doğrudan okunamıyor. Lütfen belgeyi Word'de '.docx' olarak kaydedip yükleyin.")
+
+	if lower_fn.endswith((".xlsx", ".xls")):
+		df = pd.read_excel(io.BytesIO(file_bytes), dtype=object)
+	elif lower_fn.endswith((".csv", ".txt")):
+		try:
+			df = pd.read_csv(io.BytesIO(file_bytes), sep=None, engine="python", dtype=object)
+		except Exception:
+			df = pd.read_csv(io.BytesIO(file_bytes), dtype=object)
+	else:
+		raise ValueError(f"Desteklenmeyen dosya formatı: {file_name}")
+
+	return _extract_records_from_df(df)
 
 
 def commit_screening_import(
@@ -22573,16 +22653,16 @@ def commit_screening_import(
 
 
 def render_screening_import_section(target_class: str | None = None) -> None:
-	ui.markdown("### 📥 Toplu Tarama Verisi İçe Aktar (Excel / CSV / Resim-OCR)")
-	ui.caption("Öğrencilerin sınıf, boy, kilo, cinsiyet ve doğum tarihi tarama verilerini Excel (.xlsx, .xls), CSV (.csv) veya liste fotoğrafları (.png, .jpg) üzerinden topluca sisteme aktarın.")
+	ui.markdown("### 📥 Toplu Tarama Verisi İçe Aktar (Excel / Word / CSV / Resim-OCR)")
+	ui.caption("Öğrencilerin sınıf, boy, kilo, cinsiyet ve doğum tarihi tarama verilerini Excel (.xlsx, .xls), Word (.docx), CSV (.csv) veya liste fotoğrafları (.png, .jpg) üzerinden topluca sisteme aktarın.")
 
 	card_key = f"scr_imp_{target_class or 'all'}"
 	col_up, col_info = ui.columns([2.2, 1.3])
 
 	with col_up:
 		uploaded_file = ui.file_uploader(
-			"Tarama Listesi Dosyasını (.xlsx, .xls, .csv) veya Fotoğrafını (.png, .jpg) Seçin",
-			type=["xlsx", "xls", "csv", "png", "jpg", "jpeg"],
+			"Tarama Listesi Dosyasını (.xlsx, .xls, .docx, .csv) veya Fotoğrafını (.png, .jpg) Seçin",
+			type=["xlsx", "xls", "docx", "csv", "png", "jpg", "jpeg"],
 			key=f"uploader_{card_key}"
 		)
 
@@ -23559,7 +23639,7 @@ def render_school_screening() -> None:
 								open_person_dossier_dialog(s_id)
 
 				ui.markdown("---")
-				with ui.expander(f"📥 {selected_class} İçin Toplu Tarama Verisi İçe Aktar (Excel / CSV / Resim-OCR)", expanded=False):
+				with ui.expander(f"📥 {selected_class} İçin Toplu Tarama Verisi İçe Aktar (Excel / Word / CSV / Resim-OCR)", expanded=False):
 					render_screening_import_section(target_class=selected_class)
 
 		with tab_bulk_cls:

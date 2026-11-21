@@ -199,6 +199,53 @@ class TestPersantilCoreAndUI(unittest.TestCase):
         self.assertIsNotNone(out_click.get("dialog_html"))
         self.assertIn("Ayşe Yılmaz", out_click.get("dialog_html") or "")
 
+    def test_07_screening_word_docx_import(self):
+        import io
+        import docx
+
+        # 1. Word (.docx) with class heading + screening table
+        d1 = docx.Document()
+        d1.add_heading("3-A Şubesi", level=2)
+        tbl = d1.add_table(rows=3, cols=5)
+        headers = ["Ad Soyad", "Cinsiyet", "Doğum Tarihi", "Boy (cm)", "Kilo (kg)"]
+        for idx, h in enumerate(headers):
+            tbl.cell(0, idx).text = h
+        row1 = ["Mehmet Öztürk", "E", "12.05.2017", "134.5", "30.2"]
+        row2 = ["Elif Şahin", "K", "2017-08-20", "131", "28.4"]
+        for c_i, val in enumerate(row1):
+            tbl.cell(1, c_i).text = val
+        for c_i, val in enumerate(row2):
+            tbl.cell(2, c_i).text = val
+        buf1 = io.BytesIO()
+        d1.save(buf1)
+
+        recs = persantil.parse_screening_file_or_image(buf1.getvalue(), "tarama_3a.docx")
+        self.assertEqual(len(recs), 2)
+        self.assertEqual(recs[0]["class_name"], "3-A Şubesi")
+        self.assertEqual(recs[0]["full_name"], "Mehmet Öztürk")
+        self.assertEqual(recs[0]["sex"], "Erkek")
+        self.assertEqual(recs[0]["birth_date"], "2017-05-12")
+        self.assertAlmostEqual(recs[0]["height_cm"], 134.5, places=1)
+        self.assertAlmostEqual(recs[0]["weight_kg"], 30.2, places=1)
+
+        # 2. Word (.docx) with delimited paragraph lines (no table)
+        d2 = docx.Document()
+        d2.add_paragraph("Sınıf;Ad Soyad;Cinsiyet;Doğum Tarihi;Boy (cm);Kilo (kg)")
+        d2.add_paragraph("2-B;Zeynep Kaya;K;2018-03-10;126;25.5")
+        buf2 = io.BytesIO()
+        d2.save(buf2)
+        recs2 = persantil.parse_screening_file_or_image(buf2.getvalue(), "satirlar.docx")
+        self.assertEqual(len(recs2), 1)
+        self.assertEqual(recs2[0]["class_name"], "2-B")
+        self.assertEqual(recs2[0]["full_name"], "Zeynep Kaya")
+
+        # 3. Commit imported Word rows & verify screening UI uploader accepts .docx
+        upd, scr, add = persantil.commit_screening_import(recs, screening_date="2026-11-22", default_class="3-A Şubesi")
+        self.assertEqual(scr, 2)
+        self.assertEqual(add, 2)
+        out_scr = revir_ui.run_action_headless(persantil.render_screening_import_section, {"action": "render"})
+        self.assertIn(".docx", out_scr["main_html"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
