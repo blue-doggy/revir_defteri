@@ -124,7 +124,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.16.11"
+_DEFAULT_APP_VERSION = "1.16.12"
 
 
 def _load_app_version() -> str:
@@ -11810,6 +11810,48 @@ def _execute_gemini_chat_export(export_spec: dict[str, Any], active_pid: int | N
 				return [], "\n\n🗑️ **Onaylanan silme işlemi tamamlandı:** " + ", ".join(summary_del) + " silindi."
 			return [], "\n\nℹ️ *Silinecek eşleşen kayıt bulunamadı.*"
 
+		if action == "rename_classes":
+			pairs = _resolve_rename_classes_pairs(export_spec)
+			renamed_cnt = 0
+			merged_cnt = 0
+			protected_cls = {"Sivil / Diğer", "Sınıf Belirtilmedi"}
+			with connect_db() as conn:
+				for old_nm, new_nm in pairs:
+					old_clean = str(old_nm or "").strip()
+					new_clean = str(new_nm or "").strip(" /-\t\r\n")
+					if not old_clean or not new_clean or old_clean == new_clean:
+						continue
+					if old_clean in protected_cls or new_clean in protected_cls:
+						continue
+					old_r = conn.execute("SELECT id, name, teacher_name FROM classes WHERE lower(name)=lower(?)", (old_clean,)).fetchone()
+					if not old_r:
+						continue
+					target_r = conn.execute("SELECT id, name, teacher_name FROM classes WHERE lower(name)=lower(?)", (new_clean,)).fetchone()
+					if target_r and target_r["id"] != old_r["id"]:
+						conn.execute("UPDATE OR IGNORE students SET class_id=? WHERE class_id=?", (target_r["id"], old_r["id"]))
+						# Taşınmayan çakışan ad varsa da silmeden önce benzersizleştirip taşı
+						leftovers = conn.execute("SELECT id FROM students WHERE class_id=?", (old_r["id"],)).fetchall()
+						if leftovers:
+							for lr in leftovers:
+								conn.execute("UPDATE students SET class_id=? WHERE id=?", (target_r["id"], lr["id"]))
+						old_t = str(old_r["teacher_name"] or "").strip()
+						tgt_t = str(target_r["teacher_name"] or "").strip()
+						if old_t and not tgt_t:
+							conn.execute("UPDATE classes SET teacher_name=? WHERE id=?", (old_t, target_r["id"]))
+						conn.execute("DELETE FROM classes WHERE id=?", (old_r["id"],))
+						merged_cnt += 1
+					else:
+						conn.execute("UPDATE classes SET name=? WHERE id=?", (new_clean, old_r["id"]))
+						renamed_cnt += 1
+			if renamed_cnt or merged_cnt:
+				try:
+					sync_all_person_data_files()
+				except Exception:
+					pass
+				clear_all_data_caches()
+				return [], f"\n\n✅ **Sınıf adları güncellendi:** {renamed_cnt} sınıf yeniden adlandırıldı" + (f", {merged_cnt} sınıf mevcut hedef şube ile öğrenci/öğretmenleri korunarak birleştirildi." if merged_cnt else ".")
+			return [], "\n\nℹ️ *Yeniden adlandırılacak eşleşen sınıf bulunamadı.*"
+
 		if action == "custom_doc":
 			secs = export_spec.get("sections") if isinstance(export_spec.get("sections"), list) else None
 			tbl_spec = export_spec.get("table") if isinstance(export_spec.get("table"), dict) else None
@@ -11965,7 +12007,68 @@ def _summarize_write_spec_items(ws: dict[str, Any]) -> list[str]:
 	return items
 
 
-_MUTATING_CHAT_EXPORT_ACTIONS = {"create_classes", "create_profiles", "add_calendar_events", "delete_records"}
+_MUTATING_CHAT_EXPORT_ACTIONS = {"create_classes", "create_profiles", "rename_classes", "add_calendar_events", "delete_records"}
+
+
+def _resolve_rename_classes_pairs(export_spec: dict[str, Any]) -> list[tuple[str, str]]:
+	"""`rename_classes` komutundaki replace_from/strip_prefix/renames kurallarını gerçek (eski_ad, yeni_ad) çiftlerine çözümler."""
+	pairs: list[tuple[str, str]] = []
+	seen_old: set[str] = set()
+	protected_cls = {"Sivil / Diğer", "Sınıf Belirtilmedi"}
+
+	for r_it in (export_spec.get("renames") or []):
+		if not isinstance(r_it, dict):
+			continue
+		onm = str(r_it.get("old_name") or r_it.get("from") or "").strip()
+		nnm = str(r_it.get("new_name") or r_it.get("to") or "").strip(" /-\t\r\n")
+		if onm and nnm and onm != nnm and onm not in protected_cls and nnm not in protected_cls:
+			if onm.lower() not in seen_old:
+				pairs.append((onm, nnm))
+				seen_old.add(onm.lower())
+
+	rep_from = str(export_spec.get("replace_from") or export_spec.get("strip_prefix") or export_spec.get("remove_text") or "")
+	rep_to = str(export_spec.get("replace_to") or "")
+	if rep_from.strip():
+		try:
+			with connect_db() as conn:
+				rows = conn.execute("SELECT name FROM classes ORDER BY name").fetchall()
+		except Exception:
+			rows = []
+		pat = re.compile(re.escape(rep_from.strip()) + r"(?:\s*/\s*)?", flags=re.IGNORECASE)
+		for row in rows:
+			cname = str(row["name"] or "").strip()
+			if not cname or cname in protected_cls or cname.lower() in seen_old:
+				continue
+			if pat.search(cname):
+				new_c = pat.sub(rep_to, cname).strip(" /-\t\r\n")
+				new_c = re.sub(r"\s{2,}", " ", new_c).strip()
+				if new_c and new_c != cname and new_c not in protected_cls:
+					pairs.append((cname, new_c))
+					seen_old.add(cname.lower())
+	return pairs
+
+
+def _coerce_mutating_sql_export_spec(export_spec: dict[str, Any]) -> dict[str, Any]:
+	"""Gemini yanlışlıkla sınıf güncelleme için sql_export (UPDATE classes SET name=REPLACE/...) gönderirse güvenli rename_classes aksiyonuna çevirir."""
+	if not isinstance(export_spec, dict):
+		return export_spec
+	if str(export_spec.get("action") or "").strip().lower() != "sql_export":
+		return export_spec
+	sql_raw = str(export_spec.get("sql") or "").strip()
+	if not sql_raw:
+		return export_spec
+	m_rep = re.search(
+		r"UPDATE\s+classes\s+SET\s+name\s*=\s*(?:TRIM\s*\(\s*)?REPLACE\s*\(\s*name\s*,\s*'([^']+)'\s*,\s*'([^']*)'\s*\)",
+		sql_raw,
+		flags=re.IGNORECASE,
+	)
+	if m_rep:
+		return {
+			"action": "rename_classes",
+			"replace_from": m_rep.group(1),
+			"replace_to": m_rep.group(2),
+		}
+	return export_spec
 
 
 def _build_export_write_proposal(export_spec: dict[str, Any]) -> dict[str, Any]:
@@ -11976,7 +12079,32 @@ def _build_export_write_proposal(export_spec: dict[str, Any]) -> dict[str, Any]:
 	title = "Veritabanına İşlenecek Değişiklikler (Onay Gerekli)"
 	confirm_label = "✅ Onayla ve İşlemi Uygula"
 
-	if act in ("create_classes", "create_profiles"):
+	if act == "rename_classes":
+		title = "Sınıf / Şube Adlarını Güncelleme (Onay Gerekli)"
+		pairs = _resolve_rename_classes_pairs(export_spec)
+		try:
+			with connect_db() as conn:
+				cnt_rows = conn.execute(
+					"SELECT c.name, c.teacher_name, COUNT(s.id) AS stu_cnt FROM classes c LEFT JOIN students s ON s.class_id=c.id GROUP BY c.id"
+				).fetchall()
+				info_map = {str(r["name"]).lower(): (int(r["stu_cnt"] or 0), str(r["teacher_name"] or "").strip()) for r in cnt_rows}
+		except Exception:
+			info_map = {}
+		for old_nm, new_nm in pairs[:20]:
+			stu_cnt, tch = info_map.get(old_nm.lower(), (0, ""))
+			merge_note = "birleştirilecek" if new_nm.lower() in info_map else "yeniden adlandırılacak"
+			meta_parts = []
+			if stu_cnt:
+				meta_parts.append(f"{stu_cnt} öğrenci")
+			if tch:
+				meta_parts.append(f"Öğrt: {tch}")
+			meta_s = f" ({', '.join(meta_parts)}, {merge_note})" if meta_parts else f" ({merge_note})"
+			items.append(f"✏️ {old_nm} → {new_nm}{meta_s}")
+		if len(pairs) > 20:
+			items.append(f"...ve {len(pairs) - 20} sınıf daha (Toplam {len(pairs)} sınıf)")
+		if pairs:
+			items.append("🛡️ Hiçbir öğrenci ve sınıf öğretmeni silinmeden korunacaktır.")
+	elif act in ("create_classes", "create_profiles"):
 		title = "Sınıf, Öğretmen ve Öğrenci Profili İşlemleri (Onay Gerekli)"
 		cls_list = export_spec.get("classes") if isinstance(export_spec.get("classes"), list) else []
 		stu_list = export_spec.get("students") if isinstance(export_spec.get("students"), list) else []
@@ -12214,6 +12342,7 @@ def _handle_floating_gemini_chat(payload: dict[str, Any], chat_history: list[dic
 	refresh_ui = False
 	write_proposal: dict[str, Any] | None = None
 	if isinstance(export_spec, dict) and export_spec:
+		export_spec = _coerce_mutating_sql_export_spec(export_spec)
 		exp_act = str(export_spec.get("action") or "").strip().lower()
 		if exp_act in _MUTATING_CHAT_EXPORT_ACTIONS:
 			prop_meta = _build_export_write_proposal(export_spec)

@@ -1126,7 +1126,7 @@ def chat_with_gemini_assistant(
 	öğrenciye ölçüm/vital/profil/belge işleme isterse `write_spec` döndürür.
 	Dönüş: (başarılı_mı, yanıt_metni, kullanılan_model, ses_çözümü, export_spec, write_spec)
 	"""
-	cls_hint = ", ".join(available_classes[:30]) if available_classes else "Belirtilmedi"
+	cls_hint = ", ".join(available_classes[:60]) if available_classes else "Belirtilmedi"
 	today_iso = datetime.now().strftime("%Y-%m-%d")
 	weekday_tr = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"][datetime.now().weekday()]
 	sys_inst = (
@@ -1147,9 +1147,9 @@ def chat_with_gemini_assistant(
 		"6) Revir stok & malzeme envanter raporu (Word): {\"action\":\"inventory_report\",\"format\":\"docx\"}\n"
 		"7) Buzdolabı soğuk zincir aylık ısı çizelgesi (Word): {\"action\":\"fridge_report\",\"format\":\"docx\"}\n"
 		"8) Tüm veritabanı tam Excel yedeği/kitabı: {\"action\":\"all_workbook\",\"format\":\"xlsx\"}\n"
-		"9) Veritabanından özel filtreli liste/rapor (Excel ve/veya Word, KVKK gereği yerel SQLite'da çalışır):\n"
+		"9) Veritabanından salt-okunur özel filtreli liste/rapor dışa aktarma (Excel ve/veya Word, KVKK gereği yerel SQLite'da çalışır):\n"
 		"   {\"action\":\"sql_export\",\"format\":\"xlsx\" veya \"docx\" veya \"both\",\"title\":\"Rapor Başlığı\",\"sql\":\"SELECT ...\"}\n"
-		"   Not: SQL yalnızca güvenli salt-okunur SELECT olmalı, Türkçe sütun takma adları kullanmalı ve en fazla LIMIT 200 olmalı.\n"
+		"   ÖNEMLİ: `sql_export` YALNIZCA `SELECT` içermelidir! Veri ekleme, güncelleme veya silme için ASLA `sql_export` kullanma; bunun yerine `create_profiles`, `rename_classes` veya `delete_records` kullan.\n"
 		"10) Özel metin/dilekçe/veli mektubu/BEP uyarlama/özel tablo belgesi (Word veya Excel):\n"
 		"   {\"action\":\"custom_doc\",\"format\":\"docx\" veya \"xlsx\" veya \"both\",\"title\":\"Belge Başlığı\",\"subtitle\":\"Alt Başlık\",\"sections\":[{\"heading\":\"Başlık\",\"body\":\"İçerik...\"}],\"table\":{\"headers\":[\"Sütun1\",\"Sütun2\"],\"rows\":[[\"Değer1\",\"Değer2\"]]}}\n"
 		"11) Seçili öğrencinin aylık yemek menüsüne göre tahmini insülin planı (Word/Excel): {\"action\":\"insulin_monthly_plan\",\"format\":\"docx\" veya \"xlsx\" veya \"both\",\"year_month\":\"YYYY-MM\"}\n"
@@ -1163,7 +1163,10 @@ def chat_with_gemini_assistant(
 		"\"symbol_type\":\"health | event | tr_flag | crescent | half_day | exam | profession | ballot\","
 		"\"is_civil_holiday\":false,\"is_half_day\":false,\"profession_group\":\"\",\"description\":\"Kısa açıklama\"}]}\n"
 		"15) Sınıf, şube, öğrenci/personel profili veya takvim kaydı SİLME (YALNIZCA kullanıcı açıkça 'sil / kaldır / temizle' dediğinde kullan; işlem onay kartında kullanıcıya tarif edilmeden ASLA silme yapılmaz):\n"
-		"   {\"action\":\"delete_records\",\"classes\":[\"A Şubesi\"],\"delete_empty_classes\":false,\"students\":[],\"calendar_events\":[{\"event_date\":\"YYYY-MM-DD\",\"title\":\"Etkinlik Adı\"}]}\n\n"
+		"   {\"action\":\"delete_records\",\"classes\":[\"A Şubesi\"],\"delete_empty_classes\":false,\"students\":[],\"calendar_events\":[{\"event_date\":\"YYYY-MM-DD\",\"title\":\"Etkinlik Adı\"}]}\n"
+		"16) Mevcut sınıf / şube adlarını güncelleme, sadeleştirme veya yeniden adlandırma (öğrencileri ve sınıf öğretmenlerini koruyarak yeni ada taşır/birleştirir; her zaman onay kartı ile uygulanır):\n"
+		"   {\"action\":\"rename_classes\",\"replace_from\":\"Özel Eğitim Ana Sınıfı / \",\"replace_to\":\"\",\"renames\":[{\"old_name\":\"Eski Ad\",\"new_name\":\"Yeni Ad\"}]}\n"
+		"   Not: Toplu önek/metin temizleme için `replace_from` ve `replace_to` kullanabilir veya tek tek `renames` listesi verebilirsin.\n\n"
 		"KRİTİK GÜVENLİK VE ONAY KURALI (VERİ YAZMA / SİLME):\n"
 		"- Veritabanına herhangi bir veri yazacak (sınıf/öğrenci/öğretmen/etkinlik/ölçüm ekleme veya güncelleme) ya da silecek bir komut aldığında:\n"
 		"  1) Yanıtının metin kısmında YAPACAĞIN İŞLEMİ adım adım açıkça TARİF ET (hangi sınıfların/kişilerin/kayıtların ekleneceğini, güncelleneceğini veya silineceğini madde madde yaz) ve 'Onaylıyor musunuz? Aşağıdaki onay kartından onaylayabilirsiniz.' diye kullanıcıdan onay iste.\n"

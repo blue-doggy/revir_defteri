@@ -216,6 +216,46 @@ class TestPersantilDeepCRUDAndExports(unittest.TestCase):
         )
         self.assertIn("user-select: text", css)
 
+    def test_gemini_rename_classes_and_sql_update_coercion_with_merge_and_confirm(self):
+        import gemini_assistant
+
+        with self.connect() as c:
+            cur_old = c.execute("INSERT INTO classes(name, teacher_name) VALUES ('Özel Eğitim Ana Sınıfı / A Şubesi', 'BETÜL CANSU')")
+            old_cid = cur_old.lastrowid
+            c.execute("INSERT INTO classes(name) VALUES ('A Şubesi')")  # pre-existing empty collision branch
+            c.execute("INSERT INTO classes(name, teacher_name) VALUES ('Özel Eğitim Ana Sınıfı / B Şubesi', 'CENNET SÖNMEZ')")
+            c.execute("INSERT INTO students(class_id, full_name, sex, person_type) VALUES (?, 'Ali Can', 'E', 'Öğrenci')", (old_cid,))
+            c.commit()
+
+        # Simulate Gemini mistakenly emitting UPDATE classes inside sql_export
+        bad_sql_spec = {
+            "action": "sql_export",
+            "sql": "UPDATE classes SET name = REPLACE(name, 'Özel Eğitim Ana Sınıfı / ', '') WHERE name LIKE 'Özel Eğitim Ana Sınıfı / %'",
+        }
+        with mock.patch.object(persantil, "_get_active_gemini_config", return_value=(True, "k", "gemini-3-flash-preview")), \
+             mock.patch.object(gemini_assistant, "chat_with_gemini_assistant", return_value=(True, "Sınıf adları sadeleştirilecek.", "gemini-3-flash-preview", "", bad_sql_spec, None)):
+            res = persantil._handle_floating_gemini_chat({"message": "sınıf adlarından özel eğitim ana sınıfı / kısmını sil"}, [])
+
+        self.assertTrue(res["ok"])
+        self.assertNotIn("Güvenlik gereği", res["reply_text"])
+        self.assertIsNotNone(res.get("write_proposal"))
+        self.assertEqual(res["write_proposal"]["mode"], "batch_action")
+        self.assertTrue(any("A Şubesi" in it for it in res["write_proposal"]["items"]))
+
+        # Confirm -> merges A Şubesi (preserving Ali Can + BETÜL CANSU) and renames B Şubesi cleanly
+        apply_res = persantil._handle_floating_gemini_apply_write({"token": res["write_proposal"]["token"]})
+        self.assertTrue(apply_res["ok"])
+        with self.connect() as c:
+            cls_names = sorted([r["name"] for r in c.execute("SELECT name FROM classes").fetchall()])
+            self.assertNotIn("Özel Eğitim Ana Sınıfı / A Şubesi", cls_names)
+            self.assertNotIn("Özel Eğitim Ana Sınıfı / B Şubesi", cls_names)
+            self.assertIn("A Şubesi", cls_names)
+            self.assertIn("B Şubesi", cls_names)
+            row_a = c.execute("SELECT id, teacher_name FROM classes WHERE name='A Şubesi'").fetchone()
+            self.assertEqual(row_a["teacher_name"], "BETÜL CANSU")
+            stu = c.execute("SELECT class_id FROM students WHERE full_name='Ali Can'").fetchone()
+            self.assertEqual(stu["class_id"], row_a["id"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
