@@ -90,6 +90,69 @@ class TestPersantilDeepCRUDAndExports(unittest.TestCase):
         self.assertIsNone(persantil.evaluate_measurement(-10.0, "Boy (cm)", "E", 120))
         self.assertIsNone(persantil.get_person_by_id(999999))
 
+    def test_gemini_chat_pdf_create_profiles_classes_and_teachers(self):
+        import base64
+        import json
+        import gemini_assistant
+
+        fake_pdf = b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF"
+        ai_payload = {
+            "action": "create_profiles",
+            "classes": [{"name": "4-B", "teacher_name": "Fatma Şahin"}],
+            "students": [
+                {
+                    "full_name": "Zeynep Öztürk",
+                    "class_name": "4-B",
+                    "student_no": "214",
+                    "sex": "K",
+                    "birth_date": "2016-03-11",
+                    "guardian_name": "Mehmet Öztürk",
+                    "guardian_phone": "0532 000 11 22",
+                    "allergies": "Polen",
+                    "blood_group": "A Rh+",
+                }
+            ],
+            "staff": [
+                {
+                    "full_name": "Fatma Şahin",
+                    "role": "Öğretmen",
+                    "class_name": "4-B",
+                    "sex": "K",
+                    "phone": "0505 111 22 33",
+                }
+            ],
+        }
+        fake_reply = f"PDF incelendi, sınıf ve profiller oluşturuluyor.\n[[REVIR_EXPORT:{json.dumps(ai_payload, ensure_ascii=False)}]]"
+        with mock.patch.object(gemini_assistant, "call_gemini", return_value=(True, fake_reply, "gemini-3-flash-preview")):
+            ok, clean_txt, _m, _tr, export_spec, _w = gemini_assistant.chat_with_gemini_assistant(
+                api_key="test",
+                model="gemini-3-flash-preview",
+                user_message="Ekli PDF'den sınıfları, öğretmenleri ve öğrencileri oluştur",
+                attachments=[{"name": "sinif_listesi.pdf", "type": "application/pdf", "data_b64": base64.b64encode(fake_pdf).decode("ascii")}],
+            )
+        self.assertTrue(ok)
+        self.assertIsInstance(export_spec, dict)
+        self.assertEqual(export_spec["action"], "create_profiles")
+
+        dls, note = persantil._execute_gemini_chat_export(export_spec, None, clean_txt)
+        self.assertEqual(dls, [])
+        self.assertIn("1 sınıf", note)
+        self.assertIn("1 öğrenci profili", note)
+        self.assertIn("1 öğretmen/personel profili", note)
+
+        with self.connect() as c:
+            cls_row = c.execute("SELECT name, teacher_name FROM classes WHERE name='4-B'").fetchone()
+            self.assertIsNotNone(cls_row)
+            self.assertEqual(cls_row["teacher_name"], "Fatma Şahin")
+            stu_row = c.execute("SELECT id, full_name, student_no, person_type FROM students WHERE full_name='Zeynep Öztürk'").fetchone()
+            self.assertIsNotNone(stu_row)
+            self.assertEqual(stu_row["person_type"], "Öğrenci")
+            hp_row = c.execute("SELECT allergies, blood_group FROM health_profiles WHERE student_id=?", (stu_row["id"],)).fetchone()
+            self.assertEqual(hp_row["allergies"], "Polen")
+            stf_row = c.execute("SELECT full_name, person_type FROM students WHERE full_name='Fatma Şahin'").fetchone()
+            self.assertIsNotNone(stf_row)
+            self.assertEqual(stf_row["person_type"], "Öğretmen")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

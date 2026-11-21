@@ -124,7 +124,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.16.6"
+_DEFAULT_APP_VERSION = "1.16.7"
 
 
 def _load_app_version() -> str:
@@ -11581,11 +11581,29 @@ def _execute_gemini_chat_export(export_spec: dict[str, Any], active_pid: int | N
 				downloads.append({"token": ui.register_download(bx, fn_x, xlsx_mime), "file_name": fn_x, "label": "📊 İnsülin Defteri Excel (.xlsx)", "kind": "xlsx"})
 			return downloads, extra_note
 
-		if action == "create_classes":
+		if action in ("create_classes", "create_profiles"):
 			cls_list = export_spec.get("classes") if isinstance(export_spec.get("classes"), list) else []
-			added_names: list[str] = []
+			stu_list = export_spec.get("students") if isinstance(export_spec.get("students"), list) else []
+			staff_list = export_spec.get("staff") if isinstance(export_spec.get("staff"), list) else (
+				export_spec.get("teachers") if isinstance(export_spec.get("teachers"), list) else []
+			)
+			added_classes: list[str] = []
+			updated_teachers = 0
+			added_students = 0
+			added_staff = 0
+			now_iso = datetime.now().isoformat(timespec="seconds")
+
+			def _norm_sex_val(v: Any) -> str | None:
+				s = str(v or "").strip().upper()
+				if s.startswith("E") or s.startswith("M"):
+					return "E"
+				if s.startswith("K") or s.startswith("F"):
+					return "K"
+				return None
+
 			with connect_db() as conn:
-				for c_it in cls_list[:80]:
+				# 1. Sınıflar ve sınıf öğretmenleri
+				for c_it in cls_list[:120]:
 					if isinstance(c_it, dict):
 						cn = str(c_it.get("name") or "").strip()
 						tn = str(c_it.get("teacher_name") or "").strip() or None
@@ -11594,16 +11612,120 @@ def _execute_gemini_chat_export(export_spec: dict[str, Any], active_pid: int | N
 						tn = None
 					if not cn or cn == "Sivil / Diğer":
 						continue
-					cur_ex = conn.execute("SELECT id FROM classes WHERE name=?", (cn,)).fetchone()
+					cur_ex = conn.execute("SELECT id, teacher_name FROM classes WHERE name=?", (cn,)).fetchone()
 					if not cur_ex:
 						conn.execute("INSERT OR IGNORE INTO classes(name, teacher_name) VALUES (?, ?)", (cn, tn))
-						added_names.append(cn)
-					elif tn:
-						conn.execute("UPDATE classes SET teacher_name=? WHERE id=? AND (teacher_name IS NULL OR trim(teacher_name)='')", (tn, cur_ex["id"]))
+						added_classes.append(cn)
+					elif tn and not str(cur_ex["teacher_name"] or "").strip():
+						conn.execute("UPDATE classes SET teacher_name=? WHERE id=?", (tn, cur_ex["id"]))
+						updated_teachers += 1
+
+				# 2. Öğrenci profilleri
+				for s_it in stu_list[:500]:
+					if not isinstance(s_it, dict):
+						continue
+					fnm = str(s_it.get("full_name") or s_it.get("name") or "").strip()
+					if not fnm:
+						continue
+					scn = str(s_it.get("class_name") or "Sınıf Belirtilmedi").strip() or "Sınıf Belirtilmedi"
+					conn.execute("INSERT OR IGNORE INTO classes(name) VALUES (?)", (scn,))
+					cid_r = conn.execute("SELECT id FROM classes WHERE name=?", (scn,)).fetchone()
+					cid_v = cid_r["id"] if cid_r else None
+					if cid_v is None:
+						continue
+
+					sno = str(s_it.get("student_no") or "").strip() or None
+					sex_v = _norm_sex_val(s_it.get("sex"))
+					bdate = str(s_it.get("birth_date") or "").strip()[:10] or None
+					gname = str(s_it.get("guardian_name") or "").strip() or None
+					gphone = str(s_it.get("guardian_phone") or "").strip() or None
+					notes_v = str(s_it.get("notes") or "").strip() or None
+
+					ex_s = conn.execute(
+						"SELECT id FROM students WHERE lower(full_name)=lower(?) AND class_id=? AND person_type='Öğrenci'",
+						(fnm, cid_v),
+					).fetchone()
+					if not ex_s:
+						cur_s = conn.execute(
+							"""INSERT INTO students(class_id, person_type, student_no, full_name, sex, birth_date, guardian_name, guardian_phone, notes)
+							   VALUES (?, 'Öğrenci', ?, ?, ?, ?, ?, ?, ?)""",
+							(cid_v, sno, fnm, sex_v, bdate, gname, gphone, notes_v),
+						)
+						stu_id = cur_s.lastrowid
+						added_students += 1
+					else:
+						stu_id = ex_s["id"]
+
+					allergies = str(s_it.get("allergies") or "").strip() or None
+					chronic = str(s_it.get("chronic_conditions") or "").strip() or None
+					bgroup = str(s_it.get("blood_group") or "").strip() or None
+					if stu_id and any([gname, gphone, allergies, chronic, bgroup]):
+						conn.execute(
+							"""INSERT INTO health_profiles(student_id, guardian_name, guardian_phone, allergies, chronic_conditions, blood_group, updated_at)
+							   VALUES (?, ?, ?, ?, ?, ?, ?)
+							   ON CONFLICT(student_id) DO UPDATE SET
+								 guardian_name=COALESCE(excluded.guardian_name, health_profiles.guardian_name),
+								 guardian_phone=COALESCE(excluded.guardian_phone, health_profiles.guardian_phone),
+								 allergies=COALESCE(excluded.allergies, health_profiles.allergies),
+								 chronic_conditions=COALESCE(excluded.chronic_conditions, health_profiles.chronic_conditions),
+								 blood_group=COALESCE(excluded.blood_group, health_profiles.blood_group),
+								 updated_at=excluded.updated_at""",
+							(stu_id, gname, gphone, allergies, chronic, bgroup, now_iso),
+						)
+
+				# 3. Öğretmen / Personel / Sivil profilleri
+				for stf in staff_list[:200]:
+					if not isinstance(stf, dict):
+						continue
+					fnm = str(stf.get("full_name") or stf.get("name") or "").strip()
+					if not fnm:
+						continue
+					role_v = str(stf.get("role") or stf.get("person_type") or "Öğretmen").strip() or "Öğretmen"
+					if role_v == "Öğrenci":
+						role_v = "Öğretmen"
+					scn = str(stf.get("class_name") or "Sivil / Diğer").strip() or "Sivil / Diğer"
+					conn.execute("INSERT OR IGNORE INTO classes(name) VALUES (?)", (scn,))
+					cid_r = conn.execute("SELECT id, teacher_name FROM classes WHERE name=?", (scn,)).fetchone()
+					cid_v = cid_r["id"] if cid_r else None
+					if cid_v is None:
+						continue
+					if scn != "Sivil / Diğer" and not str(cid_r["teacher_name"] or "").strip() and "öğretmen" in role_v.lower():
+						conn.execute("UPDATE classes SET teacher_name=? WHERE id=?", (fnm, cid_v))
+						updated_teachers += 1
+
+					phone_v = str(stf.get("phone") or stf.get("guardian_phone") or "").strip() or None
+					notes_v = str(stf.get("notes") or "").strip() or None
+					sex_v = _norm_sex_val(stf.get("sex"))
+					ex_stf = conn.execute(
+						"SELECT id FROM students WHERE lower(full_name)=lower(?) AND person_type!='Öğrenci'",
+						(fnm,),
+					).fetchone()
+					if not ex_stf:
+						conn.execute(
+							"""INSERT INTO students(class_id, person_type, full_name, sex, guardian_phone, notes)
+							   VALUES (?, ?, ?, ?, ?, ?)""",
+							(cid_v, role_v, fnm, sex_v, phone_v, notes_v),
+						)
+						added_staff += 1
+
+			if added_students or added_staff:
+				try:
+					sync_all_person_data_files()
+				except Exception:
+					pass
 			clear_all_data_caches()
-			if added_names:
-				return [], f"\n\n✅ **{len(added_names)} yeni sınıf/şube oluşturuldu:** `{', '.join(added_names[:20])}`"
-			return [], "\n\nℹ️ *Belirtilen sınıflar sistemde zaten mevcuttu (varsa eksik öğretmen adları güncellendi).*"
+			parts: list[str] = []
+			if added_classes:
+				parts.append(f"**{len(added_classes)} sınıf** (`{', '.join(added_classes[:15])}`)")
+			if updated_teachers:
+				parts.append(f"**{updated_teachers} sınıf öğretmeni**")
+			if added_students:
+				parts.append(f"**{added_students} öğrenci profili**")
+			if added_staff:
+				parts.append(f"**{added_staff} öğretmen/personel profili**")
+			if parts:
+				return [], "\n\n✅ **Belgeden oluşturuldu / güncellendi:** " + ", ".join(parts)
+			return [], "\n\nℹ️ *Belirtilen sınıf ve profiller sistemde zaten mevcuttu.*"
 
 		if action == "custom_doc":
 			secs = export_spec.get("sections") if isinstance(export_spec.get("sections"), list) else None
@@ -11920,7 +12042,7 @@ def _handle_floating_gemini_chat(payload: dict[str, Any], chat_history: list[dic
 		downloads, exp_note = _execute_gemini_chat_export(export_spec, int(context_pid) if context_pid else None, reply_txt)
 		if exp_note:
 			reply_txt = (reply_txt + exp_note).strip()
-		if str(export_spec.get("action") or "").strip().lower() == "create_classes":
+		if str(export_spec.get("action") or "").strip().lower() in ("create_classes", "create_profiles"):
 			refresh_ui = True
 
 	# 2. Yapılandırılmış Veri / Belge Yazma Önerisi (Onay Kartı Hazırla)
