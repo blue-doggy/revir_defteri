@@ -940,7 +940,7 @@ def seed_selected_exams_to_db(year: int, selected_exams: list[str], connect_db_f
 	return added
 
 
-def save_ai_generated_events_to_db(events: list[dict[str, Any]], connect_db_fn: Callable) -> int:
+def save_ai_generated_events_to_db(events: list[dict[str, Any]], connect_db_fn: Callable, upsert: bool = False) -> int:
 	"""Gemini AI tarafından üretilen takvim kayıtlarını tekilleştirerek SQLite veritabanına kaydeder."""
 	added = 0
 	now_iso = datetime.now().isoformat(timespec="seconds")
@@ -956,12 +956,6 @@ def save_ai_generated_events_to_db(events: list[dict[str, Any]], connect_db_fn: 
 				date.fromisoformat(ev_date)
 			except Exception:
 				continue
-			dup = conn.execute(
-				"SELECT id FROM calendar_events WHERE event_date = ? AND lower(trim(title)) = lower(trim(?))",
-				(ev_date, title),
-			).fetchone()
-			if dup:
-				continue
 			cat = str(ev.get("category") or "belirli_gun").strip()
 			if cat not in CATEGORY_LABELS:
 				cat = "belirli_gun"
@@ -974,6 +968,21 @@ def save_ai_generated_events_to_db(events: list[dict[str, Any]], connect_db_fn: 
 			st_time = str(ev.get("start_time") or "").strip()[:5]
 			en_time = str(ev.get("end_time") or "").strip()[:5]
 			desc = str(ev.get("description") or "").strip()
+			dup = conn.execute(
+				"SELECT id FROM calendar_events WHERE event_date = ? AND lower(trim(title)) = lower(trim(?))",
+				(ev_date, title),
+			).fetchone()
+			if dup:
+				if upsert:
+					conn.execute(
+						"""UPDATE calendar_events
+						   SET category=?, symbol_type=?, is_civil_holiday=?, is_half_day=?,
+						       profession_group=?, start_time=?, end_time=?, description=?
+						   WHERE id=?""",
+						(cat, sym, is_hol, is_half, prof, st_time, en_time, desc, int(dup["id"])),
+					)
+					added += 1
+				continue
 			conn.execute(
 				"""INSERT INTO calendar_events
 				   (event_date, title, category, symbol_type, is_civil_holiday, is_half_day,
@@ -1019,10 +1028,23 @@ def render_calendar_and_planning_page(
 ) -> None:
 	"""
 	GELİŞİM & PLAN -> 📅 Takvim & Planlama ana sayfasını oluşturur.
+	- Sol Panel: Her gün için TEK ve doğrudan tıklanabilir kutucuklu Aylık Takvim Izgarası
+	- Sağ Panel: Ezan vakitleri, canlı sayaç ve takvim yaprağı arkası (Hadis/Özlü Söz)
+	  doğrudan içine gömülü Birleşik 'Günlük Takvim Yaprağı' + Etkinlik Ekleme/Yönetim
 	"""
 	today = date.today()
 	cfg = get_app_settings_fn()
 	ai_enabled, ai_key, ai_model = get_active_gemini_config_fn()
+
+	# Doğrudan gün kutucuğuna tıklamayı yakala (altında ikinci bir buton olmadan tek kutucuk tıklaması!)
+	try:
+		clicked_wid = getattr(ui._get_ctx(), "clicked_button", None)
+		if isinstance(clicked_wid, str) and clicked_wid.startswith("btn_cal_day_"):
+			picked_iso = clicked_wid[len("btn_cal_day_"):][:10]
+			date.fromisoformat(picked_iso)
+			ui.session_state["cal_selected_date"] = picked_iso
+	except Exception:
+		pass
 
 	if "cal_selected_date" not in ui.session_state:
 		ui.session_state["cal_selected_date"] = today.isoformat()
@@ -1051,11 +1073,21 @@ def render_calendar_and_planning_page(
 		ensure_year_builtin_holidays_seeded(view_year, connect_db_fn, include_special_days=False)
 		ui.session_state[seed_flag_key] = True
 
-	ui.markdown("## 📅 Okul & Revir Takvimi, MEB Belirli Günler ve Günlük Takvim Yaprağı")
-	ui.caption(
-		"İş günleri, hafta sonları, devlet memurları için **kırmızı** resmi tatiller ve **½ yarım gün** arife mesaileri, "
-		"🇹🇷 milli bayramlar, 🌙 dini bayramlar/kandiller, 🏫 MEB belirli gün ve haftalar, 📝 ÖSYM/MEB sınavları, 👩‍⚕️ meslek günleri ve 🕌 canlı ezan vakti sayacı."
-	)
+	top_h1, top_h2 = ui.columns([2.7, 1.15])
+	with top_h1:
+		ui.markdown("## 📅 Okul & Revir Takvimi ve Günlük Takvim Yaprağı")
+		ui.caption(
+			"Gün kutucuklarına doğrudan tıklayarak sağdaki **Takvim Yaprağını** açın. "
+			"Ezan vakti ili, görünüm ve yapay zeka ile toplu tatil/sınav/belirli gün ekleme işlemleri **Ayarlar → Kurum, Yıl & Şube Yapısı → Takvim Ayarları** bölümündedir."
+		)
+	with top_h2:
+		ui.write("")
+		if ui.button("⚙️ Takvim Ayarları & AI Sihirbazı", key="btn_goto_cal_settings_top", type="secondary", use_container_width=True):
+			ui.session_state["settings_vertical_nav"] = "🏫 Kurum, Yıl & Şube Yapısı"
+			ui.session_state["_force_tab_label"] = "🗓️ Takvim Ayarları"
+			ui.session_state["target_page"] = "⚙️ Ayarlar"
+			ui.session_state["main_menu_page"] = "⚙️ Ayarlar"
+			ui.rerun()
 
 	flash_msg = ui.session_state.pop("_cal_flash_msg", None)
 	if flash_msg:
@@ -1134,156 +1166,6 @@ def render_calendar_and_planning_page(
 			ui.rerun()
 
 	# -----------------------------------------------------------------------
-	# GEMINI AI TAKVİM SİHİRBAZI & MEB BELİRLİ GÜN VE HAFTALAR İŞARETLEYİCİ
-	# -----------------------------------------------------------------------
-	with ui.expander("✨ Gemini AI Takvim Sihirbazı · Resmi/Dini Tatil, MEB Belirli Gün ve Haftalar, ÖSYM Sınavları ve Özel Gün İşaretleyici", expanded=False):
-		wiz_t1, wiz_t2, wiz_t3, wiz_t4 = ui.tabs([
-			"🇹🇷 Resmi & Dini Tatiller / Yarım Günler",
-			"🏫 MEB Belirli Gün ve Haftalar & Meslek Günleri",
-			"📝 ÖSYM & MEB Sınav Takvimi",
-			"🤖 Gemini AI Serbest Komut (Seçim Tatili, Ara Tatil vb.)",
-		])
-
-		with wiz_t1:
-			ui.caption(
-				f"**{view_year}** yılı için Türkiye Cumhuriyeti resmi tatillerini, devlet memurları yarım gün arife/28 Ekim mesailerini, "
-				"milli bayramları (🇹🇷) ve dini bayram/kandilleri (🌙) tek tıkla takvime işleyin."
-			)
-			wc1, wc2 = ui.columns(2)
-			with wc1:
-				if ui.button(f"📥 {view_year} Resmi & Dini Tatilleri + Yarım Günleri İşle (Hızlı)", key="btn_seed_official_holidays", type="primary", use_container_width=True):
-					cnt = ensure_year_builtin_holidays_seeded(view_year, connect_db_fn, include_special_days=False)
-					ui.session_state["_cal_flash_msg"] = f"✅ {view_year} yılı resmi tatilleri, yarım gün arife mesaileri ve dini bayramlar işlendi ({cnt} yeni kayıt eklendi)."
-					ui.rerun()
-			with wc2:
-				if ai_enabled and ai_key:
-					if ui.button(f"✨ Gemini AI ile {view_year} Resmi/Dini Tatilleri Doğrula & İşle", key="btn_ai_official_holidays", type="secondary", use_container_width=True):
-						ok, res, used_m = generate_calendar_events_with_ai(
-							api_key=ai_key,
-							model=ai_model,
-							year=view_year,
-							month=None,
-							preset_type="official_holidays",
-						)
-						if ok:
-							added = save_ai_generated_events_to_db(res.get("events") or [], connect_db_fn)
-							ui.session_state["_cal_flash_msg"] = f"✨ Gemini AI ({used_m}) ile {view_year} yılı için {added} resmi/dini tatil kaydı işlendi."
-							ui.rerun()
-						else:
-							ui.error(f"Gemini hatası: {res.get('error')}")
-
-		with wiz_t2:
-			ui.caption(
-				"MEB Eğitim Kurumları Sosyal Etkinlikler Yönetmeliği'ndeki **Belirli Gün ve Haftalar Çizelgesini** "
-				"(İlköğretim Haftası, Yeşilay Haftası, Kızılay Haftası, Lösemili Çocuklar Haftası, Atatürk Haftası, Yerli Malı Haftası, "
-				"Trafik ve İlkyardım Haftası, Engelliler Haftası, Orman Haftası vb.) ve **Meslek Grubu Günlerini** takvime ekleyin."
-			)
-			mc1, mc2, mc3 = ui.columns(3)
-			with mc1:
-				if ui.button(f"🏫 {view_year} Tüm MEB Belirli Gün ve Haftaları + Meslek Günlerini İşle", key="btn_seed_meb_all_year", type="primary", use_container_width=True):
-					cnt = ensure_year_builtin_holidays_seeded(view_year, connect_db_fn, include_special_days=True)
-					ui.session_state["_cal_flash_msg"] = f"✅ {view_year} yılı MEB Belirli Gün ve Haftalar çizelgesi ile meslek günleri takvime işlendi ({cnt} yeni kayıt)."
-					ui.rerun()
-			with mc2:
-				if ai_enabled and ai_key:
-					if ui.button(f"✨ Gemini AI ile {TR_MONTH_NAMES[view_month]} {view_year} MEB Belirli Gün ve Haftalarını Ekle", key="btn_ai_meb_month", type="secondary", use_container_width=True):
-						ok, res, used_m = generate_calendar_events_with_ai(
-							api_key=ai_key,
-							model=ai_model,
-							year=view_year,
-							month=view_month,
-							preset_type="meb_belirli_gunler",
-						)
-						if ok:
-							added = save_ai_generated_events_to_db(res.get("events") or [], connect_db_fn)
-							ui.session_state["_cal_flash_msg"] = f"✨ Gemini AI ({used_m}) ile {TR_MONTH_NAMES[view_month]} {view_year} için {added} MEB Belirli Gün ve Haftası takvime işlendi!"
-							ui.rerun()
-						else:
-							ui.error(f"Gemini hatası: {res.get('error')}")
-			with mc3:
-				if ai_enabled and ai_key:
-					if ui.button(f"✨ Gemini AI ile Tüm {view_year} Yılı MEB Belirli Günlerini Üret", key="btn_ai_meb_full_year", type="secondary", use_container_width=True):
-						ok, res, used_m = generate_calendar_events_with_ai(
-							api_key=ai_key,
-							model=ai_model,
-							year=view_year,
-							month=None,
-							preset_type="meb_belirli_gunler",
-						)
-						if ok:
-							added = save_ai_generated_events_to_db(res.get("events") or [], connect_db_fn)
-							ui.session_state["_cal_flash_msg"] = f"✨ Gemini AI ({used_m}) ile {view_year} yılı tamamı için {added} MEB Belirli Gün ve Haftası takvime işlendi!"
-							ui.rerun()
-						else:
-							ui.error(f"Gemini hatası: {res.get('error')}")
-
-		with wiz_t3:
-			ui.caption("Takvimde işaretlenmesini istediğiniz **ÖSYM** ve **MEB** merkezi sınavlarını seçin (Her yıl ilgili haftanın Cumartesi/Pazar gününe otomatik hizalanır):")
-			exam_choices = ["YKS (TYT-AYT-YDT)", "LGS", "KPSS", "MSÜ", "ALES", "DGS", "YDS / YÖKDİL", "İOKBS Bursluluk"]
-			picked_exams = ui.multiselect(
-				"İşaretlenecek Sınavlar",
-				exam_choices,
-				default=["YKS (TYT-AYT-YDT)", "LGS", "KPSS", "MSÜ"],
-				key="cal_multiselect_exams",
-			)
-			ex_c1, ex_c2 = ui.columns(2)
-			with ex_c1:
-				if ui.button(f"📝 Seçili Sınavları {view_year} Takvimine İşle (Hızlı)", key="btn_seed_builtin_exams", type="primary", use_container_width=True):
-					cnt = seed_selected_exams_to_db(view_year, picked_exams, connect_db_fn)
-					ui.session_state["_cal_flash_msg"] = f"✅ Seçilen sınavlardan {cnt} oturum {view_year} takvimine 📝 sembolüyle eklendi."
-					ui.rerun()
-			with ex_c2:
-				if ai_enabled and ai_key:
-					if ui.button(f"✨ Gemini AI ile {view_year} Güncel ÖSYM Sınavlarını Sorgula & İşle", key="btn_ai_osym_exams", type="secondary", use_container_width=True):
-						ok, res, used_m = generate_calendar_events_with_ai(
-							api_key=ai_key,
-							model=ai_model,
-							year=view_year,
-							month=None,
-							preset_type="osym_exams",
-							selected_exams=picked_exams,
-						)
-						if ok:
-							added = save_ai_generated_events_to_db(res.get("events") or [], connect_db_fn)
-							ui.session_state["_cal_flash_msg"] = f"✨ Gemini AI ({used_m}) ile {added} ÖSYM/MEB sınav tarihi takvime eklendi."
-							ui.rerun()
-						else:
-							ui.error(f"Gemini hatası: {res.get('error')}")
-
-		with wiz_t4:
-			if not (ai_enabled and ai_key):
-				ui.info("🤖 Serbest doğal dil ile takvim işaretlemek için **Ayarlar → Yapay Zekâ (Gemini)** bölümünden Gemini AI'yı aktif hale getirebilirsiniz. Manuel etkinlik ve tatil ekleme formu sağdaki **Takvim Yaprağı** altında her zaman aktiftir.")
-			else:
-				ai_cal_prompt = ui.text_area(
-					"Gemini AI'ya Takvim Talimatı Verin",
-					placeholder=(
-						f"Örn: {TR_MONTH_NAMES[view_month]} {view_year} içindeki MEB ara tatilini, seçim ertesi idari izin gününü, "
-						"MEB belirli gün ve haftalarını veya okul genel göz/boy-kilo tarama haftasını takvime işle..."
-					),
-					height=78,
-					key="cal_ai_free_prompt",
-				)
-				if ui.button("✨ Gemini AI ile Analiz Et ve Takvime İşle", key="btn_run_ai_free_cal", type="primary"):
-					if not ai_cal_prompt.strip():
-						ui.warning("Lütfen eklenecek tatil, sınav, belirli gün veya etkinlik talimatını yazın.")
-					else:
-						ok, res, used_m = generate_calendar_events_with_ai(
-							api_key=ai_key,
-							model=ai_model,
-							year=view_year,
-							month=view_month,
-							preset_type="election_or_custom",
-							custom_prompt=ai_cal_prompt.strip(),
-						)
-						if ok:
-							added = save_ai_generated_events_to_db(res.get("events") or [], connect_db_fn)
-							summary_txt = res.get("summary") or f"{added} kayıt oluşturuldu."
-							ui.session_state["_cal_flash_msg"] = f"✨ Gemini AI ({used_m}): {summary_txt} ({added} yeni takvim kaydı eklendi)."
-							ui.rerun()
-						else:
-							ui.error(f"Gemini hatası: {res.get('error')}")
-
-	# -----------------------------------------------------------------------
 	# GÖRÜNTÜLENEN AYIN VERİLERİNİ VERİTABANINDAN ÇEKME VE MESAİ ANALİZİ
 	# -----------------------------------------------------------------------
 	month_prefix = f"{view_year:04d}-{view_month:02d}-"
@@ -1341,7 +1223,7 @@ def render_calendar_and_planning_page(
 			weekend_days_count += 1
 		else:
 			if has_full_hol or has_admin_leave:
-				pass  # Resmi tatil veya seçim/idari izin hafta içine denk geldiğinde net iş gününden düşülür (Hata #3 düzeltmesi)
+				pass
 			elif has_half_hol:
 				workdays_count += 0.5
 			else:
@@ -1382,10 +1264,6 @@ def render_calendar_and_planning_page(
 		unsafe_allow_html=True,
 	)
 
-	# -----------------------------------------------------------------------
-	# SAYFA BÖLÜM GÖRÜNÜRLÜĞÜ KONTROLÜ VE KAPATILAN BÖLÜMLERİ GERİ AÇMA ŞERİDİ
-	# (Hata #11 + "kapatınca kaybolan kısımları ekle" düzeltmesi)
-	# -----------------------------------------------------------------------
 	show_grid_sec = True
 	show_leaf_sec = True
 	if is_section_visible_fn is not None:
@@ -1417,7 +1295,7 @@ def render_calendar_and_planning_page(
 				ui.rerun()
 
 	if show_grid_sec and show_leaf_sec:
-		cal_col, leaf_col = ui.columns([1.68, 1.05], gap="medium")
+		cal_col, leaf_col = ui.columns([1.62, 1.12], gap="medium")
 	elif show_grid_sec:
 		cal_col = ui.container()
 		leaf_col = None
@@ -1428,7 +1306,7 @@ def render_calendar_and_planning_page(
 		return
 
 	# -----------------------------------------------------------------------
-	# SOL PANEL: 7 SÜTUNLU AYLIK İNTERAKTİF TAKVİM IZGARASI
+	# SOL PANEL: 7 SÜTUNLU AYLIK İNTERAKTİF TAKVİM IZGARASI (TEK TIKLANABİLİR KUTUCUK)
 	# -----------------------------------------------------------------------
 	if cal_col is not None:
 		with cal_col:
@@ -1453,8 +1331,8 @@ def render_calendar_and_planning_page(
 					with w_cols[wd_idx]:
 						if day_num == 0:
 							ui.markdown(
-								'<div style="min-height:112px;border-radius:10px;background:rgba(148,163,184,0.06);'
-								'border:1px dashed rgba(148,163,184,0.22);margin-bottom:4px;"></div>',
+								'<div style="min-height:98px;border-radius:10px;background:rgba(148,163,184,0.06);'
+								'border:1px dashed rgba(148,163,184,0.22);margin-bottom:6px;"></div>',
 								unsafe_allow_html=True,
 							)
 							continue
@@ -1480,36 +1358,34 @@ def render_calendar_and_planning_page(
 						has_ballot = any(e.get("symbol_type") == "ballot" or e.get("category") == "secim_idari_tatil" for e in cell_events)
 						has_prof = any(e.get("symbol_type") == "profession" or e.get("category") in ("meslek_gunu", "belirli_gun") for e in cell_events) or bool(sp_builtin)
 
-						# Hata #2 düzeltmesi: Hafta sonuna denk gelen Arife / Yarım gün tatillerde
-						# memur zaten hafta sonu tatilinde olduğu için "½ YARIM GÜN" değil "ARİFE · TATİL" gösterilir!
 						if has_full_holiday:
 							cell_bg = "linear-gradient(180deg, #fef2f2 0%, #fee2e2 100%)"
-							cell_border = "2px solid #dc2626" if is_selected else "1.5px solid #fca5a5"
+							cell_border = "2.5px solid #dc2626" if is_selected else "1.5px solid #fca5a5"
 							num_color = "#dc2626"
 							status_tag = '<span style="font-size:9.5px;font-weight:800;color:#ffffff;background:#dc2626;padding:1px 5px;border-radius:4px;">TATİL</span>'
 						elif has_half_day and is_weekend:
 							cell_bg = "linear-gradient(180deg, #fef2f2 0%, #fee2e2 100%)"
-							cell_border = "2px solid #dc2626" if is_selected else "1.5px solid #fca5a5"
+							cell_border = "2.5px solid #dc2626" if is_selected else "1.5px solid #fca5a5"
 							num_color = "#dc2626"
 							status_tag = '<span style="font-size:9px;font-weight:800;color:#b91c1c;background:#fecaca;padding:1px 5px;border-radius:4px;">ARİFE · TATİL</span>'
 						elif has_half_day:
 							cell_bg = "linear-gradient(180deg, #fff7ed 0%, #ffedd5 100%)"
-							cell_border = "2px solid #ea580c" if is_selected else "1.5px solid #fdba74"
+							cell_border = "2.5px solid #ea580c" if is_selected else "1.5px solid #fdba74"
 							num_color = "#dc2626"
 							status_tag = '<span style="font-size:9.5px;font-weight:800;color:#9a3412;background:#fed7aa;padding:1px 5px;border-radius:4px;">½ YARIM GÜN</span>'
 						elif has_ballot:
 							cell_bg = "linear-gradient(180deg, #f5f3ff 0%, #ede9fe 100%)"
-							cell_border = "2px solid #7c3aed" if is_selected else "1.5px solid #c4b5fd"
+							cell_border = "2.5px solid #7c3aed" if is_selected else "1.5px solid #c4b5fd"
 							num_color = "#6d28d9"
 							status_tag = '<span style="font-size:9.5px;font-weight:800;color:#5b21b6;background:#ddd6fe;padding:1px 5px;border-radius:4px;">İDARİ İZİN</span>'
 						elif is_weekend:
 							cell_bg = "linear-gradient(180deg, #f1f5f9 0%, #e2e8f0 100%)"
-							cell_border = "2px solid var(--teal)" if is_selected else "1px solid #cbd5e1"
+							cell_border = "2.5px solid var(--teal)" if is_selected else "1px solid #cbd5e1"
 							num_color = "#dc2626" if is_sunday else "#334155"
 							status_tag = '<span style="font-size:9px;font-weight:700;color:#64748b;">H.Sonu</span>'
 						else:
 							cell_bg = "var(--bg-card)"
-							cell_border = "2px solid var(--teal)" if is_selected else "1px solid var(--line)"
+							cell_border = "2.5px solid var(--teal)" if is_selected else "1px solid var(--line)"
 							num_color = "var(--text-heading)"
 							status_tag = '<span style="font-size:9px;font-weight:600;color:#059669;">İş Günü</span>'
 
@@ -1551,7 +1427,6 @@ def render_calendar_and_planning_page(
 								f'{ev_title}</div>'
 							)
 
-						# Yerleşik MEB belirli gün/meslek günü varsa ve henüz aynı başlıkla eklenmemişse hücrede göster
 						if sp_builtin and len(pills_html_list) < 2:
 							existing_titles_low = {str(e.get("title") or "").lower() for e in cell_events}
 							if sp_builtin["title"].lower() not in existing_titles_low:
@@ -1577,34 +1452,36 @@ def render_calendar_and_planning_page(
 							'<span style="background:#0284c7;color:#fff;font-size:8.5px;font-weight:800;padding:1px 4px;border-radius:4px;margin-left:3px;">BUGÜN</span>'
 							if is_today else ""
 						)
-						sel_shadow = "0 0 0 2px rgba(13,148,136,0.22)" if is_selected else "0 1px 2px rgba(0,0,0,0.04)"
+						sel_badge = (
+							'<span style="background:var(--teal);color:#fff;font-size:8.5px;font-weight:800;padding:1px 4px;border-radius:4px;margin-left:3px;">SEÇİLİ</span>'
+							if is_selected and not is_today else ""
+						)
+						sel_shadow = "0 0 0 3px rgba(13,148,136,0.28)" if is_selected else "0 1px 3px rgba(0,0,0,0.05)"
 
+						# SADECE TEK KUTUCUK: Doğrudan bu kutucuğa tıklandığında o gün seçilir (altında ikinci buton yok!)
 						ui.markdown(
-							f"""<div style="min-height:86px;padding:6px 7px;border-radius:10px 10px 4px 4px;background:{cell_bg};
-							border:{cell_border};box-shadow:{sel_shadow};display:flex;flex-direction:column;justify-content:space-between;">
+							f"""<div role="button" tabindex="0"
+							onclick="window.__revirClick('btn_cal_day_{cell_iso}')"
+							onkeydown="if(event.key==='Enter'||event.key===' '){{event.preventDefault();window.__revirClick('btn_cal_day_{cell_iso}');}}"
+							title="{day_num} {TR_MONTH_NAMES[view_month]} {view_year} takvim yaprağını açmak için tıklayın"
+							style="min-height:98px;padding:7px 8px;border-radius:10px;background:{cell_bg};
+							border:{cell_border};box-shadow:{sel_shadow};cursor:pointer;user-select:none;
+							transition:transform 0.1s ease,box-shadow 0.1s ease;margin-bottom:6px;
+							display:flex;flex-direction:column;justify-content:space-between;">
 								<div>
 									<div style="display:flex;align-items:center;justify-content:space-between;gap:2px;">
-										<span style="font-size:15.5px;font-weight:900;color:{num_color};line-height:1.1;">{day_num}{today_dot}</span>
+										<span style="font-size:16px;font-weight:900;color:{num_color};line-height:1.1;">{day_num}{today_dot}{sel_badge}</span>
 										<span style="display:flex;align-items:center;gap:3px;">{symbols_html}</span>
 									</div>
-									<div style="margin-top:2px;">{status_tag}</div>
-									<div style="margin-top:3px;">{pills_joined}</div>
+									<div style="margin-top:3px;">{status_tag}</div>
+									<div style="margin-top:4px;">{pills_joined}</div>
 								</div>
 							</div>""",
 							unsafe_allow_html=True,
 						)
-						btn_lbl = f"✓ {day_num} {TR_MONTH_NAMES[view_month][:3]}" if is_selected else f"{day_num} {TR_MONTH_NAMES[view_month][:3]}"
-						if ui.button(
-							btn_lbl,
-							key=f"btn_cal_day_{cell_iso}",
-							type=("primary" if is_selected else "secondary"),
-							use_container_width=True,
-						):
-							ui.session_state["cal_selected_date"] = cell_iso
-							ui.rerun()
 
 	# -----------------------------------------------------------------------
-	# SAĞ PANEL: SEÇİLİ GÜNE AİT İNTERAKTİF "TAKVİM YAPRAĞI"
+	# SAĞ PANEL: SEÇİLİ GÜNE AİT BİRLEŞİK "TAKVİM YAPRAĞI"
 	# -----------------------------------------------------------------------
 	if leaf_col is not None:
 		with leaf_col:
@@ -1621,7 +1498,7 @@ def render_calendar_and_planning_page(
 
 
 # ---------------------------------------------------------------------------
-# SAĞ PANEL: TAKVİM YAPRAĞI DETAY BİLEŞENİ
+# SAĞ PANEL: BİRLEŞİK TAKVİM YAPRAĞI (EZAN VAKTİ + YAPRAK ARKASI YAZISI İÇERide)
 # ---------------------------------------------------------------------------
 
 def _render_interactive_calendar_leaf(
@@ -1674,9 +1551,6 @@ def _render_interactive_calendar_leaf(
 	is_weekend = weekday_idx >= 5
 	is_sunday = weekday_idx == 6
 
-	# Hata #2 ve Hata #3 düzeltmeleri:
-	# - Hafta sonuna denk gelen arife günlerinde memurlar tam gün tatildedir.
-	# - Seçim tatili / idari izinlerde "TAM İŞ GÜNÜ" değil "SEÇİM TATİLİ / İDARİ İZİN" gösterilir.
 	if has_full_hol:
 		header_accent = "#dc2626"
 		num_color = "#dc2626"
@@ -1714,44 +1588,66 @@ def _render_interactive_calendar_leaf(
 		work_status_bg = "#d1fae5"
 		work_status_fg = "#065f46"
 
-	# Günün Meslek Grubu Tespiti (+ Gemini AI profession_override desteği — Hata #7/#8 düzeltmesi)
-	prof_groups: list[str] = []
-	for e in day_events:
-		pg = str(e.get("profession_group") or "").strip()
-		if pg and pg not in prof_groups:
-			prof_groups.append(pg)
-	if sp_builtin and sp_builtin.get("prof") and sp_builtin["prof"] not in prof_groups:
-		prof_groups.append(sp_builtin["prof"])
-	ai_prof_override = (leaf_note_row["profession_override"] if leaf_note_row and leaf_note_row["profession_override"] else "").strip()
-	if ai_prof_override and ai_prof_override not in prof_groups:
-		prof_groups.append(ai_prof_override)
+	# 1. Meslek Grubu Bölümü (Ayarlardan açık/kapalı kontrolü)
+	show_profession = str(cfg.get("calendar_show_profession", "1")).strip() != "0"
+	prof_section_html = ""
+	if show_profession:
+		prof_groups: list[str] = []
+		for e in day_events:
+			pg = str(e.get("profession_group") or "").strip()
+			if pg and pg not in prof_groups:
+				prof_groups.append(pg)
+		if sp_builtin and sp_builtin.get("prof") and sp_builtin["prof"] not in prof_groups:
+			prof_groups.append(sp_builtin["prof"])
+		ai_prof_override = (leaf_note_row["profession_override"] if leaf_note_row and leaf_note_row["profession_override"] else "").strip()
+		if ai_prof_override and ai_prof_override not in prof_groups:
+			prof_groups.append(ai_prof_override)
 
-	default_wd_prof, default_wd_desc = WEEKDAY_DEFAULT_PROFESSION_THEME[weekday_idx]
-	ai_significance = (leaf_note_row["day_significance"] if leaf_note_row and leaf_note_row["day_significance"] else "").strip()
+		default_wd_prof, default_wd_desc = WEEKDAY_DEFAULT_PROFESSION_THEME[weekday_idx]
+		ai_significance = (leaf_note_row["day_significance"] if leaf_note_row and leaf_note_row["day_significance"] else "").strip()
 
-	if prof_groups:
-		active_prof_title = " · ".join(prof_groups)
-		active_prof_sub = (
-			ai_significance
-			or (sp_builtin["title"] if sp_builtin else "")
-			or next((e["title"] for e in day_events if e.get("profession_group")), "Günün Özel Meslek Grubu")
+		if prof_groups:
+			active_prof_title = " · ".join(prof_groups)
+			active_prof_sub = (
+				ai_significance
+				or (sp_builtin["title"] if sp_builtin else "")
+				or next((e["title"] for e in day_events if e.get("profession_group")), "Günün Özel Meslek Grubu")
+			)
+		else:
+			active_prof_title = default_wd_prof
+			active_prof_sub = ai_significance or default_wd_desc
+
+		prof_section_html = f"""<div style="margin-top:10px;padding:8px 11px;border-radius:9px;background:#f0fdfa;border:1px solid #99f6e4;">
+			<div style="font-size:10.5px;font-weight:800;color:#0f766e;text-transform:uppercase;letter-spacing:0.5px;">
+				👩‍⚕️ GÜNÜN MESLEK GRUBU & ANLAMI
+			</div>
+			<div style="font-size:13px;font-weight:800;color:#134e4a;margin-top:2px;">
+				{html.escape(active_prof_title)}
+			</div>
+			<div style="font-size:11.3px;color:#0f766e;margin-top:1px;">
+				{html.escape(active_prof_sub)}
+			</div>
+		</div>"""
+
+	# 2. MEB Belirli Gün ve Haftalar Şeridi (Ayarlardan açık/kapalı kontrolü)
+	show_meb_weeks = str(cfg.get("calendar_show_meb_weeks", "1")).strip() != "0"
+	meb_weeks_section_html = ""
+	if show_meb_weeks and active_meb_weeks:
+		meb_weeks_html_list: list[str] = []
+		for mw in active_meb_weeks:
+			meb_weeks_html_list.append(
+				f"""<div style="padding:6px 10px;border-radius:8px;background:#eff6ff;border:1px solid #bfdbfe;margin-bottom:5px;">
+					<div style="font-size:12px;font-weight:800;color:#1e40af;">🏫 {html.escape(mw['title'])}</div>
+					<div style="font-size:11px;color:#1e3a8a;margin-top:1px;">Revir & Okul Odağı: {html.escape(mw['focus'])}</div>
+				</div>"""
+			)
+		meb_weeks_section_html = (
+			f'<div style="margin-top:9px;"><div style="font-size:10.5px;font-weight:800;color:#1e40af;'
+			f'text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">🏫 BU HAFTANIN MEB BELİRLİ GÜN VE HAFTALARI</div>'
+			f'{"".join(meb_weeks_html_list)}</div>'
 		)
-	else:
-		active_prof_title = default_wd_prof
-		active_prof_sub = ai_significance or default_wd_desc
 
-	# MEB Aktif Belirli Gün ve Haftası Şeridi
-	meb_weeks_html_list: list[str] = []
-	for mw in active_meb_weeks:
-		meb_weeks_html_list.append(
-			f"""<div style="padding:6px 10px;border-radius:8px;background:#eff6ff;border:1px solid #bfdbfe;margin-bottom:5px;">
-				<div style="font-size:12px;font-weight:800;color:#1e40af;">🏫 {html.escape(mw['title'])}</div>
-				<div style="font-size:11px;color:#1e3a8a;margin-top:1px;">Revir & Okul Odağı: {html.escape(mw['focus'])}</div>
-			</div>"""
-		)
-	meb_weeks_block = "".join(meb_weeks_html_list)
-
-	# Günün Tatil / Belirli Gün Özeti
+	# 3. Günün Tatil / Sınav / Planlanan Etkinlik Özeti
 	special_badges_html: list[str] = []
 	existing_titles_low: set[str] = set()
 	for e in day_events:
@@ -1760,14 +1656,17 @@ def _render_interactive_calendar_leaf(
 		existing_titles_low.add(raw_ttl.lower())
 		e_ttl = html.escape(raw_ttl)
 		e_desc = html.escape(str(e.get("description") or ""))
+		t_rng = " - ".join(filter(None, [e.get("start_time"), e.get("end_time")]))
+		t_span = f'<span style="background:rgba(15,23,42,0.08);padding:1px 6px;border-radius:4px;font-size:10.5px;font-weight:800;">⏰ {html.escape(t_rng)}</span>' if t_rng else ""
 		is_h = bool(e.get("is_civil_holiday"))
 		b_bg = "#fef2f2" if is_h else "#f8fafc"
 		b_bd = "#fca5a5" if is_h else "#cbd5e1"
 		b_fg = "#b91c1c" if is_h else "#1e293b"
 		special_badges_html.append(
-			f"""<div style="padding:7px 10px;border-radius:8px;background:{b_bg};border:1px solid {b_bd};margin-bottom:6px;">
-				<div style="font-size:12.5px;font-weight:800;color:{b_fg};display:flex;align-items:center;gap:6px;">
-					{sym_html} <span>{e_ttl}</span>
+			f"""<div style="padding:7px 10px;border-radius:8px;background:{b_bg};border:1px solid {b_bd};margin-bottom:5px;">
+				<div style="font-size:12.5px;font-weight:800;color:{b_fg};display:flex;align-items:center;justify-content:space-between;gap:6px;">
+					<span style="display:flex;align-items:center;gap:6px;">{sym_html} <span>{e_ttl}</span></span>
+					{t_span}
 				</div>
 				{f'<div style="font-size:11.2px;color:#475569;margin-top:2px;">{e_desc}</div>' if e_desc else ''}
 			</div>"""
@@ -1775,7 +1674,7 @@ def _render_interactive_calendar_leaf(
 	if sp_builtin and sp_builtin["title"].lower() not in existing_titles_low:
 		sym_html = render_symbol_badge("tr_flag" if sp_builtin.get("cat") == "milli_bayram" else "profession")
 		special_badges_html.append(
-			f"""<div style="padding:7px 10px;border-radius:8px;background:#f0fdfa;border:1px solid #99f6e4;margin-bottom:6px;">
+			f"""<div style="padding:7px 10px;border-radius:8px;background:#f0fdfa;border:1px solid #99f6e4;margin-bottom:5px;">
 				<div style="font-size:12.5px;font-weight:800;color:#0f766e;display:flex;align-items:center;gap:6px;">
 					{sym_html} <span>{html.escape(sp_builtin['title'])}</span>
 				</div>
@@ -1785,18 +1684,201 @@ def _render_interactive_calendar_leaf(
 	special_block = (
 		"".join(special_badges_html)
 		if special_badges_html
-		else '<div style="font-size:12px;color:#64748b;font-style:italic;">Bu güne kayıtlı resmi tatil veya sınav bulunmuyor. Aşağıdan yeni etkinlik ekleyebilirsiniz.</div>'
+		else '<div style="font-size:12px;color:#64748b;font-style:italic;">Bu güne kayıtlı resmi tatil, sınav veya etkinlik bulunmuyor.</div>'
 	)
 
-	# 1. KLASİK TAKVİM YAPRAĞI KARTI
+	# 4. TAKVİM YAPRAĞI İÇİNE GÖMÜLÜ EZAN VAKİTLERİ VE CANLI GERİ SAYIM SAYACI
+	show_prayer = str(cfg.get("calendar_show_prayer_times", "1")).strip() != "0"
+	default_prov = (cfg.get("default_province") or "Ankara").strip() or "Ankara"
+	default_dist = (cfg.get("default_district") or "").strip()
+	prayer_leaf_html = ""
+	prayer_script_html = ""
+
+	if show_prayer:
+		loc_disp = f"{default_prov} / {default_dist}" if default_dist else default_prov
+		sel_ptimes = get_prayer_times_for_province(default_prov, sel_date, connect_db_fn)
+		today_ptimes = sel_ptimes if sel_date == today else get_prayer_times_for_province(default_prov, today, connect_db_fn)
+		tmr_ptimes = get_prayer_times_for_province(default_prov, today + timedelta(days=1), connect_db_fn)
+
+		vakit_keys = ["İmsak", "Güneş", "Öğle", "İkindi", "Akşam", "Yatsı"]
+		now_dt = datetime.now()
+		now_hm = now_dt.strftime("%H:%M")
+
+		next_vakit_name = "İmsak"
+		next_vakit_hm = today_ptimes.get("İmsak", "05:30")
+		current_vakit_name = "Yatsı"
+		is_target_tomorrow = False
+		for idx_v, vk in enumerate(vakit_keys):
+			vhm = today_ptimes.get(vk, "00:00")
+			if now_hm < vhm:
+				next_vakit_name = vk
+				next_vakit_hm = vhm
+				current_vakit_name = vakit_keys[idx_v - 1] if idx_v > 0 else "Yatsı"
+				break
+		else:
+			is_target_tomorrow = True
+			next_vakit_name = "İmsak (Yarın)"
+			next_vakit_hm = tmr_ptimes.get("İmsak", today_ptimes.get("İmsak", "05:30"))
+			current_vakit_name = "Yatsı"
+
+		today_schedule_json = json.dumps(
+			[{"name": vk, "time": today_ptimes.get(vk, "00:00")} for vk in vakit_keys],
+			ensure_ascii=False,
+		)
+		tmr_imsak_json = json.dumps(tmr_ptimes.get("İmsak", today_ptimes.get("İmsak", "05:30")))
+
+		v_cards_html: list[str] = []
+		for vk in vakit_keys:
+			vhm = sel_ptimes.get(vk, "--:--")
+			is_cur_v = (vk == current_vakit_name and sel_date == today)
+			vc_bg = "#0f766e" if is_cur_v else "#f8fafc"
+			vc_fg = "#ffffff" if is_cur_v else "#0f172a"
+			vc_sub = "#ccfbf1" if is_cur_v else "#64748b"
+			vc_bd = "2px solid #0d9488" if is_cur_v else "1px solid #cbd5e1"
+			v_cards_html.append(
+				f"""<div data-vakit-card="{vk}" style="text-align:center;padding:5px 3px;border-radius:7px;background:{vc_bg};border:{vc_bd};">
+					<div style="font-size:10px;font-weight:700;color:{vc_sub};">{vk}</div>
+					<div style="font-size:13px;font-weight:900;color:{vc_fg};margin-top:1px;">{vhm}</div>
+				</div>"""
+			)
+
+		try:
+			nh, nm = [int(x) for x in next_vakit_hm.split(":")[:2]]
+			target_dt = now_dt.replace(hour=nh, minute=nm, second=0, microsecond=0)
+			if is_target_tomorrow or target_dt <= now_dt:
+				target_dt += timedelta(days=1)
+			diff_sec = max(0, int((target_dt - now_dt).total_seconds()))
+			init_h = diff_sec // 3600
+			init_m = (diff_sec % 3600) // 60
+			init_s = diff_sec % 60
+			init_countdown_txt = f"{init_h:02d} saat {init_m:02d} dk {init_s:02d} sn"
+		except Exception:
+			init_countdown_txt = "-- saat -- dk -- sn"
+
+		diff_day_note = (
+			f"Vakitler: {sel_date.strftime('%d.%m.%Y')} · Sayaç: Bugün ({today.strftime('%d.%m.%Y')})"
+			if sel_date != today
+			else f"{sel_ptimes.get('source', 'Diyanet Takvimi')}"
+		)
+
+		prayer_leaf_html = f"""<div style="margin-top:11px;padding-top:10px;border-top:1.5px dashed #cbd5e1;">
+			<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+				<span style="font-size:10.8px;font-weight:800;color:#0f766e;text-transform:uppercase;letter-spacing:0.5px;">
+					🕌 EZAN VAKİTLERİ ({html.escape(loc_disp)})
+				</span>
+				<span style="font-size:10px;color:#64748b;font-weight:600;">{html.escape(diff_day_note)}</span>
+			</div>
+			<div style="display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:4px;margin-bottom:7px;">
+				{''.join(v_cards_html)}
+			</div>
+			<div style="padding:7px 11px;border-radius:8px;background:linear-gradient(90deg,#0f766e 0%,#0284c7 100%);
+			color:#ffffff;display:flex;align-items:center;justify-content:space-between;font-size:12px;font-weight:800;">
+				<span>⏳ <span id="revir_next_prayer_label">{html.escape(next_vakit_name)} ({html.escape(next_vakit_hm)})</span> vaktine kalan:</span>
+				<span id="revir_prayer_countdown" style="background:rgba(255,255,255,0.2);padding:2px 8px;border-radius:5px;font-family:monospace;font-size:13px;letter-spacing:0.3px;">
+					{init_countdown_txt}
+				</span>
+			</div>
+		</div>"""
+
+		prayer_script_html = f"""<script>
+		(function() {{
+			var schedule = {today_schedule_json};
+			var tomorrowImsak = {tmr_imsak_json};
+			function tickPrayerCountdown() {{
+				var el = document.getElementById('revir_prayer_countdown');
+				var lbl = document.getElementById('revir_next_prayer_label');
+				if (!el || !schedule || !schedule.length) return;
+				var now = new Date();
+				var target = null;
+				var targetName = '';
+				var targetHM = '';
+				for (var i = 0; i < schedule.length; i++) {{
+					var parts = schedule[i].time.split(':');
+					if (parts.length < 2) continue;
+					var dt = new Date(now.getFullYear(), now.getMonth(), now.getDate(), parseInt(parts[0], 10), parseInt(parts[1], 10), 0);
+					if (dt > now) {{
+						target = dt;
+						targetName = schedule[i].name;
+						targetHM = schedule[i].time;
+						break;
+					}}
+				}}
+				if (!target) {{
+					var p0 = (tomorrowImsak || schedule[0].time).split(':');
+					target = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, parseInt(p0[0], 10), parseInt(p0[1], 10), 0);
+					targetName = 'İmsak (Yarın)';
+					targetHM = tomorrowImsak || schedule[0].time;
+				}}
+				var diff = Math.max(0, Math.floor((target.getTime() - now.getTime()) / 1000));
+				var hh = String(Math.floor(diff / 3600)).padStart(2, '0');
+				var mm = String(Math.floor((diff % 3600) / 60)).padStart(2, '0');
+				var ss = String(diff % 60).padStart(2, '0');
+				el.textContent = hh + ' saat ' + mm + ' dk ' + ss + ' sn';
+				if (lbl) lbl.textContent = targetName + ' (' + targetHM + ')';
+			}}
+			if (window._revirPrayerTimer) clearInterval(window._revirPrayerTimer);
+			tickPrayerCountdown();
+			window._revirPrayerTimer = setInterval(tickPrayerCountdown, 1000);
+		}})();
+		</script>"""
+
+	# 5. TAKVİM YAPRAĞI İÇİNE GÖMÜLÜ "TAKVİM YAPRAĞI ARKASI" (HADİS-İ ŞERİF / ÖZLÜ SÖZ / GÜNÜN YAZISI)
+	quote_mode = cfg.get("calendar_quote_mode", QUOTE_MODE_OPTIONS[0])
+	if quote_mode not in QUOTE_MODE_OPTIONS:
+		quote_mode = QUOTE_MODE_OPTIONS[0]
+
+	quote_leaf_html = ""
+	if quote_mode != "Kapalı (Gösterme)":
+		builtin_qh = get_builtin_daily_quote_and_hadith(sel_date)
+		hadith_txt = (leaf_note_row["hadith_text"] if leaf_note_row and leaf_note_row["hadith_text"] else "") or builtin_qh["hadith_text"]
+		hadith_src = (leaf_note_row["hadith_source"] if leaf_note_row and leaf_note_row["hadith_source"] else "") or builtin_qh["hadith_source"]
+		quote_txt = (leaf_note_row["quote_text"] if leaf_note_row and leaf_note_row["quote_text"] else "") or builtin_qh["quote_text"]
+		quote_src = (leaf_note_row["quote_source"] if leaf_note_row and leaf_note_row["quote_source"] else "") or builtin_qh["quote_author"]
+		leaf_back_txt = (leaf_note_row["custom_note"] if leaf_note_row and leaf_note_row["custom_note"] else "")
+
+		show_hadith = ("Hadis" in quote_mode) or ("Karışık" in quote_mode)
+		show_quote = ("Özlü Söz" in quote_mode) or ("Karışık" in quote_mode)
+
+		back_parts: list[str] = []
+		if show_hadith:
+			back_parts.append(
+				f"""<div style="padding:8px 11px;border-radius:8px;background:#fffbeb;border-left:3.5px solid #d97706;margin-bottom:6px;color:#78350f;">
+					<div style="font-size:10px;font-weight:800;color:#b45309;text-transform:uppercase;">🌙 GÜNÜN HADİS-İ ŞERİFİ</div>
+					<div style="font-size:12.2px;font-style:italic;font-weight:600;margin-top:2px;">“{html.escape(hadith_txt)}”</div>
+					<div style="font-size:10.5px;font-weight:800;color:#92400e;margin-top:2px;text-align:right;">— {html.escape(hadith_src)}</div>
+				</div>"""
+			)
+		if show_quote:
+			back_parts.append(
+				f"""<div style="padding:8px 11px;border-radius:8px;background:#f0fdf4;border-left:3.5px solid #059669;margin-bottom:6px;color:#064e3b;">
+					<div style="font-size:10px;font-weight:800;color:#047857;text-transform:uppercase;">💡 GÜNÜN ÖZLÜ SÖZÜ / VECİZESİ</div>
+					<div style="font-size:12.2px;font-style:italic;font-weight:600;margin-top:2px;">“{html.escape(quote_txt)}”</div>
+					<div style="font-size:10.5px;font-weight:800;color:#065f46;margin-top:2px;text-align:right;">— {html.escape(quote_src)}</div>
+				</div>"""
+			)
+		if leaf_back_txt:
+			back_parts.append(
+				f"""<div style="padding:7px 10px;border-radius:7px;background:#f8fafc;border:1px solid #cbd5e1;font-size:11.5px;color:#334155;">
+					<b>📖 Takvim Yaprağı Arkası Yazısı:</b> {html.escape(leaf_back_txt)}
+				</div>"""
+			)
+		if back_parts:
+			quote_leaf_html = f"""<div style="margin-top:11px;padding-top:10px;border-top:1.5px dashed #cbd5e1;">
+				<div style="font-size:10.5px;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;">
+					📜 TAKVİM YAPRAĞI ARKASI · GÜNÜN SÖZÜ & YAZISI
+				</div>
+				{''.join(back_parts)}
+			</div>"""
+
+	# BİRLEŞİK TEK PARÇA TAKVİM YAPRAĞI KARTI (Tarih + Meslek + MEB Haftası + Tatil + Ezan Vakti + Yaprak Arkası Yazısı)
 	ui.markdown(
 		f"""<div style="border-radius:14px;overflow:hidden;border:2px solid {header_accent};background:#fffdf9;
-		box-shadow:0 8px 22px rgba(15,23,42,0.08);margin-bottom:10px;color:#1e293b;">
+		box-shadow:0 8px 22px rgba(15,23,42,0.08);margin-bottom:8px;color:#1e293b;">
 			<div style="background:{header_accent};color:#ffffff;padding:8px 14px;display:flex;align-items:center;justify-content:space-between;">
 				<span style="font-size:12px;font-weight:800;letter-spacing:0.6px;">🗓️ GÜNLÜK TAKVİM YAPRAĞI</span>
 				<span style="font-size:11.5px;font-weight:700;opacity:0.95;">🌙 {html.escape(hijri_str)}</span>
 			</div>
-			<div style="padding:12px 16px;">
+			<div style="padding:12px 15px;">
 				<div style="display:flex;align-items:center;justify-content:space-between;border-bottom:1.5px dashed #cbd5e1;padding-bottom:10px;">
 					<div>
 						<div style="font-size:13px;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:0.8px;">
@@ -1822,313 +1904,85 @@ def _render_interactive_calendar_leaf(
 					</div>
 				</div>
 
-				<div style="margin-top:10px;padding:8px 11px;border-radius:9px;background:#f0fdfa;border:1px solid #99f6e4;">
-					<div style="font-size:10.5px;font-weight:800;color:#0f766e;text-transform:uppercase;letter-spacing:0.5px;">
-						👩‍⚕️ GÜNÜN MESLEK GRUBU & ANLAMI
-					</div>
-					<div style="font-size:13px;font-weight:800;color:#134e4a;margin-top:2px;">
-						{html.escape(active_prof_title)}
-					</div>
-					<div style="font-size:11.3px;color:#0f766e;margin-top:1px;">
-						{html.escape(active_prof_sub)}
-					</div>
-				</div>
-
-				{f'<div style="margin-top:9px;"><div style="font-size:10.5px;font-weight:800;color:#1e40af;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">🏫 BU HAFTANIN MEB BELİRLİ GÜN VE HAFTALARI</div>{meb_weeks_block}</div>' if meb_weeks_block else ''}
+				{prof_section_html}
+				{meb_weeks_section_html}
 
 				<div style="margin-top:10px;">
 					<div style="font-size:10.5px;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px;">
-						📌 GÜNÜN TATİL, SINAV VE BELİRLİ GÜNLERİ
+						📌 GÜNÜN TATİL, SINAV VE ETKİNLİKLERİ
 					</div>
 					{special_block}
 				</div>
+
+				{prayer_leaf_html}
+				{quote_leaf_html}
 			</div>
-		</div>""",
+		</div>
+		{prayer_script_html}""",
 		unsafe_allow_html=True,
 	)
 
-	# -----------------------------------------------------------------------
-	# 2. SEÇİLİ İLE GÖRE EZAN VAKİTLERİ VE CANLI GERİ SAYIM SAYACI
-	# (Hata #1 + Hata #10 + Kapatınca Kaybolmama Düzeltmesi)
-	# -----------------------------------------------------------------------
-	show_prayer = str(cfg.get("calendar_show_prayer_times", "1")).strip() != "0"
-	default_prov = (cfg.get("default_province") or "Ankara").strip() or "Ankara"
-	default_dist = (cfg.get("default_district") or "").strip()
-	all_provs = get_tr_provinces_fn() or sorted(TR_PROVINCE_COORDS.keys())
-	if default_prov not in all_provs:
-		default_prov = "Ankara"
-
-	if not show_prayer:
-		# Kapatıldığında tamamen kaybolmak yerine geri açma şeridi gösterilir!
-		with ui.container(border=True):
-			pr_off1, pr_off2 = ui.columns([2.1, 1.1])
-			with pr_off1:
-				ui.caption(f"🕌 **Ezan Vakitleri & Canlı Sayaç ({default_prov})** şu an gizli.")
-			with pr_off2:
-				if ui.button("🕌 Ezan Vakitlerini Aç", key="btn_reopen_prayer_card", type="secondary", use_container_width=True):
-					save_app_settings_fn({"calendar_show_prayer_times": "1"})
+	# Yaprak Altı Hızlı Aksiyonlar (Gemini ile Yaprak Yazısı Yenileme & Takvim Ayarları Kısayolu)
+	leaf_act1, leaf_act2 = ui.columns(2)
+	with leaf_act1:
+		if ai_enabled and ai_key:
+			if ui.button("✨ Gemini ile Yaprak Yazısını Yenile", key=f"btn_ai_leaf_{sel_iso}", type="secondary", use_container_width=True):
+				meb_ctx = ", ".join([w["title"] for w in active_meb_weeks])
+				day_ctx = ", ".join(filter(None, [
+					", ".join([e["title"] for e in day_events]),
+					sp_builtin["title"] if sp_builtin else "",
+					meb_ctx,
+				]))
+				ok, res, used_m = generate_daily_leaf_content_with_ai(
+					api_key=ai_key,
+					model=ai_model,
+					target_date=sel_iso,
+					quote_mode=quote_mode,
+					day_context=day_ctx,
+					province=default_prov,
+				)
+				if ok:
+					with connect_db_fn() as conn:
+						conn.execute(
+							"""INSERT INTO calendar_daily_notes
+							   (note_date, quote_text, quote_source, hadith_text, hadith_source,
+							    day_significance, profession_override, custom_note, updated_at)
+							   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+							   ON CONFLICT(note_date) DO UPDATE SET
+							     quote_text = excluded.quote_text,
+							     quote_source = excluded.quote_source,
+							     hadith_text = excluded.hadith_text,
+							     hadith_source = excluded.hadith_source,
+							     day_significance = excluded.day_significance,
+							     profession_override = excluded.profession_override,
+							     custom_note = excluded.custom_note,
+							     updated_at = excluded.updated_at""",
+							(
+								sel_iso,
+								str(res.get("quote_text") or "").strip(),
+								str(res.get("quote_author") or "").strip(),
+								str(res.get("hadith_text") or "").strip(),
+								str(res.get("hadith_source") or "").strip(),
+								str(res.get("day_significance") or "").strip(),
+								str(res.get("profession_group") or "").strip(),
+								str(res.get("leaf_back_note") or "").strip(),
+								datetime.now().isoformat(timespec="seconds"),
+							),
+						)
+					ui.session_state["_cal_flash_msg"] = f"✨ {sel_date.strftime('%d.%m.%Y')} takvim yaprağı yazısı Gemini AI ({used_m}) ile güncellendi."
 					ui.rerun()
-	else:
-		with ui.container(border=True):
-			pr_hdr1, pr_hdr2, pr_hdr3 = ui.columns([1.65, 1.05, 0.45])
-			with pr_hdr1:
-				loc_disp = f"{default_prov} / {default_dist}" if default_dist else default_prov
-				ui.markdown(f"#### 🕌 Ezan Vakitleri ({html.escape(loc_disp)})")
-			with pr_hdr2:
-				picked_prov = ui.selectbox(
-					"İl Seçimi",
-					all_provs,
-					index=all_provs.index(default_prov),
-					key="cal_leaf_province_picker",
-					label_visibility="collapsed",
-				)
-				if picked_prov != default_prov:
-					save_app_settings_fn({"default_province": picked_prov})
-					ui.rerun()
-			with pr_hdr3:
-				if ui.button("Gizle", key="btn_hide_prayer_card", help="Ezan vakitleri kartını gizle", use_container_width=True):
-					save_app_settings_fn({"calendar_show_prayer_times": "0"})
-					ui.rerun()
-
-			# 6'lı tablo seçili günün (sel_date) vakitlerini gösterir
-			sel_ptimes = get_prayer_times_for_province(default_prov, sel_date, connect_db_fn)
-			# Canlı geri sayım sayacı ise DAİMA bugünün (today) ve yarının (today + 1) gerçek vakitlerini baz alır! (Hata #1 düzeltmesi)
-			today_ptimes = sel_ptimes if sel_date == today else get_prayer_times_for_province(default_prov, today, connect_db_fn)
-			tmr_ptimes = get_prayer_times_for_province(default_prov, today + timedelta(days=1), connect_db_fn)
-
-			vakit_keys = ["İmsak", "Güneş", "Öğle", "İkindi", "Akşam", "Yatsı"]
-			now_dt = datetime.now()
-			now_hm = now_dt.strftime("%H:%M")
-
-			next_vakit_name = "İmsak"
-			next_vakit_hm = today_ptimes.get("İmsak", "05:30")
-			current_vakit_name = "Yatsı"
-			is_target_tomorrow = False
-			for idx_v, vk in enumerate(vakit_keys):
-				vhm = today_ptimes.get(vk, "00:00")
-				if now_hm < vhm:
-					next_vakit_name = vk
-					next_vakit_hm = vhm
-					current_vakit_name = vakit_keys[idx_v - 1] if idx_v > 0 else "Yatsı"
-					break
-			else:
-				is_target_tomorrow = True
-				next_vakit_name = "İmsak (Yarın)"
-				next_vakit_hm = tmr_ptimes.get("İmsak", today_ptimes.get("İmsak", "05:30"))
-				current_vakit_name = "Yatsı"
-
-			today_schedule_json = json.dumps(
-				[{"name": vk, "time": today_ptimes.get(vk, "00:00")} for vk in vakit_keys],
-				ensure_ascii=False,
-			)
-			tmr_imsak_json = json.dumps(tmr_ptimes.get("İmsak", today_ptimes.get("İmsak", "05:30")))
-
-			v_cards_html: list[str] = []
-			for vk in vakit_keys:
-				vhm = sel_ptimes.get(vk, "--:--")
-				is_cur_v = (vk == current_vakit_name and sel_date == today)
-				vc_bg = "#0f766e" if is_cur_v else "var(--bg-card)"
-				vc_fg = "#ffffff" if is_cur_v else "var(--text-heading)"
-				vc_sub = "#ccfbf1" if is_cur_v else "var(--text-muted)"
-				vc_bd = "2px solid #0d9488" if is_cur_v else "1px solid var(--line)"
-				v_cards_html.append(
-					f"""<div data-vakit-card="{vk}" style="text-align:center;padding:6px 4px;border-radius:8px;background:{vc_bg};border:{vc_bd};">
-						<div style="font-size:10.5px;font-weight:700;color:{vc_sub};">{vk}</div>
-						<div style="font-size:13.5px;font-weight:900;color:{vc_fg};margin-top:1px;">{vhm}</div>
-					</div>"""
-				)
-
-			try:
-				nh, nm = [int(x) for x in next_vakit_hm.split(":")[:2]]
-				target_dt = now_dt.replace(hour=nh, minute=nm, second=0, microsecond=0)
-				if is_target_tomorrow or target_dt <= now_dt:
-					target_dt += timedelta(days=1)
-				diff_sec = max(0, int((target_dt - now_dt).total_seconds()))
-				init_h = diff_sec // 3600
-				init_m = (diff_sec % 3600) // 60
-				init_s = diff_sec % 60
-				init_countdown_txt = f"{init_h:02d} saat {init_m:02d} dk {init_s:02d} sn"
-			except Exception:
-				init_countdown_txt = "-- saat -- dk -- sn"
-
-			diff_day_note = (
-				f"Tablo {sel_date.strftime('%d.%m.%Y')} vakitleridir · Sayaç bugünün ({today.strftime('%d.%m.%Y')}) sıradaki vaktine sayar"
-				if sel_date != today
-				else f"Kaynak: {sel_ptimes.get('source', 'Diyanet Takvimi')} · Ayarlar → Varsayılan Konum ile senkronize"
-			)
-
-			ui.markdown(
-				f"""<div style="display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:5px;margin:4px 0 8px 0;">
-					{''.join(v_cards_html)}
-				</div>
-				<div style="padding:8px 12px;border-radius:9px;background:linear-gradient(90deg,#0f766e 0%,#0284c7 100%);
-				color:#ffffff;display:flex;align-items:center;justify-content:space-between;font-size:12.5px;font-weight:800;">
-					<span>⏳ <span id="revir_next_prayer_label">{html.escape(next_vakit_name)} ({html.escape(next_vakit_hm)})</span> vaktine kalan:</span>
-					<span id="revir_prayer_countdown" style="background:rgba(255,255,255,0.18);padding:2px 9px;border-radius:6px;font-family:monospace;font-size:13.5px;letter-spacing:0.4px;">
-						{init_countdown_txt}
-					</span>
-				</div>
-				<div style="font-size:10.5px;color:var(--text-muted);margin-top:4px;text-align:right;">
-					{html.escape(diff_day_note)}
-				</div>
-				<script>
-				(function() {{
-					var schedule = {today_schedule_json};
-					var tomorrowImsak = {tmr_imsak_json};
-					function tickPrayerCountdown() {{
-						var el = document.getElementById('revir_prayer_countdown');
-						var lbl = document.getElementById('revir_next_prayer_label');
-						if (!el || !schedule || !schedule.length) return;
-						var now = new Date();
-						var target = null;
-						var targetName = '';
-						var targetHM = '';
-						for (var i = 0; i < schedule.length; i++) {{
-							var parts = schedule[i].time.split(':');
-							if (parts.length < 2) continue;
-							var dt = new Date(now.getFullYear(), now.getMonth(), now.getDate(), parseInt(parts[0], 10), parseInt(parts[1], 10), 0);
-							if (dt > now) {{
-								target = dt;
-								targetName = schedule[i].name;
-								targetHM = schedule[i].time;
-								break;
-							}}
-						}}
-						if (!target) {{
-							var p0 = (tomorrowImsak || schedule[0].time).split(':');
-							target = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, parseInt(p0[0], 10), parseInt(p0[1], 10), 0);
-							targetName = 'İmsak (Yarın)';
-							targetHM = tomorrowImsak || schedule[0].time;
-						}}
-						var diff = Math.max(0, Math.floor((target.getTime() - now.getTime()) / 1000));
-						var hh = String(Math.floor(diff / 3600)).padStart(2, '0');
-						var mm = String(Math.floor((diff % 3600) / 60)).padStart(2, '0');
-						var ss = String(diff % 60).padStart(2, '0');
-						el.textContent = hh + ' saat ' + mm + ' dk ' + ss + ' sn';
-						if (lbl) lbl.textContent = targetName + ' (' + targetHM + ')';
-					}}
-					if (window._revirPrayerTimer) clearInterval(window._revirPrayerTimer);
-					tickPrayerCountdown();
-					window._revirPrayerTimer = setInterval(tickPrayerCountdown, 1000);
-				}})();
-				</script>""",
-				unsafe_allow_html=True,
-			)
+				else:
+					ui.error(f"Gemini hatası: {res.get('error')}")
+	with leaf_act2:
+		if ui.button("⚙️ Takvim Ayarları (İl / Ezan / AI)", key="btn_goto_cal_settings_leaf", type="secondary", use_container_width=True):
+			ui.session_state["settings_vertical_nav"] = "🏫 Kurum, Yıl & Şube Yapısı"
+			ui.session_state["_force_tab_label"] = "🗓️ Takvim Ayarları"
+			ui.session_state["target_page"] = "⚙️ Ayarlar"
+			ui.session_state["main_menu_page"] = "⚙️ Ayarlar"
+			ui.rerun()
 
 	# -----------------------------------------------------------------------
-	# 3. GÜNÜN HADİS-İ ŞERİFİ / ÖZLÜ SÖZÜ (KAPATINCA KAYBOLMAYAN SEÇİCİ İLE)
-	# -----------------------------------------------------------------------
-	quote_mode = cfg.get("calendar_quote_mode", QUOTE_MODE_OPTIONS[0])
-	if quote_mode not in QUOTE_MODE_OPTIONS:
-		quote_mode = QUOTE_MODE_OPTIONS[0]
-
-	with ui.container(border=True):
-		ui.markdown("#### 📜 Takvim Yaprağı Arkası: Günün Sözü & Hadis-i Şerif")
-		if quote_mode == "Kapalı (Gösterme)":
-			ui.caption("Günün Hadis-i Şerifi ve Özlü Söz gösterimi şu an kapalı. Aşağıdaki kutudan istediğiniz zaman tekrar açabilirsiniz:")
-		else:
-			builtin_qh = get_builtin_daily_quote_and_hadith(sel_date)
-			hadith_txt = (leaf_note_row["hadith_text"] if leaf_note_row and leaf_note_row["hadith_text"] else "") or builtin_qh["hadith_text"]
-			hadith_src = (leaf_note_row["hadith_source"] if leaf_note_row and leaf_note_row["hadith_source"] else "") or builtin_qh["hadith_source"]
-			quote_txt = (leaf_note_row["quote_text"] if leaf_note_row and leaf_note_row["quote_text"] else "") or builtin_qh["quote_text"]
-			quote_src = (leaf_note_row["quote_source"] if leaf_note_row and leaf_note_row["quote_source"] else "") or builtin_qh["quote_author"]
-			leaf_back_txt = (leaf_note_row["custom_note"] if leaf_note_row and leaf_note_row["custom_note"] else "")
-
-			show_hadith = ("Hadis" in quote_mode) or ("Karışık" in quote_mode)
-			show_quote = ("Özlü Söz" in quote_mode) or ("Karışık" in quote_mode)
-
-			if show_hadith:
-				ui.markdown(
-					f"""<div style="padding:9px 12px;border-radius:9px;background:#fffbeb;border-left:4px solid #d97706;margin-bottom:7px;color:#78350f;">
-						<div style="font-size:10.5px;font-weight:800;color:#b45309;text-transform:uppercase;">🌙 GÜNÜN HADİS-İ ŞERİFİ</div>
-						<div style="font-size:12.8px;font-style:italic;font-weight:600;margin-top:3px;">“{html.escape(hadith_txt)}”</div>
-						<div style="font-size:11px;font-weight:800;color:#92400e;margin-top:3px;text-align:right;">— {html.escape(hadith_src)}</div>
-					</div>""",
-					unsafe_allow_html=True,
-				)
-			if show_quote:
-				ui.markdown(
-					f"""<div style="padding:9px 12px;border-radius:9px;background:#f0fdf4;border-left:4px solid #059669;margin-bottom:7px;color:#064e3b;">
-						<div style="font-size:10.5px;font-weight:800;color:#047857;text-transform:uppercase;">💡 GÜNÜN ÖZLÜ SÖZÜ / VECİZESİ</div>
-						<div style="font-size:12.8px;font-style:italic;font-weight:600;margin-top:3px;">“{html.escape(quote_txt)}”</div>
-						<div style="font-size:11px;font-weight:800;color:#065f46;margin-top:3px;text-align:right;">— {html.escape(quote_src)}</div>
-					</div>""",
-					unsafe_allow_html=True,
-				)
-			if leaf_back_txt:
-				ui.markdown(
-					f"""<div style="padding:8px 11px;border-radius:8px;background:var(--bg-card);border:1px solid var(--line);font-size:12px;color:var(--text-body);margin-bottom:7px;">
-						<b>📖 Takvim Yaprağı Notu:</b> {html.escape(leaf_back_txt)}
-					</div>""",
-					unsafe_allow_html=True,
-				)
-
-		# Seçici ve Gemini üretim butonu her zaman görünür kalır (Kapalı seçildiğinde bile kaybolmaz!)
-		qm_c1, qm_c2 = ui.columns([1.45, 1.35])
-		with qm_c1:
-			new_q_mode = ui.selectbox(
-				"Gösterim Tercihi (Ayarlar)",
-				QUOTE_MODE_OPTIONS,
-				index=QUOTE_MODE_OPTIONS.index(quote_mode),
-				key="cal_leaf_quote_mode_sel",
-				label_visibility="collapsed",
-			)
-			if new_q_mode != quote_mode:
-				save_app_settings_fn({"calendar_quote_mode": new_q_mode})
-				ui.rerun()
-		with qm_c2:
-			if ai_enabled and ai_key and quote_mode != "Kapalı (Gösterme)":
-				if ui.button("✨ Gemini ile Bu Güne Özel Üret", key=f"btn_ai_leaf_{sel_iso}", type="secondary", use_container_width=True):
-					meb_ctx = ", ".join([w["title"] for w in active_meb_weeks])
-					day_ctx = ", ".join(filter(None, [
-						", ".join([e["title"] for e in day_events]),
-						sp_builtin["title"] if sp_builtin else "",
-						meb_ctx,
-					]))
-					ok, res, used_m = generate_daily_leaf_content_with_ai(
-						api_key=ai_key,
-						model=ai_model,
-						target_date=sel_iso,
-						quote_mode=quote_mode,
-						day_context=day_ctx,
-						province=default_prov,
-					)
-					if ok:
-						with connect_db_fn() as conn:
-							conn.execute(
-								"""INSERT INTO calendar_daily_notes
-								   (note_date, quote_text, quote_source, hadith_text, hadith_source,
-								    day_significance, profession_override, custom_note, updated_at)
-								   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-								   ON CONFLICT(note_date) DO UPDATE SET
-								     quote_text = excluded.quote_text,
-								     quote_source = excluded.quote_source,
-								     hadith_text = excluded.hadith_text,
-								     hadith_source = excluded.hadith_source,
-								     day_significance = excluded.day_significance,
-								     profession_override = excluded.profession_override,
-								     custom_note = excluded.custom_note,
-								     updated_at = excluded.updated_at""",
-								(
-									sel_iso,
-									str(res.get("quote_text") or "").strip(),
-									str(res.get("quote_author") or "").strip(),
-									str(res.get("hadith_text") or "").strip(),
-									str(res.get("hadith_source") or "").strip(),
-									str(res.get("day_significance") or "").strip(),
-									str(res.get("profession_group") or "").strip(),
-									str(res.get("leaf_back_note") or "").strip(),
-									datetime.now().isoformat(timespec="seconds"),
-								),
-							)
-						ui.session_state["_cal_flash_msg"] = f"✨ {sel_date.strftime('%d.%m.%Y')} takvim yaprağı yazısı Gemini AI ({used_m}) ile güncellendi."
-						ui.rerun()
-					else:
-						ui.error(f"Gemini hatası: {res.get('error')}")
-
-	# -----------------------------------------------------------------------
-	# 4. SEÇİLİ GÜNÜN ETKİNLİKLERİ & YENİ ETKİNLİK / TATİL OLUŞTURMA FORMU
-	# (Hata #5 düzeltmesi: Kategori seçimi canlı tepki verir ve form kaybolmaz)
+	# SEÇİLİ GÜNÜN ETKİNLİKLERİ & YENİ ETKİNLİK / TATİL OLUŞTURMA FORMU
 	# -----------------------------------------------------------------------
 	with ui.container(border=True):
 		ui.markdown(f"#### 📌 {sel_date.strftime('%d')} {month_name} {sel_date.year} — Etkinlik & Plan Yönetimi")
@@ -2158,14 +2012,47 @@ def _render_interactive_calendar_leaf(
 						ui.session_state["_cal_flash_msg"] = f"🗑️ '{ev['title']}' takvimden silindi."
 						ui.rerun()
 
-		# Etkinlik ekleme paneli her zaman açık/erişilebilir kalır (kayıt eklendikten sonra kapanıp kaybolmaz!)
 		with ui.expander(f"➕ {sel_date.strftime('%d.%m.%Y')} Gününe Yeni Etkinlik / Tatil / Sınav Ekle", expanded=True):
+			if ai_enabled and ai_key:
+				q_ai_txt = ui.text_input(
+					"✍️ Yapay Zekâya (Gemini AI) Yazarak Hızlı Etkinlik / Gün / Saat / Durum Ekle",
+					placeholder=f"Örn: '{sel_date.strftime('%d.%m.%Y')} saat 10:30 4-A sınıfı göz taraması' veya 'Cuma günü idari izin'...",
+					key=f"cal_leaf_quick_ai_txt_{sel_iso}",
+				)
+				if ui.button("✨ Yazılanı Gemini AI ile Takvime İşle", key=f"btn_leaf_quick_ai_add_{sel_iso}", type="secondary", use_container_width=True):
+					if not q_ai_txt.strip():
+						ui.warning("Lütfen eklenecek etkinlik, gün, saat veya durumu yazın.")
+					else:
+						ok, res, used_m = generate_calendar_events_with_ai(
+							api_key=ai_key,
+							model=ai_model,
+							year=sel_date.year,
+							month=sel_date.month,
+							preset_type="election_or_custom",
+							custom_prompt=f"(Seçili gün bağlamı: {sel_iso}) {q_ai_txt.strip()}",
+						)
+						if ok:
+							ev_items = res.get("events") or []
+							added = save_ai_generated_events_to_db(ev_items, connect_db_fn, upsert=True)
+							if ev_items and isinstance(ev_items[0], dict) and ev_items[0].get("event_date"):
+								try:
+									d0 = date.fromisoformat(str(ev_items[0]["event_date"])[:10])
+									ui.session_state["cal_selected_date"] = d0.isoformat()
+									ui.session_state["cal_view_year"] = d0.year
+									ui.session_state["cal_view_month"] = d0.month
+								except Exception:
+									pass
+							ui.session_state["_cal_flash_msg"] = f"✨ Gemini AI ({used_m}): {res.get('summary') or ''} ({added} kayıt takvime eklendi)."
+							ui.rerun()
+						else:
+							ui.error(f"Gemini hatası: {res.get('error')}")
+				ui.divider()
+
 			cat_keys = list(CATEGORY_LABELS.keys())
 			cat_disp = [CATEGORY_LABELS[k][0] for k in cat_keys]
 			sym_keys = list(SYMBOL_OPTIONS.keys())
 			sym_disp = [SYMBOL_OPTIONS[k] for k in sym_keys]
 
-			# Kategori seçiciyi form dışında tutuyoruz ki değiştirildiğinde sembol ve tatil kutucukları anında güncellensin! (Hata #5 düzeltmesi)
 			picked_cat_disp = ui.selectbox(
 				"Kategori Seçin",
 				cat_disp,
@@ -2195,7 +2082,7 @@ def _render_interactive_calendar_leaf(
 					new_is_half = ui.checkbox("Yarım Gün Mesai (½ Rozeti)", value=default_half)
 
 				new_prof = ui.text_input("İlgili Meslek Grubu (Opsiyonel)", placeholder="Örn: Okul Hemşireleri ve Öğretmenler")
-				new_desc = ui.text_area("Açıklama / Not", placeholder="Günün anlamı veya planlanan etkinlik detayı...", height=60)
+				new_desc = ui.text_area("Açıklama / Not", placeholder="Günün anlamı veya planlanan etkinlik detayı...", height=55)
 
 				if ui.form_submit_button("💾 Takvime Kaydet", type="primary", use_container_width=True):
 					if not new_title.strip():
@@ -2223,3 +2110,316 @@ def _render_interactive_calendar_leaf(
 							)
 						ui.session_state["_cal_flash_msg"] = f"✅ '{new_title.strip()}' ({sel_date.strftime('%d.%m.%Y')}) takvime eklendi."
 						ui.rerun()
+
+
+# ---------------------------------------------------------------------------
+# AYARLAR -> KURUM, YIL & ŞUBE YAPISI -> 🗓️ TAKVİM AYARLARI SEKMESİ
+# ---------------------------------------------------------------------------
+
+def render_calendar_settings_tab(
+	*,
+	connect_db_fn: Callable,
+	current_cfg: dict[str, str],
+	save_app_settings_fn: Callable,
+	get_active_gemini_config_fn: Callable,
+	get_tr_provinces_fn: Callable,
+) -> None:
+	"""
+	Ayarlar -> 🏫 Kurum, Yıl & Şube Yapısı -> 🗓️ Takvim Ayarları sekmesini oluşturur:
+	1. Takvim Yaprağı görünüm bölümleri, Ezan Vakitleri görünürlüğü, İl değiştirme ve Hadis/Özlü Söz tercihi
+	2. Yapay Zeka (Gemini AI) ve Hazır Paketlerle Resmi/Dini Tatil, Yarım Gün, MEB Belirli Gün ve Haftalar, ÖSYM/MEB Sınavı ekleme
+	3. Ekstra eklemek istediğimiz etkinlikleri, tatilleri veya özel durumları (günü, saati ile) yazarak ekleyebileceğimiz kutucuk
+	"""
+	today = date.today()
+	ai_enabled, ai_key, ai_model = get_active_gemini_config_fn()
+	all_provs = get_tr_provinces_fn() or sorted(TR_PROVINCE_COORDS.keys())
+	cur_prov = (current_cfg.get("default_province") or "Ankara").strip() or "Ankara"
+	if cur_prov not in all_provs:
+		cur_prov = "Ankara"
+
+	ui.markdown("### 🗓️ Takvim Yaprağı, Ezan Vakitleri ve Yapay Zekâ Takvim Planlama Ayarları")
+	ui.caption(
+		"Gelişim & Plan → **Takvim & Planlama** sayfasındaki **Günlük Takvim Yaprağı** içinde gösterilecek bölümleri, "
+		"ezan vakti ilini, Hadis-i Şerif / Özlü Söz tercihini yönetin ve yapay zeka veya yazı kutucuğuyla takvime tatil/sınav/etkinlik işleyin."
+	)
+
+	cal_cfg_flash = ui.session_state.pop("_cal_settings_flash", None)
+	if cal_cfg_flash:
+		ui.success(cal_cfg_flash)
+
+	# -----------------------------------------------------------------------
+	# 1. BÖLÜM: TAKVİM YAPRAĞI GÖRÜNÜM, EZAN VAKTİ VE İL AYARLARI
+	# -----------------------------------------------------------------------
+	with ui.container(border=True):
+		ui.markdown("#### 🕌 1. Takvim Yaprağı İçerik, Ezan Vakti İli ve Günün Yazısı (Hadis / Özlü Söz) Ayarları")
+		s_c1, s_c2 = ui.columns(2)
+		with s_c1:
+			sel_prov = ui.selectbox(
+				"🏙️ Ezan Vakitleri İli (Varsayılan İl ile Senkronize)",
+				all_provs,
+				index=all_provs.index(cur_prov),
+				key="cfg_cal_tab_province",
+			)
+		cur_q_mode = current_cfg.get("calendar_quote_mode", QUOTE_MODE_OPTIONS[0])
+		if cur_q_mode not in QUOTE_MODE_OPTIONS:
+			cur_q_mode = QUOTE_MODE_OPTIONS[0]
+		with s_c2:
+			sel_q_mode = ui.selectbox(
+				"📜 Takvim Yaprağı Arkası Yazı Tercihi (Hadis / Özlü Söz)",
+				QUOTE_MODE_OPTIONS,
+				index=QUOTE_MODE_OPTIONS.index(cur_q_mode),
+				key="cfg_cal_tab_quote_mode",
+			)
+
+		tg_c1, tg_c2, tg_c3, tg_c4 = ui.columns(4)
+		with tg_c1:
+			sel_show_prayer = ui.toggle(
+				"🕌 Ezan Vakitleri ve Canlı Sayacı Göster",
+				value=(str(current_cfg.get("calendar_show_prayer_times", "1")) != "0"),
+				key="cfg_cal_tab_show_prayer",
+			)
+		with tg_c2:
+			sel_show_prof = ui.toggle(
+				"👩‍⚕️ Günün Meslek Grubu Bölümünü Göster",
+				value=(str(current_cfg.get("calendar_show_profession", "1")) != "0"),
+				key="cfg_cal_tab_show_prof",
+			)
+		with tg_c3:
+			sel_show_meb = ui.toggle(
+				"🏫 MEB Belirli Gün & Haftalar Şeridini Göster",
+				value=(str(current_cfg.get("calendar_show_meb_weeks", "1")) != "0"),
+				key="cfg_cal_tab_show_meb",
+			)
+		with tg_c4:
+			sel_auto_hol = ui.toggle(
+				"🇹🇷 Resmi & Dini Tatilleri Otomatik İşaretle",
+				value=(str(current_cfg.get("calendar_auto_load_holidays", "1")) != "0"),
+				key="cfg_cal_tab_auto_hol",
+			)
+
+		if ui.button("💾 Takvim Yaprağı, İl ve Görünüm Ayarlarını Kaydet", type="primary", key="btn_save_cal_tab_settings"):
+			save_app_settings_fn({
+				"default_province": sel_prov,
+				"calendar_quote_mode": sel_q_mode,
+				"calendar_show_prayer_times": "1" if sel_show_prayer else "0",
+				"calendar_show_profession": "1" if sel_show_prof else "0",
+				"calendar_show_meb_weeks": "1" if sel_show_meb else "0",
+				"calendar_auto_load_holidays": "1" if sel_auto_hol else "0",
+			})
+			ui.session_state["_cal_settings_flash"] = f"✅ Takvim yaprağı ayarları kaydedildi (Ezan vakti ili: {sel_prov}, Söz tercihi: {sel_q_mode})."
+			ui.rerun()
+
+	# -----------------------------------------------------------------------
+	# 2. BÖLÜM: YAPAY ZEKA & HAZIR PAKETLERLE RESMİ TATİL, MEB BELİRLİ GÜNLER VE ÖSYM SINAVLARI EKLEME
+	# -----------------------------------------------------------------------
+	with ui.container(border=True):
+		ui.markdown("#### ✨ 2. Yapay Zekâ (Gemini AI) ve Hazır Paketlerle Takvime Tatil, MEB Belirli Gün ve Sınav İşleme")
+		ui.caption("İşlem yapılacak hedef yılı ve ayı seçerek resmi/dini tatilleri, yarım gün arife çalışmalarını, MEB Belirli Gün ve Haftalarını ve ÖSYM/MEB sınavlarını takvime ekleyin.")
+
+		ym_c1, ym_c2 = ui.columns(2)
+		year_opts = list(range(2024, 2031))
+		def_yr = int(ui.session_state.get("cal_view_year") or today.year)
+		if def_yr not in year_opts:
+			def_yr = today.year
+		with ym_c1:
+			target_year = int(ui.selectbox("📅 Hedef Yıl", year_opts, index=year_opts.index(def_yr), key="cfg_cal_target_year"))
+		month_labels = list(TR_MONTH_NAMES.values())
+		def_mn = int(ui.session_state.get("cal_view_month") or today.month)
+		with ym_c2:
+			picked_m_lbl = ui.selectbox("🗓️ Hedef Ay (Ay Bazlı İşlemler İçin)", month_labels, index=def_mn - 1, key="cfg_cal_target_month")
+			target_month = month_labels.index(picked_m_lbl) + 1
+
+		ui.markdown("##### 🇹🇷 A) Resmi Tatiller, Yarım Gün Arifeler, Dini Bayramlar ve MEB Belirli Gün/Haftalar")
+		p_c1, p_c2, p_c3 = ui.columns(3)
+		with p_c1:
+			if ui.button(f"📥 {target_year} Resmi & Dini Tatiller + Yarım Günleri İşle", key="cfg_btn_seed_holidays", type="primary", use_container_width=True):
+				cnt = ensure_year_builtin_holidays_seeded(target_year, connect_db_fn, include_special_days=False)
+				ui.session_state["_cal_settings_flash"] = f"✅ {target_year} yılı resmi tatilleri, yarım gün arifeler ve dini bayramlar takvime işlendi ({cnt} yeni kayıt)."
+				ui.rerun()
+		with p_c2:
+			if ui.button(f"🏫 {target_year} MEB Belirli Gün ve Haftalar + Meslek Günlerini İşle", key="cfg_btn_seed_meb", type="primary", use_container_width=True):
+				cnt = ensure_year_builtin_holidays_seeded(target_year, connect_db_fn, include_special_days=True)
+				ui.session_state["_cal_settings_flash"] = f"✅ {target_year} yılı MEB Belirli Gün ve Haftalar çizelgesi ile meslek günleri takvime işlendi ({cnt} yeni kayıt)."
+				ui.rerun()
+		with p_c3:
+			if ai_enabled and ai_key:
+				if ui.button(f"✨ Gemini AI ile {TR_MONTH_NAMES[target_month]} {target_year} MEB Belirli Günlerini Zenginleştir", key="cfg_btn_ai_meb_month", type="secondary", use_container_width=True):
+					ok, res, used_m = generate_calendar_events_with_ai(
+						api_key=ai_key,
+						model=ai_model,
+						year=target_year,
+						month=target_month,
+						preset_type="meb_belirli_gunler",
+					)
+					if ok:
+						added = save_ai_generated_events_to_db(res.get("events") or [], connect_db_fn)
+						ui.session_state["_cal_settings_flash"] = f"✨ Gemini AI ({used_m}) ile {TR_MONTH_NAMES[target_month]} {target_year} için {added} MEB Belirli Gün ve Haftası eklendi!"
+						ui.rerun()
+					else:
+						ui.error(f"Gemini hatası: {res.get('error')}")
+			else:
+				ui.caption("💡 Gemini AI açık olduğunda yapay zeka ile ay/yıl bazlı ek MEB belirli gün taraması yapabilirsiniz.")
+
+		ui.divider()
+		ui.markdown("##### 📝 B) ÖSYM ve MEB Merkezi Sınavlarını Takvime İşle")
+		exam_choices = ["YKS (TYT-AYT-YDT)", "LGS", "KPSS", "MSÜ", "ALES", "DGS", "YDS / YÖKDİL", "İOKBS Bursluluk"]
+		picked_exams = ui.multiselect(
+			"Takvimde İşaretlenecek ÖSYM / MEB Sınavlarını Seçin",
+			exam_choices,
+			default=["YKS (TYT-AYT-YDT)", "LGS", "KPSS", "MSÜ"],
+			key="cfg_cal_multiselect_exams",
+		)
+		ex_b1, ex_b2 = ui.columns(2)
+		with ex_b1:
+			if ui.button(f"📝 Seçili Sınavları {target_year} Takvimine İşle (Hızlı)", key="cfg_btn_seed_exams", type="primary", use_container_width=True):
+				cnt = seed_selected_exams_to_db(target_year, picked_exams, connect_db_fn)
+				ui.session_state["_cal_settings_flash"] = f"✅ Seçilen sınavlardan {cnt} oturum {target_year} takvimine 📝 sembolüyle işlendi."
+				ui.rerun()
+		with ex_b2:
+			if ai_enabled and ai_key:
+				if ui.button(f"✨ Gemini AI ile {target_year} ÖSYM Sınav Takvimini Sorgula & İşle", key="cfg_btn_ai_exams", type="secondary", use_container_width=True):
+					ok, res, used_m = generate_calendar_events_with_ai(
+						api_key=ai_key,
+						model=ai_model,
+						year=target_year,
+						month=None,
+						preset_type="osym_exams",
+						selected_exams=picked_exams,
+					)
+					if ok:
+						added = save_ai_generated_events_to_db(res.get("events") or [], connect_db_fn)
+						ui.session_state["_cal_settings_flash"] = f"✨ Gemini AI ({used_m}) ile {added} ÖSYM/MEB sınav tarihi takvime eklendi."
+						ui.rerun()
+					else:
+						ui.error(f"Gemini hatası: {res.get('error')}")
+
+	# -----------------------------------------------------------------------
+	# 3. BÖLÜM: EKSTRA EKLEMEK İSTEDİĞİMİZ ŞEYLERİ VEYA DURUMLARI YAZARAK EKLEME KUTUCUĞU
+	# -----------------------------------------------------------------------
+	with ui.container(border=True):
+		ui.markdown("#### ✍️ 3. Ekstra Etkinlik, Tatil, Sınav veya Özel Durumları Yazarak Ekleme Kutucuğu")
+		ui.caption(
+			"Eklemek istediğiniz özel tatilleri (seçim tatili, kar tatili, ara tatil, idari izin), revir taramalarını, "
+			"toplantıları veya etkinlikleri **günü ve saatiyle birlikte** serbestçe yazarak veya manuel form ile takvime ekleyin. "
+			"*(Ayrıca sağ alttaki yüzen **Gemini Asistan** sohbet balonuna yazarak veya konuşarak da doğrudan etkinlik/gün/saat ekleyebilirsiniz!)*"
+		)
+
+		free_txt_prompt = ui.text_area(
+			"🤖 Yapay Zekâya (Gemini AI) Yazarak Etkinlik / Gün / Saat / Tatil Ekle",
+			placeholder=(
+				f"Örn: '25 Kasım {target_year} Çarşamba saat 14:00-15:30 arası Veli Toplantısı ekle', "
+				f"'18 Aralık {target_year} Cuma gününü kar tatili (idari izin) olarak işaretle', "
+				f"'12-16 Kasım {target_year} tarihlerini MEB 1. Dönem Ara Tatili olarak takvime işle'..."
+			),
+			height=85,
+			key="cfg_cal_free_text_box",
+		)
+		ft_c1, ft_c2 = ui.columns([1.6, 1.4])
+		with ft_c1:
+			if ui.button("✨ Yazılanları Gemini AI ile Analiz Et ve Takvime Ekle", key="cfg_btn_ai_free_add", type="primary", use_container_width=True):
+				if not free_txt_prompt.strip():
+					ui.warning("Lütfen eklenecek etkinlik, gün, saat veya tatil durumunu yukarıdaki kutucuğa yazın.")
+				elif not (ai_enabled and ai_key):
+					ui.error("Gemini AI şu an kapalı veya API anahtarı girilmemiş. Lütfen Ayarlar → Yapay Zekâ bölümünden aktif edin veya aşağıdaki manuel ekleme kutusunu kullanın.")
+				else:
+					ok, res, used_m = generate_calendar_events_with_ai(
+						api_key=ai_key,
+						model=ai_model,
+						year=target_year,
+						month=target_month,
+						preset_type="election_or_custom",
+						custom_prompt=free_txt_prompt.strip(),
+					)
+					if ok:
+						ev_items = res.get("events") or []
+						added = save_ai_generated_events_to_db(ev_items, connect_db_fn, upsert=True)
+						if ev_items and isinstance(ev_items[0], dict) and ev_items[0].get("event_date"):
+							try:
+								d0 = date.fromisoformat(str(ev_items[0]["event_date"])[:10])
+								ui.session_state["cal_selected_date"] = d0.isoformat()
+								ui.session_state["cal_view_year"] = d0.year
+								ui.session_state["cal_view_month"] = d0.month
+							except Exception:
+								pass
+						summary_txt = res.get("summary") or f"{added} kayıt takvime işlendi."
+						ui.session_state["_cal_settings_flash"] = f"✨ Gemini AI ({used_m}): {summary_txt} ({added} kayıt takvime eklendi)."
+						ui.rerun()
+					else:
+						ui.error(f"Gemini hatası: {res.get('error')}")
+		with ft_c2:
+			if ui.button("📅 Takvim & Planlama Sayfasına Git", key="cfg_btn_goto_calendar_page", type="secondary", use_container_width=True):
+				ui.session_state["target_page"] = "📅 Takvim & Planlama"
+				ui.session_state["main_menu_page"] = "📅 Takvim & Planlama"
+				ui.rerun()
+
+		with ui.expander("📌 Manuel Tarih, Saat ve Durum Seçerek Doğrudan Takvime Ekle (AI Kapalıyken de Çalışır)", expanded=False):
+			cat_keys = list(CATEGORY_LABELS.keys())
+			cat_disp = [CATEGORY_LABELS[k][0] for k in cat_keys]
+			sym_keys = list(SYMBOL_OPTIONS.keys())
+			sym_disp = [SYMBOL_OPTIONS[k] for k in sym_keys]
+
+			m_cat_disp = ui.selectbox("Kategori", cat_disp, index=cat_keys.index("revir_etkinlik"), key="cfg_cal_manual_cat")
+			m_cat = cat_keys[cat_disp.index(m_cat_disp)]
+			def_sym = CATEGORY_LABELS[m_cat][2]
+			def_hol = m_cat in ("milli_bayram", "resmi_tatil", "yarim_gun", "secim_idari_tatil")
+			def_half = m_cat == "yarim_gun"
+
+			with ui.form(f"cfg_form_manual_cal_add_{m_cat}"):
+				mc1, mc2, mc3 = ui.columns([1.3, 1.0, 1.0])
+				with mc1:
+					m_date_str = ui.text_input("Tarih (YYYY-AA-GG)", value=str(ui.session_state.get("cal_selected_date") or today.isoformat())[:10])
+				with mc2:
+					m_start = ui.text_input("Başlangıç Saati", placeholder="09:00")
+				with mc3:
+					m_end = ui.text_input("Bitiş Saati", placeholder="12:00")
+
+				m_title = ui.text_input("Etkinlik / Tatil / Durum Başlığı", placeholder="Örn: Seçim Sonrası İdari İzin veya 4-B Göz Taraması")
+				m_sym_disp = ui.selectbox("Takvim Sembolü", sym_disp, index=sym_keys.index(def_sym))
+				m_sym = sym_keys[sym_disp.index(m_sym_disp)]
+
+				mh1, mh2 = ui.columns(2)
+				with mh1:
+					m_is_hol = ui.checkbox("Devlet Memuru Resmi Tatili (Kırmızı Yaz)", value=def_hol)
+				with mh2:
+					m_is_half = ui.checkbox("Yarım Gün Mesai (½ Rozeti)", value=def_half)
+
+				m_prof = ui.text_input("İlgili Meslek Grubu (Opsiyonel)", placeholder="Örn: Okul Hemşireleri ve Öğretmenler")
+				m_desc = ui.text_area("Açıklama / Not", placeholder="Detaylı bilgi veya açıklama...", height=55)
+
+				if ui.form_submit_button("💾 Manuel Kaydı Takvime Ekle", type="primary", use_container_width=True):
+					clean_d = m_date_str.strip()[:10]
+					try:
+						d_parsed = date.fromisoformat(clean_d)
+					except Exception:
+						d_parsed = None
+					if not d_parsed:
+						ui.error("Lütfen tarihi YYYY-AA-GG biçiminde girin (Örn: 2026-11-25).")
+					elif not m_title.strip():
+						ui.warning("Lütfen bir başlık girin.")
+					else:
+						with connect_db_fn() as conn:
+							conn.execute(
+								"""INSERT INTO calendar_events
+								   (event_date, title, category, symbol_type, is_civil_holiday, is_half_day,
+								    profession_group, start_time, end_time, description, source, is_completed, created_at)
+								   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', 0, ?)""",
+								(
+									clean_d,
+									m_title.strip(),
+									m_cat,
+									m_sym,
+									1 if (m_is_hol or m_is_half) else 0,
+									1 if m_is_half else 0,
+									m_prof.strip(),
+									m_start.strip()[:5],
+									m_end.strip()[:5],
+									m_desc.strip(),
+									datetime.now().isoformat(timespec="seconds"),
+								),
+							)
+						ui.session_state["cal_selected_date"] = clean_d
+						ui.session_state["cal_view_year"] = d_parsed.year
+						ui.session_state["cal_view_month"] = d_parsed.month
+						ui.session_state["_cal_settings_flash"] = f"✅ '{m_title.strip()}' ({d_parsed.strftime('%d.%m.%Y')}) takvime eklendi."
+						ui.rerun()
+

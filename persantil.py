@@ -124,7 +124,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.15.2"
+_DEFAULT_APP_VERSION = "1.16.0"
 
 
 def _load_app_version() -> str:
@@ -295,6 +295,8 @@ DEFAULT_APP_SETTINGS: dict[str, str] = {
 	"gemini_api_key": "",
 	"calendar_quote_mode": "Karışık (Hadis-i Şerif + Özlü Söz / Günün Yazısı)",
 	"calendar_show_prayer_times": "1",
+	"calendar_show_profession": "1",
+	"calendar_show_meb_weeks": "1",
 	"calendar_auto_load_holidays": "1",
 }
 
@@ -11566,6 +11568,40 @@ def _execute_gemini_chat_export(export_spec: dict[str, Any], active_pid: int | N
 				return [], f"\n\n✅ **{len(added_names)} yeni sınıf/şube oluşturuldu:** `{', '.join(added_names[:20])}`"
 			return [], "\n\nℹ️ *Belirtilen sınıflar sistemde zaten mevcuttu (varsa eksik öğretmen adları güncellendi).*"
 
+		if action == "add_calendar_events":
+			from school_calendar import save_ai_generated_events_to_db, TR_MONTH_NAMES
+			ev_list = export_spec.get("events") if isinstance(export_spec.get("events"), list) else []
+			if not ev_list and export_spec.get("event_date"):
+				ev_list = [export_spec]
+			added_cnt = save_ai_generated_events_to_db(ev_list, connect_db, upsert=True)
+			summaries: list[str] = []
+			first_valid_date: date | None = None
+			for ev_it in ev_list[:15]:
+				if not isinstance(ev_it, dict):
+					continue
+				ed = str(ev_it.get("event_date") or "").strip()[:10]
+				et = str(ev_it.get("title") or "").strip()
+				st_t = str(ev_it.get("start_time") or "").strip()[:5]
+				en_t = str(ev_it.get("end_time") or "").strip()[:5]
+				if ed and et:
+					try:
+						d_parsed = date.fromisoformat(ed)
+						if first_valid_date is None:
+							first_valid_date = d_parsed
+					except Exception:
+						pass
+					t_str = f" `{st_t}{'-' + en_t if en_t else ''}`" if st_t else ""
+					summaries.append(f"📅 `{ed}`{t_str} — **{et}**")
+			if first_valid_date is not None:
+				ui.session_state["cal_selected_date"] = first_valid_date.isoformat()
+				ui.session_state["cal_view_year"] = first_valid_date.year
+				ui.session_state["cal_view_month"] = first_valid_date.month
+				ui.session_state["cal_sel_month_box"] = TR_MONTH_NAMES.get(first_valid_date.month, "Ocak")
+				ui.session_state["cal_sel_year_box"] = first_valid_date.year
+			if summaries:
+				return [], f"\n\n✅ **Takvime İşlendi ({added_cnt} kayıt):**\n" + "\n".join(f"- {s}" for s in summaries)
+			return [], "\n\n⚠️ *Takvime eklenecek geçerli bir tarih/başlık bulunamadı.*"
+
 		if action == "custom_doc":
 			secs = export_spec.get("sections") if isinstance(export_spec.get("sections"), list) else None
 			tbl_spec = export_spec.get("table") if isinstance(export_spec.get("table"), dict) else None
@@ -11881,7 +11917,7 @@ def _handle_floating_gemini_chat(payload: dict[str, Any], chat_history: list[dic
 		downloads, exp_note = _execute_gemini_chat_export(export_spec, int(context_pid) if context_pid else None, reply_txt)
 		if exp_note:
 			reply_txt = (reply_txt + exp_note).strip()
-		if str(export_spec.get("action") or "").strip().lower() == "create_classes":
+		if str(export_spec.get("action") or "").strip().lower() in ("create_classes", "add_calendar_events"):
 			refresh_ui = True
 
 	# 2. Yapılandırılmış Veri / Belge Yazma Önerisi (Onay Kartı Hazırla)
@@ -29410,8 +29446,8 @@ ie4uinit.exe -show
 SETTINGS_GROUPS_META: list[dict[str, str]] = [
 	{
 		"key": "🏫 Kurum, Yıl & Şube Yapısı",
-		"desc": "Okul anteti, eğitim öğretim yılı arşivi, şube yönetimi ve varsayılan konum",
-		"keywords": "okul kurum antet hemşire müdür eğitim yılı arşiv şube sınıf şablon konum il ilçe köy adres",
+		"desc": "Okul anteti, eğitim öğretim yılı arşivi, şube yönetimi, varsayılan konum ve takvim ayarları",
+		"keywords": "okul kurum antet hemşire müdür eğitim yılı arşiv şube sınıf şablon konum il ilçe köy adres takvim ezan vakti hadis özlü söz resmi tatil ösym sınav belirli gün",
 	},
 	{
 		"key": "🎨 Görünüm & Çalışma Alanı",
@@ -29541,11 +29577,12 @@ def render_settings() -> None:
 		# GRUP 1: KURUM, EĞİTİM YILI, ŞUBE & KONUM
 		# ======================================================================
 		if active_sec == "🏫 Kurum, Yıl & Şube Yapısı":
-			t_inst, t_ay, t_cls, t_loc = ui.tabs([
+			t_inst, t_ay, t_cls, t_loc, t_cal = ui.tabs([
 				"🏛️ Kurum & Rapor Anteti",
 				"📅 Eğitim Yılı & Arşiv",
 				"🗂️ Şubeler & Sınıf Şablonları",
 				"📍 Varsayılan Konum",
+				"🗓️ Takvim Ayarları",
 			], orientation="segmented")
 
 			with t_inst:
@@ -29787,6 +29824,16 @@ def render_settings() -> None:
 								ui.success(f"{browse_prov} / {browse_dist} → {custom_vil.strip()} eklendi.")
 								ui.rerun()
 
+			with t_cal:
+				from school_calendar import render_calendar_settings_tab
+				render_calendar_settings_tab(
+					connect_db_fn=connect_db,
+					current_cfg=current_cfg,
+					save_app_settings_fn=save_app_settings,
+					get_active_gemini_config_fn=_get_active_gemini_config,
+					get_tr_provinces_fn=get_tr_provinces,
+				)
+
 		# ======================================================================
 		# GRUP 2: GÖRÜNÜM & ÇALIŞMA ALANI (GÖRSEL TEMA KARTLARI + CANLI ÖNİZLEME)
 		# ======================================================================
@@ -29892,38 +29939,6 @@ def render_settings() -> None:
 						"show_address_in_summary": "1" if sel_show_addr else "0",
 					})
 					ui.success("✅ Görünüm ve çalışma alanı ayarları kaydedildi.")
-					ui.rerun()
-
-			with ui.container(border=True):
-				from school_calendar import QUOTE_MODE_OPTIONS
-				ui.markdown("#### 📅 Takvim Yaprağı, Hadis-i Şerif / Özlü Söz ve Ezan Vakti Sayacı Tercihleri")
-				ui.caption("Gelişim & Plan → **Takvim & Planlama** sayfasındaki günlük takvim yaprağında gösterilecek söz/hadis türünü ve seçili ile göre ezan vakti geri sayım sayacını özelleştirin.")
-				cal_c1, cal_c2, cal_c3 = ui.columns([1.8, 1.1, 1.1])
-				cur_q_mode = current_cfg.get("calendar_quote_mode", QUOTE_MODE_OPTIONS[0])
-				qm_idx = QUOTE_MODE_OPTIONS.index(cur_q_mode) if cur_q_mode in QUOTE_MODE_OPTIONS else 0
-				with cal_c1:
-					sel_q_mode = ui.selectbox("📜 Takvim Yaprağı Günün Yazısı (Hadis / Özlü Söz)", QUOTE_MODE_OPTIONS, index=qm_idx, key="cfg_cal_quote_mode")
-				with cal_c2:
-					ui.write("")
-					sel_show_prayer = ui.toggle(
-						f"🕌 Ezan Vakitleri & Sayaç ({current_cfg.get('default_province', 'Ankara')})",
-						value=(str(current_cfg.get("calendar_show_prayer_times", "1")) != "0"),
-						key="cfg_cal_show_prayer",
-					)
-				with cal_c3:
-					ui.write("")
-					sel_auto_hol = ui.toggle(
-						"🇹🇷 Resmi & Dini Tatilleri Otomatik İşaretle",
-						value=(str(current_cfg.get("calendar_auto_load_holidays", "1")) != "0"),
-						key="cfg_cal_auto_holidays",
-					)
-				if ui.button("💾 Takvim Yaprağı ve Ezan Vakti Ayarlarını Kaydet", type="primary", key="btn_save_calendar_settings"):
-					save_app_settings({
-						"calendar_quote_mode": sel_q_mode,
-						"calendar_show_prayer_times": "1" if sel_show_prayer else "0",
-						"calendar_auto_load_holidays": "1" if sel_auto_hol else "0",
-					})
-					ui.success("✅ Takvim yaprağı, söz/hadis ve ezan vakti sayacı tercihleri kaydedildi.")
 					ui.rerun()
 
 		# ======================================================================

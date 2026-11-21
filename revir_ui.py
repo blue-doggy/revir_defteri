@@ -1367,6 +1367,10 @@ class _UIContainer:
 		labels = [str(x) for x in tab_labels]
 		tab_sig = f"{orientation}|" + "|".join(labels)
 		tab_id = ctx.next_auto_id("tabs", tab_sig)
+		forced_lbl = ctx.session.state.get("_force_tab_label")
+		if isinstance(forced_lbl, str) and forced_lbl in labels:
+			ctx.session.active_tabs[tab_id] = labels.index(forced_lbl)
+			ctx.session.state.pop("_force_tab_label", None)
 		active_idx = ctx.session.active_tabs.get(tab_id, 0)
 		if active_idx < 0 or active_idx >= len(labels):
 			active_idx = 0
