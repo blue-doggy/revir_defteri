@@ -25,6 +25,7 @@ import pandas as pd
 import revir_ui as ui
 import gemini_assistant as gai
 import insulin_diabetes as idm
+import document_studio as dstudio
 
 # Ağır kütüphaneler (altair, openpyxl, python-docx) açılışta değil, ilk kullanıldıklarında tembel yüklenir.
 docx = None
@@ -122,7 +123,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.10.0"
+_DEFAULT_APP_VERSION = "1.11.0"
 
 
 def _load_app_version() -> str:
@@ -9799,6 +9800,145 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 					ui.success("Senkronize edildi.")
 					ui.rerun()
 
+	# Opsiyonel Gemini AI: Öğrencinin Tüm Raporlarından & Geçmişinden Derin Klinik Çıkarım (Sadece AI açıkken)
+	_ov_ai_on, _ov_ai_key, _ov_ai_model = _get_active_gemini_config()
+	if _ov_ai_on:
+		with ui.expander("🧠 Gemini AI — Tüm Raporlardan & Geçmişten Derin Klinik Çıkarım", expanded=False):
+			ui.caption("Öğrencinin tüm revir başvuruları, tahlil sonuçları, büyüme eğrisi, ilaçları, tarama bulguları ve Evrak Deposundaki eşleşen belgeleri çapraz analiz edilir; gizli örüntüler, eksikler ve profile eklenebilecek öneriler çıkarılır.")
+			inf_q = ui.text_input(
+				"💬 Özel Odak Sorusu (Opsiyonel)",
+				placeholder="Örn: Tekrarlayan şikayetler ile tahliller arasında ilişki var mı? Profilde unutulmuş kritik bir bilgi var mı?",
+				key=f"dos_inf_q_{person_id}",
+			)
+			inf_b1, inf_b2 = ui.columns([1.8, 1.4])
+			with inf_b1:
+				run_inf_btn = ui.button("🧠 Tüm Kayıt & Raporlardan Çıkarım Yap", type="primary", use_container_width=True, key=f"dos_btn_inf_{person_id}")
+			with inf_b2:
+				if ui.button("📥 Yeni Rapor/Evrak Oku & Bu Kişiye İşle", type="secondary", use_container_width=True, key=f"dos_btn_imp_{person_id}"):
+					set_active_person(person_id)
+					open_smart_document_importer_dialog()
+
+			inf_state_k = f"dos_inf_res_{person_id}"
+			if run_inf_btn:
+				anon_ctx_i, sens_names_i, _ = _build_person_anon_bundle(person_id)
+				miss_i, snap_i = audit_student_missing_data(person_id)
+				# Evrak Deposunda bu öğrenciye ait olabilecek belgeleri (KVKK anonimleştirerek) tara
+				matched_docs_i: list[dict[str, str]] = []
+				try:
+					p_nm_fold = dstudio.tr_fold(person["full_name"])
+					p_no_s = str(person["student_no"] or "").strip()
+					if EVRAKLAR_DIR.exists():
+						for f_dep in sorted(EVRAKLAR_DIR.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True)[:40]:
+							if not f_dep.is_file() or f_dep.name.startswith("."):
+								continue
+							fn_fold = dstudio.tr_fold(f_dep.name)
+							if (p_nm_fold and len(p_nm_fold) >= 5 and p_nm_fold in fn_fold) or (p_no_s and len(p_no_s) >= 2 and p_no_s in f_dep.name):
+								snip = ""
+								if f_dep.suffix.lower() == ".pdf":
+									try:
+										snip = extract_pdf_text(f_dep.read_bytes())[:1800]
+									except Exception:
+										snip = ""
+								elif f_dep.suffix.lower() == ".docx" and _ensure_docx_loaded() and docx is not None:
+									try:
+										_dd = docx.Document(f_dep)
+										snip = "\n".join(p.text for p in _dd.paragraphs if p.text.strip())[:1800]
+									except Exception:
+										snip = ""
+								elif f_dep.suffix.lower() in (".txt", ".csv"):
+									try:
+										snip = f_dep.read_text(encoding="utf-8", errors="replace")[:1800]
+									except Exception:
+										snip = ""
+								matched_docs_i.append({
+									"belge": gai.anonymize_free_text(f_dep.name, sens_names_i),
+									"ozet_metin": gai.anonymize_free_text(snip, sens_names_i),
+								})
+								if len(matched_docs_i) >= 4:
+									break
+				except Exception:
+					pass
+
+				with ui.spinner("Gemini öğrencinin tüm kayıt ve raporlarını çapraz analiz ediyor..."):
+					ok_inf, inf_data, used_im = gai.infer_insights_from_student_reports_with_gemini(
+						api_key=_ov_ai_key,
+						model=_ov_ai_model,
+						anon_context=anon_ctx_i,
+						clinical_snapshot=snap_i,
+						missing_data_items=miss_i,
+						matched_depot_summaries=matched_docs_i,
+						focus_question=inf_q,
+					)
+				ui.session_state[inf_state_k] = {"ok": ok_inf, "data": inf_data, "model": used_im, "doc_cnt": len(matched_docs_i)}
+				ui.rerun()
+
+			inf_saved = ui.session_state.get(inf_state_k)
+			if isinstance(inf_saved, dict):
+				if not inf_saved.get("ok"):
+					ui.error(f"Çıkarım hatası: {inf_saved.get('data', {}).get('error', 'Bilinmeyen hata')}")
+				else:
+					idata = inf_saved["data"]
+					ui.markdown(f"**🤖 Klinik Çıkarım Özeti** <small>({inf_saved.get('model')} · {inf_saved.get('doc_cnt', 0)} ilişkili depo belgesi dahil)</small>", unsafe_allow_html=True)
+					if idata.get("executive_summary"):
+						ui.info(idata["executive_summary"])
+					if idata.get("hidden_patterns"):
+						ui.markdown("🔍 **Tespit Edilen Örüntü & İlişkiler:**\n" + "\n".join(f"- {x}" for x in idata["hidden_patterns"]))
+					if idata.get("inconsistencies_or_gaps"):
+						ui.warning("⚠️ **Kayıtlar Arası Eksik / Dikkat Edilmesi Gerekenler:**\n" + "\n".join(f"- {x}" for x in idata["inconsistencies_or_gaps"]))
+					if idata.get("follow_up_recommendations"):
+						ui.markdown("👩‍⚕️ **Önerilen Takip Adımları:**\n" + "\n".join(f"- {x}" for x in idata["follow_up_recommendations"]))
+
+					sug_upd = idata.get("suggested_profile_updates") or {}
+					rep_para = str(idata.get("report_ready_paragraph") or "").strip()
+					has_prof_sug = any(str(sug_upd.get(k) or "").strip() for k in ("allergies_add", "chronic_add", "emergency_notes_add"))
+					has_cp_sug = bool(str(sug_upd.get("care_plan_title") or "").strip() and str(sug_upd.get("care_plan_interventions") or "").strip())
+
+					act_r1, act_r2, act_r3 = ui.columns(3)
+					with act_r1:
+						if ui.button("💾 Profil Önerilerini Uygula", disabled=not has_prof_sug, use_container_width=True, key=f"dos_inf_ap_hp_{person_id}"):
+							upd_f: dict[str, Any] = {}
+							if str(sug_upd.get("allergies_add") or "").strip():
+								upd_f["allergies"] = dstudio._append_unique_csv(hp["allergies"] if hp else "", sug_upd["allergies_add"])
+							if str(sug_upd.get("chronic_add") or "").strip():
+								upd_f["chronic_conditions"] = dstudio._append_unique_csv(hp["chronic_conditions"] if hp else "", sug_upd["chronic_add"])
+							if str(sug_upd.get("emergency_notes_add") or "").strip():
+								old_em = str((hp["emergency_notes"] if hp else "") or "").strip()
+								add_em = str(sug_upd["emergency_notes_add"]).strip()
+								upd_f["emergency_notes"] = (old_em + ("\n" if old_em else "") + add_em) if add_em not in old_em else old_em
+							if upd_f:
+								_upsert_health_profile_fields(person_id, upd_f)
+								ui.success("✅ Önerilen alanlar sağlık profiline eklendi!")
+								ui.rerun()
+					with act_r2:
+						if ui.button("📋 Önerilen Bakım Planını Ekle", disabled=not has_cp_sug, use_container_width=True, key=f"dos_inf_ap_cp_{person_id}"):
+							app_c_inf = get_app_settings()
+							with connect_db() as _cpconn:
+								_cpconn.execute(
+									"""INSERT INTO care_plans(student_id, created_at, reviewed_by, nursing_diagnosis, observed_facts, goals, interventions, monitoring, escalation, status)
+									   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Aktif')""",
+									(
+										person_id,
+										datetime.now().isoformat(timespec="minutes"),
+										app_c_inf.get("nurse_name") or "Okul Hemşiresi",
+										str(sug_upd.get("care_plan_title") or "Klinik İzlem Planı").strip(),
+										str(idata.get("executive_summary") or "")[:400],
+										"Güvenli okul içi sağlık izlemi ve erken müdahale",
+										str(sug_upd.get("care_plan_interventions") or "").strip(),
+										"; ".join(idata.get("follow_up_recommendations") or [])[:400],
+										"Semptom artışı veya acil bulguda veli/112 bilgilendirmesi",
+									),
+								)
+							sync_after_person_mutation(person_id)
+							ui.success("✅ Önerilen bakım planı eklendi!")
+							ui.rerun()
+					with act_r3:
+						if ui.button("📄 Rapor AI Metnine Yansıt", disabled=not rep_para, use_container_width=True, key=f"dos_inf_ap_rep_{person_id}"):
+							_, cur_rep_txt = get_student_ai_report_state(person_id)
+							combined = (cur_rep_txt.strip() + "\n\n" + rep_para).strip() if cur_rep_txt.strip() else rep_para
+							save_student_ai_report_state(person_id, True, combined)
+							ui.success("✅ Çıkarım özeti öğrencinin Word/PDF rapor AI bölümüne eklendi!")
+							ui.rerun()
+
 	ui.markdown("---")
 	ui.markdown("### 🩺 Okul Sağlık Taraması ve Bireysel Gelişim Bulguları")
 	ui.caption("Öğrencinin tarama bulgularını inceleyebilir, her kutucuğun sağ üst köşesindeki **✏️ Düzenle** butonuna tıklayarak doğrudan düzeltebilirsiniz.")
@@ -11221,6 +11361,30 @@ def _execute_gemini_chat_export(export_spec: dict[str, Any], active_pid: int | N
 				downloads.append({"token": ui.register_download(bx, fn_x, xlsx_mime), "file_name": fn_x, "label": "📊 İnsülin Defteri Excel (.xlsx)", "kind": "xlsx"})
 			return downloads, extra_note
 
+		if action == "create_classes":
+			cls_list = export_spec.get("classes") if isinstance(export_spec.get("classes"), list) else []
+			added_names: list[str] = []
+			with connect_db() as conn:
+				for c_it in cls_list[:80]:
+					if isinstance(c_it, dict):
+						cn = str(c_it.get("name") or "").strip()
+						tn = str(c_it.get("teacher_name") or "").strip() or None
+					else:
+						cn = str(c_it or "").strip()
+						tn = None
+					if not cn or cn == "Sivil / Diğer":
+						continue
+					cur_ex = conn.execute("SELECT id FROM classes WHERE name=?", (cn,)).fetchone()
+					if not cur_ex:
+						conn.execute("INSERT OR IGNORE INTO classes(name, teacher_name) VALUES (?, ?)", (cn, tn))
+						added_names.append(cn)
+					elif tn:
+						conn.execute("UPDATE classes SET teacher_name=? WHERE id=? AND (teacher_name IS NULL OR trim(teacher_name)='')", (tn, cur_ex["id"]))
+			clear_all_data_caches()
+			if added_names:
+				return [], f"\n\n✅ **{len(added_names)} yeni sınıf/şube oluşturuldu:** `{', '.join(added_names[:20])}`"
+			return [], "\n\nℹ️ *Belirtilen sınıflar sistemde zaten mevcuttu (varsa eksik öğretmen adları güncellendi).*"
+
 		if action == "custom_doc":
 			secs = export_spec.get("sections") if isinstance(export_spec.get("sections"), list) else None
 			tbl_spec = export_spec.get("table") if isinstance(export_spec.get("table"), dict) else None
@@ -11373,6 +11537,20 @@ def _build_context_chat_chips(cur_page: str) -> list[dict[str, str]]:
 			{"label": "🩺 Kişiyi Özetle", "prompt": "Seçili kişinin sağlık, ilaç ve alerji profilini kısaca özetle."},
 			{"label": "📊 Bugünkü Başvurular", "prompt": "Bugünkü revir başvurularını Excel (.xlsx) tablosu olarak hazırla ve özetle."},
 			{"label": "📎 Reçete/Prospektüs Ekle", "action": "upload"},
+		]
+	if p_clean == "Evraklar":
+		return [
+			{"label": "📝 Resmi Tutanak (Word)", "prompt": "Okul reviri için resmi olay / başvuru tutanağı şablonunu Word (.docx) dosyası olarak hazırla."},
+			{"label": "📊 Özel Liste (Excel)", "prompt": "Alerjisi veya kronik hastalığı bulunan öğrencilerin listesini Excel (.xlsx) olarak hazırla."},
+			{"label": "🏫 Sınıf/Şube Oluştur", "prompt": "Okul için 1'den 4'e kadar A ve B şubelerini oluştur."},
+			{"label": "📎 Evrak Yükle & Oku", "action": "upload"},
+		]
+	if p_clean == "Öğrenciler":
+		return [
+			{"label": "🏫 Sınıf/Şube Oluştur", "prompt": "Okul için yeni sınıf ve şubeleri oluşturmamda yardımcı ol (mevcut sınıfları listele)."},
+			{"label": "♿ Özel Gereksinim Excel", "prompt": "Engelli veya özel gereksinimli öğrencilerin listesini Excel olarak çıkar."},
+			{"label": "🩺 Kişiyi Özetle", "prompt": "Seçili kişinin sağlık, büyüme, özel gereksinim ve revir profilini kısaca özetle."},
+			{"label": "📎 Liste/Rapor Ekle", "action": "upload"},
 		]
 	return [
 		{"label": "🩺 Kişiyi Özetle", "prompt": "Seçili kişinin sağlık, büyüme, özel gereksinim ve revir profilini kısaca özetle."},
@@ -15446,6 +15624,95 @@ def open_class_manager_dialog() -> None:
 				else:
 					ui.warning("Lütfen eklemek istediğiniz şablonu seçin.")
 
+		# Opsiyonel Gemini AI: Serbest Türkçe Metin veya Belgeden Akıllı Sınıf & Şube Oluşturucu (Yalnızca AI açıkken!)
+		_cm_ai_on, _cm_ai_key, _cm_ai_model = _get_active_gemini_config()
+		if _cm_ai_on:
+			with ui.expander("✨ Gemini AI ile Akıllı Sınıf / Şube Oluştur (Yazarak veya Belge Yükleyerek)", expanded=False):
+				ui.caption("Örn: '1'den 8'e kadar A, B, C şubeleri ve 2 anasınıfı oluştur, 5-A öğretmeni Ayşe Demir' yazın veya okul şube/öğretmen listesi (PDF/Excel/Word/Fotoğraf) yükleyin. Eklemeden önce tabloyu kontrol edip onaylayabilirsiniz.")
+				ai_cls_prompt = ui.text_input(
+					"💬 Oluşturulacak Sınıflar / Öğretmenler Talimatı",
+					placeholder="Örn: 1. sınıftan 4. sınıfa kadar A, B, C şubeleri + Anasınıfı-A, Anasınıfı-B oluştur",
+					key="modal_ai_cls_prompt",
+				)
+				ai_cls_file = ui.file_uploader(
+					"📎 Veya Sınıf / Şube Listesi Dosyası Yükle (Opsiyonel — PDF, Excel, Word, Fotoğraf)",
+					type=["pdf", "xlsx", "xls", "csv", "docx", "png", "jpg", "jpeg", "webp"],
+					key="modal_ai_cls_file",
+				)
+				if ui.button("✨ Gemini ile Sınıf Listesini Hazırla (Önizleme)", type="primary", use_container_width=True, key="modal_btn_ai_cls_parse"):
+					if not ai_cls_prompt.strip() and ai_cls_file is None:
+						ui.warning("Lütfen bir talimat yazın veya liste dosyası yükleyin.")
+					else:
+						fb = ai_cls_file.getvalue() if ai_cls_file is not None else None
+						fn = ai_cls_file.name if ai_cls_file is not None else ""
+						with ui.spinner("Gemini sınıf ve şube yapısını hazırlıyor..."):
+							ok_ac, ac_res, used_am = gai.parse_classes_and_students_with_gemini(
+								api_key=_cm_ai_key,
+								model=_cm_ai_model,
+								instruction_text=ai_cls_prompt,
+								file_bytes=fb,
+								file_name=fn,
+								existing_classes=[r["Sinif_Adi"] for _, r in cls_df.iterrows()],
+							)
+						if ok_ac:
+							ui.session_state["modal_ai_cls_preview"] = {"res": ac_res, "model": used_am}
+							ui.rerun()
+						else:
+							ui.error(f"Gemini hatası: {ac_res.get('error')}")
+
+				ac_prev = ui.session_state.get("modal_ai_cls_preview")
+				if isinstance(ac_prev, dict):
+					ac_data = ac_prev["res"]
+					cls_items = ac_data.get("classes") or []
+					stu_items = ac_data.get("students") or []
+					ui.info(f"🤖 **Önizleme ({ac_prev['model']}):** {ac_data.get('summary', '')}")
+					if cls_items:
+						df_cls_ed = ui.data_editor(
+							pd.DataFrame(cls_items).rename(columns={"name": "Sınıf / Şube", "teacher_name": "Sınıf Öğretmeni"}),
+							num_rows="dynamic",
+							use_container_width=True,
+							key="modal_ai_cls_editor",
+						)
+						ca1, ca2 = ui.columns(2)
+						with ca1:
+							if ui.button(f"✅ Onayla ve {len(df_cls_ed)} Sınıfı Oluştur" + (f" (+{len(stu_items)} Öğrenci)" if stu_items else ""), type="primary", use_container_width=True, key="modal_btn_ai_cls_commit"):
+								added_c = 0
+								added_s = 0
+								with connect_db() as connection:
+									for _, r_c in df_cls_ed.iterrows():
+										cn = str(r_c.get("Sınıf / Şube") or "").strip()
+										tn = str(r_c.get("Sınıf Öğretmeni") or "").strip() or None
+										if cn and cn != "Sivil / Diğer":
+											ex_c = connection.execute("SELECT id FROM classes WHERE name=?", (cn,)).fetchone()
+											if not ex_c:
+												connection.execute("INSERT OR IGNORE INTO classes(name, teacher_name) VALUES (?, ?)", (cn, tn))
+												added_c += 1
+											elif tn:
+												connection.execute("UPDATE classes SET teacher_name=? WHERE id=?", (tn, ex_c["id"]))
+									for st_it in stu_items:
+										fnm = str(st_it.get("full_name") or "").strip()
+										scn = str(st_it.get("class_name") or "Sınıf Belirtilmedi").strip() or "Sınıf Belirtilmedi"
+										if not fnm:
+											continue
+										connection.execute("INSERT OR IGNORE INTO classes(name) VALUES (?)", (scn,))
+										cid_r = connection.execute("SELECT id FROM classes WHERE name=?", (scn,)).fetchone()
+										cid_v = cid_r["id"] if cid_r else None
+										ex_s = connection.execute("SELECT id FROM students WHERE lower(full_name)=lower(?) AND COALESCE(class_id,0)=COALESCE(?,0)", (fnm, cid_v)).fetchone()
+										if not ex_s:
+											connection.execute(
+												"INSERT INTO students(class_id, person_type, student_no, full_name, sex, birth_date) VALUES (?, ?, ?, ?, ?, ?)",
+												(cid_v, st_it.get("person_type") or "Öğrenci", st_it.get("student_no") or None, fnm, st_it.get("sex") or None, st_it.get("birth_date") or None),
+											)
+											added_s += 1
+								clear_all_data_caches()
+								ui.session_state.pop("modal_ai_cls_preview", None)
+								ui.success(f"🎉 {added_c} yeni sınıf" + (f" ve {added_s} yeni öğrenci" if added_s else "") + " oluşturuldu!")
+								ui.rerun()
+						with ca2:
+							if ui.button("✖ Önizlemeyi Temizle", use_container_width=True, key="modal_btn_ai_cls_cancel"):
+								ui.session_state.pop("modal_ai_cls_preview", None)
+								ui.rerun()
+
 		ui.markdown("##### 📋 Kayıtlı Sınıflar ve Öğretmenler Listesi")
 		ui.dataframe(
 			cls_df.drop(columns=["id"], errors="ignore").rename(columns={"Sinif_Adi": "Sınıf / Şube", "Ogretmen_Adi": "Sınıf Öğretmeni", "Ogrenci_Sayisi": "Kayıtlı Öğrenci Sayısı"}),
@@ -16296,6 +16563,11 @@ def render_health_profile_and_plan() -> None:
 	profile_tab, plan_tab = ui.tabs(["Sağlık formu ve profil", "Bakım planı taslağı"])
 	with profile_tab:
 		ui.caption(f"{person['person_type']} profili · {person['full_name']}")
+		_hp_ai_on, _, _ = _get_active_gemini_config()
+		if _hp_ai_on:
+			if ui.button("🤖 Gemini Akıllı Belge Okuyucu (PDF / Fotoğraf / Rapor Oku & Profile İşle)", type="secondary", use_container_width=True, key=f"hp_btn_smart_imp_{person_id}"):
+				set_active_person(person_id)
+				open_smart_document_importer_dialog()
 		uploaded = ui.file_uploader("Sağlık tanılama formu PDF", type=["pdf"], key=f"health_form_upload_{person_id}")
 		extracted_text = ""
 		parsed = {}
@@ -19244,6 +19516,11 @@ def render_vital_tracking() -> None:
 					ui.error(f"Referans tablosu okunamadı: {error}")
 	with lab_tab:
 		ui.write("PDF, Excel veya CSV raporu yükleyin. Bulunan sonuçları ve rapordaki referans sınırlarını kontrol edip onayladıktan sonra öğrenci dosyasına kaydedin.")
+		_lb_ai_on, _, _ = _get_active_gemini_config()
+		if _lb_ai_on:
+			if ui.button("🤖 Gemini Akıllı Belge Okuyucu (Fotoğraf / Karmaşık Tahlil / Rapor Oku & Öğrenciye İşle)", type="secondary", use_container_width=True, key=f"lab_btn_smart_imp_{student['id']}"):
+				set_active_person(int(student["id"]))
+				open_smart_document_importer_dialog()
 		uploaded = ui.file_uploader("Laboratuvar raporu", type=["pdf", "xlsx", "csv"], key="lab_report_upload")
 		if uploaded is not None:
 			content = uploaded.getvalue()
@@ -27670,6 +27947,33 @@ def get_or_create_document_cover(file_path: Path, force: bool = False) -> Path |
 		return None
 
 
+def _build_document_studio_ctx() -> dict[str, Any]:
+	return {
+		"connect_db": connect_db,
+		"get_person_by_id": get_person_by_id,
+		"set_active_person": set_active_person,
+		"get_app_settings": get_app_settings,
+		"_get_active_gemini_config": _get_active_gemini_config,
+		"_build_person_anon_bundle": _build_person_anon_bundle,
+		"mask_kvkk_value": mask_kvkk_value,
+		"EVRAKLAR_DIR": EVRAKLAR_DIR,
+		"get_or_create_document_cover": get_or_create_document_cover,
+		"extract_pdf_text": extract_pdf_text,
+		"sync_after_person_mutation": sync_after_person_mutation,
+		"age_in_months": age_in_months,
+	}
+
+
+@ui.dialog("🛠️ Belge Düzenleme & PDF Form Stüdyosu", width="large")
+def open_document_studio_dialog(file_path: Path) -> None:
+	dstudio.render_document_studio_dialog(file_path, _build_document_studio_ctx())
+
+
+@ui.dialog("🤖 Gemini Akıllı Belge Okuyucu & Öğrenci Eşleştirici", width="large")
+def open_smart_document_importer_dialog(initial_file_path: Path | None = None) -> None:
+	dstudio.render_smart_document_importer_dialog(_build_document_studio_ctx(), initial_file_path=initial_file_path)
+
+
 @ui.dialog("👁️ Evrak / Belge Önizleme", width="large")
 def open_document_preview_dialog(file_path: Path) -> None:
 	if not file_path.exists():
@@ -27680,22 +27984,36 @@ def open_document_preview_dialog(file_path: Path) -> None:
 	stat = file_path.stat()
 	f_size_str = format_file_size(stat.st_size)
 	f_date_str = datetime.fromtimestamp(stat.st_mtime).strftime("%d.%m.%Y %H:%M")
+	is_editable_doc = ext in (".pdf", ".docx", ".xlsx", ".txt", ".csv")
+	is_gai_on, gai_key, gai_model = _get_active_gemini_config()
 
-	h_c1, h_c2 = ui.columns([7, 3])
+	h_c1, h_c2 = ui.columns([6.0, 4.0])
 	with h_c1:
 		ui.markdown(f"#### 📄 {file_path.name}")
 		ui.caption(f"📏 Boyut: **{f_size_str}** · 🕒 Tarih: **{f_date_str}** · 🏷️ Tür: **{ext.upper().strip('.')}**")
 	with h_c2:
 		mime_t = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
-		with open(file_path, "rb") as f_dl:
-			dl_data = f_dl.read()
-		ui.download_button("📥 Bilgisayara İndir", data=dl_data, file_name=file_path.name, mime=mime_t, type="primary", use_container_width=True)
+		if is_editable_doc:
+			hb1, hb2 = ui.columns(2)
+			with hb1:
+				ed_lbl = "✍️ PDF Form Doldur" if ext == ".pdf" else "🛠️ Belgeyi Düzenle"
+				if ui.button(ed_lbl, type="primary", use_container_width=True, key=f"prev_open_studio_{sha256(file_path.name.encode()).hexdigest()[:8]}"):
+					open_document_studio_dialog(file_path)
+			with hb2:
+				ui.download_button("📥 İndir", data=lambda _p=file_path: _p.read_bytes(), file_name=file_path.name, mime=mime_t, type="secondary", use_container_width=True, key=f"prev_dl_btn_{sha256(file_path.name.encode()).hexdigest()[:8]}")
+		else:
+			ui.download_button("📥 Bilgisayara İndir", data=lambda _p=file_path: _p.read_bytes(), file_name=file_path.name, mime=mime_t, type="primary", use_container_width=True, key=f"prev_dl_btn_{sha256(file_path.name.encode()).hexdigest()[:8]}")
 
 	ui.divider()
-	is_gai_on, gai_key, gai_model = _get_active_gemini_config()
-	if is_gai_on and ext in (".pdf", ".png", ".jpg", ".jpeg", ".webp", ".txt", ".csv", ".docx"):
+	if is_gai_on and ext in (".pdf", ".png", ".jpg", ".jpeg", ".webp", ".txt", ".csv", ".docx", ".xlsx"):
 		doc_sum_key = f"gai_doc_sum_{file_path.name}"
-		if ui.button("✨ Gemini AI ile Bu Belgeyi Klinik & İdari Olarak Özetle", key=f"btn_gai_doc_sum_{file_path.name}", use_container_width=True):
+		ga_b1, ga_b2 = ui.columns([1.2, 1.0])
+		with ga_b1:
+			sum_clicked = ui.button("✨ Gemini AI ile Bu Belgeyi Özetle", key=f"btn_gai_doc_sum_{file_path.name}", use_container_width=True)
+		with ga_b2:
+			if ui.button("👤 Belgeyi Oku & Öğrenciye İşle", type="secondary", key=f"btn_gai_doc_imp_{file_path.name}", use_container_width=True):
+				open_smart_document_importer_dialog(initial_file_path=file_path)
+		if sum_clicked:
 			ext_txt = ""
 			if ext == ".pdf":
 				try:
@@ -27844,16 +28162,36 @@ def open_upload_document_dialog() -> None:
 def render_documents_depot() -> None:
 	EVRAKLAR_DIR.mkdir(parents=True, exist_ok=True)
 	(EVRAKLAR_DIR / ".thumbnails").mkdir(parents=True, exist_ok=True)
+	_dep_ai_on, _, _ = _get_active_gemini_config()
 
-	# Clean top header with upload button on top right
-	head_c, btn_c = ui.columns([4, 1.3])
+	# Clean top header with upload, offline new-doc creator, and optional Gemini Smart Reader
+	if _dep_ai_on:
+		head_c, btn_c1, btn_c2, btn_c3 = ui.columns([3.0, 1.1, 1.15, 1.25])
+	else:
+		head_c, btn_c1, btn_c2 = ui.columns([3.7, 1.15, 1.2])
+		btn_c3 = None
+
 	with head_c:
 		ui.markdown("## 📁 Revir Evrak & Dosya Deposu")
-		ui.caption("Okul reviri ile ilgili tüm resmi evrakları, Word/Excel formlarını, PDF yönergeleri, sağlık raporlarını ve fotoğrafları güvenle depolayın, düzenleyin ve indirin.")
-	with btn_c:
+		ui.caption("Word (.docx), Excel (.xlsx) dosyalarını doğrudan düzenleyin, PDF formlardaki yazılabilir alanları tarayıp doldurun, resmi evrakları güvenle depolayın ve indirin.")
+	with btn_c1:
+		with ui.popover("➕ Yeni Belge", use_container_width=True, help="Depoda sıfırdan Word veya Excel belgesi oluştur"):
+			ui.markdown("##### 📄 Yeni Ofis Belgesi Oluştur")
+			new_doc_kind = ui.selectbox("Belge Türü", ["Word Belgesi (.docx)", "Excel Tablosu (.xlsx)"], key="depot_new_doc_kind")
+			new_doc_title = ui.text_input("Belge Adı / Başlığı", placeholder="Örn: Revir Olay Tutanağı", key="depot_new_doc_title")
+			if ui.button("✨ Oluştur & Düzenleyicide Aç", type="primary", use_container_width=True, key="depot_btn_create_new_doc"):
+				kind_code = "xlsx" if "Excel" in new_doc_kind else "docx"
+				created_p = dstudio.create_new_office_document_in_depot(EVRAKLAR_DIR, kind_code, new_doc_title.strip() or "Yeni_Revir_Belgesi", get_app_settings())
+				get_or_create_document_cover(created_p, force=True)
+				open_document_studio_dialog(created_p)
+	with btn_c2:
 		if is_section_visible("docs_upload"):
-			if ui.button("📤 Yeni Evrak Yükle", type="primary", use_container_width=True, key="btn_trigger_upload_doc"):
+			if ui.button("📤 Evrak Yükle", type="primary", use_container_width=True, key="btn_trigger_upload_doc"):
 				open_upload_document_dialog()
+	if btn_c3 is not None:
+		with btn_c3:
+			if ui.button("🤖 Oku & Öğrenciye İşle", type="secondary", use_container_width=True, key="btn_depot_smart_imp", help="Yüklenen veya depodaki sağlık raporunu Gemini ile okuyup ilgili öğrencinin dosyasına işler"):
+				open_smart_document_importer_dialog()
 
 	ui.markdown("---")
 	if not is_section_visible("docs_list"):
@@ -28003,7 +28341,15 @@ def render_documents_depot() -> None:
 						ext_label = item['ext'].upper().strip('.')
 						ui.caption(f"🏷️ `{ext_label}` · 📏 {format_file_size(item['size'])} · 🕒 {item['mtime_dt'].strftime('%d.%m.%Y %H:%M')}")
 					with col_actions:
-						la1, la2, la3, la4 = ui.columns([1, 1, 1, 1])
+						can_edit_doc = item["ext"] in (".pdf", ".docx", ".xlsx", ".txt", ".csv")
+						if can_edit_doc:
+							la0, la1, la2, la3, la4 = ui.columns([1, 1, 1, 1, 1])
+							with la0:
+								ed_tip = "PDF Form Tara & Yazı Yaz" if item["ext"] == ".pdf" else "Ofis Stüdyosunda Düzenle"
+								if ui.button("🛠️", key=f"btn_edit_list_{item_hash}", help=ed_tip, type="primary", use_container_width=True):
+									open_document_studio_dialog(item["path"])
+						else:
+							la1, la2, la3, la4 = ui.columns([1, 1, 1, 1])
 						with la1:
 							if ui.button("👁️", key=f"btn_prev_list_{item_hash}", help="Evrakı Aç / Önizle", use_container_width=True):
 								open_document_preview_dialog(item["path"])
@@ -28080,6 +28426,12 @@ def render_documents_depot() -> None:
 							short_name = item["name"] if len(item["name"]) <= 30 else item["name"][:27] + "..."
 							ui.markdown(f"<div style='font-weight:700; font-size:13.5px; margin-top:8px; word-break:break-all;' title='{html.escape(item['name'])}'>{html.escape(short_name)}</div>", unsafe_allow_html=True)
 							ui.caption(f"📏 {format_file_size(item['size'])} · 🕒 {item['mtime_dt'].strftime('%d.%m.%Y %H:%M')}")
+
+							can_edit_card = item["ext"] in (".pdf", ".docx", ".xlsx", ".txt", ".csv")
+							if can_edit_card:
+								ed_card_lbl = "✍️ PDF Tara & Doldur" if item["ext"] == ".pdf" else "🛠️ Belgeyi Düzenle"
+								if ui.button(ed_card_lbl, key=f"btn_studio_card_{item_hash}", type="primary", use_container_width=True):
+									open_document_studio_dialog(item["path"])
 
 							act_col0, act_col1, act_col2, act_col3 = ui.columns([1, 1, 1, 1])
 							with act_col0:
@@ -29336,10 +29688,16 @@ def render_settings() -> None:
 
 			with t_imp:
 				ui.markdown("### 📥 Öğrenci, Şube ve Servis Listesi İçe Aktarma")
-				tab_eokul_import, tab_std_import = ui.tabs([
+				_imp_ai_on, _imp_ai_key, _imp_ai_model = _get_active_gemini_config()
+				imp_tab_labels = [
 					"📑 e-Okul Şube Doğum Tarihleri (PDF / Excel)",
 					"📋 Standart Excel / CSV Listesi",
-				])
+				]
+				if _imp_ai_on:
+					imp_tab_labels.append("✨ Gemini Akıllı Liste Okuyucu (PDF / Fotoğraf / Word)")
+				imp_tabs = ui.tabs(imp_tab_labels)
+				tab_eokul_import, tab_std_import = imp_tabs[0], imp_tabs[1]
+				tab_ai_import = imp_tabs[2] if _imp_ai_on else None
 				with tab_eokul_import:
 					e_c1, e_c2 = ui.columns([2.3, 1.2])
 					with e_c1:
@@ -29379,6 +29737,73 @@ def render_settings() -> None:
 								ui.error(f"Dosya okunamadı: {error}")
 					with col_template:
 						ui.download_button("📄 Excel Şablonunu İndir", lambda: make_roster_template(), "ogrenci_ve_servis_listesi_sablonu.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="settings_download_roster_template", use_container_width=True)
+
+				if tab_ai_import is not None:
+					with tab_ai_import:
+						ui.caption("Standart şablona uymayan karmaşık okul listelerini (PDF, fotoğraf, Word, Excel) veya serbest metin talimatlarını Gemini ile okuyup düzenlenebilir önizleme sonrası sınıfları ve öğrencileri içe aktarabilirsiniz.")
+						ai_imp_inst = ui.text_input("💬 Özel Talimat (Opsiyonel)", placeholder="Örn: Tüm şubeleri ve öğrencileri çıkar, 5. sınıfları 5-A olarak ekle", key="cfg_ai_imp_inst")
+						ai_imp_up = ui.file_uploader("📤 Karmaşık Liste Dosyası (PDF, Fotoğraf, Word, Excel, CSV)", type=["pdf", "png", "jpg", "jpeg", "webp", "docx", "xlsx", "xls", "csv"], key="cfg_ai_imp_file")
+						if ui.button("✨ Gemini ile Listeyi Oku & Önizle", type="primary", use_container_width=True, key="cfg_btn_ai_imp_parse"):
+							if not ai_imp_inst.strip() and ai_imp_up is None:
+								ui.warning("Lütfen bir dosya yükleyin veya talimat yazın.")
+							else:
+								fb_i = ai_imp_up.getvalue() if ai_imp_up is not None else None
+								fn_i = ai_imp_up.name if ai_imp_up is not None else ""
+								with ui.spinner("Gemini sınıf ve öğrenci listesini çözümlüyor..."):
+									ok_gi, gi_res, used_gi = gai.parse_classes_and_students_with_gemini(
+										api_key=_imp_ai_key,
+										model=_imp_ai_model,
+										instruction_text=ai_imp_inst,
+										file_bytes=fb_i,
+										file_name=fn_i,
+										existing_classes=[c for c in get_classes() if c != "Sivil / Diğer"],
+									)
+								if ok_gi:
+									ui.session_state["cfg_ai_imp_preview"] = {"res": gi_res, "model": used_gi}
+									ui.rerun()
+								else:
+									ui.error(f"Gemini okuma hatası: {gi_res.get('error')}")
+						gi_prev = ui.session_state.get("cfg_ai_imp_preview")
+						if isinstance(gi_prev, dict):
+							gid = gi_prev["res"]
+							g_cls = gid.get("classes") or []
+							g_stu = gid.get("students") or []
+							ui.success(f"🤖 **Gemini Önizleme ({gi_prev['model']}):** {gid.get('summary', '')}")
+							ed_cls_df = ui.data_editor(pd.DataFrame(g_cls), num_rows="dynamic", use_container_width=True, key="cfg_ai_imp_cls_ed") if g_cls else pd.DataFrame()
+							ed_stu_df = ui.data_editor(pd.DataFrame(g_stu), num_rows="dynamic", use_container_width=True, key="cfg_ai_imp_stu_ed") if g_stu else pd.DataFrame()
+							if ui.button("✅ Onayla ve Sınıfları / Öğrencileri İçe Aktar", type="primary", use_container_width=True, key="cfg_btn_ai_imp_commit"):
+								c_add = 0
+								s_add = 0
+								with connect_db() as conn:
+									if not ed_cls_df.empty:
+										for _, rc in ed_cls_df.iterrows():
+											cn = str(rc.get("name") or "").strip()
+											tn = str(rc.get("teacher_name") or "").strip() or None
+											if cn and cn != "Sivil / Diğer":
+												ex = conn.execute("SELECT id FROM classes WHERE name=?", (cn,)).fetchone()
+												if not ex:
+													conn.execute("INSERT OR IGNORE INTO classes(name, teacher_name) VALUES (?, ?)", (cn, tn))
+													c_add += 1
+									if not ed_stu_df.empty:
+										for _, rs in ed_stu_df.iterrows():
+											fnm = str(rs.get("full_name") or "").strip()
+											scn = str(rs.get("class_name") or "Sınıf Belirtilmedi").strip() or "Sınıf Belirtilmedi"
+											if not fnm:
+												continue
+											conn.execute("INSERT OR IGNORE INTO classes(name) VALUES (?)", (scn,))
+											cid = conn.execute("SELECT id FROM classes WHERE name=?", (scn,)).fetchone()["id"]
+											ex_s = conn.execute("SELECT id FROM students WHERE lower(full_name)=lower(?) AND COALESCE(class_id,0)=COALESCE(?,0)", (fnm, cid)).fetchone()
+											if not ex_s:
+												conn.execute(
+													"INSERT INTO students(class_id, person_type, student_no, full_name, sex, birth_date) VALUES (?, ?, ?, ?, ?, ?)",
+													(cid, str(rs.get("person_type") or "Öğrenci").strip() or "Öğrenci", str(rs.get("student_no") or "").strip() or None, fnm, str(rs.get("sex") or "").strip()[:1] or None, str(rs.get("birth_date") or "").strip() or None),
+												)
+												s_add += 1
+								clear_all_data_caches()
+								ui.session_state.pop("cfg_ai_imp_preview", None)
+								ui.balloons()
+								ui.success(f"🎉 {c_add} yeni sınıf ve {s_add} yeni kişi başarıyla içe aktarıldı!")
+								ui.rerun()
 
 			with t_upd:
 				ui.markdown("### 🚀 Sistem Sürümü & Güncelleme Yönetimi")
@@ -29501,15 +29926,21 @@ def _handle_cmd_search(query: str) -> list[dict[str, Any]]:
 	results: list[dict[str, Any]] = []
 
 	# 1. Hızlı İşlemler
+	_cmd_ai_on, _, _ = _get_active_gemini_config()
 	quick_cmds = [
 		{"group": "⚡ Hızlı İşlemler", "kind": "page", "value": "🩺 Revir Kaydı", "icon": "🩺", "title": "Yeni Revir Kaydı Aç", "subtitle": "Öğrenci veya yetişkin revir başvurusu kaydet (Alt+V)", "tag": "Sayfa"},
-		{"group": "⚡ Hızlı İşlemler", "kind": "page", "value": "💉 İnsülin & Diyabet Yönetimi", "icon": "💉", "title": "İnsülin Dozu Hesapla & Yemek Menüsü", "subtitle": "Bolus hesaplayıcı, aylık okul menüsü ve Gemini diyabet yorumu", "tag": "Diyabet"},
-		{"group": "⚡ Hızlı İşlemler", "kind": "new_student", "value": "Öğrenci", "icon": "➕", "title": "Yeni Öğrenci Profili Ekle", "subtitle": "Sağ çekmecede hızlı profil ve ilk ölçüm formu", "tag": "Çekmece"},
+		{"group": "⚡ Hızlı İşlemler", "kind": "page", "value": "💉 İnsülin & Diyabet Yönetimi", "icon": "💉", "title": "İnsülin Dozu Hesapla & Yemek Menüsü", "subtitle": "Bolus hesaplayıcı ve aylık okul yemek menüsü yönetimi", "tag": "Diyabet"},
+		{"group": "⚡ Hızlı İşlemler", "kind": "new_student", "value": "Öğrenci", "icon": "➕", "title": "Yeni Öğrenci Profili Ekle", "subtitle": "Sağlık profili ve ilk ölçüm formu", "tag": "Çekmece"},
 		{"group": "⚡ Hızlı İşlemler", "kind": "new_student", "value": "Sivil / diğer kişi", "icon": "🧑‍💼", "title": "Yeni Yetişkin / Personel Ekle", "subtitle": "Öğretmen, personel veya veli kaydı oluştur", "tag": "Çekmece"},
 		{"group": "⚡ Hızlı İşlemler", "kind": "class_mgr", "value": "", "icon": "🏫", "title": "Okul Sınıfları & Şube Yönetimi", "subtitle": "Sınıf ekle, çıkar veya öğrenci ata", "tag": "Pencere"},
+		{"group": "⚡ Hızlı İşlemler", "kind": "page", "value": "📁 Evraklar", "icon": "🛠️", "title": "Evrak Deposu — Word / Excel Düzenle & PDF Doldur", "subtitle": "Evrak deposundaki belgeleri düzenle, PDF form alanlarını tara ve doldur", "tag": "Stüdyo"},
 		{"group": "⚡ Hızlı İşlemler", "kind": "toggle_kvkk", "value": "", "icon": "🛡️", "title": "KVKK Ekran Gizliliğini Aç / Kapat", "subtitle": "İsim, telefon ve tıbbi verileri anında maskele", "tag": "Gizlilik"},
-		{"group": "⚡ Hızlı İşlemler", "kind": "open_chat", "value": "", "icon": "🤖", "title": "Gemini Klinik Asistanı Aç", "subtitle": "Sesli soru sor, Word/Excel ürettir veya tahlil yükle (⌘J)", "tag": "AI"},
 	]
+	if _cmd_ai_on:
+		quick_cmds.extend([
+			{"group": "⚡ Hızlı İşlemler", "kind": "smart_doc_import", "value": "", "icon": "🤖", "title": "Belge Oku & Öğrenciye Otomatik İşle (Gemini)", "subtitle": "Sağlık raporu, tahlil, reçete veya ÇÖZGER belgesini okuyup öğrenci dosyasına işle", "tag": "AI"},
+			{"group": "⚡ Hızlı İşlemler", "kind": "open_chat", "value": "", "icon": "🤖", "title": "Gemini Klinik Asistanı Aç", "subtitle": "Sesli soru sor, sınıf oluştur, Word/Excel ürettir veya tahlil yükle (⌘J)", "tag": "AI"},
+		])
 	for cmd in quick_cmds:
 		if not q or q in _tr_fold(cmd["title"]) or q in _tr_fold(cmd["subtitle"]) or q in _tr_fold(cmd["tag"]):
 			results.append(cmd)
@@ -29624,6 +30055,8 @@ def _handle_cmd_exec(item: dict[str, Any]) -> None:
 		open_new_profile_dialog(str(val or "Öğrenci"))
 	elif kind == "class_mgr":
 		open_class_manager_dialog()
+	elif kind == "smart_doc_import":
+		open_smart_document_importer_dialog()
 	elif kind == "toggle_kvkk":
 		ui.session_state["kvkk_privacy_mode"] = not bool(ui.session_state.get("kvkk_privacy_mode", False))
 		ui.rerun(scope="fragment")

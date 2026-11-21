@@ -1109,8 +1109,9 @@ def chat_with_gemini_assistant(
 		"10) Özel metin/dilekçe/veli mektubu/BEP uyarlama/özel tablo belgesi (Word veya Excel):\n"
 		"   {\"action\":\"custom_doc\",\"format\":\"docx\" veya \"xlsx\" veya \"both\",\"title\":\"Belge Başlığı\",\"subtitle\":\"Alt Başlık\",\"sections\":[{\"heading\":\"Başlık\",\"body\":\"İçerik...\"}],\"table\":{\"headers\":[\"Sütun1\",\"Sütun2\"],\"rows\":[[\"Değer1\",\"Değer2\"]]}}\n"
 		"11) Seçili öğrencinin aylık yemek menüsüne göre tahmini insülin planı (Word/Excel): {\"action\":\"insulin_monthly_plan\",\"format\":\"docx\" veya \"xlsx\" veya \"both\",\"year_month\":\"YYYY-MM\"}\n"
-		"12) Seçili öğrencinin insülin & kan şekeri izlem defteri raporu (Word/Excel): {\"action\":\"insulin_log_report\",\"format\":\"docx\" veya \"xlsx\" veya \"both\"}\n\n"
-		"Kullanıcı dosya/Word/Excel/rapor çıktısı istemiyorsa [[REVIR_EXPORT:...]] etiketini EKLEME. "
+		"12) Seçili öğrencinin insülin & kan şekeri izlem defteri raporu (Word/Excel): {\"action\":\"insulin_log_report\",\"format\":\"docx\" veya \"xlsx\" veya \"both\"}\n"
+		"13) Okul sınıfları / şubeleri oluşturma (kullanıcı açıkça 'şu sınıfları oluştur / ekle' derse): {\"action\":\"create_classes\",\"classes\":[{\"name\":\"5-A\",\"teacher_name\":\"\"}]}\n\n"
+		"Kullanıcı dosya/Word/Excel/rapor çıktısı veya sınıf oluşturma istemiyorsa [[REVIR_EXPORT:...]] etiketini EKLEME. "
 		"Kısa, maddeli ve okunması kolay yanıtlar üret."
 	)
 
@@ -1513,5 +1514,424 @@ Türkçe olarak şu 4 kısa başlıkla raporla (kod bloğu kullanma):
 4. **👩‍⚕️ Hekim Kontrolü & Okul İçi İzlem İçin Önerilen Notlar**"""
 
 	return call_gemini(prompt, api_key=api_key, model=model, temperature=0.25, timeout=24.0)
+
+
+# ==============================================================================
+# 12. AKILLI SINIF/ÖĞRENCİ OLUŞTURMA, EVRAK OKUYUCU, ÇIKARIM & OFİS/PDF YARDIMCISI
+# ==============================================================================
+
+def parse_classes_and_students_with_gemini(
+	*,
+	api_key: str,
+	model: str,
+	instruction_text: str = "",
+	file_bytes: bytes | None = None,
+	file_name: str = "",
+	existing_classes: list[str] | None = None,
+) -> tuple[bool, dict[str, Any], str]:
+	"""
+	Serbest Türkçe talimattan veya yüklenen okul şube/öğrenci listesinden (PDF, Word, Excel, CSV, fotoğraf)
+	oluşturulacak sınıfları ve (varsa) öğrencileri yapılandırılmış JSON olarak çıkarır.
+	"""
+	inline_files: list[tuple[bytes, str]] = []
+	extracted_txt = ""
+	if file_bytes and file_name:
+		item, txt_blk = _extract_attachment_context(file_name, "", file_bytes, sensitive_names=None)
+		if item is not None:
+			inline_files.append(item)
+		if txt_blk:
+			extracted_txt = txt_blk[:14000]
+
+	cls_str = ", ".join((existing_classes or [])[:40]) or "Henüz sınıf yok"
+	prompt = f"""Okul reviri yönetim yazılımı için aşağıdaki talimat ve/veya belgeden oluşturulacak okul sınıflarını/şubelerini ve (varsa) öğrenci listesini çıkar.
+
+[MEVCUT SINIFLAR]: {cls_str}
+[KULLANICI TALİMATI]: {instruction_text or 'Ekli belgedeki tüm sınıfları, sınıf öğretmenlerini ve varsa öğrenci listesini çıkar.'}
+{('[BELGE İÇERİĞİ]: ' + extracted_txt) if extracted_txt else ''}
+
+SADECE aşağıdaki JSON şemasını döndür (başka metin yazma):
+{{
+  "classes": [
+    {{"name": "5-A", "teacher_name": "Varsa öğretmen adı yoksa boş string"}}
+  ],
+  "students": [
+    {{
+      "full_name": "Öğrenci Adı Soyadı",
+      "class_name": "5-A",
+      "student_no": "Varsa okul no",
+      "sex": "K veya E veya boş",
+      "birth_date": "YYYY-MM-DD veya boş",
+      "person_type": "Öğrenci veya Sivil / diğer kişi"
+    }}
+  ],
+  "summary": "Çıkarılan sınıf ve öğrenci sayısının kısa Türkçe özeti"
+}}
+
+KURALLAR:
+- İl, ilçe, köy, mahalle veya okul adlarını ASLA sınıf olarak ekleme.
+- Kullanıcı '1'den 4'e kadar A, B, C şubeleri oluştur' gibi bir talimat verdiyse tüm kombinasyonları tek tek üret (1-A, 1-B, 1-C, ..., 4-C).
+- Belgede sadece sınıf listesi varsa `students` boş dizi `[]` olsun.
+- Doğum tarihlerini mümkünse `YYYY-MM-DD` biçimine çevir."""
+
+	ok, raw, used_m = call_gemini(
+		prompt,
+		api_key=api_key,
+		model=model,
+		inline_files=inline_files if inline_files else None,
+		expect_json=True,
+		temperature=0.1,
+		timeout=30.0,
+	)
+	if not ok:
+		return False, {"error": raw}, used_m
+	parsed = _parse_json_response(raw)
+	if not parsed:
+		return False, {"error": "Gemini yanıtı JSON olarak ayrıştırılamadı."}, used_m
+	classes_out = []
+	for c in (parsed.get("classes") or []):
+		if isinstance(c, dict) and str(c.get("name") or "").strip():
+			classes_out.append({
+				"name": str(c.get("name") or "").strip(),
+				"teacher_name": str(c.get("teacher_name") or "").strip(),
+			})
+		elif isinstance(c, str) and c.strip():
+			classes_out.append({"name": c.strip(), "teacher_name": ""})
+	students_out = []
+	for s in (parsed.get("students") or []):
+		if isinstance(s, dict) and str(s.get("full_name") or "").strip():
+			students_out.append({
+				"full_name": str(s.get("full_name") or "").strip(),
+				"class_name": str(s.get("class_name") or "").strip(),
+				"student_no": str(s.get("student_no") or "").strip(),
+				"sex": str(s.get("sex") or "").strip().upper()[:1] if str(s.get("sex") or "").strip() else "",
+				"birth_date": str(s.get("birth_date") or "").strip(),
+				"person_type": str(s.get("person_type") or "Öğrenci").strip() or "Öğrenci",
+			})
+	return True, {
+		"classes": classes_out,
+		"students": students_out,
+		"summary": str(parsed.get("summary") or f"{len(classes_out)} sınıf, {len(students_out)} kişi algılandı."),
+	}, used_m
+
+
+def extract_clinical_record_from_document_with_gemini(
+	*,
+	api_key: str,
+	model: str,
+	file_bytes: bytes,
+	file_name: str,
+	extracted_text: str = "",
+	extra_instruction: str = "",
+) -> tuple[bool, dict[str, Any], str]:
+	"""
+	Herhangi bir sağlık raporu, tahlil, reçete, ÇÖZGER/engellilik raporu, endokrin/diyabet raporu,
+	ölçüm veya okul sağlık evrakını (PDF, fotoğraf, Word, Excel, TXT) okuyarak hangi öğrenciye ait olduğuna
+	dair eşleştirme ipuçları ve veritabanına işlenebilecek tüm yapılandırılmış klinik alanları çıkarır.
+	"""
+	inline_files: list[tuple[bytes, str]] = []
+	doc_txt = extracted_text or ""
+	if file_bytes and file_name:
+		item, txt_blk = _extract_attachment_context(file_name, "", file_bytes, sensitive_names=None)
+		if item is not None:
+			inline_files.append(item)
+		if txt_blk and not doc_txt:
+			doc_txt = txt_blk[:14000]
+
+	prompt = f"""Okul revir hemşiresinin yüklediği aşağıdaki belgeyi dikkatle incele ve öğrencinin revir dosyasına işlenebilecek TÜM klinik, sağlık profili, laboratuvar, ilaç, vital, ölçüm, engellilik/özel gereksinim ve diyabet bilgilerini çıkar.
+
+[DOSYA ADI]: {file_name}
+[HEMŞİRE NOTU]: {extra_instruction or 'Tüm klinik verileri eksiksiz oku ve eşleştirme için belgedeki kişi/sınıf/numara bilgisini çıkar.'}
+{('[YEREL METİN ÖNİZLEMESİ]: ' + doc_txt[:12000]) if doc_txt else ''}
+
+SADECE aşağıdaki JSON yapısını döndür (bulunmayan alanları boş string, null veya [] bırak; ASLA veri uydurma!):
+{{
+  "document_type": "Sağlık Raporu | Laboratuvar Tahlili | Reçete / İlaç | Engellilik / ÇÖZGER / RAM | Diyabet / Endokrin | Ölçüm / Büyüme | Aşı Kartı | Revir / Acil Epikriz | Diğer",
+  "detected_person_hints": {{
+    "name_hint": "Belgede yazan hasta/öğrenci adı soyadı (yoksa boş)",
+    "student_no_hint": "Varsa okul/öğrenci numarası",
+    "class_hint": "Varsa sınıf/şube (örn 5-A)",
+    "birth_date_hint": "Varsa doğum tarihi YYYY-MM-DD",
+    "sex_hint": "K veya E veya boş"
+  }},
+  "document_date": "YYYY-MM-DD veya boş",
+  "clinical_summary": "Belgenin okul hemşiresi için 2-4 cümlelik net Türkçe klinik özeti",
+  "health_profile": {{
+    "allergies": "Belgede geçen alerjiler (yoksa boş)",
+    "chronic_conditions": "Kronik hastalıklar / tanılar (yoksa boş)",
+    "blood_group": "Kan grubu örn A Rh(+) (yoksa boş)",
+    "regular_medications": "Düzenli kullanılan ilaçlar özeti (yoksa boş)",
+    "emergency_notes": "Okulda acil dikkat/müdahale notu (yoksa boş)"
+  }},
+  "lab_results": [
+    {{"test_name": "Hemoglobin", "value_num": 11.2, "value_text": "11.2", "unit": "g/dL", "ref_range": "11.5-15.5", "flag": "Düşük", "measured_on": "YYYY-MM-DD"}}
+  ],
+  "vitals": {{
+    "measured_at": "YYYY-MM-DD HH:MM veya boş",
+    "temperature_c": null,
+    "pulse_bpm": null,
+    "spo2_pct": null,
+    "systolic_bp": null,
+    "diastolic_bp": null,
+    "glucose_mg_dl": null
+  }},
+  "measurements": {{
+    "measured_on": "YYYY-MM-DD veya boş",
+    "height_cm": null,
+    "weight_kg": null,
+    "head_circ_cm": null
+  }},
+  "medications": [
+    {{"medication_name": "İlaç Adı", "med_type": "Düzenli İlaç", "dosage": "1x1 / 5 ml", "schedule_times": "09:00, 13:00", "notes": "Kullanım notu"}}
+  ],
+  "disability": {{
+    "has_disability": false,
+    "disability_rate": null,
+    "categories": [],
+    "mobility_status": "",
+    "school_adaptations": "",
+    "report_summary": ""
+  }},
+  "diabetes": {{
+    "is_diabetic": false,
+    "diabetes_type": "",
+    "icr_breakfast": null,
+    "icr_lunch": null,
+    "icr_snack": null,
+    "isf": null,
+    "target_bg": null,
+    "insulin_brand": ""
+  }},
+  "visit_note_suggestion": "Belge acil başvuru/istirahat/rapor içeriyorsa kısa revir izlem notu (yoksa boş)",
+  "inferred_risks_and_actions": [
+    "Bu belgeden hemşirenin dikkat etmesi gereken çıkarım veya aksiyon 1"
+  ]
+}}"""
+
+	ok, raw, used_m = call_gemini(
+		prompt,
+		api_key=api_key,
+		model=model,
+		inline_files=inline_files if inline_files else None,
+		expect_json=True,
+		temperature=0.1,
+		timeout=32.0,
+	)
+	if not ok:
+		return False, {"error": raw}, used_m
+	parsed = _parse_json_response(raw)
+	if not parsed:
+		return False, {"error": "Belge analiz sonucu JSON olarak ayrıştırılamadı."}, used_m
+	return True, parsed, used_m
+
+
+def infer_insights_from_student_reports_with_gemini(
+	*,
+	api_key: str,
+	model: str,
+	anon_context: str,
+	clinical_snapshot: dict[str, Any],
+	missing_data_items: list[str],
+	matched_depot_summaries: list[dict[str, str]] | None = None,
+	focus_question: str = "",
+) -> tuple[bool, dict[str, Any], str]:
+	"""
+	Öğrencinin veritabanındaki tüm geçmiş raporlarını (vizit, tahlil, vital, büyüme, ilaç, tarama, engel, diyabet)
+	ve varsa Evrak Deposundaki belgelerini birlikte değerlendirip gizli klinik örüntüleri, eksikleri ve
+	profile yansıtılabilecek önerileri çıkarır. (KVKK tam anonim)
+	"""
+	depot_txt = json.dumps(matched_depot_summaries or [], ensure_ascii=False)[:4000]
+	prompt = f"""Bir pediatri ve okul sağlığı uzmanı olarak aşağıdaki anonim öğrencinin TÜM geçmiş kayıtlarını, tahlillerini, başvurularını ve ilişkili evrak metinlerini çapraz analiz ederek derin klinik çıkarımlar üret.
+
+[ANONİM ÖĞRENCİ BAĞLAMI]: {anon_context}
+[KLİNİK VERİ ÖZETİ]: {json.dumps(clinical_snapshot, ensure_ascii=False, default=str)[:5500]}
+[EKSİK VERİ LİSTESİ]: {json.dumps(missing_data_items, ensure_ascii=False)}
+[EVRAK DEPOSU İLİŞKİLİ BELGE ÖZETLERİ]: {depot_txt}
+[ÖZEL ODAK SORUSU]: {focus_question or 'Tekrarlayan semptom örüntülerini, kayıtlar arası çelişkileri/eksikleri, okul içi riskleri ve profile eklenmesi gerekenleri çıkar.'}
+
+SADECE aşağıdaki JSON şemasını döndür (kesin tıbbi tanı koyma, hemşire karar desteği ve yönlendirme dili kullan):
+{{
+  "executive_summary": "Öğrencinin genel sağlık tablosunun 2-3 cümlelik bütüncül özeti",
+  "hidden_patterns": [
+    "Kayıtlar arası tespit edilen tekrarlayan örüntü veya ilişkili bulgu 1",
+    "Bulgu 2"
+  ],
+  "inconsistencies_or_gaps": [
+    "Bir kayıtta geçen ama profilde eksik kalmış bulgu veya tamamlanması gereken veri 1"
+  ],
+  "suggested_profile_updates": {{
+    "allergies_add": "Profile eklenmesi önerilen alerji (yoksa boş)",
+    "chronic_add": "Profile eklenmesi önerilen kronik durum/izlem (yoksa boş)",
+    "emergency_notes_add": "Acil notlara eklenmesi önerilen okul önlemi (yoksa boş)",
+    "care_plan_title": "Önerilen kısa bakım planı başlığı (gerekmiyorsa boş)",
+    "care_plan_interventions": "Önerilen okul hemşireliği girişimleri (gerekmiyorsa boş)"
+  }},
+  "follow_up_recommendations": [
+    "Öncelikli hemşire/veli/hekim takip adımı 1",
+    "Adım 2"
+  ],
+  "report_ready_paragraph": "Öğrencinin resmi Word/PDF sağlık raporundaki 'AI Değerlendirme' bölümüne doğrudan eklenebilecek profesyonel, akıcı Türkçe paragraf"
+}}"""
+
+	ok, raw, used_m = call_gemini(
+		prompt,
+		api_key=api_key,
+		model=model,
+		expect_json=True,
+		temperature=0.22,
+		timeout=28.0,
+	)
+	if not ok:
+		return False, {"error": raw}, used_m
+	parsed = _parse_json_response(raw)
+	if not parsed:
+		return False, {"error": "Klinik çıkarım yanıtı JSON olarak ayrıştırılamadı."}, used_m
+	return True, parsed, used_m
+
+
+def scan_pdf_form_fields_with_gemini(
+	*,
+	api_key: str,
+	model: str,
+	page_png_bytes: bytes,
+	page_number: int = 1,
+	school_context: str = "",
+	anon_student_context: str = "",
+	user_instruction: str = "",
+) -> tuple[bool, dict[str, Any], str]:
+	"""
+	PDF sayfasının görüntüsünü (taranmış veya statik formlar dahil) Gemini Vision ile tarar,
+	yazı yazılabilecek boş alanların etiketlerini, yüzde cinsinden konumlarını (x_pct, y_pct, w_pct, h_pct)
+	ve varsa bağlama göre önerilen doldurma değerlerini döndürür.
+	"""
+	prompt = f"""Bu görüntü bir okul reviri / resmi form PDF sayfasıdır (Sayfa {page_number}).
+Sayfada el ile veya bilgisayarla YAZI YAZILABİLECEK veya İŞARETLENEBİLECEK TÜM boş form alanlarını (isim, sınıf, tarih, okul adı, açıklama satırları, tablo boş kutuları, onay kutuları, imza üstü ad-soyad vb.) tespit et.
+
+[OKUL BİLGİSİ]: {school_context or 'Okul Reviri'}
+[AKTİF KİŞİ ANONİM BAĞLAMI]: {anon_student_context or 'Yok'}
+[HEMŞİRE TALİMATI]: {user_instruction or 'Sayfadaki tüm yazılabilir boş alanları koordinatlarıyla bul ve uygun olanlara öneri metin yaz.'}
+
+SADECE aşağıdaki JSON yapısını döndür:
+{{
+  "fields": [
+    {{
+      "label": "Alan Etiketi (örn: Adı Soyadı / Tarih / Okul Adı / Açıklama)",
+      "field_type": "text | date | checkbox",
+      "x_pct": 25.0,
+      "y_pct": 18.5,
+      "w_pct": 40.0,
+      "h_pct": 3.5,
+      "suggested_value": "Varsa otomatik doldurulabilecek öneri (yoksa boş string)",
+      "font_size": 10
+    }}
+  ],
+  "notes": "Sayfa hakkında kısa Türkçe not"
+}}
+
+KOORDİNAT KURALLARI:
+- x_pct (0-100): Yazının başlayacağı SOL kenar (etiketin hemen sağı veya boş çizginin başı).
+- y_pct (0-100): Yazı kutusunun ÜST kenarı (0=sayfa en üstü, 100=sayfa en altı).
+- w_pct (5-90): Boş alanın genişliği yüzde cinsinden.
+- h_pct (2-25): Boş alanın yüksekliği yüzde cinsinden.
+- En fazla 35 en önemli yazılabilir alanı listele; üst üste binen kopya alan üretme."""
+
+	ok, raw, used_m = call_gemini(
+		prompt,
+		api_key=api_key,
+		model=model,
+		inline_files=[(page_png_bytes, "image/png")],
+		expect_json=True,
+		temperature=0.1,
+		timeout=32.0,
+	)
+	if not ok:
+		return False, {"error": raw}, used_m
+	parsed = _parse_json_response(raw)
+	if not parsed:
+		return False, {"error": "PDF alan tarama yanıtı JSON olarak ayrıştırılamadı."}, used_m
+	fields_clean = []
+	for i, f in enumerate(parsed.get("fields") or []):
+		if not isinstance(f, dict):
+			continue
+		try:
+			xp = max(1.0, min(95.0, float(f.get("x_pct") or 10.0)))
+			yp = max(1.0, min(95.0, float(f.get("y_pct") or 10.0)))
+			wp = max(4.0, min(96.0 - xp, float(f.get("w_pct") or 28.0)))
+			hp = max(2.0, min(40.0, float(f.get("h_pct") or 3.2)))
+		except Exception:
+			continue
+		fields_clean.append({
+			"label": str(f.get("label") or f"Alan {i + 1}").strip(),
+			"field_type": str(f.get("field_type") or "text").strip(),
+			"x_pct": round(xp, 2),
+			"y_pct": round(yp, 2),
+			"w_pct": round(wp, 2),
+			"h_pct": round(hp, 2),
+			"suggested_value": str(f.get("suggested_value") or "").strip(),
+			"font_size": int(max(7, min(20, float(f.get("font_size") or 10)))),
+		})
+	return True, {"fields": fields_clean, "notes": str(parsed.get("notes") or "")}, used_m
+
+
+def assist_office_document_with_gemini(
+	*,
+	api_key: str,
+	model: str,
+	doc_type: str,
+	doc_payload: dict[str, Any],
+	instruction: str,
+	school_context: str = "",
+	anon_student_context: str = "",
+) -> tuple[bool, dict[str, Any], str]:
+	"""
+	Evrak Deposundaki Word (.docx), Excel (.xlsx) veya PDF form alanlarında hemşirenin talimatına göre
+	veri girme, metin iyileştirme veya tablo düzenleme önerileri üretir.
+	doc_type: 'docx' | 'xlsx' | 'pdf_fields'
+	"""
+	payload_json = json.dumps(doc_payload, ensure_ascii=False, default=str)[:12000]
+	if doc_type == "docx":
+		schema_hint = """{
+  "explanation": "Yapılan/önerilen değişikliklerin kısa Türkçe açıklaması",
+  "paragraph_edits": [{"index": 0, "new_text": "Güncellenmiş paragraf metni"}],
+  "append_paragraphs": ["Belge sonuna eklenecek yeni paragraf (gerekirse)"],
+  "table_edits": [{"table_index": 0, "row_index": 1, "col_index": 1, "new_text": "Yeni hücre değeri"}]
+}"""
+	elif doc_type == "xlsx":
+		schema_hint = """{
+  "explanation": "Yapılan/önerilen değişikliklerin kısa Türkçe açıklaması",
+  "cell_edits": [{"row_index": 0, "col_name": "Sütun Adı", "value": "Yeni Değer"}],
+  "append_rows": [{"Sütun1": "Değer1", "Sütun2": "Değer2"}]
+}"""
+	else:
+		schema_hint = """{
+  "explanation": "PDF alanları için önerilen doldurmaların kısa açıklaması",
+  "field_values": {"f_1": "Doldurulacak metin", "f_2": "Değer"}
+}"""
+
+	prompt = f"""Okul revir hemşiresinin düzenlediği aşağıdaki `{doc_type}` belgesinde, verilen talimata göre yalnızca gerekli alanları profesyonel ve doğru Türkçe ile düzenle veya doldur.
+
+[OKUL BİLGİSİ]: {school_context or 'Okul Reviri'}
+[AKTİF KİŞİ ANONİM BAĞLAMI]: {anon_student_context or 'Seçili kişi yok'}
+[HEMŞİRENİN DÜZENLEME TALİMATI]: {instruction}
+[MEVCUT BELGE İÇERİĞİ]:
+{payload_json}
+
+SADECE aşağıdaki JSON yapısını döndür (değişmeyecek satır/paragrafları tekrarlama, yalnızca değişecek veya eklenecek öğeleri yaz):
+{schema_hint}"""
+
+	ok, raw, used_m = call_gemini(
+		prompt,
+		api_key=api_key,
+		model=model,
+		expect_json=True,
+		temperature=0.18,
+		timeout=30.0,
+	)
+	if not ok:
+		return False, {"error": raw}, used_m
+	parsed = _parse_json_response(raw)
+	if not parsed:
+		return False, {"error": "Belge yardımcı yanıtı JSON olarak ayrıştırılamadı."}, used_m
+	return True, parsed, used_m
+
 
 

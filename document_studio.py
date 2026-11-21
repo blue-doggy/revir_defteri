@@ -1,0 +1,1907 @@
+from __future__ import annotations
+
+import copy
+import html
+import io
+import json
+import mimetypes
+import re
+import sqlite3
+from datetime import date, datetime
+from difflib import SequenceMatcher
+from hashlib import sha256
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+
+import gemini_assistant as gai
+import insulin_diabetes as idm
+import revir_ui as ui
+
+# ==============================================================================
+# 1. YARDIMCI ARAÇLAR: TÜRKÇE KARAKTER FOLDING & UNICODE FONT BULUCU
+# ==============================================================================
+
+_TR_TRANS = str.maketrans("çğıöşü", "cgiosu")
+
+
+def tr_fold(text: Any) -> str:
+	s = re.sub(r"\s+", " ", str(text or "").replace("\xa0", " ")).strip()
+	s = s.replace("İ", "i").replace("I", "ı").lower().replace("\u0307", "")
+	return s.translate(_TR_TRANS)
+
+
+def find_unicode_ttf_font() -> str | None:
+	"""macOS, Windows ve Linux'ta Türkçe (ğşçıöüİ) destekli TTF/OTF font dosyasını bulur."""
+	candidates = [
+		# macOS
+		"/System/Library/Fonts/Supplemental/Arial.ttf",
+		"/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+		"/System/Library/Fonts/Supplemental/Tahoma.ttf",
+		"/System/Library/Fonts/Supplemental/Verdana.ttf",
+		"/Library/Fonts/Arial.ttf",
+		# Windows
+		"C:/Windows/Fonts/arial.ttf",
+		"C:/Windows/Fonts/calibri.ttf",
+		"C:/Windows/Fonts/segoeui.ttf",
+		"C:/Windows/Fonts/tahoma.ttf",
+		# Linux
+		"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+		"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+		"/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+	]
+	for p in candidates:
+		try:
+			if Path(p).exists():
+				return p
+		except Exception:
+			continue
+	return None
+
+
+def _safe_stem(name: str, fallback: str = "belge") -> str:
+	cleaned = re.sub(r'[\\/*?:"<>|]', "_", (name or "").strip())
+	return cleaned or fallback
+
+
+def _unique_target_path(folder: Path, stem: str, ext: str) -> Path:
+	base = _safe_stem(stem)
+	cand = folder / f"{base}{ext}"
+	idx = 1
+	while cand.exists():
+		cand = folder / f"{base}_{idx}{ext}"
+		idx += 1
+	return cand
+
+
+# ==============================================================================
+# 2. AKILLI PDF YAZILABİLİR ALAN TARAYICI, ÖNİZLEYİCİ VE TÜRKÇE YAZICI (PyMuPDF)
+# ==============================================================================
+
+def _rects_overlap_strongly(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> bool:
+	ix0, iy0 = max(a[0], b[0]), max(a[1], b[1])
+	ix1, iy1 = min(a[2], b[2]), min(a[3], b[3])
+	if ix1 <= ix0 or iy1 <= iy0:
+		return False
+	inter = (ix1 - ix0) * (iy1 - iy0)
+	area_a = max(1.0, (a[2] - a[0]) * (a[3] - a[1]))
+	area_b = max(1.0, (b[2] - b[0]) * (b[3] - b[1]))
+	return (inter / min(area_a, area_b)) > 0.45
+
+
+def scan_pdf_writable_fields(pdf_path: Path, page_idx: int = 0) -> list[dict[str, Any]]:
+	"""
+	PDF sayfasındaki yazı yazılabilecek alanları %100 çevrimdışı (yerel) tarar:
+	1) Gerçek AcroForm form alanları (metin kutusu, onay kutusu, seçim listesi)
+	2) Statik/düz PDF'lerde etiket sonrası boşluklar ('Adı Soyadı:', 'Tarih:', 'Okulu:' vb.)
+	3) Alt çizgili / noktalı boşluklar ('_____', '.....') ve yatay vektör doldurma çizgileri.
+	"""
+	import pymupdf
+
+	fields: list[dict[str, Any]] = []
+	doc = pymupdf.open(pdf_path)
+	try:
+		if page_idx < 0 or page_idx >= len(doc):
+			return []
+		page = doc[page_idx]
+		pw = float(page.rect.width or 595.0)
+		ph = float(page.rect.height or 842.0)
+
+		# 1. AcroForm interaktif alanları
+		try:
+			widgets = list(page.widgets() or [])
+		except Exception:
+			widgets = []
+		for wi, w in enumerate(widgets):
+			r = w.rect
+			if r.width < 6 or r.height < 6:
+				continue
+			ft_num = int(getattr(w, "field_type", 7) or 7)
+			ftype = "checkbox" if ft_num == 2 else "text"
+			lbl = str(getattr(w, "field_label", "") or getattr(w, "field_name", "") or f"Form Alanı {wi + 1}").strip()
+			val = str(getattr(w, "field_value", "") or "").strip()
+			if val.lower() in ("off", "none"):
+				val = ""
+			fields.append({
+				"id": f"af_{page_idx}_{wi}",
+				"page": page_idx,
+				"label": lbl[:60],
+				"field_type": ftype,
+				"source": "acroform",
+				"widget_name": str(getattr(w, "field_name", "") or ""),
+				"x0": round(float(r.x0), 1),
+				"y0": round(float(r.y0), 1),
+				"x1": round(float(r.x1), 1),
+				"y1": round(float(r.y1), 1),
+				"value": val,
+				"font_size": 10,
+				"color": "lacivert",
+				"clear_bg": False,
+			})
+
+		# 2. Metin bloklarından etiket+boşluk ve altçizgi/nokta taraması
+		txt_dict = page.get_text("dict") or {}
+		lines_info: list[dict[str, Any]] = []
+		for blk in txt_dict.get("blocks") or []:
+			if blk.get("type") != 0:
+				continue
+			for ln in blk.get("lines") or []:
+				spans = ln.get("spans") or []
+				if not spans:
+					continue
+				full_txt = "".join(str(sp.get("text") or "") for sp in spans)
+				clean_s = full_txt.strip()
+				if not clean_s:
+					continue
+				lb = ln.get("bbox") or spans[0].get("bbox")
+				lines_info.append({
+					"text": clean_s,
+					"raw": full_txt,
+					"bbox": (float(lb[0]), float(lb[1]), float(lb[2]), float(lb[3])),
+					"spans": spans,
+				})
+
+		def _has_text_in_rect(rx0: float, ry0: float, rx1: float, ry1: float) -> bool:
+			for li in lines_info:
+				bx0, by0, bx1, by1 = li["bbox"]
+				if bx1 > rx0 + 3 and bx0 < rx1 - 3 and by1 > ry0 + 2 and by0 < ry1 - 2:
+					# Sadece nokta/altçizgi ise boş kabul et
+					stripped = re.sub(r"[._\-–—\s:]", "", li["text"])
+					if stripped:
+						return True
+			return False
+
+		def _add_candidate(lbl: str, rect: tuple[float, float, float, float], src: str = "detected", clear_bg: bool = False) -> None:
+			x0, y0, x1, y1 = rect
+			x0 = max(12.0, min(pw - 25.0, x0))
+			x1 = max(x0 + 24.0, min(pw - 14.0, x1))
+			y0 = max(10.0, min(ph - 18.0, y0))
+			y1 = max(y0 + 14.0, min(ph - 10.0, y1))
+			cand_r = (x0, y0, x1, y1)
+			for ex in fields:
+				if _rects_overlap_strongly(cand_r, (ex["x0"], ex["y0"], ex["x1"], ex["y1"])):
+					return
+			clean_lbl = re.sub(r"\s+", " ", str(lbl or "").replace("\xa0", " ")).strip(" :._-")
+			fields.append({
+				"id": f"det_{page_idx}_{len(fields) + 1}",
+				"page": page_idx,
+				"label": (clean_lbl or f"Yazı Alanı {len(fields) + 1}")[:55],
+				"field_type": "text",
+				"source": src,
+				"widget_name": "",
+				"x0": round(x0, 1),
+				"y0": round(y0, 1),
+				"x1": round(x1, 1),
+				"y1": round(y1, 1),
+				"value": "",
+				"font_size": 10,
+				"color": "lacivert",
+				"clear_bg": clear_bg,
+			})
+
+		# 2a. Altçizgi / nokta dizisi (____ veya ....) veya ':' biten form etiketleri
+		for li in lines_info:
+			txt = li["text"]
+			bx0, by0, bx1, by1 = li["bbox"]
+			lh = max(14.0, by1 - by0 + 4.0)
+
+			# Örn: "Adı Soyadı : ............" veya "Tarih: ________"
+			m_dots = re.search(r"([._]{4,})", txt)
+			if m_dots:
+				prefix = txt[:m_dots.start()].strip(" :.-_")
+				ratio_start = m_dots.start() / max(1, len(txt))
+				ratio_end = m_dots.end() / max(1, len(txt))
+				dx0 = bx0 + (bx1 - bx0) * ratio_start
+				dx1 = max(dx0 + 60.0, bx0 + (bx1 - bx0) * ratio_end)
+				_add_candidate(prefix or "Boş Çizgi Alanı", (dx0, by0 - 2.0, dx1, by0 + lh), src="underline", clear_bg=True)
+				continue
+
+			# Örn: "Adı Soyadı:" (sağında boşluk var)
+			if txt.endswith(":") and len(txt) <= 44 and bx1 < pw * 0.80:
+				# Aynı satırda sağdaki bir sonraki metnin başlangıcını bul
+				next_x = pw - 28.0
+				for other in lines_info:
+					if other is li:
+						continue
+					ox0, oy0, ox1, oy1 = other["bbox"]
+					if abs(oy0 - by0) <= 7.0 and ox0 > bx1 + 4.0:
+						next_x = min(next_x, ox0 - 6.0)
+				if next_x - (bx1 + 6.0) >= 48.0 and not _has_text_in_rect(bx1 + 5.0, by0 - 1.0, min(next_x, bx1 + 110.0), by1 + 1.0):
+					_add_candidate(txt[:-1], (bx1 + 6.0, by0 - 2.0, next_x, by0 + lh), src="label_colon", clear_bg=False)
+
+		# 2b. Vektörel yatay doldurma çizgileri ve boş form kutuları (page.get_drawings)
+		try:
+			drawings = page.get_drawings() or []
+		except Exception:
+			drawings = []
+		for dr in drawings:
+			dr_r = dr.get("rect")
+			if not dr_r:
+				continue
+			dx0, dy0, dx1, dy1 = float(dr_r.x0), float(dr_r.y0), float(dr_r.x1), float(dr_r.y1)
+			dw, dh = dx1 - dx0, dy1 - dy0
+			# Yatay doldurma çizgisi (genişlik >= 55pt, yükseklik <= 3pt, sayfa genişliğinin %75'inden küçük ki başlık ayırıcısı olmasın)
+			if 55.0 <= dw <= pw * 0.72 and dh <= 3.0 and 24.0 < dy0 < ph - 24.0:
+				box_y0 = max(10.0, dy0 - 16.0)
+				box_y1 = dy0 + 2.0
+				if not _has_text_in_rect(dx0 + 2.0, box_y0 + 1.0, dx1 - 2.0, box_y1 - 1.0):
+					# Solundaki veya hemen altındaki etiketi bul
+					best_lbl = ""
+					best_dist = 9999.0
+					for li in lines_info:
+						lx0, ly0, lx1, ly1 = li["bbox"]
+						# Solunda aynı satırda
+						if abs(ly1 - dy0) <= 10.0 and lx1 <= dx0 + 8.0 and (dx0 - lx1) < 90.0:
+							d = dx0 - lx1
+							if d < best_dist:
+								best_dist = d
+								best_lbl = li["text"]
+						# Veya hemen altında ortalanmış (örn: İmza / Adı Soyadı)
+						elif 0.0 <= (ly0 - dy0) <= 16.0 and lx0 >= dx0 - 25.0 and lx1 <= dx1 + 25.0:
+							d = 120.0 + (ly0 - dy0)
+							if d < best_dist:
+								best_dist = d
+								best_lbl = li["text"]
+					_add_candidate(best_lbl or "Çizgi Üstü Alan", (dx0 + 2.0, box_y0, dx1 - 2.0, box_y1), src="line", clear_bg=False)
+			# Küçük boş dikdörtgen form kutusu (ör. tablo boş hücresi / veri kutusu)
+			elif 45.0 <= dw <= pw * 0.70 and 14.0 <= dh <= 34.0 and 24.0 < dy0 < ph - 24.0:
+				if not _has_text_in_rect(dx0 + 3.0, dy0 + 2.0, dx1 - 3.0, dy1 - 2.0):
+					best_lbl = ""
+					for li in lines_info:
+						lx0, ly0, lx1, ly1 = li["bbox"]
+						if abs(((ly0 + ly1) / 2.0) - ((dy0 + dy1) / 2.0)) <= 12.0 and lx1 <= dx0 + 10.0 and (dx0 - lx1) < 120.0:
+							best_lbl = li["text"]
+							break
+					if best_lbl:
+						_add_candidate(best_lbl, (dx0 + 3.0, dy0 + 2.0, dx1 - 3.0, dy1 - 2.0), src="box", clear_bg=False)
+
+		# Yukarıdan aşağıya, soldan sağa sırala (max 45 alan)
+		fields.sort(key=lambda f: (round(f["y0"] / 8.0), f["x0"]))
+		return fields[:45]
+	finally:
+		doc.close()
+
+
+_PDF_COLOR_MAP = {
+	"lacivert": (0.06, 0.19, 0.45),
+	"siyah": (0.08, 0.08, 0.08),
+	"kirmizi": (0.72, 0.11, 0.11),
+	"yesil": (0.04, 0.44, 0.36),
+}
+
+
+def _apply_fields_to_pymupdf_page(page: Any, page_fields: list[dict[str, Any]], font_path: str | None, draw_guides: bool = False) -> None:
+	import pymupdf
+
+	fontname = "helv"
+	if font_path:
+		try:
+			page.insert_font(fontname="revir_tr", fontfile=font_path)
+			fontname = "revir_tr"
+		except Exception:
+			fontname = "helv"
+
+	acro_map: dict[str, Any] = {}
+	try:
+		for w in (page.widgets() or []):
+			wname = str(getattr(w, "field_name", "") or "")
+			if wname:
+				acro_map[wname] = w
+	except Exception:
+		pass
+
+	for idx, f in enumerate(page_fields):
+		x0, y0, x1, y1 = float(f["x0"]), float(f["y0"]), float(f["x1"]), float(f["y1"])
+		rect = pymupdf.Rect(x0, y0, x1, y1)
+		val = str(f.get("value") or "")
+		fsize = float(f.get("font_size") or 10.0)
+		col_rgb = _PDF_COLOR_MAP.get(str(f.get("color") or "lacivert"), _PDF_COLOR_MAP["lacivert"])
+
+		if draw_guides:
+			stroke_c = (0.05, 0.58, 0.53) if val.strip() else (0.15, 0.39, 0.92)
+			fill_c = (0.90, 0.99, 0.97) if val.strip() else (0.94, 0.97, 1.0)
+			shape = page.new_shape()
+			shape.draw_rect(rect)
+			shape.finish(color=stroke_c, fill=fill_c, fill_opacity=0.42, width=1.0, dashes="[3 2]")
+			# Numara etiketi kutusu (#1, #2...)
+			badge_r = pymupdf.Rect(max(2.0, x0 - 1.0), max(2.0, y0 - 11.5), min(page.rect.width - 2.0, x0 + 21.0), max(12.0, y0 - 0.5))
+			shape.draw_rect(badge_r)
+			shape.finish(color=stroke_c, fill=stroke_c, width=0.5)
+			shape.commit()
+			page.insert_text((badge_r.x0 + 2.5, badge_r.y1 - 2.5), f"#{idx + 1}", fontsize=7.5, fontname="helv", color=(1, 1, 1))
+
+		if not val.strip():
+			continue
+
+		# Gerçek AcroForm alanı ise (ve kayıt modundaysak) widget değerini güncelle
+		if not draw_guides and f.get("source") == "acroform" and f.get("widget_name") in acro_map:
+			w = acro_map[f["widget_name"]]
+			try:
+				if f.get("field_type") == "checkbox":
+					w.field_value = val.strip().lower() in ("1", "true", "evet", "x", "✓", "on", "yes")
+				else:
+					w.field_value = val
+				w.update()
+				continue
+			except Exception:
+				pass
+
+		# Arka plan temizleme (noktalı/altçizgili alanları örtmek için)
+		if f.get("clear_bg") and not draw_guides:
+			sh_bg = page.new_shape()
+			sh_bg.draw_rect(rect)
+			sh_bg.finish(color=None, fill=(1, 1, 1))
+			sh_bg.commit()
+
+		# Kutuya sığacak şekilde yazı boyutu ayarla ve Türkçe metni yerleştir
+		cur_fs = fsize
+		placed = False
+		for _ in range(5):
+			rc = page.insert_textbox(rect, val, fontsize=cur_fs, fontname=fontname, color=col_rgb, align=0)
+			if rc >= 0:
+				placed = True
+				break
+			cur_fs = max(6.5, cur_fs - 1.2)
+		if not placed:
+			page.insert_text((x0 + 2.0, min(y1 - 2.0, y0 + cur_fs + 1.0)), val[:140], fontsize=cur_fs, fontname=fontname, color=col_rgb)
+
+
+def render_pdf_page_preview_png(pdf_path: Path, page_idx: int, page_fields: list[dict[str, Any]], show_guides: bool = True, dpi: int = 135) -> bytes:
+	import pymupdf
+
+	font_path = find_unicode_ttf_font()
+	doc = pymupdf.open(pdf_path)
+	try:
+		if page_idx < 0 or page_idx >= len(doc):
+			return b""
+		page = doc[page_idx]
+		_apply_fields_to_pymupdf_page(page, page_fields, font_path, draw_guides=show_guides)
+		pix = page.get_pixmap(dpi=dpi)
+		return pix.tobytes("png")
+	finally:
+		doc.close()
+
+
+def save_filled_pdf(src_pdf_path: Path, fields_by_page: dict[int, list[dict[str, Any]]], dest_pdf_path: Path) -> None:
+	import pymupdf
+
+	font_path = find_unicode_ttf_font()
+	raw_bytes = src_pdf_path.read_bytes()
+	doc = pymupdf.open(stream=raw_bytes, filetype="pdf")
+	try:
+		for p_idx, p_fields in fields_by_page.items():
+			if 0 <= int(p_idx) < len(doc) and p_fields:
+				_apply_fields_to_pymupdf_page(doc[int(p_idx)], p_fields, font_path, draw_guides=False)
+		dest_pdf_path.write_bytes(doc.tobytes(garbage=3, deflate=True))
+	finally:
+		doc.close()
+
+
+def auto_match_pdf_fields_locally(
+	fields: list[dict[str, Any]],
+	app_cfg: dict[str, str],
+	person: dict[str, Any] | None = None,
+	hp: dict[str, Any] | None = None,
+) -> int:
+	"""
+	%100 yerel ve çevrimdışı olarak PDF alan etiketlerini Okul Ayarları ve aktif kişinin
+	gerçek verileriyle eşleştirip boş olan alanları doldurur. Doldurulan alan sayısını döndürür.
+	"""
+	p = person or {}
+	h = hp or {}
+	today_tr = date.today().strftime("%d.%m.%Y")
+	dob_raw = str(p.get("birth_date") or "")
+	dob_tr = dob_raw
+	try:
+		if len(dob_raw) >= 10:
+			dob_tr = date.fromisoformat(dob_raw[:10]).strftime("%d.%m.%Y")
+	except Exception:
+		pass
+
+	rules: list[tuple[tuple[str, ...], str]] = [
+		(("okul adi", "kurum adi", "okulu", "kurumu"), str(app_cfg.get("school_name") or "")),
+		(("hemsire", "revir sorumlusu", "gorevli"), str(app_cfg.get("nurse_name") or "")),
+		(("mudur",), str(app_cfg.get("principal_name") or "")),
+		(("ilce",), str(app_cfg.get("default_district") or "")),
+		(("tarih", "date"), today_tr),
+		(("adi soyadi", "ad soyad", "ogrenci adi", "hasta adi", "isim"), str(p.get("full_name") or "")),
+		(("sinif", "sube"), str(p.get("class_name") or "")),
+		(("okul no", "ogrenci no", "numara", "no"), str(p.get("student_no") or "")),
+		(("dogum",), dob_tr),
+		(("cinsiyet",), {"K": "Kız", "E": "Erkek"}.get(str(p.get("sex") or ""), "")),
+		(("kan grubu",), str(h.get("blood_group") or "")),
+		(("alerji",), str(h.get("allergies") or "")),
+		(("kronik",), str(h.get("chronic_conditions") or "")),
+		(("veli",), str(h.get("guardian_name") or p.get("guardian_name") or "")),
+		(("telefon", "tel", "gsm", "iletisim"), str(h.get("guardian_phone") or p.get("guardian_phone") or "")),
+		(("adres",), str(p.get("address") or "")),
+	]
+
+	filled = 0
+	for f in fields:
+		if str(f.get("value") or "").strip():
+			continue
+		lbl_f = tr_fold(f.get("label") or "")
+		if not lbl_f:
+			continue
+		for keywords, val in rules:
+			if not val.strip():
+				continue
+			if any(k in lbl_f for k in keywords):
+				f["value"] = val.strip()
+				filled += 1
+				break
+	return filled
+
+
+# ==============================================================================
+# 3. WORD (.DOCX) & EXCEL (.XLSX) OKUMA / DÜZENLEME / KAYDETME MOTORLARI
+# ==============================================================================
+
+def _load_docx_structure(file_path: Path) -> tuple[list[dict[str, Any]], list[pd.DataFrame]]:
+	import docx
+
+	d = docx.Document(file_path)
+	paras: list[dict[str, Any]] = []
+	for i, p in enumerate(d.paragraphs):
+		style_nm = str(p.style.name if p.style else "Normal")
+		paras.append({
+			"index": i,
+			"style": style_nm,
+			"text": p.text or "",
+		})
+	tables_dfs: list[pd.DataFrame] = []
+	for tbl in d.tables:
+		raw_rows = [[c.text.strip() for c in row.cells] for row in tbl.rows]
+		if not raw_rows:
+			tables_dfs.append(pd.DataFrame())
+			continue
+		max_c = max(len(r) for r in raw_rows)
+		norm_rows = [r + [""] * (max_c - len(r)) for r in raw_rows]
+		if len(norm_rows) > 1:
+			raw_hdrs = norm_rows[0]
+			seen: dict[str, int] = {}
+			hdrs = []
+			for ci, h in enumerate(raw_hdrs):
+				base = h.strip() or f"Sütun {ci + 1}"
+				if base in seen:
+					seen[base] += 1
+					hdrs.append(f"{base} ({seen[base]})")
+				else:
+					seen[base] = 1
+					hdrs.append(base)
+			tables_dfs.append(pd.DataFrame(norm_rows[1:], columns=hdrs))
+		else:
+			hdrs = [f"Sütun {ci + 1}" for ci in range(max_c)]
+			tables_dfs.append(pd.DataFrame(norm_rows, columns=hdrs))
+	return paras, tables_dfs
+
+
+def _save_docx_structure(
+	src_path: Path,
+	dest_path: Path,
+	edited_paras: dict[int, str],
+	appended_paras: list[str],
+	edited_tables: dict[int, pd.DataFrame],
+) -> None:
+	import docx
+
+	d = docx.Document(src_path)
+	for p_idx, new_txt in edited_paras.items():
+		if 0 <= p_idx < len(d.paragraphs):
+			p = d.paragraphs[p_idx]
+			if p.text != new_txt:
+				if p.runs:
+					p.runs[0].text = new_txt
+					for r in p.runs[1:]:
+						r.text = ""
+				else:
+					p.text = new_txt
+
+	for add_t in appended_paras:
+		if str(add_t).strip():
+			d.add_paragraph(str(add_t).strip())
+
+	for t_idx, df in edited_tables.items():
+		if not (0 <= t_idx < len(d.tables)) or df is None:
+			continue
+		tbl = d.tables[t_idx]
+		has_header_row = len(tbl.rows) > 1
+		cols = [str(c) for c in df.columns]
+		new_rows_vals: list[list[str]] = []
+		if has_header_row:
+			new_rows_vals.append([re.sub(r"\s+\(\d+\)$", "", c) for c in cols])
+		for _, row in df.iterrows():
+			new_rows_vals.append(["" if pd.isna(v) else str(v) for v in row.tolist()])
+
+		# Satır sayısını eşitle
+		while len(tbl.rows) < len(new_rows_vals):
+			tbl.add_row()
+		while len(tbl.rows) > len(new_rows_vals) and len(tbl.rows) > 1:
+			tbl._tbl.remove(tbl.rows[-1]._tr)
+
+		for ri, r_vals in enumerate(new_rows_vals):
+			if ri >= len(tbl.rows):
+				break
+			cells = tbl.rows[ri].cells
+			for ci, val in enumerate(r_vals):
+				if ci < len(cells):
+					cells[ci].text = val
+
+	d.save(dest_path)
+
+
+def _load_xlsx_sheet_df(file_path: Path, sheet_name: str) -> pd.DataFrame:
+	import openpyxl
+
+	wb = openpyxl.load_workbook(file_path, data_only=False)
+	try:
+		if sheet_name not in wb.sheetnames:
+			return pd.DataFrame()
+		ws = wb[sheet_name]
+		rows_raw = [list(r) for r in ws.iter_rows(values_only=True)]
+		while rows_raw and all(v is None or str(v).strip() == "" for v in rows_raw[-1]):
+			rows_raw.pop()
+		if not rows_raw:
+			return pd.DataFrame(columns=["Sütun 1", "Sütun 2", "Sütun 3"])
+		max_c = max(len(r) for r in rows_raw)
+		norm = [["" if v is None else str(v) for v in (list(r) + [None] * (max_c - len(r)))] for r in rows_raw]
+		raw_hdr = norm[0]
+		seen: dict[str, int] = {}
+		hdrs = []
+		for ci, h in enumerate(raw_hdr):
+			base = h.strip() or f"Sütun {ci + 1}"
+			if base in seen:
+				seen[base] += 1
+				hdrs.append(f"{base} ({seen[base]})")
+			else:
+				seen[base] = 1
+				hdrs.append(base)
+		body = norm[1:] if len(norm) > 1 else []
+		return pd.DataFrame(body, columns=hdrs)
+	finally:
+		wb.close()
+
+
+def _save_xlsx_sheet_df(src_path: Path, dest_path: Path, sheet_name: str, df: pd.DataFrame, new_sheet_title: str = "") -> None:
+	import openpyxl
+	from openpyxl.styles import Font
+
+	wb = openpyxl.load_workbook(src_path)
+	try:
+		if new_sheet_title.strip():
+			ws = wb.create_sheet(title=new_sheet_title.strip()[:31])
+		elif sheet_name in wb.sheetnames:
+			ws = wb[sheet_name]
+		else:
+			ws = wb.active
+
+		# Mevcut veri satırlarını temizle (üst başlık stilini koruyarak)
+		old_max_r = ws.max_row
+		old_max_c = ws.max_column
+		cols = [re.sub(r"\s+\(\d+\)$", "", str(c)) for c in df.columns]
+
+		for ci, col_nm in enumerate(cols, start=1):
+			cell = ws.cell(row=1, column=ci, value=col_nm)
+			if cell.font is None or not cell.font.bold:
+				cell.font = Font(bold=True)
+
+		for ri, (_, row) in enumerate(df.iterrows(), start=2):
+			for ci, val in enumerate(row.tolist(), start=1):
+				v_str = "" if pd.isna(val) else str(val).strip()
+				# Sayısal değerleri mümkünse sayıya dönüştür (T.C./telefon gibi baştan sıfırlı veya çok uzun sayıları koru)
+				out_v: Any = v_str
+				if v_str and not v_str.startswith("0") and len(v_str) <= 9:
+					try:
+						if re.match(r"^-?\d+$", v_str):
+							out_v = int(v_str)
+						elif re.match(r"^-?\d+[.,]\d+$", v_str):
+							out_v = float(v_str.replace(",", "."))
+					except Exception:
+						out_v = v_str
+				ws.cell(row=ri, column=ci, value=out_v)
+
+		new_max_r = len(df) + 1
+		for r_clear in range(new_max_r + 1, old_max_r + 1):
+			for c_clear in range(1, max(old_max_c, len(cols)) + 1):
+				ws.cell(row=r_clear, column=c_clear, value=None)
+
+		wb.save(dest_path)
+	finally:
+		wb.close()
+
+
+# ==============================================================================
+# 4. EVRAK STÜDYOSU DİYALOĞU (WORD / EXCEL / PDF FORM TARAMA & DOLDURMA)
+# ==============================================================================
+
+def render_document_studio_dialog(file_path: Path, ctx_api: dict[str, Any]) -> None:
+	"""
+	Evrak Deposundaki Word (.docx), Excel (.xlsx) veya PDF (.pdf) belgesini doğrudan düzenler,
+	PDF'lerde yazılabilir boş alanları tarayıp metin/imza ekler; Gemini AI açıksa isteğe bağlı
+	yapay zekâ destekli doldurma ve düzenleme yardımı sunar.
+	"""
+	if not file_path.exists():
+		ui.error("Dosya bulunamadı.")
+		return
+
+	ext = file_path.suffix.lower()
+	fhash = sha256(str(file_path.name).encode("utf-8")).hexdigest()[:10]
+	evrak_dir: Path = ctx_api["EVRAKLAR_DIR"]
+	is_gai_on, gai_key, gai_model = ctx_api["_get_active_gemini_config"]()
+	app_cfg = ctx_api["get_app_settings"]()
+	active_pid = ui.session_state.get("active_person_id")
+	active_person = dict(ctx_api["get_person_by_id"](int(active_pid))) if active_pid else None
+
+	h1, h2 = ui.columns([7.2, 2.8])
+	with h1:
+		ui.markdown(f"#### 🛠️ Belge Düzenleme & Form Stüdyosu — `{file_path.name}`")
+		act_badge = f" · 📌 Aktif Kişi: **{ctx_api['mask_kvkk_value'](active_person['full_name'], 'name')}** ({active_person.get('class_name', '—')})" if active_person else ""
+		ui.caption(f"🏷️ Tür: **{ext.upper().strip('.')}** · 🏫 Kurum: **{app_cfg.get('school_name', 'Okul Reviri')}**{act_badge}")
+	with h2:
+		mime_t = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+		ui.download_button(
+			"📥 Güncel Dosyayı İndir",
+			data=lambda _p=file_path: _p.read_bytes(),
+			file_name=file_path.name,
+			mime=mime_t,
+			type="secondary",
+			use_container_width=True,
+			key=f"studio_dl_{fhash}",
+		)
+
+	flash_k = f"studio_flash_{fhash}"
+	f_msg = ui.session_state.pop(flash_k, None)
+	if f_msg:
+		ui.success(f_msg)
+
+	if ext == ".pdf":
+		_render_pdf_studio(file_path, fhash, evrak_dir, ctx_api, app_cfg, active_person, is_gai_on, gai_key, gai_model, flash_k)
+	elif ext == ".docx":
+		_render_docx_studio(file_path, fhash, evrak_dir, ctx_api, app_cfg, active_person, is_gai_on, gai_key, gai_model, flash_k)
+	elif ext == ".xlsx":
+		_render_xlsx_studio(file_path, fhash, evrak_dir, ctx_api, app_cfg, active_person, is_gai_on, gai_key, gai_model, flash_k)
+	elif ext in (".txt", ".csv"):
+		_render_text_studio(file_path, fhash, evrak_dir, ctx_api, flash_k)
+	else:
+		ui.info(f"`{ext}` biçimi için doğrudan düzenleme şu an desteklenmiyor. Word (`.docx`), Excel (`.xlsx`), PDF (`.pdf`) veya Metin (`.txt`/`.csv`) dosyalarını bu stüdyoda düzenleyebilirsiniz.")
+
+
+def _render_pdf_studio(
+	file_path: Path,
+	fhash: str,
+	evrak_dir: Path,
+	ctx_api: dict[str, Any],
+	app_cfg: dict[str, str],
+	active_person: dict[str, Any] | None,
+	is_gai_on: bool,
+	gai_key: str,
+	gai_model: str,
+	flash_k: str,
+) -> None:
+	import pymupdf
+
+	doc_meta = pymupdf.open(file_path)
+	num_pages = len(doc_meta)
+	page_dims = [(float(doc_meta[i].rect.width), float(doc_meta[i].rect.height)) for i in range(num_pages)]
+	doc_meta.close()
+
+	if num_pages == 0:
+		ui.warning("PDF dosyasında sayfa bulunamadı.")
+		return
+
+	state_key = f"pdf_studio_fields_{fhash}"
+	if state_key not in ui.session_state:
+		ui.session_state[state_key] = {}
+
+	# Üst kontrol şeridi: Sayfa seçimi, Yerel Tarama, Otomatik Doldurma, Kılavuz Kutuları
+	tb1, tb2, tb3, tb4 = ui.columns([1.3, 1.5, 1.8, 1.4])
+	with tb1:
+		page_opts = [f"Sayfa {i + 1} / {num_pages}" for i in range(num_pages)]
+		sel_pg_lbl = ui.selectbox("📄 Çalışılan Sayfa", page_opts, index=0, key=f"pdf_pg_sel_{fhash}")
+		cur_pg = page_opts.index(sel_pg_lbl)
+	pw, ph = page_dims[cur_pg]
+
+	# İlk açılışta bu sayfanın yazılabilir alanlarını otomatik olarak yerel tara!
+	if cur_pg not in ui.session_state[state_key]:
+		ui.session_state[state_key][cur_pg] = scan_pdf_writable_fields(file_path, cur_pg)
+
+	cur_fields: list[dict[str, Any]] = ui.session_state[state_key][cur_pg]
+
+	with tb2:
+		ui.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
+		if ui.button("🔍 Yazılabilir Alanları Tara", type="secondary", use_container_width=True, key=f"pdf_rescan_{fhash}_{cur_pg}"):
+			ui.session_state[state_key][cur_pg] = scan_pdf_writable_fields(file_path, cur_pg)
+			ui.session_state[flash_k] = f"✅ Sayfa {cur_pg + 1} yerel olarak tarandı: {len(ui.session_state[state_key][cur_pg])} yazılabilir alan bulundu."
+			ui.rerun()
+
+	with tb3:
+		ui.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
+		if ui.button("⚡ Okul & Kişi Bilgilerini Otomatik Eşleştir", type="secondary", use_container_width=True, key=f"pdf_automatch_{fhash}_{cur_pg}"):
+			hp_dict = None
+			if active_person:
+				try:
+					with ctx_api["connect_db"]() as _c:
+						_hr = _c.execute("SELECT * FROM health_profiles WHERE student_id=?", (int(active_person["id"]),)).fetchone()
+						if _hr:
+							hp_dict = dict(_hr)
+				except Exception:
+					pass
+			cnt = auto_match_pdf_fields_locally(cur_fields, app_cfg, active_person, hp_dict)
+			ui.session_state[flash_k] = f"⚡ {cnt} alan okul ayarları ve seçili kişi bilgileriyle otomatik dolduruldu!" if cnt else "Eşleşen boş alan bulunamadı; manuel girebilir veya yeni alan ekleyebilirsiniz."
+			ui.rerun()
+
+	with tb4:
+		ui.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
+		show_guides = ui.checkbox("🟩 Kutu Numaralarını Göster", value=True, key=f"pdf_guides_{fhash}")
+
+	# Opsiyonel Gemini PDF Stüdyo Yardımcıları (SADECE Gemini açıkken gösterilir!)
+	if is_gai_on:
+		with ui.expander("✨ Gemini AI PDF Form Tarayıcı & Akıllı Doldurma Yardımcısı (İsteğe Bağlı)", expanded=False):
+			ui.caption("Taranmış resim PDF'lerinde bile yazı yazılabilecek kutuları görsel olarak bulabilir veya talimatınıza göre alanları doldurabilir.")
+			ai_pdf_inst = ui.text_input(
+				"💬 Gemini'ye Talimat (Opsiyonel)",
+				placeholder="Örn: Boş alanları bul ve bugünkü tarih, okul adı ve istirahat/sevk açıklamasıyla doldur",
+				key=f"pdf_ai_inst_{fhash}_{cur_pg}",
+			)
+			ga1, ga2 = ui.columns(2)
+			with ga1:
+				if ui.button("👁️ Gemini Vision ile Sayfadaki Boş Alanları Tara", type="primary", use_container_width=True, key=f"pdf_ai_scan_{fhash}_{cur_pg}"):
+					raw_png = render_pdf_page_preview_png(file_path, cur_pg, [], show_guides=False, dpi=130)
+					anon_ctx = ""
+					if active_person:
+						try:
+							anon_ctx, _, _ = ctx_api["_build_person_anon_bundle"](int(active_person["id"]))
+						except Exception:
+							anon_ctx = ""
+					school_ctx = f"Okul: {app_cfg.get('school_name', '')} | Hemşire: {app_cfg.get('nurse_name', '')} | Tarih: {date.today().strftime('%d.%m.%Y')}"
+					with ui.spinner("Gemini sayfa görüntüsünü tarayıp yazılabilir kutuları tespit ediyor..."):
+						ok_sc, sc_res, used_m = gai.scan_pdf_form_fields_with_gemini(
+							api_key=gai_key,
+							model=gai_model,
+							page_png_bytes=raw_png,
+							page_number=cur_pg + 1,
+							school_context=school_ctx,
+							anon_student_context=anon_ctx,
+							user_instruction=ai_pdf_inst,
+						)
+					if ok_sc and sc_res.get("fields"):
+						new_ai_fields = []
+						for idx_a, af in enumerate(sc_res["fields"]):
+							x0 = round(pw * af["x_pct"] / 100.0, 1)
+							y0 = round(ph * af["y_pct"] / 100.0, 1)
+							x1 = round(min(pw - 10.0, x0 + pw * af["w_pct"] / 100.0), 1)
+							y1 = round(min(ph - 10.0, y0 + ph * af["h_pct"] / 100.0), 1)
+							sval = str(af.get("suggested_value") or "")
+							if active_person and "[ÖĞRENCİ_ADI]" in sval:
+								sval = sval.replace("[ÖĞRENCİ_ADI]", str(active_person.get("full_name") or ""))
+							new_ai_fields.append({
+								"id": f"gai_{cur_pg}_{idx_a + 1}",
+								"page": cur_pg,
+								"label": af["label"],
+								"field_type": af.get("field_type", "text"),
+								"source": "gemini_vision",
+								"widget_name": "",
+								"x0": x0, "y0": y0, "x1": x1, "y1": y1,
+								"value": sval,
+								"font_size": int(af.get("font_size") or 10),
+								"color": "lacivert",
+								"clear_bg": False,
+							})
+						ui.session_state[state_key][cur_pg] = new_ai_fields
+						ui.session_state[flash_k] = f"✨ Gemini Vision ({used_m}) Sayfa {cur_pg + 1} üzerinde {len(new_ai_fields)} yazılabilir alan buldu!"
+						ui.rerun()
+					else:
+						ui.error(f"Gemini Vision tarama hatası: {sc_res.get('error', 'Alan bulunamadı')}")
+
+			with ga2:
+				if ui.button("🪄 Mevcut Alanları Gemini ile Akıllı Doldur", type="secondary", disabled=not cur_fields, use_container_width=True, key=f"pdf_ai_fill_{fhash}_{cur_pg}"):
+					if not ai_pdf_inst.strip():
+						ui.warning("Lütfen üstteki kutuya alanların nasıl doldurulacağına dair kısa bir talimat yazın.")
+					else:
+						anon_ctx = ""
+						if active_person:
+							try:
+								anon_ctx, _, _ = ctx_api["_build_person_anon_bundle"](int(active_person["id"]))
+							except Exception:
+								anon_ctx = ""
+						school_ctx = f"Okul: {app_cfg.get('school_name', '')} | Hemşire: {app_cfg.get('nurse_name', '')} | Tarih: {date.today().strftime('%d.%m.%Y')}"
+						f_payload = {"fields": [{"id": f["id"], "label": f["label"], "current_value": f["value"]} for f in cur_fields]}
+						with ui.spinner("Gemini form alanları için Türkçe içerik hazırlıyor..."):
+							ok_af, af_res, used_m = gai.assist_office_document_with_gemini(
+								api_key=gai_key,
+								model=gai_model,
+								doc_type="pdf_fields",
+								doc_payload=f_payload,
+								instruction=ai_pdf_inst,
+								school_context=school_ctx,
+								anon_student_context=anon_ctx,
+							)
+						if ok_af and isinstance(af_res.get("field_values"), dict):
+							fvals = af_res["field_values"]
+							upd = 0
+							for f in cur_fields:
+								if f["id"] in fvals and str(fvals[f["id"]]).strip():
+									nv = str(fvals[f["id"]])
+									if active_person:
+										nv = nv.replace("[ÖĞRENCİ_ADI]", str(active_person.get("full_name") or ""))
+									f["value"] = nv
+									upd += 1
+							ui.session_state[flash_k] = f"✨ Gemini ({used_m}) {upd} form alanını doldurdu! {af_res.get('explanation', '')}"
+							ui.rerun()
+						else:
+							ui.error(f"Gemini doldurma hatası: {af_res.get('error', 'Ayrıştırılamadı')}")
+
+	# 2 Sütunlu Çalışma Alanı: Sol Canlı PDF Önizleme (Yapışkan!) + Sağ Form Alanları & Serbest Yazı Ekleme
+	col_prev, col_edit = ui.columns([1.25, 1.05], gap="large", sticky_first_col=True)
+
+	with col_edit:
+		st_tab_fields, st_tab_add, st_tab_save = ui.tabs([
+			f"✍️ Yazılabilir Alanlar ({len(cur_fields)})",
+			"➕ Serbest Metin / Kaşe Ekle",
+			"💾 Kaydet & Dışa Aktar",
+		])
+
+		with st_tab_fields:
+			if not cur_fields:
+				ui.info("Bu sayfada otomatik form alanı tespit edilmedi. **'➕ Serbest Metin / Kaşe Ekle'** sekmesinden istediğiniz koordinata yazı ekleyebilir" + (" veya yukarıdan **Gemini Vision** taramasını çalıştırabilirsiniz." if is_gai_on else "."))
+			else:
+				ui.caption("Soldaki önizlemede numaralandırılan (`#1`, `#2`...) kutuların karşısına yazmak istediğiniz metni girin. Kaydedildiğinde Türkçe karakterlerle doğrudan PDF'ye işlenir.")
+				for f_idx, f in enumerate(cur_fields):
+					fid = f["id"]
+					src_tag = {"acroform": "Form", "gemini_vision": "AI", "underline": "Çizgi", "label_colon": "Etiket", "line": "Çizgi", "box": "Kutu", "manual": "Serbest"}.get(str(f.get("source")), "Alan")
+					with ui.container(border=True):
+						fc1, fc2 = ui.columns([3.4, 0.9])
+						with fc1:
+							new_v = ui.text_input(
+								f"#{f_idx + 1} · {f['label']} [{src_tag}]",
+								value=str(f.get("value") or ""),
+								placeholder="Yazılacak metin (boş bırakılırsa yazılmaz)...",
+								key=f"pdf_fv_{fhash}_{cur_pg}_{fid}",
+							)
+							f["value"] = new_v
+						with fc2:
+							ui.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
+							if ui.button("🗑️", key=f"pdf_fdel_{fhash}_{cur_pg}_{fid}", help="Bu alanı kaldır", use_container_width=True):
+								cur_fields.pop(f_idx)
+								ui.rerun()
+						with ui.expander(f"⚙️ Konum & Yazı Boyutu İnce Ayar (#{f_idx + 1})", expanded=False):
+							t1, t2, t3, t4 = ui.columns(4)
+							f["x0"] = float(t1.number_input("Sol (X)", min_value=0.0, max_value=pw, value=float(f["x0"]), step=4.0, key=f"pdf_fx0_{fhash}_{cur_pg}_{fid}"))
+							f["y0"] = float(t2.number_input("Üst (Y)", min_value=0.0, max_value=ph, value=float(f["y0"]), step=4.0, key=f"pdf_fy0_{fhash}_{cur_pg}_{fid}"))
+							w_cur = max(20.0, float(f["x1"]) - float(f["x0"]))
+							new_w = float(t3.number_input("Genişlik", min_value=20.0, max_value=pw, value=round(w_cur, 1), step=10.0, key=f"pdf_fw_{fhash}_{cur_pg}_{fid}"))
+							f["x1"] = min(pw - 4.0, f["x0"] + new_w)
+							f["font_size"] = int(t4.number_input("Punto", min_value=6, max_value=24, value=int(f.get("font_size") or 10), step=1, key=f"pdf_fs_{fhash}_{cur_pg}_{fid}"))
+							c1, c2 = ui.columns(2)
+							col_opts = ["lacivert", "siyah", "kirmizi", "yesil"]
+							cur_ci = col_opts.index(f.get("color", "lacivert")) if f.get("color") in col_opts else 0
+							f["color"] = c1.selectbox("Renk", col_opts, index=cur_ci, key=f"pdf_fc_{fhash}_{cur_pg}_{fid}")
+							f["clear_bg"] = c2.checkbox("Arkadaki noktaları/çizgiyi ört", value=bool(f.get("clear_bg")), key=f"pdf_fbg_{fhash}_{cur_pg}_{fid}")
+
+		with st_tab_add:
+			ui.caption(f"Sayfa boyutu: **{pw:.0f} × {ph:.0f} pt**. PDF sayfasının herhangi bir noktasına serbest metin, tarih, ✓ işareti veya kaşe ekleyebilirsiniz.")
+			m_lbl = ui.text_input("Alan Adı / Etiketi", value="Serbest Not", key=f"pdf_man_lbl_{fhash}_{cur_pg}")
+			m_val = ui.text_input("Yazılacak Metin", placeholder="Örn: ✓ veya Revir Kontrolü Yapıldı / Tarih", key=f"pdf_man_val_{fhash}_{cur_pg}")
+			mc1, mc2, mc3 = ui.columns(3)
+			m_xp = float(mc1.number_input("Yatay Konum (%)", min_value=2.0, max_value=92.0, value=18.0, step=2.0, key=f"pdf_man_xp_{fhash}_{cur_pg}"))
+			m_yp = float(mc2.number_input("Dikey Konum (%)", min_value=2.0, max_value=95.0, value=25.0, step=2.0, key=f"pdf_man_yp_{fhash}_{cur_pg}"))
+			m_wp = float(mc3.number_input("Genişlik (%)", min_value=5.0, max_value=90.0, value=38.0, step=2.0, key=f"pdf_man_wp_{fhash}_{cur_pg}"))
+			mc4, mc5 = ui.columns(2)
+			m_fs = int(mc4.number_input("Yazı Boyutu (pt)", min_value=7, max_value=24, value=11, step=1, key=f"pdf_man_fs_{fhash}_{cur_pg}"))
+			m_col = mc5.selectbox("Yazı Rengi", ["lacivert", "siyah", "kirmizi", "yesil"], index=0, key=f"pdf_man_col_{fhash}_{cur_pg}")
+			if ui.button("➕ Bu Konuma Metin Alanı Ekle", type="primary", use_container_width=True, key=f"pdf_man_add_{fhash}_{cur_pg}"):
+				nx0 = round(pw * m_xp / 100.0, 1)
+				ny0 = round(ph * m_yp / 100.0, 1)
+				nx1 = round(min(pw - 10.0, nx0 + pw * m_wp / 100.0), 1)
+				ny1 = round(min(ph - 10.0, ny0 + max(18.0, m_fs * 1.9)), 1)
+				cur_fields.append({
+					"id": f"man_{cur_pg}_{len(cur_fields) + 1}_{int(datetime.now().timestamp()) % 10000}",
+					"page": cur_pg,
+					"label": m_lbl.strip() or "Serbest Metin",
+					"field_type": "text",
+					"source": "manual",
+					"widget_name": "",
+					"x0": nx0, "y0": ny0, "x1": nx1, "y1": ny1,
+					"value": m_val,
+					"font_size": m_fs,
+					"color": m_col,
+					"clear_bg": False,
+				})
+				ui.session_state[flash_k] = f"➕ '{m_lbl}' alanı Sayfa {cur_pg + 1} üzerine eklendi."
+				ui.rerun()
+
+		with st_tab_save:
+			filled_total = sum(
+				1 for flist in ui.session_state[state_key].values() for f in flist if str(f.get("value") or "").strip()
+			)
+			ui.info(f"📝 Tüm sayfalarda doldurulmuş toplam **{filled_total}** alan kayda hazır.")
+			new_copy_stem = ui.text_input(
+				"Farklı Kaydet Dosya Adı (.pdf otomatik eklenir)",
+				value=f"{file_path.stem}_doldurulmus",
+				key=f"pdf_save_stem_{fhash}",
+			)
+			sv1, sv2 = ui.columns(2)
+			with sv1:
+				if ui.button("📄 Yeni PDF Olarak Depoya Kaydet", type="primary", use_container_width=True, key=f"pdf_save_copy_{fhash}"):
+					target_p = _unique_target_path(evrak_dir, new_copy_stem, ".pdf")
+					save_filled_pdf(file_path, ui.session_state[state_key], target_p)
+					ctx_api["get_or_create_document_cover"](target_p, force=True)
+					ui.session_state[flash_k] = f"✅ Doldurulmuş PDF `{target_p.name}` olarak Evrak Deposuna kaydedildi!"
+					ui.rerun()
+			with sv2:
+				if ui.button("💾 Mevcut PDF Üzerine Yaz", type="secondary", use_container_width=True, key=f"pdf_save_over_{fhash}"):
+					save_filled_pdf(file_path, ui.session_state[state_key], file_path)
+					ctx_api["get_or_create_document_cover"](file_path, force=True)
+					ui.session_state[flash_k] = f"✅ `{file_path.name}` dosyası güncellendi!"
+					ui.rerun()
+
+	# Sol Sütun: Canlı Önizleme (sağdaki değişiklikler anında yansır!)
+	with col_prev:
+		with ui.container(border=True):
+			ui.markdown(f"##### 👁️ Canlı Önizleme — Sayfa {cur_pg + 1} / {num_pages}")
+			try:
+				png_bytes = render_pdf_page_preview_png(file_path, cur_pg, cur_fields, show_guides=show_guides, dpi=135)
+				if png_bytes:
+					ui.image(png_bytes, use_container_width=True)
+			except Exception as exc:
+				ui.error(f"PDF önizleme oluşturulamadı: {exc}")
+
+
+def _render_docx_studio(
+	file_path: Path,
+	fhash: str,
+	evrak_dir: Path,
+	ctx_api: dict[str, Any],
+	app_cfg: dict[str, str],
+	active_person: dict[str, Any] | None,
+	is_gai_on: bool,
+	gai_key: str,
+	gai_model: str,
+	flash_k: str,
+) -> None:
+	st_key = f"docx_studio_data_{fhash}"
+	if st_key not in ui.session_state:
+		paras, tables = _load_docx_structure(file_path)
+		ui.session_state[st_key] = {
+			"paras": paras,
+			"tables": tables,
+			"appended": [],
+		}
+	st = ui.session_state[st_key]
+	paras: list[dict[str, Any]] = st["paras"]
+	tables: list[pd.DataFrame] = st["tables"]
+
+	# Hızlı Bul & Değiştir + Okul/Kişi Yer Tutucu Şeridi (%100 Çevrimdışı)
+	with ui.expander("🔎 Hızlı Bul & Değiştir + Okul / Öğrenci Bilgilerini Otomatik Yerleştir", expanded=False):
+		fr1, fr2, fr3 = ui.columns([1.8, 1.8, 1.2])
+		find_txt = fr1.text_input("Aranacak Metin", placeholder="Örn: [TARİH] veya 2025-2026", key=f"docx_find_{fhash}")
+		rep_txt = fr2.text_input("Yeni Metin", placeholder="Örn: 21.11.2026", key=f"docx_rep_{fhash}")
+		with fr3:
+			ui.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
+			if ui.button("🔄 Tümünde Değiştir", type="primary", use_container_width=True, key=f"docx_do_rep_{fhash}"):
+				if find_txt:
+					hit = 0
+					for p in paras:
+						if find_txt in p["text"]:
+							p["text"] = p["text"].replace(find_txt, rep_txt)
+							hit += 1
+					for ti, df in enumerate(tables):
+						if not df.empty:
+							for col in df.columns:
+								mask = df[col].astype(str).str.contains(re.escape(find_txt), na=False)
+								if mask.any():
+									df[col] = df[col].astype(str).str.replace(find_txt, rep_txt, regex=False)
+									hit += int(mask.sum())
+					ui.session_state[flash_k] = f"🔄 {hit} yerde değiştirme uygulandı."
+					ui.rerun()
+
+		if ui.button("⚡ Yer Tutucuları ([OKUL_ADI], [TARIH], [HEMSIRE_ADI], [OGRENCI_ADI], [SINIF]) Otomatik Doldur", use_container_width=True, key=f"docx_fill_ph_{fhash}"):
+			ph_map = {
+				"[OKUL_ADI]": str(app_cfg.get("school_name") or ""),
+				"[HEMSIRE_ADI]": str(app_cfg.get("nurse_name") or ""),
+				"[MUDUR_ADI]": str(app_cfg.get("principal_name") or ""),
+				"[TARIH]": date.today().strftime("%d.%m.%Y"),
+				"[TARİH]": date.today().strftime("%d.%m.%Y"),
+				"[OGRENCI_ADI]": str(active_person.get("full_name") or "") if active_person else "",
+				"[ÖĞRENCİ_ADI]": str(active_person.get("full_name") or "") if active_person else "",
+				"[SINIF]": str(active_person.get("class_name") or "") if active_person else "",
+			}
+			hit = 0
+			for p in paras:
+				for k_ph, v_ph in ph_map.items():
+					if v_ph and k_ph in p["text"]:
+						p["text"] = p["text"].replace(k_ph, v_ph)
+						hit += 1
+			for df in tables:
+				for col in df.columns:
+					for k_ph, v_ph in ph_map.items():
+						if v_ph:
+							s_col = df[col].astype(str)
+							if s_col.str.contains(re.escape(k_ph), na=False).any():
+								df[col] = s_col.str.replace(k_ph, v_ph, regex=False)
+								hit += 1
+			ui.session_state[flash_k] = f"⚡ {hit} yer tutucu otomatik dolduruldu!" if hit else "Belgede eşleşen köşeli parantezli yer tutucu bulunamadı."
+			ui.rerun()
+
+	# Opsiyonel Gemini Word Yardımcı Paneli (SADECE Gemini açıkken!)
+	if is_gai_on:
+		with ui.expander("✨ Gemini AI Word Belge Düzenleme Yardımcısı (İsteğe Bağlı)", expanded=False):
+			w_inst = ui.text_input(
+				"💬 Belgede ne düzenlensin / eklensin?",
+				placeholder="Örn: Dili resmi MEB yazışma üslubuna çevir | Eksik imza ve tarih satırı ekle | Tabloyu seçili öğrenci bilgisine göre doldur",
+				key=f"docx_ai_inst_{fhash}",
+			)
+			if ui.button("✨ Gemini ile Düzenleme Önerisi Hazırla", type="primary", use_container_width=True, key=f"docx_ai_run_{fhash}"):
+				if not w_inst.strip():
+					ui.warning("Lütfen bir talimat yazın.")
+				else:
+					anon_ctx = ""
+					if active_person:
+						try:
+							anon_ctx, _, _ = ctx_api["_build_person_anon_bundle"](int(active_person["id"]))
+						except Exception:
+							anon_ctx = ""
+					payload = {
+						"paragraphs": [{"index": p["index"], "text": p["text"]} for p in paras if p["text"].strip()][:60],
+						"tables": [
+							{"table_index": ti, "headers": list(df.columns), "rows": df.head(25).values.tolist()}
+							for ti, df in enumerate(tables[:4])
+						],
+					}
+					school_ctx = f"Okul: {app_cfg.get('school_name', '')} | Hemşire: {app_cfg.get('nurse_name', '')} | Tarih: {date.today().strftime('%d.%m.%Y')}"
+					with ui.spinner("Gemini Word belgesini inceliyor..."):
+						ok_dw, dw_res, used_m = gai.assist_office_document_with_gemini(
+							api_key=gai_key,
+							model=gai_model,
+							doc_type="docx",
+							doc_payload=payload,
+							instruction=w_inst,
+							school_context=school_ctx,
+							anon_student_context=anon_ctx,
+						)
+					if ok_dw:
+						ui.session_state[f"docx_ai_prop_{fhash}"] = {"res": dw_res, "model": used_m}
+						ui.rerun()
+					else:
+						ui.error(f"Gemini hatası: {dw_res.get('error')}")
+
+			prop = ui.session_state.get(f"docx_ai_prop_{fhash}")
+			if isinstance(prop, dict):
+				pr = prop["res"]
+				ui.info(f"🤖 **Gemini Önerisi ({prop['model']}):** {pr.get('explanation', '')}")
+				p_edits = pr.get("paragraph_edits") or []
+				p_adds = pr.get("append_paragraphs") or []
+				t_edits = pr.get("table_edits") or []
+				ui.caption(f"Önerilen değişiklikler: **{len(p_edits)}** paragraf düzenlemesi · **{len(p_adds)}** yeni paragraf · **{len(t_edits)}** tablo hücresi")
+				ap_c1, ap_c2 = ui.columns(2)
+				with ap_c1:
+					if ui.button("✅ Gemini Önerilerini Belgeye Uygula", type="primary", use_container_width=True, key=f"docx_ai_apply_{fhash}"):
+						p_by_idx = {p["index"]: p for p in paras}
+						for pe in p_edits:
+							try:
+								pi = int(pe["index"])
+								nt = str(pe.get("new_text") or "")
+								if active_person:
+									nt = nt.replace("[ÖĞRENCİ_ADI]", str(active_person.get("full_name") or ""))
+								if pi in p_by_idx:
+									p_by_idx[pi]["text"] = nt
+							except Exception:
+								pass
+						for pa in p_adds:
+							if str(pa).strip():
+								nt = str(pa).strip()
+								if active_person:
+									nt = nt.replace("[ÖĞRENCİ_ADI]", str(active_person.get("full_name") or ""))
+								st["appended"].append(nt)
+						for te in t_edits:
+							try:
+								ti, ri, ci = int(te["table_index"]), int(te["row_index"]), int(te["col_index"])
+								if 0 <= ti < len(tables) and 0 <= ri < len(tables[ti]) and 0 <= ci < len(tables[ti].columns):
+									tables[ti].iat[ri, ci] = str(te.get("new_text") or "")
+							except Exception:
+								pass
+						ui.session_state.pop(f"docx_ai_prop_{fhash}", None)
+						ui.session_state[flash_k] = "✅ Gemini önerileri düzenleyiciye aktarıldı! Kaydetmek için aşağıdan 'Kaydet' butonuna basın."
+						ui.rerun()
+				with ap_c2:
+					if ui.button("✖ Öneriyi İptal Et", use_container_width=True, key=f"docx_ai_dismiss_{fhash}"):
+						ui.session_state.pop(f"docx_ai_prop_{fhash}", None)
+						ui.rerun()
+
+	t_p, t_t, t_s = ui.tabs([
+		f"📝 Paragraflar ({sum(1 for p in paras if p['text'].strip())})",
+		f"📊 Tablolar ({len(tables)})",
+		"💾 Kaydet",
+	])
+
+	with t_p:
+		non_empty = [p for p in paras if p["text"].strip()]
+		if not non_empty:
+			ui.info("Bu Word belgesinde metin paragrafı bulunmuyor; aşağıdan yeni paragraf ekleyebilir veya Tablolar sekmesini düzenleyebilirsiniz.")
+		for p in non_empty[:80]:
+			pi = p["index"]
+			h_val = 95 if len(p["text"]) > 130 else 68
+			p["text"] = ui.text_area(
+				f"Paragraf #{pi + 1} ({p['style']})",
+				value=p["text"],
+				height=h_val,
+				key=f"docx_p_{fhash}_{pi}",
+			)
+		ui.divider()
+		ui.markdown("##### ➕ Belge Sonuna Yeni Paragraf Ekle")
+		new_p_txt = ui.text_area("Eklenecek Metin", placeholder="Belgenin sonuna eklemek istediğiniz paragrafı yazın...", height=80, key=f"docx_newp_{fhash}")
+		if ui.button("➕ Paragrafı Listeye Ekle", key=f"docx_addp_{fhash}"):
+			if new_p_txt.strip():
+				st["appended"].append(new_p_txt.strip())
+				ui.session_state[f"docx_newp_{fhash}"] = ""
+				ui.session_state[flash_k] = "➕ Yeni paragraf belge sonuna eklendi."
+				ui.rerun()
+		if st["appended"]:
+			ui.caption(f"Belge sonuna eklenecek **{len(st['appended'])}** yeni paragraf:")
+			for ai, at in enumerate(st["appended"]):
+				ac1, ac2 = ui.columns([4.5, 0.7])
+				ac1.markdown(f"• {html.escape(at)}")
+				if ac2.button("✖", key=f"docx_rm_app_{fhash}_{ai}"):
+					st["appended"].pop(ai)
+					ui.rerun()
+
+	with t_t:
+		if not tables:
+			ui.info("Bu Word belgesinde tablo bulunmuyor.")
+		else:
+			for ti, df in enumerate(tables):
+				ui.markdown(f"##### 📊 Tablo #{ti + 1}")
+				tables[ti] = ui.data_editor(
+					df,
+					num_rows="dynamic",
+					use_container_width=True,
+					key=f"docx_tbl_{fhash}_{ti}",
+				)
+
+	with t_s:
+		new_stem = ui.text_input("Farklı Kaydet Dosya Adı (.docx otomatik eklenir)", value=f"{file_path.stem}_duzenlenmis", key=f"docx_sv_stem_{fhash}")
+		s1, s2 = ui.columns(2)
+		with s1:
+			if ui.button("💾 Mevcut Word Dosyasının Üzerine Kaydet", type="primary", use_container_width=True, key=f"docx_sv_over_{fhash}"):
+				edited_map = {p["index"]: p["text"] for p in paras}
+				tbl_map = {ti: df for ti, df in enumerate(tables)}
+				_save_docx_structure(file_path, file_path, edited_map, st["appended"], tbl_map)
+				ctx_api["get_or_create_document_cover"](file_path, force=True)
+				ui.session_state.pop(st_key, None)
+				ui.session_state[flash_k] = f"✅ `{file_path.name}` başarıyla güncellendi!"
+				ui.rerun()
+		with s2:
+			if ui.button("📄 Yeni Kopya Olarak Depoya Kaydet", type="secondary", use_container_width=True, key=f"docx_sv_copy_{fhash}"):
+				target_p = _unique_target_path(evrak_dir, new_stem, ".docx")
+				edited_map = {p["index"]: p["text"] for p in paras}
+				tbl_map = {ti: df for ti, df in enumerate(tables)}
+				_save_docx_structure(file_path, target_p, edited_map, st["appended"], tbl_map)
+				ctx_api["get_or_create_document_cover"](target_p, force=True)
+				ui.session_state[flash_k] = f"✅ `{target_p.name}` Evrak Deposuna yeni kopya olarak kaydedildi!"
+				ui.rerun()
+
+
+def _render_xlsx_studio(
+	file_path: Path,
+	fhash: str,
+	evrak_dir: Path,
+	ctx_api: dict[str, Any],
+	app_cfg: dict[str, str],
+	active_person: dict[str, Any] | None,
+	is_gai_on: bool,
+	gai_key: str,
+	gai_model: str,
+	flash_k: str,
+) -> None:
+	import openpyxl
+
+	wb_m = openpyxl.load_workbook(file_path, read_only=True)
+	sheet_names = list(wb_m.sheetnames)
+	wb_m.close()
+
+	sh1, sh2 = ui.columns([2.2, 1.8])
+	with sh1:
+		sel_sheet = ui.selectbox("📑 Düzenlenecek Excel Sayfası (Sheet)", sheet_names, index=0, key=f"xlsx_sh_{fhash}")
+	with sh2:
+		new_sh_nm = ui.text_input("➕ Veya Yeni Sayfa Adı (Opsiyonel)", placeholder="Boş bırakılırsa seçili sayfa güncellenir", key=f"xlsx_newsh_{fhash}")
+
+	df_key = f"xlsx_studio_df_{fhash}_{sel_sheet}"
+	if df_key not in ui.session_state:
+		ui.session_state[df_key] = _load_xlsx_sheet_df(file_path, sel_sheet)
+
+	cur_df: pd.DataFrame = ui.session_state[df_key]
+
+	# Opsiyonel Gemini Excel Yardımcı Paneli (SADECE Gemini açıkken!)
+	if is_gai_on:
+		with ui.expander("✨ Gemini AI Excel Tablo Yardımcısı (Veri Girme & Düzenleme)", expanded=False):
+			x_inst = ui.text_input(
+				"💬 Tabloda ne yapılsın?",
+				placeholder="Örn: Eksik durum hücrelerini sınıflandır | Yeni özet satırı ekle | Seçili öğrenciye göre 1 yeni kayıt satırı ekle",
+				key=f"xlsx_ai_inst_{fhash}_{sel_sheet}",
+			)
+			if ui.button("✨ Gemini ile Tablo Önerisi Hazırla", type="primary", use_container_width=True, key=f"xlsx_ai_run_{fhash}_{sel_sheet}"):
+				if not x_inst.strip():
+					ui.warning("Lütfen bir talimat yazın.")
+				else:
+					anon_ctx = ""
+					if active_person:
+						try:
+							anon_ctx, _, _ = ctx_api["_build_person_anon_bundle"](int(active_person["id"]))
+						except Exception:
+							anon_ctx = ""
+					payload = {
+						"sheet": sel_sheet,
+						"columns": list(cur_df.columns),
+						"rows": cur_df.head(45).to_dict(orient="records"),
+					}
+					school_ctx = f"Okul: {app_cfg.get('school_name', '')} | Hemşire: {app_cfg.get('nurse_name', '')} | Tarih: {date.today().strftime('%d.%m.%Y')}"
+					with ui.spinner("Gemini Excel sayfasını inceliyor..."):
+						ok_x, x_res, used_m = gai.assist_office_document_with_gemini(
+							api_key=gai_key,
+							model=gai_model,
+							doc_type="xlsx",
+							doc_payload=payload,
+							instruction=x_inst,
+							school_context=school_ctx,
+							anon_student_context=anon_ctx,
+						)
+					if ok_x:
+						ui.session_state[f"xlsx_ai_prop_{fhash}_{sel_sheet}"] = {"res": x_res, "model": used_m}
+						ui.rerun()
+					else:
+						ui.error(f"Gemini hatası: {x_res.get('error')}")
+
+			xprop = ui.session_state.get(f"xlsx_ai_prop_{fhash}_{sel_sheet}")
+			if isinstance(xprop, dict):
+				xr = xprop["res"]
+				ui.info(f"🤖 **Gemini Önerisi ({xprop['model']}):** {xr.get('explanation', '')}")
+				c_edits = xr.get("cell_edits") or []
+				a_rows = xr.get("append_rows") or []
+				ui.caption(f"Önerilen: **{len(c_edits)}** hücre güncellemesi · **{len(a_rows)}** yeni satır")
+				xa1, xa2 = ui.columns(2)
+				with xa1:
+					if ui.button("✅ Tabloya Uygula", type="primary", use_container_width=True, key=f"xlsx_ai_apply_{fhash}_{sel_sheet}"):
+						df_mod = cur_df.copy()
+						for ce in c_edits:
+							try:
+								ri = int(ce["row_index"])
+								cn = str(ce["col_name"])
+								if cn in df_mod.columns and 0 <= ri < len(df_mod):
+									df_mod.at[df_mod.index[ri], cn] = str(ce.get("value") or "")
+							except Exception:
+								pass
+						if a_rows:
+							extra_rows = []
+							for ar in a_rows:
+								if isinstance(ar, dict):
+									extra_rows.append({c: str(ar.get(c, "")) for c in df_mod.columns})
+							if extra_rows:
+								df_mod = pd.concat([df_mod, pd.DataFrame(extra_rows)], ignore_index=True)
+						ui.session_state[df_key] = df_mod
+						ui.session_state.pop(f"xlsx_ai_prop_{fhash}_{sel_sheet}", None)
+						ui.session_state[flash_k] = "✅ Gemini önerileri Excel tablosuna uygulandı!"
+						ui.rerun()
+				with xa2:
+					if ui.button("✖ İptal", use_container_width=True, key=f"xlsx_ai_dismiss_{fhash}_{sel_sheet}"):
+						ui.session_state.pop(f"xlsx_ai_prop_{fhash}_{sel_sheet}", None)
+						ui.rerun()
+
+	ui.caption("💡 Hücreye tıklayıp doğrudan yazabilirsiniz; `Enter` tuşu bir alt satıra geçer, alttan yeni satır ekleyebilirsiniz.")
+	edited_df = ui.data_editor(
+		cur_df,
+		num_rows="dynamic",
+		use_container_width=True,
+		key=f"xlsx_ed_{fhash}_{sel_sheet}",
+	)
+	ui.session_state[df_key] = edited_df
+
+	ui.divider()
+	new_stem = ui.text_input("Farklı Kaydet Dosya Adı (.xlsx otomatik eklenir)", value=f"{file_path.stem}_duzenlenmis", key=f"xlsx_sv_stem_{fhash}")
+	sv1, sv2 = ui.columns(2)
+	with sv1:
+		if ui.button("💾 Mevcut Excel Dosyasının Üzerine Kaydet", type="primary", use_container_width=True, key=f"xlsx_sv_over_{fhash}"):
+			_save_xlsx_sheet_df(file_path, file_path, sel_sheet, edited_df, new_sheet_title=new_sh_nm)
+			ctx_api["get_or_create_document_cover"](file_path, force=True)
+			ui.session_state[flash_k] = f"✅ `{file_path.name}` ({new_sh_nm.strip() or sel_sheet}) kaydedildi!"
+			ui.rerun()
+	with sv2:
+		if ui.button("📊 Yeni Kopya Olarak Depoya Kaydet", type="secondary", use_container_width=True, key=f"xlsx_sv_copy_{fhash}"):
+			target_p = _unique_target_path(evrak_dir, new_stem, ".xlsx")
+			_save_xlsx_sheet_df(file_path, target_p, sel_sheet, edited_df, new_sheet_title=new_sh_nm)
+			ctx_api["get_or_create_document_cover"](target_p, force=True)
+			ui.session_state[flash_k] = f"✅ `{target_p.name}` Evrak Deposuna kaydedildi!"
+			ui.rerun()
+
+
+def _render_text_studio(file_path: Path, fhash: str, evrak_dir: Path, ctx_api: dict[str, Any], flash_k: str) -> None:
+	raw_txt = file_path.read_text(encoding="utf-8", errors="replace")
+	edited = ui.text_area("📝 Dosya İçeriği", value=raw_txt, height=380, key=f"txt_ed_{fhash}")
+	if ui.button("💾 Değişiklikleri Kaydet", type="primary", use_container_width=True, key=f"txt_sv_{fhash}"):
+		file_path.write_text(edited or "", encoding="utf-8")
+		ctx_api["get_or_create_document_cover"](file_path, force=True)
+		ui.session_state[flash_k] = f"✅ `{file_path.name}` kaydedildi!"
+		ui.rerun()
+
+
+def create_new_office_document_in_depot(
+	evrak_dir: Path,
+	doc_kind: str,
+	title: str,
+	app_cfg: dict[str, str],
+) -> Path:
+	"""Evrak deposunda sıfırdan temiz bir Word (.docx) veya Excel (.xlsx) belgesi oluşturur."""
+	evrak_dir.mkdir(parents=True, exist_ok=True)
+	school_nm = str(app_cfg.get("school_name") or "Okul Reviri")
+	nurse_nm = str(app_cfg.get("nurse_name") or "Okul Revir Sorumlusu")
+	today_tr = date.today().strftime("%d.%m.%Y")
+
+	if doc_kind == "xlsx":
+		import openpyxl
+		from openpyxl.styles import Font
+
+		target = _unique_target_path(evrak_dir, title or f"Revir_Tablo_{date.today().isoformat()}", ".xlsx")
+		wb = openpyxl.Workbook()
+		ws = wb.active
+		ws.title = "Liste"
+		headers = ["Sıra", "Tarih", "Adı Soyadı", "Sınıfı", "Açıklama / İşlem", "Notlar"]
+		for ci, h in enumerate(headers, start=1):
+			c = ws.cell(row=1, column=ci, value=h)
+			c.font = Font(bold=True)
+		ws.cell(row=2, column=1, value=1)
+		ws.cell(row=2, column=2, value=today_tr)
+		wb.save(target)
+		return target
+
+	import docx
+
+	target = _unique_target_path(evrak_dir, title or f"Revir_Belge_{date.today().isoformat()}", ".docx")
+	d = docx.Document()
+	d.add_heading(f"{school_nm} — {title or 'Resmi Revir Belgesi'}", level=1)
+	d.add_paragraph(f"Tarih: {today_tr}")
+	d.add_paragraph("Konu: ")
+	d.add_paragraph("Açıklama: ")
+	d.add_paragraph(f"Düzenleyen: {nurse_nm}")
+	d.save(target)
+	return target
+
+
+# ==============================================================================
+# 5. GEMİNİ AKILLI EVRAK OKUYUCU & ÖĞRENCİ EŞLEŞTİRİCİ + VERİTABANINA İŞLEME
+# ==============================================================================
+
+def rank_matching_people(connect_db_fn, hints: dict[str, Any], limit: int = 12) -> list[dict[str, Any]]:
+	"""Belgeden çıkan isim, okul no ve sınıf ipuçlarına göre yerel SQLite kişilerini puanlayarak sıralar."""
+	name_q = tr_fold(hints.get("name_hint") or "")
+	no_q = re.sub(r"\D+", "", str(hints.get("student_no_hint") or ""))
+	cls_q = tr_fold(hints.get("class_hint") or "")
+
+	with connect_db_fn() as conn:
+		rows = conn.execute(
+			"""SELECT s.id, s.full_name, s.student_no, s.birth_date, s.sex, s.person_type,
+					  COALESCE(c.name, 'Sınıfsız') AS class_name
+			   FROM students s
+			   LEFT JOIN classes c ON c.id = s.class_id
+			   ORDER BY s.full_name ASC"""
+		).fetchall()
+
+	scored: list[tuple[float, dict[str, Any]]] = []
+	for r in rows:
+		rd = dict(r)
+		score = 0.0
+		r_no = re.sub(r"\D+", "", str(rd.get("student_no") or ""))
+		r_nm = tr_fold(rd.get("full_name") or "")
+		r_cls = tr_fold(rd.get("class_name") or "")
+		if no_q and r_no and no_q == r_no:
+			score += 1.2
+		if name_q and r_nm:
+			if name_q == r_nm:
+				score += 1.5
+			elif name_q in r_nm or r_nm in name_q:
+				score += 0.95
+			else:
+				ratio = SequenceMatcher(None, name_q, r_nm).ratio()
+				# Kelime kesişimi bonusu
+				w_q = set(name_q.split())
+				w_r = set(r_nm.split())
+				overlap = len(w_q & w_r) / max(1, len(w_q))
+				score += max(ratio * 0.9, overlap * 0.95)
+		if cls_q and r_cls and (cls_q == r_cls or cls_q in r_cls):
+			score += 0.25
+		rd["_match_score"] = round(score, 3)
+		scored.append((score, rd))
+
+	scored.sort(key=lambda x: (-x[0], x[1]["full_name"]))
+	return [x[1] for x in scored[:limit]] if (name_q or no_q or cls_q) else [x[1] for x in scored]
+
+
+def _append_unique_csv(existing: str | None, addition: str | None) -> str:
+	cur = [x.strip() for x in str(existing or "").split(",") if x.strip()]
+	cur_f = {tr_fold(x) for x in cur}
+	for item in [x.strip() for x in str(addition or "").split(",") if x.strip()]:
+		if tr_fold(item) not in cur_f:
+			cur.append(item)
+			cur_f.add(tr_fold(item))
+	return ", ".join(cur)
+
+
+def apply_extracted_clinical_record(
+	connect_db_fn,
+	student_id: int,
+	extracted: dict[str, Any],
+	*,
+	apply_profile: bool = True,
+	apply_labs: bool = True,
+	apply_vitals: bool = True,
+	apply_measurements: bool = True,
+	apply_meds: bool = True,
+	apply_disability: bool = False,
+	apply_diabetes: bool = False,
+	apply_visit_note: bool = False,
+	source_filename: str = "",
+	source_bytes: bytes | None = None,
+	age_in_months_fn=None,
+) -> list[str]:
+	"""Onaylanmış Gemini evrak çıkarımını gerçek SQLite tablolarına (kesin şema uyumuyla) işler."""
+	applied_log: list[str] = []
+	doc_dt = str(extracted.get("document_date") or "").strip()
+	if not re.match(r"^\d{4}-\d{2}-\d{2}$", doc_dt):
+		doc_dt = date.today().isoformat()
+	now_iso = datetime.now().isoformat(timespec="minutes")
+
+	def _parse_ref_bounds(ref_s: str) -> tuple[float | None, float | None]:
+		nums = re.findall(r"-?\d+(?:[.,]\d+)?", str(ref_s or ""))
+		if len(nums) >= 2:
+			try:
+				return float(nums[0].replace(",", ".")), float(nums[1].replace(",", "."))
+			except Exception:
+				return None, None
+		return None, None
+
+	with connect_db_fn() as conn:
+		# 1. Sağlık Profili (health_profiles)
+		if apply_profile:
+			hp_in = extracted.get("health_profile") or {}
+			if any(str(hp_in.get(k) or "").strip() for k in ("allergies", "chronic_conditions", "blood_group", "regular_medications", "emergency_notes")):
+				cur_hp = conn.execute("SELECT * FROM health_profiles WHERE student_id=?", (student_id,)).fetchone()
+				cur_d = dict(cur_hp) if cur_hp else {}
+				new_al = _append_unique_csv(cur_d.get("allergies"), hp_in.get("allergies"))
+				new_ch = _append_unique_csv(cur_d.get("chronic_conditions"), hp_in.get("chronic_conditions"))
+				new_bg = str(hp_in.get("blood_group") or "").strip() or str(cur_d.get("blood_group") or "")
+				new_rm = _append_unique_csv(cur_d.get("medications"), hp_in.get("regular_medications"))
+				em_old = str(cur_d.get("emergency_notes") or "").strip()
+				em_add = str(hp_in.get("emergency_notes") or "").strip()
+				new_em = (em_old + ("\n" if em_old and em_add else "") + em_add) if (em_add and em_add not in em_old) else em_old
+				if cur_hp:
+					conn.execute(
+						"""UPDATE health_profiles
+						   SET allergies=?, chronic_conditions=?, blood_group=?, medications=?, emergency_notes=?, updated_at=?
+						   WHERE student_id=?""",
+						(new_al or None, new_ch or None, new_bg or None, new_rm or None, new_em or None, now_iso, student_id),
+					)
+				else:
+					conn.execute(
+						"""INSERT INTO health_profiles(student_id, allergies, chronic_conditions, blood_group, medications, emergency_notes, updated_at)
+						   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+						(student_id, new_al or None, new_ch or None, new_bg or None, new_rm or None, new_em or None, now_iso),
+					)
+				applied_log.append("📋 Sağlık profili (alerji / kronik / kan grubu / ilaç / acil not) güncellendi")
+
+		# 2. Laboratuvar Tahlilleri (lab_reports + lab_results)
+		if apply_labs:
+			labs = extracted.get("lab_results") or []
+			valid_labs = [lr for lr in labs if isinstance(lr, dict) and str(lr.get("test_name") or "").strip()]
+			if valid_labs:
+				first_dt = str(valid_labs[0].get("measured_on") or doc_dt).strip()
+				if not re.match(r"^\d{4}-\d{2}-\d{2}$", first_dt):
+					first_dt = doc_dt
+				mime_t = mimetypes.guess_type(source_filename or "rapor.pdf")[0] or "application/pdf"
+				cur_rep = conn.execute(
+					"""INSERT INTO lab_reports(student_id, report_date, file_name, content_type, content, extracted_text)
+					   VALUES (?, ?, ?, ?, ?, ?)""",
+					(
+						student_id,
+						first_dt,
+						source_filename or "Gemini_Evrak_Okuyucu",
+						mime_t,
+						source_bytes if source_bytes else b"",
+						str(extracted.get("clinical_summary") or ""),
+					),
+				)
+				rep_id = int(cur_rep.lastrowid)
+				lab_ins = 0
+				for lr in valid_labs:
+					v_num = lr.get("value_num")
+					try:
+						v_num = float(str(v_num).replace(",", ".")) if v_num is not None and str(v_num).strip() != "" else None
+					except Exception:
+						v_num = None
+					if v_num is None:
+						try:
+							m_n = re.search(r"-?\d+(?:[.,]\d+)?", str(lr.get("value_text") or ""))
+							v_num = float(m_n.group(0).replace(",", ".")) if m_n else None
+						except Exception:
+							v_num = None
+					r_low, r_high = _parse_ref_bounds(str(lr.get("ref_range") or ""))
+					val_store: Any = v_num if v_num is not None else (str(lr.get("value_text") or "").strip() or "0")
+					conn.execute(
+						"""INSERT INTO lab_results(report_id, test_name, value, unit, ref_low, ref_high, lab_flag)
+						   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+						(
+							rep_id,
+							str(lr.get("test_name") or "").strip(),
+							val_store,
+							str(lr.get("unit") or "").strip() or None,
+							r_low,
+							r_high,
+							str(lr.get("flag") or "Normal").strip() or "Normal",
+						),
+					)
+					lab_ins += 1
+				if lab_ins:
+					applied_log.append(f"🧪 {lab_ins} laboratuvar tahlil parametresi işlendi")
+
+		# 3. Vital Bulgular (vital_readings)
+		if apply_vitals:
+			vt = extracted.get("vitals") or {}
+			has_vt = any(vt.get(k) is not None and str(vt.get(k)).strip() != "" for k in ("temperature_c", "pulse_bpm", "spo2_pct", "systolic_bp", "diastolic_bp", "glucose_mg_dl"))
+			if has_vt:
+				def _fnum(v: Any) -> float | None:
+					try:
+						return float(str(v).replace(",", ".")) if v is not None and str(v).strip() != "" else None
+					except Exception:
+						return None
+				m_at = str(vt.get("measured_at") or "").strip() or f"{doc_dt} 09:00"
+				conn.execute(
+					"""INSERT INTO vital_readings(student_id, measured_at, systolic_mmhg, diastolic_mmhg, pulse_bpm, temperature_c, spo2_pct, glucose_mg_dl, notes)
+					   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+					(
+						student_id, m_at,
+						_fnum(vt.get("systolic_bp")),
+						_fnum(vt.get("diastolic_bp")),
+						_fnum(vt.get("pulse_bpm")),
+						_fnum(vt.get("temperature_c")),
+						_fnum(vt.get("spo2_pct")),
+						_fnum(vt.get("glucose_mg_dl")),
+						f"Evraktan aktarıldı ({source_filename})",
+					),
+				)
+				applied_log.append("💓 Vital bulgu kaydı eklendi")
+
+		# 4. Antropometrik Ölçümler (measurements)
+		if apply_measurements:
+			ms = extracted.get("measurements") or {}
+			try:
+				h_cm = float(str(ms.get("height_cm")).replace(",", ".")) if ms.get("height_cm") not in (None, "") else None
+			except Exception:
+				h_cm = None
+			try:
+				w_kg = float(str(ms.get("weight_kg")).replace(",", ".")) if ms.get("weight_kg") not in (None, "") else None
+			except Exception:
+				w_kg = None
+			try:
+				hc_cm = float(str(ms.get("head_circ_cm")).replace(",", ".")) if ms.get("head_circ_cm") not in (None, "") else None
+			except Exception:
+				hc_cm = None
+			if h_cm or w_kg or hc_cm:
+				bmi_v = round(w_kg / ((h_cm / 100.0) ** 2), 2) if (h_cm and w_kg and h_cm > 30) else None
+				m_on = str(ms.get("measured_on") or doc_dt).strip()
+				if not re.match(r"^\d{4}-\d{2}-\d{2}$", m_on):
+					m_on = doc_dt
+				age_m = None
+				try:
+					b_row = conn.execute("SELECT birth_date FROM students WHERE id=?", (student_id,)).fetchone()
+					if b_row and b_row["birth_date"] and age_in_months_fn:
+						age_m = age_in_months_fn(str(b_row["birth_date"]), date.fromisoformat(m_on))
+				except Exception:
+					age_m = None
+				conn.execute(
+					"""INSERT INTO measurements(student_id, measured_on, height_cm, weight_kg, head_circ_cm, age_months, bmi)
+					   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+					(student_id, m_on, h_cm, w_kg, hc_cm, age_m, bmi_v),
+				)
+				applied_log.append("📏 Boy / Kilo / Baş çevresi ölçümü kaydedildi")
+
+		# 5. İlaç Takip Sistemi (student_medications)
+		if apply_meds:
+			meds = extracted.get("medications") or []
+			med_ins = 0
+			for md in meds:
+				if not isinstance(md, dict) or not str(md.get("medication_name") or "").strip():
+					continue
+				conn.execute(
+					"""INSERT INTO student_medications(student_id, medication_name, med_type, dosage_pattern, scheduled_times, start_date, special_notes, status, created_at)
+					   VALUES (?, ?, ?, ?, ?, ?, ?, 'Aktif', ?)""",
+					(
+						student_id,
+						str(md.get("medication_name") or "").strip(),
+						str(md.get("med_type") or "Düzenli İlaç").strip(),
+						str(md.get("dosage") or "").strip() or None,
+						str(md.get("schedule_times") or "").strip() or None,
+						doc_dt,
+						f"{str(md.get('notes') or '').strip()} [Evrak: {source_filename}]".strip(),
+						now_iso,
+					),
+				)
+				med_ins += 1
+			if med_ins:
+				applied_log.append(f"💊 {med_ins} ilaç kaydı İlaç Takip Sistemine eklendi")
+
+		# 6. Engellilik / Özel Gereksinim Profili (students.has_disability + health_profiles)
+		if apply_disability:
+			dis = extracted.get("disability") or {}
+			if dis.get("has_disability"):
+				cur_hp = conn.execute("SELECT disability_profile_json FROM health_profiles WHERE student_id=?", (student_id,)).fetchone()
+				try:
+					cur_dp = json.loads(cur_hp["disability_profile_json"] or "{}") if (cur_hp and cur_hp["disability_profile_json"]) else {}
+				except Exception:
+					cur_dp = {}
+				cur_dp["has_disability"] = True
+				if dis.get("disability_rate") not in (None, ""):
+					try:
+						cur_dp["disability_rate"] = int(float(dis["disability_rate"]))
+					except Exception:
+						pass
+				if dis.get("categories"):
+					cats = list(dict.fromkeys((cur_dp.get("categories") or []) + [str(c) for c in dis["categories"] if str(c).strip()]))
+					cur_dp["categories"] = cats
+				if str(dis.get("mobility_status") or "").strip():
+					cur_dp["mobility_status"] = str(dis["mobility_status"]).strip()
+				if str(dis.get("school_adaptations") or "").strip():
+					cur_dp["school_adaptations"] = str(dis["school_adaptations"]).strip()
+				if str(dis.get("report_summary") or "").strip():
+					cur_dp["notes"] = str(dis["report_summary"]).strip()
+				rate_val = int(cur_dp.get("disability_rate") or 0)
+				dp_json = json.dumps(cur_dp, ensure_ascii=False)
+				conn.execute("UPDATE students SET has_disability=1 WHERE id=?", (student_id,))
+				if cur_hp:
+					conn.execute(
+						"UPDATE health_profiles SET disability_rate=?, disability_profile_json=?, updated_at=? WHERE student_id=?",
+						(rate_val, dp_json, now_iso, student_id),
+					)
+				else:
+					conn.execute(
+						"INSERT INTO health_profiles(student_id, disability_rate, disability_profile_json, updated_at) VALUES (?, ?, ?, ?)",
+						(student_id, rate_val, dp_json, now_iso),
+					)
+				applied_log.append("♿ Özel gereksinim / engellilik profili güncellendi")
+
+		# 7. Diyabet / İnsülin Profili
+		if apply_diabetes:
+			diab = extracted.get("diabetes") or {}
+			if diab.get("is_diabetic"):
+				idm.ensure_diabetes_tables(conn)
+				cur_p = idm.get_diabetes_profile(connect_db_fn, student_id)
+				upd_p = dict(cur_p)
+				upd_p["is_diabetic"] = 1
+				if str(diab.get("diabetes_type") or "").strip():
+					upd_p["diabetes_type"] = str(diab["diabetes_type"]).strip()
+				for num_k in ("icr_breakfast", "icr_lunch", "icr_snack", "isf", "target_bg"):
+					if diab.get(num_k) not in (None, ""):
+						try:
+							upd_p[num_k] = float(str(diab[num_k]).replace(",", "."))
+						except Exception:
+							pass
+				if str(diab.get("insulin_brand") or "").strip():
+					upd_p["insulin_brand"] = str(diab["insulin_brand"]).strip()
+				idm.save_diabetes_profile(connect_db_fn, student_id, upd_p)
+				applied_log.append("💉 Diyabet / İnsülin profili (İKO / İDF) güncellendi")
+
+		# 8. Revir İzlem Notu (visits)
+		if apply_visit_note and str(extracted.get("visit_note_suggestion") or extracted.get("clinical_summary") or "").strip():
+			v_note = str(extracted.get("visit_note_suggestion") or extracted.get("clinical_summary") or "").strip()
+			conn.execute(
+				"""INSERT INTO visits(student_id, visit_date, visit_time, complaint, observation, action, follow_up_status)
+				   VALUES (?, ?, ?, ?, ?, ?, 'Kapalı')""",
+				(
+					student_id,
+					doc_dt,
+					datetime.now().strftime("%H:%M"),
+					f"Belge / Rapor Kaydı ({extracted.get('document_type', 'Sağlık Belgesi')})",
+					f"{v_note} [Dosya: {source_filename}]",
+					"Dış rapor / evrak okunup dosyaya işlendi",
+				),
+			)
+			applied_log.append("🩺 Revir başvuru / izlem notu eklendi")
+
+	return applied_log
+
+
+def render_smart_document_importer_dialog(ctx_api: dict[str, Any], initial_file_path: Path | None = None) -> None:
+	"""
+	Herhangi bir sağlık raporunu, tahlili, reçeteyi, ÇÖZGER/diyabet raporunu veya sınıf/öğrenci listesini
+	Gemini ile okuyup ait olduğu öğrenciyi bulan ve hemşire onayıyla doğrudan veritabanına işleyen akıllı pencere.
+	"""
+	is_gai_on, gai_key, gai_model = ctx_api["_get_active_gemini_config"]()
+	if not is_gai_on:
+		ui.warning("🤖 Bu özellik için **Ayarlar → Yapay Zekâ (Gemini)** bölümünden Gemini AI'nın etkinleştirilmesi gerekir. Yapay zekâ kapalıyken tüm manuel form ve Excel/PDF yükleme ekranlarını normal şekilde kullanabilirsiniz.")
+		return
+
+	ui.caption("Yüklediğiniz veya Evrak Deposundan seçtiğiniz belgeyi Gemini okur, hangi öğrenciye ait olduğunu yerel veritabanından eşleştirir ve çıkardığı tüm klinik bilgileri onayınızla doğrudan dosyasına işler.")
+
+	src_bytes: bytes | None = None
+	src_name: str = ""
+	if initial_file_path and initial_file_path.exists():
+		src_bytes = initial_file_path.read_bytes()
+		src_name = initial_file_path.name
+		ui.info(f"📄 **Seçili Depo Belgesi:** `{src_name}`")
+	else:
+		evrak_dir: Path = ctx_api["EVRAKLAR_DIR"]
+		depot_files = sorted([f for f in evrak_dir.iterdir() if f.is_file() and not f.name.startswith(".")], key=lambda x: x.stat().st_mtime, reverse=True) if evrak_dir.exists() else []
+		s_c1, s_c2 = ui.columns([1.4, 1.2])
+		with s_c1:
+			up_f = ui.file_uploader(
+				"📤 Yeni Belge Yükle (PDF, Fotoğraf, Word, Excel, TXT)",
+				type=["pdf", "png", "jpg", "jpeg", "webp", "docx", "xlsx", "csv", "txt"],
+				key="smart_imp_uploader",
+			)
+		with s_c2:
+			dep_opts = ["— Seçiniz —"] + [f.name for f in depot_files[:40]]
+			picked_dep = ui.selectbox("📁 Veya Evrak Deposundan Seç", dep_opts, index=0, key="smart_imp_depot_sel")
+		if up_f is not None:
+			src_bytes = up_f.read()
+			src_name = up_f.name
+		elif picked_dep != "— Seçiniz —":
+			p_cand = evrak_dir / picked_dep
+			if p_cand.exists():
+				src_bytes = p_cand.read_bytes()
+				src_name = p_cand.name
+
+	extra_note = ui.text_input(
+		"💬 Ek İpucu / Talimat (Opsiyonel)",
+		placeholder="Örn: Bu bir tahlil ve ÇÖZGER raporu, alerji ve ilaçları da çıkar",
+		key="smart_imp_extra_note",
+	)
+
+	res_key = f"smart_imp_result_{sha256(src_name.encode('utf-8')).hexdigest()[:10]}" if src_name else "smart_imp_result_none"
+	if ui.button("✨ Belgeyi Gemini ile Oku & Öğrenciyi Eşleştir", type="primary", disabled=(not src_bytes), use_container_width=True, key="btn_smart_imp_analyze"):
+		ext_txt = ""
+		if src_name.lower().endswith(".pdf") and src_bytes:
+			try:
+				ext_txt = ctx_api["extract_pdf_text"](src_bytes)
+			except Exception:
+				ext_txt = ""
+		with ui.spinner("Gemini belgeyi okuyor ve klinik bilgileri ayrıştırıyor..."):
+			ok_ex, ex_data, used_m = gai.extract_clinical_record_from_document_with_gemini(
+				api_key=gai_key,
+				model=gai_model,
+				file_bytes=src_bytes or b"",
+				file_name=src_name,
+				extracted_text=ext_txt,
+				extra_instruction=extra_note,
+			)
+		ui.session_state[res_key] = {"ok": ok_ex, "data": ex_data, "model": used_m, "name": src_name}
+		ui.rerun()
+
+	saved_res = ui.session_state.get(res_key)
+	if not isinstance(saved_res, dict):
+		return
+	if not saved_res.get("ok"):
+		ui.error(f"Belge analiz hatası: {saved_res.get('data', {}).get('error', 'Bilinmeyen hata')}")
+		return
+
+	data = saved_res["data"]
+	hints = data.get("detected_person_hints") or {}
+
+	with ui.container(border=True):
+		ui.markdown(f"##### 🤖 Analiz Tamamlandı ({saved_res.get('model')}) · Tür: **`{data.get('document_type', 'Sağlık Belgesi')}`**")
+		if data.get("clinical_summary"):
+			ui.markdown(f"📝 **Klinik Özet:** {data['clinical_summary']}")
+		if hints.get("name_hint") or hints.get("student_no_hint") or hints.get("class_hint"):
+			ui.caption(
+				f"🔎 Belgeden okunan kişi ipucu: **Ad:** `{hints.get('name_hint') or '—'}` · "
+				f"**No:** `{hints.get('student_no_hint') or '—'}` · **Sınıf:** `{hints.get('class_hint') or '—'}`"
+			)
+
+		# Öğrenci Eşleştirme Seçicisi
+		ranked = rank_matching_people(ctx_api["connect_db"], hints, limit=25)
+		match_opts = []
+		lbl_to_pid: dict[str, int] = {}
+		for rp in ranked:
+			pct = int(min(99, rp.get("_match_score", 0) * 65))
+			tag = f"🎯 %{pct} eşleşme · " if rp.get("_match_score", 0) >= 0.45 else ""
+			sno = f" (No: {rp['student_no']})" if rp.get("student_no") else ""
+			lbl = f"{tag}{rp['full_name']} · {rp['class_name']}{sno}"
+			match_opts.append(lbl)
+			lbl_to_pid[lbl] = int(rp["id"])
+
+		if not match_opts:
+			ui.warning("Veritabanında henüz kayıtlı kişi yok. Önce öğrenci oluşturun.")
+			return
+
+		picked_p_lbl = ui.selectbox("👤 Bilgilerin İşleneceği Hedef Öğrenci / Kişi (En yüksek eşleşme en üsttedir)", match_opts, index=0, key=f"smart_imp_target_{res_key}")
+		target_pid = lbl_to_pid[picked_p_lbl]
+
+		# Çıkarılan Alanların Onay Kutuları ve Önizlemeleri
+		hp_d = data.get("health_profile") or {}
+		labs_d = data.get("lab_results") or []
+		vit_d = data.get("vitals") or {}
+		meas_d = data.get("measurements") or {}
+		meds_d = data.get("medications") or []
+		dis_d = data.get("disability") or {}
+		diab_d = data.get("diabetes") or {}
+		v_note_d = str(data.get("visit_note_suggestion") or "").strip()
+
+		has_hp = any(str(hp_d.get(k) or "").strip() for k in ("allergies", "chronic_conditions", "blood_group", "regular_medications", "emergency_notes"))
+		has_vt = any(vit_d.get(k) not in (None, "") for k in ("temperature_c", "pulse_bpm", "spo2_pct", "systolic_bp", "diastolic_bp", "glucose_mg_dl"))
+		has_ms = any(meas_d.get(k) not in (None, "") for k in ("height_cm", "weight_kg", "head_circ_cm"))
+
+		ui.markdown("###### ✅ İşlenecek Bölümleri Seçin ve Onaylayın:")
+		chk1, chk2 = ui.columns(2)
+		with chk1:
+			c_hp = ui.checkbox(f"📋 Sağlık Profilini Güncelle {'(Veri bulundu)' if has_hp else '(Veri yok)'}", value=has_hp, disabled=not has_hp, key=f"si_chk_hp_{res_key}")
+			if has_hp:
+				ui.caption(f"Alerji: `{hp_d.get('allergies') or '—'}` · Kronik: `{hp_d.get('chronic_conditions') or '—'}` · Kan: `{hp_d.get('blood_group') or '—'}`")
+			c_labs = ui.checkbox(f"🧪 Laboratuvar Sonuçlarını İşle ({len(labs_d)} parametre)", value=bool(labs_d), disabled=not labs_d, key=f"si_chk_lab_{res_key}")
+			c_vt = ui.checkbox(f"💓 Vital Bulguları Kaydet {'(Veri bulundu)' if has_vt else '(Veri yok)'}", value=has_vt, disabled=not has_vt, key=f"si_chk_vt_{res_key}")
+			c_ms = ui.checkbox(f"📏 Boy / Kilo Ölçümü Kaydet {'(Veri bulundu)' if has_ms else '(Veri yok)'}", value=has_ms, disabled=not has_ms, key=f"si_chk_ms_{res_key}")
+		with chk2:
+			c_meds = ui.checkbox(f"💊 İlaç Takip Listesine Ekle ({len(meds_d)} ilaç)", value=bool(meds_d), disabled=not meds_d, key=f"si_chk_med_{res_key}")
+			c_dis = ui.checkbox(f"♿ Özel Gereksinim / Engel Profilini Güncelle {'(Tespit edildi)' if dis_d.get('has_disability') else '(Yok)'}", value=bool(dis_d.get("has_disability")), disabled=not dis_d.get("has_disability"), key=f"si_chk_dis_{res_key}")
+			c_diab = ui.checkbox(f"💉 Diyabet / İnsülin Profilini Güncelle {'(Tespit edildi)' if diab_d.get('is_diabetic') else '(Yok)'}", value=bool(diab_d.get("is_diabetic")), disabled=not diab_d.get("is_diabetic"), key=f"si_chk_diab_{res_key}")
+			c_vis = ui.checkbox("🩺 Revir İzlem / Belge Notu Olarak Kaydet", value=bool(v_note_d), key=f"si_chk_vis_{res_key}")
+
+		if labs_d:
+			ui.dataframe(pd.DataFrame(labs_d)[["test_name", "value_text", "unit", "ref_range", "flag"]].rename(columns={"test_name": "Test", "value_text": "Sonuç", "unit": "Birim", "ref_range": "Referans", "flag": "Durum"}), use_container_width=True, height=180)
+		if meds_d:
+			ui.dataframe(pd.DataFrame(meds_d), use_container_width=True, height=140)
+		if data.get("inferred_risks_and_actions"):
+			ui.info("🧠 **Belgeden Çıkarılan Dikkat Noktaları:**\n" + "\n".join(f"- {x}" for x in data["inferred_risks_and_actions"]))
+
+		save_to_depot = False
+		if initial_file_path is None and src_bytes:
+			save_to_depot = ui.checkbox("📁 Bu belgeyi ayrıca Revir Evrak Deposuna da arşivle", value=True, key=f"si_chk_dep_{res_key}")
+
+		if ui.button("✅ Onayla ve Seçili Verileri Kişi Dosyasına İşle", type="primary", use_container_width=True, key=f"btn_si_commit_{res_key}"):
+			logs = apply_extracted_clinical_record(
+				ctx_api["connect_db"],
+				target_pid,
+				data,
+				apply_profile=c_hp,
+				apply_labs=c_labs,
+				apply_vitals=c_vt,
+				apply_measurements=c_ms,
+				apply_meds=c_meds,
+				apply_disability=c_dis,
+				apply_diabetes=c_diab,
+				apply_visit_note=c_vis,
+				source_filename=src_name,
+				source_bytes=src_bytes,
+				age_in_months_fn=ctx_api.get("age_in_months"),
+			)
+			if save_to_depot and src_bytes and src_name:
+				evrak_dir: Path = ctx_api["EVRAKLAR_DIR"]
+				evrak_dir.mkdir(parents=True, exist_ok=True)
+				dst = _unique_target_path(evrak_dir, Path(src_name).stem, Path(src_name).suffix.lower() or ".pdf")
+				dst.write_bytes(src_bytes)
+				ctx_api["get_or_create_document_cover"](dst, force=True)
+				logs.append(f"📁 Belge `{dst.name}` olarak Evrak Deposuna arşivlendi")
+			ctx_api["sync_after_person_mutation"](target_pid)
+			ctx_api["set_active_person"](target_pid)
+			ui.session_state.pop(res_key, None)
+			if logs:
+				ui.success("✅ İşlem Tamamlandı:\n\n" + "\n".join(f"- {x}" for x in logs))
+			else:
+				ui.info("İşlenecek aktif bir bölüm seçilmedi.")
+			ui.rerun()

@@ -3287,9 +3287,12 @@ html, body {
 .revir-combo-clear:hover { color: #dc2626; }
 .revir-combo-menu {
 	display: none; position: absolute; left: 0; right: 0; top: calc(100% + 4px);
-	max-height: 270px; overflow-y: auto; z-index: 950;
+	max-height: 270px; overflow-y: auto; z-index: 9990;
 	background: var(--card-bg); border: 1px solid var(--line); border-radius: 9px;
-	box-shadow: 0 10px 30px rgba(0,0,0,0.16); padding: 4px;
+	box-shadow: 0 12px 32px rgba(15,23,42,0.22); padding: 4px;
+}
+.revir-combo-menu.revir-portaled {
+	position: fixed !important; right: auto !important; z-index: 99990 !important;
 }
 .revir-combo-menu.open { display: block; }
 .revir-combo-opt {
@@ -3364,15 +3367,16 @@ html, body {
 /* Expander */
 .revir-expander {
 	border: 1px solid var(--line); border-radius: 10px;
-	background: var(--card-bg); margin: 8px 0 12px 0; overflow: hidden;
+	background: var(--card-bg); margin: 8px 0 12px 0; overflow: visible;
 }
 .revir-expander-summary {
 	padding: 10px 14px; font-weight: 600; font-size: 0.93rem; cursor: pointer;
 	user-select: none; list-style: none; display: flex; align-items: center; justify-content: space-between;
+	border-radius: 10px;
 }
 .revir-expander-summary::after { content: "▾"; font-size: 13px; color: var(--text-muted); transition: transform 0.18s; }
 .revir-expander[open] > .revir-expander-summary::after { transform: rotate(180deg); }
-.revir-expander-body { padding: 4px 14px 14px 14px; border-top: 1px solid var(--line); }
+.revir-expander-body { padding: 4px 14px 14px 14px; border-top: 1px solid var(--line); border-radius: 0 0 10px 10px; }
 
 /* Popover */
 .revir-popover-wrap { position: relative; display: block; margin-bottom: 6px; }
@@ -3380,7 +3384,7 @@ html, body {
 	display: none; position: absolute; right: 0; top: calc(100% + 6px);
 	min-width: 280px; max-width: 350px; max-height: 75vh; overflow-y: auto;
 	background: var(--card-bg); border: 1px solid var(--line); border-radius: 12px;
-	padding: 14px; box-shadow: 0 12px 34px rgba(0,0,0,0.22); z-index: 980;
+	padding: 14px; box-shadow: 0 12px 34px rgba(0,0,0,0.22); z-index: 9900;
 }
 .revir-popover-body.flip-up { top: auto; bottom: calc(100% + 6px); }
 .revir-popover-body.open { display: block; }
@@ -4085,6 +4089,7 @@ body.revir-busy .revir-btn { pointer-events: none; }
 
 	function applyRender(data, mainScroll, dlgScroll, sbScroll, refocusId) {
 		if (!data) return;
+		cleanupPortaledMenus();
 		if (data.title) document.title = data.title;
 
 		var dynStyles = document.getElementById("revir-dynamic-styles");
@@ -4293,6 +4298,93 @@ body.revir-busy .revir-btn { pointer-events: none; }
 		sendAction({ action: "form_submit", form_id: formId, form_values: vals });
 	};
 
+	// Portal tabanlı Fixed-Viewport Açılır Menü Konumlandırıcı (Expander/Kart/Modal Kesilmesini Tamamen Önler)
+	function portalAndPositionMenu(wrap, menu) {
+		if (!wrap || !menu) return;
+		var ctrl = wrap.querySelector(".revir-combo-control, .revir-multi-control") || wrap;
+		if (menu.dataset.portaled !== "1") {
+			menu.__origParent = menu.parentNode;
+			menu.__origNext = menu.nextSibling;
+			menu.__anchorWrap = wrap;
+			menu.dataset.portaled = "1";
+			menu.classList.add("revir-portaled");
+			document.body.appendChild(menu);
+		} else {
+			menu.__anchorWrap = wrap;
+		}
+		var rect = ctrl.getBoundingClientRect();
+		var vw = window.innerWidth || document.documentElement.clientWidth || 1200;
+		var vh = window.innerHeight || document.documentElement.clientHeight || 800;
+		var spaceBelow = vh - rect.bottom - 12;
+		var spaceAbove = rect.top - 12;
+		var menuW = Math.min(Math.max(rect.width, 220), vw - 20);
+		var leftPos = Math.max(10, Math.min(rect.left, vw - menuW - 10));
+		menu.style.left = leftPos + "px";
+		menu.style.width = menuW + "px";
+		if (spaceBelow < 190 && spaceAbove > spaceBelow) {
+			var maxHUp = Math.max(120, Math.min(280, spaceAbove - 6));
+			menu.style.top = "auto";
+			menu.style.bottom = (vh - rect.top + 4) + "px";
+			menu.style.maxHeight = maxHUp + "px";
+		} else {
+			var maxHDn = Math.max(120, Math.min(280, spaceBelow - 4));
+			menu.style.bottom = "auto";
+			menu.style.top = (rect.bottom + 4) + "px";
+			menu.style.maxHeight = maxHDn + "px";
+		}
+	}
+
+	function restorePortaledMenu(menu) {
+		if (!menu) return;
+		menu.classList.remove("open");
+		if (menu.dataset.portaled === "1") {
+			menu.classList.remove("revir-portaled");
+			menu.dataset.portaled = "0";
+			menu.style.left = "";
+			menu.style.top = "";
+			menu.style.bottom = "";
+			menu.style.width = "";
+			menu.style.maxHeight = "";
+			if (menu.__origParent && menu.__origParent.isConnected) {
+				if (menu.__origNext && menu.__origNext.parentNode === menu.__origParent) {
+					menu.__origParent.insertBefore(menu, menu.__origNext);
+				} else {
+					menu.__origParent.appendChild(menu);
+				}
+			} else if (menu.parentNode === document.body) {
+				menu.remove();
+			}
+		}
+	}
+
+	function cleanupPortaledMenus() {
+		document.querySelectorAll('.revir-combo-menu[data-portaled="1"]').forEach(function(m) {
+			m.remove();
+		});
+	}
+
+	function repositionOpenMenus(ev) {
+		var openMenus = document.querySelectorAll('.revir-combo-menu.open[data-portaled="1"]');
+		if (!openMenus.length) return;
+		openMenus.forEach(function(m) {
+			if (ev && ev.target && (ev.target === m || (m.contains && m.contains(ev.target)))) return;
+			var w = m.__anchorWrap;
+			if (!w || !w.isConnected) {
+				restorePortaledMenu(m);
+				return;
+			}
+			var r = w.getBoundingClientRect();
+			if (r.bottom < 0 || r.top > (window.innerHeight || 800)) {
+				restorePortaledMenu(m);
+				return;
+			}
+			portalAndPositionMenu(w, m);
+		});
+	}
+
+	window.addEventListener("scroll", repositionOpenMenus, true);
+	window.addEventListener("resize", repositionOpenMenus);
+
 	// Aranabilir Selectbox (Klavye ↑↓↵ + Fare Destekli)
 	function renderComboMenu(key, filterTxt) {
 		var wrap = document.querySelector('.revir-combo[data-key="' + CSS.escape(key) + '"]');
@@ -4315,16 +4407,18 @@ body.revir-busy .revir-btn { pointer-events: none; }
 	}
 
 	window.__revirComboKey = function(key, ev) {
+		var wrap = document.querySelector('.revir-combo[data-key="' + CSS.escape(key) + '"]');
 		var menu = document.getElementById("combo_" + key);
 		if (!menu) return;
 		if (ev.key === "Escape") {
-			menu.classList.remove("open");
+			restorePortaledMenu(menu);
 			return;
 		}
 		if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
 			ev.preventDefault();
 			if (!menu.classList.contains("open")) {
 				renderComboMenu(key, "");
+				portalAndPositionMenu(wrap, menu);
 				menu.classList.add("open");
 			}
 			var items = Array.prototype.slice.call(menu.querySelectorAll(".revir-combo-opt[data-opt-idx]"));
@@ -4348,15 +4442,21 @@ body.revir-busy .revir-btn { pointer-events: none; }
 	window.__revirOpenCombo = function(key, ev) {
 		if (ev) ev.stopPropagation();
 		closeAllMenus("combo_" + key);
+		var wrap = document.querySelector('.revir-combo[data-key="' + CSS.escape(key) + '"]');
 		var menu = document.getElementById("combo_" + key);
 		if (!menu) return;
 		renderComboMenu(key, "");
+		portalAndPositionMenu(wrap, menu);
 		menu.classList.add("open");
 	};
 
 	window.__revirFilterCombo = function(key, val) {
+		var wrap = document.querySelector('.revir-combo[data-key="' + CSS.escape(key) + '"]');
 		var menu = document.getElementById("combo_" + key);
-		if (menu && !menu.classList.contains("open")) menu.classList.add("open");
+		if (menu) {
+			portalAndPositionMenu(wrap, menu);
+			if (!menu.classList.contains("open")) menu.classList.add("open");
+		}
 		renderComboMenu(key, val);
 	};
 
@@ -4374,7 +4474,7 @@ body.revir-busy .revir-btn { pointer-events: none; }
 		if (ev) { ev.preventDefault(); ev.stopPropagation(); }
 		var wrap = document.querySelector('.revir-combo[data-key="' + CSS.escape(key) + '"]');
 		var menu = document.getElementById("combo_" + key);
-		if (menu) menu.classList.remove("open");
+		if (menu) restorePortaledMenu(menu);
 		if (!wrap) return;
 		var opts = JSON.parse(wrap.dataset.options || "[]");
 		wrap.dataset.value = String(idx);
@@ -4418,12 +4518,13 @@ body.revir-busy .revir-btn { pointer-events: none; }
 	}
 
 	window.__revirMultiKey = function(key, ev) {
+		var wrap = document.querySelector('.revir-multi[data-key="' + CSS.escape(key) + '"]');
 		var menu = document.getElementById("multi_" + key);
 		if (!menu) return;
-		if (ev.key === "Escape") { menu.classList.remove("open"); return; }
+		if (ev.key === "Escape") { restorePortaledMenu(menu); return; }
 		if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
 			ev.preventDefault();
-			if (!menu.classList.contains("open")) { renderMultiMenu(key, ""); menu.classList.add("open"); }
+			if (!menu.classList.contains("open")) { renderMultiMenu(key, ""); portalAndPositionMenu(wrap, menu); menu.classList.add("open"); }
 			var items = Array.prototype.slice.call(menu.querySelectorAll(".revir-combo-opt[data-opt-idx]"));
 			if (!items.length) return;
 			var curI = items.findIndex(function(x) { return x.classList.contains("kbd-active"); });
@@ -4445,15 +4546,21 @@ body.revir-busy .revir-btn { pointer-events: none; }
 	window.__revirOpenMulti = function(key, ev) {
 		if (ev) ev.stopPropagation();
 		closeAllMenus("multi_" + key);
+		var wrap = document.querySelector('.revir-multi[data-key="' + CSS.escape(key) + '"]');
 		var menu = document.getElementById("multi_" + key);
 		if (!menu) return;
 		renderMultiMenu(key, "");
+		portalAndPositionMenu(wrap, menu);
 		menu.classList.add("open");
 	};
 
 	window.__revirFilterMulti = function(key, val) {
+		var wrap = document.querySelector('.revir-multi[data-key="' + CSS.escape(key) + '"]');
 		var menu = document.getElementById("multi_" + key);
-		if (menu && !menu.classList.contains("open")) menu.classList.add("open");
+		if (menu) {
+			portalAndPositionMenu(wrap, menu);
+			if (!menu.classList.contains("open")) menu.classList.add("open");
+		}
 		renderMultiMenu(key, val);
 	};
 
@@ -4529,7 +4636,10 @@ body.revir-busy .revir-btn { pointer-events: none; }
 
 	function closeAllMenus(exceptId) {
 		document.querySelectorAll(".revir-combo-menu.open, .revir-popover-body.open").forEach(function(m) {
-			if (m.id !== exceptId) m.classList.remove("open");
+			if (m.id !== exceptId) {
+				if (m.classList.contains("revir-combo-menu")) restorePortaledMenu(m);
+				else m.classList.remove("open");
+			}
 		});
 	}
 
@@ -4864,7 +4974,7 @@ body.revir-busy .revir-btn { pointer-events: none; }
 	document.addEventListener("click", function(ev) {
 		var closeSb = ev.target && ev.target.closest ? ev.target.closest(".revir-sidebar-close-btn") : null;
 		if (closeSb) { window.__revirToggleSidebar(); return; }
-		if (!ev.target.closest(".revir-combo") && !ev.target.closest(".revir-multi") && !ev.target.closest(".revir-popover-wrap")) {
+		if (!ev.target.closest(".revir-combo") && !ev.target.closest(".revir-multi") && !ev.target.closest(".revir-combo-menu") && !ev.target.closest(".revir-popover-wrap")) {
 			closeAllMenus();
 		}
 	});
