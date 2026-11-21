@@ -2298,10 +2298,11 @@ class _UIContainer:
 			row_parts.append(f'<tr><td colspan="{colspan}" class="revir-empty-td">Kayıt bulunamadı.</td></tr>')
 
 		ctx.emit(
+			f'<div class="revir-table-outer" data-tbl-key="{esc_key}" data-tbl-explicit="{1 if key is not None else 0}">'
 			f'<div class="revir-table-wrap" style="{h_style}">'
 			f'<table class="revir-table{" revir-table-selectable" if selectable else ""}">'
 			f'<thead><tr>{"".join(th_parts)}</tr></thead>'
-			f'<tbody>{"".join(row_parts)}</tbody></table></div>'
+			f'<tbody>{"".join(row_parts)}</tbody></table></div></div>'
 		)
 
 		if selectable:
@@ -2493,10 +2494,11 @@ class _UIContainer:
 		)
 		ctx.emit(
 			f'<div class="revir-editor-box" data-editor-key="{esc_key}">'
+			f'<div class="revir-table-outer" data-tbl-key="{esc_key}" data-tbl-explicit="{1 if is_keyed else 0}">'
 			f'<div class="revir-table-wrap" style="{h_style}">'
 			f'<table class="revir-table revir-editor-table">'
 			f'<thead><tr>{"".join(th_parts)}</tr></thead>'
-			f'<tbody>{"".join(tr_parts)}</tbody></table></div>{add_footer}</div>'
+			f'<tbody>{"".join(tr_parts)}</tbody></table></div></div>{add_footer}</div>'
 		)
 		return out_df
 
@@ -3188,7 +3190,7 @@ html, body {
 }
 
 .revir-main {
-	flex: 1; overflow-y: auto; overflow-x: hidden;
+	flex: 1; overflow-y: auto; overflow-x: auto;
 	padding: 20px 28px 64px 28px;
 	scroll-behavior: auto;
 }
@@ -3466,17 +3468,92 @@ html, body {
 .revir-popover-body.open { display: block; }
 
 /* Tablolar & Data Editor */
-.revir-table-wrap {
+.revir-table-outer {
+	position: relative; display: block; width: 100%; max-width: 100%;
+	margin-bottom: 10px; box-sizing: border-box;
+}
+.revir-table-outer > .revir-table-wrap,
+.revir-table-outer > .revir-md-table-wrap {
+	margin-bottom: 0 !important; width: 100%; box-sizing: border-box;
+}
+.revir-table-outer.revir-tbl-resizing {
+	outline: 2px dashed var(--teal); outline-offset: 1px; border-radius: 10px;
+	user-select: none !important;
+}
+.revir-table-outer.revir-tbl-resizing > .revir-table-wrap,
+.revir-table-outer.revir-tbl-resizing > .revir-md-table-wrap {
+	border-color: var(--teal); box-shadow: 0 8px 26px rgba(13,148,136,0.18);
+}
+.revir-tbl-handle-r, .revir-tbl-handle-l {
+	position: absolute; top: 6px; bottom: 14px; width: 9px;
+	cursor: ew-resize; z-index: 12; touch-action: none;
+}
+.revir-tbl-handle-r { right: -4px; }
+.revir-tbl-handle-l { left: -4px; }
+.revir-tbl-handle-r::after, .revir-tbl-handle-l::after {
+	content: ""; position: absolute; top: 18%; bottom: 18%; left: 3px; width: 3px;
+	border-radius: 999px; background: var(--teal); opacity: 0; transition: opacity 0.14s ease;
+}
+.revir-tbl-handle-r:hover::after, .revir-tbl-handle-l:hover::after,
+.revir-table-outer.revir-tbl-resizing .revir-tbl-handle-r::after,
+.revir-table-outer.revir-tbl-resizing .revir-tbl-handle-l::after { opacity: 0.78; }
+
+.revir-tbl-handle-b {
+	position: absolute; left: 14px; right: 16px; bottom: -4px; height: 9px;
+	cursor: ns-resize; z-index: 12; touch-action: none;
+}
+.revir-tbl-handle-b::after {
+	content: ""; position: absolute; left: 22%; right: 22%; top: 3px; height: 3px;
+	border-radius: 999px; background: var(--teal); opacity: 0; transition: opacity 0.14s ease;
+}
+.revir-tbl-handle-b:hover::after,
+.revir-table-outer.revir-tbl-resizing .revir-tbl-handle-b::after { opacity: 0.78; }
+
+.revir-tbl-handle-sw {
+	position: absolute; left: -2px; bottom: -2px; width: 14px; height: 14px;
+	cursor: nesw-resize; z-index: 13; touch-action: none;
+}
+.revir-tbl-handle-se {
+	position: absolute; right: 0; bottom: 0; width: 16px; height: 16px;
+	cursor: nwse-resize; z-index: 14; touch-action: none;
+	border-radius: 0 0 9px 0;
+	background: linear-gradient(135deg, transparent 46%, rgba(13,148,136,0.45) 48%, transparent 56%, rgba(13,148,136,0.75) 76%);
+	opacity: 0.58; transition: opacity 0.15s ease;
+}
+.revir-table-outer:hover .revir-tbl-handle-se,
+.revir-table-outer.revir-tbl-resizing .revir-tbl-handle-se { opacity: 1; }
+
+.revir-col-resizer {
+	position: absolute; top: 0; right: 0; width: 7px; height: 100%;
+	cursor: col-resize; z-index: 7; user-select: none; touch-action: none;
+}
+.revir-col-resizer::after {
+	content: ""; position: absolute; top: 22%; bottom: 22%; right: 2px; width: 2px;
+	border-radius: 2px; background: var(--teal); opacity: 0; transition: opacity 0.12s ease;
+}
+.revir-col-resizer:hover::after, .revir-col-resizer.active::after { opacity: 0.85; }
+
+.revir-table-wrap, .revir-md-table-wrap {
 	width: 100%; overflow: auto; border: 1px solid var(--line);
 	border-radius: 10px; background: var(--card-bg); margin-bottom: 10px;
+	box-sizing: border-box;
 }
-.revir-table { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
-.revir-table thead th {
+.revir-md-table-wrap { max-height: 460px; }
+.revir-cmsg .revir-md-table-wrap { max-height: 280px; margin: 6px 0; }
+.revir-table, .revir-md-table { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
+.revir-table-fixed-cols { table-layout: fixed; }
+.revir-table-fixed-cols th, .revir-table-fixed-cols td { overflow: hidden; text-overflow: ellipsis; }
+.revir-table-fixed-cols .revir-ed-input, .revir-table-fixed-cols .revir-ed-select { min-width: 0; }
+.revir-table th, .revir-table td, .revir-md-table th, .revir-md-table td { box-sizing: border-box; }
+.revir-table thead th, .revir-md-table thead th {
 	position: sticky; top: 0; z-index: 3;
 	background: var(--sidebar-bg); color: var(--text-heading);
 	font-weight: 700; text-align: left; padding: 9px 11px;
 	border-bottom: 1.5px solid var(--line); white-space: nowrap; cursor: pointer; user-select: none;
 }
+.revir-md-table thead th { cursor: default; }
+.revir-md-table tbody td { padding: 7px 11px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.revir-md-table tbody tr:hover td { background: rgba(13,148,136,0.05); }
 .revir-sticky-th { position: sticky !important; left: 0; z-index: 5 !important; background: var(--sidebar-bg) !important; box-shadow: 2px 0 6px rgba(15,23,42,0.06); }
 .revir-sticky-td { position: sticky !important; left: 0; z-index: 2; background: var(--card-bg); box-shadow: 2px 0 6px rgba(15,23,42,0.05); }
 .revir-table tbody tr:hover td.revir-sticky-td { background: var(--mint); }
@@ -3639,12 +3716,53 @@ body.revir-dark .revir-a4-stage, .dark .revir-a4-stage { background: #1e293b; }
 .revir-modal-backdrop.open { display: flex; }
 .revir-modal-backdrop.drawer-mode { justify-content: flex-end; align-items: stretch; padding: 0; }
 .revir-modal-card {
+	position: relative;
 	background: var(--card-bg); color: var(--text-main);
 	border: 1px solid var(--line); border-radius: 16px;
 	box-shadow: 0 24px 64px rgba(0,0,0,0.34);
 	width: 93vw; max-width: 1220px; max-height: 92vh;
 	display: flex; flex-direction: column; overflow: hidden;
 	transition: width 0.2s ease, max-width 0.2s ease, height 0.2s ease, max-height 0.2s ease;
+}
+.revir-modal-card.revir-modal-resizing {
+	transition: none !important; user-select: none !important;
+	border-color: var(--teal) !important;
+	box-shadow: 0 24px 64px rgba(13,148,136,0.28) !important;
+}
+.revir-modal-resize-r, .revir-modal-resize-l {
+	position: absolute; top: 10px; bottom: 16px; width: 7px;
+	cursor: ew-resize; z-index: 25; touch-action: none;
+}
+.revir-modal-resize-r { right: 0; }
+.revir-modal-resize-l { left: 0; }
+.revir-modal-resize-b {
+	position: absolute; left: 14px; right: 16px; bottom: 0; height: 7px;
+	cursor: ns-resize; z-index: 25; touch-action: none;
+}
+.revir-modal-resize-se {
+	position: absolute; right: 2px; bottom: 2px; width: 16px; height: 16px;
+	cursor: nwse-resize; z-index: 26; touch-action: none; border-radius: 0 0 10px 0;
+	background: linear-gradient(135deg, transparent 46%, rgba(13,148,136,0.45) 48%, transparent 56%, rgba(13,148,136,0.75) 76%);
+	opacity: 0.55; transition: opacity 0.15s ease;
+}
+.revir-modal-resize-sw {
+	position: absolute; left: 2px; bottom: 2px; width: 14px; height: 14px;
+	cursor: nesw-resize; z-index: 26; touch-action: none;
+}
+.revir-modal-card:hover .revir-modal-resize-se { opacity: 0.95; }
+.revir-modal-card.fullscreen .revir-modal-resize-r,
+.revir-modal-card.fullscreen .revir-modal-resize-l,
+.revir-modal-card.fullscreen .revir-modal-resize-b,
+.revir-modal-card.fullscreen .revir-modal-resize-se,
+.revir-modal-card.fullscreen .revir-modal-resize-sw,
+.revir-modal-card.drawer .revir-modal-resize-r,
+.revir-modal-card.drawer .revir-modal-resize-b,
+.revir-modal-card.drawer .revir-modal-resize-se,
+.revir-modal-card.drawer .revir-modal-resize-sw { display: none; }
+#revir-resize-badge {
+	position: fixed; display: none; z-index: 99999; pointer-events: none;
+	background: #0f172a; color: #ffffff; font-size: 11px; font-weight: 800;
+	padding: 3px 8px; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.24);
 }
 .revir-modal-card.small { max-width: 640px; }
 .revir-modal-card.drawer {
@@ -4014,6 +4132,11 @@ body.revir-busy .revir-btn { pointer-events: none; }
 			</div>
 		</div>
 		<div id="revir-modal-body" class="revir-modal-body"></div>
+		<div class="revir-modal-resize-l" data-mres="l" title="Pencere genişliğini ayarlamak için sürükleyin · Sıfırlamak için çift tıklayın"></div>
+		<div class="revir-modal-resize-r" data-mres="r" title="Pencere genişliğini ayarlamak için sürükleyin · Sıfırlamak için çift tıklayın"></div>
+		<div class="revir-modal-resize-b" data-mres="b" title="Pencere yüksekliğini ayarlamak için sürükleyin · Sıfırlamak için çift tıklayın"></div>
+		<div class="revir-modal-resize-sw" data-mres="sw" title="Boyutlandırmak için sürükleyin · Sıfırlamak için çift tıklayın"></div>
+		<div class="revir-modal-resize-se" data-mres="se" title="Boyutlandırmak için sürükleyin · Sıfırlamak için çift tıklayın"></div>
 	</div>
 </div>
 <div id="revir-cmd-backdrop" onclick="if(event.target===this) window.__revirCloseCmdPalette()">
@@ -4031,6 +4154,7 @@ body.revir-busy .revir-btn { pointer-events: none; }
 	</div>
 </div>
 <div id="revir-chart-tooltip"></div>
+<div id="revir-resize-badge"></div>
 <div id="revir-toast" onclick="this.style.display='none'" title="Kapatmak için tıklayın"></div>
 
 <!-- Yüzen Gemini Sohbet Butonu ve Konuşma Balonu -->
@@ -4095,6 +4219,7 @@ body.revir-busy .revir-btn { pointer-events: none; }
 	var modalDirty = false;
 	var modalBackdropWarned = false;
 	var lastDialogSig = "";
+	var lastDialogTitle = "";
 	var lastRenderedPage = "";
 	var loadingPillTimer = null;
 	var cmdItems = [];
@@ -4286,6 +4411,7 @@ body.revir-busy .revir-btn { pointer-events: none; }
 				mBody.scrollTop = dlgScroll;
 			}
 			var isDrawer = (data.dialog_mode === "drawer");
+			lastDialogTitle = String(data.dialog_title || "");
 			if (backdrop) {
 				backdrop.classList.add("open");
 				backdrop.classList.toggle("drawer-mode", isDrawer);
@@ -4293,11 +4419,13 @@ body.revir-busy .revir-btn { pointer-events: none; }
 			if (card) {
 				card.classList.toggle("small", !isDrawer && data.dialog_width === "small");
 				card.classList.toggle("drawer", isDrawer);
+				applySavedModalSize(card, lastDialogTitle, isDrawer);
 			}
 			if (mBack) mBack.classList.toggle("visible", Number(data.dialog_depth || 0) > 1);
 			if (mFs) mFs.style.display = isDrawer ? "none" : "flex";
 			document.body.classList.add("modal-open");
 		} else {
+			lastDialogTitle = "";
 			if (backdrop) {
 				backdrop.classList.remove("open");
 				backdrop.classList.remove("drawer-mode");
@@ -4305,6 +4433,10 @@ body.revir-busy .revir-btn { pointer-events: none; }
 			if (card) {
 				card.classList.remove("drawer");
 				card.classList.remove("fullscreen");
+				card.style.width = "";
+				card.style.maxWidth = "";
+				card.style.height = "";
+				card.style.maxHeight = "";
 			}
 			if (mBody) mBody.innerHTML = "";
 			modalDirty = false;
@@ -4335,6 +4467,8 @@ body.revir-busy .revir-btn { pointer-events: none; }
 				} catch (e) {}
 			});
 		}
+
+		if (window.__revirInitResizableTables) window.__revirInitResizableTables();
 
 		// Konfeti animasyonu
 		if (data.balloons) launchConfetti();
@@ -4796,6 +4930,7 @@ body.revir-busy .revir-btn { pointer-events: none; }
 	window.__revirSortTable = function(th) {
 		var tbl = th.closest("table");
 		if (!tbl || tbl.classList.contains("revir-editor-table")) return;
+		if (tbl.dataset.colResizeAt && (Date.now() - parseInt(tbl.dataset.colResizeAt, 10)) < 320) return;
 		var tbody = tbl.querySelector("tbody");
 		if (!tbody) return;
 		var idx = Array.prototype.indexOf.call(th.parentNode.children, th);
@@ -4958,6 +5093,9 @@ body.revir-busy .revir-btn { pointer-events: none; }
 	};
 
 	window.__revirTryBackdropClose = function() {
+		if (window.__revirLastResizeEndAt && (Date.now() - window.__revirLastResizeEndAt) < 350) {
+			return;
+		}
 		if (modalDirty && !modalBackdropWarned) {
 			modalBackdropWarned = true;
 			showToast("⚠️ Kaydedilmemiş değişiklikler var — kapatmak için ✕ tuşuna veya dışarı tekrar tıklayın.");
@@ -5479,6 +5617,434 @@ body.revir-busy .revir-btn { pointer-events: none; }
 			chatBusy = false;
 		});
 	};
+
+	// Tablo & Modal Pencere Kenarından/Köşesinden ve Sütun Çizgisinden Canlı Boyutlandırma
+	var TBL_STORE_KEY = "revir_table_sizes_v1";
+	var MODAL_STORE_KEY = "revir_modal_sizes_v1";
+
+	function loadResizeStore(k) {
+		try { return JSON.parse(localStorage.getItem(k) || "{}") || {}; } catch (e) { return {}; }
+	}
+	function saveResizeStore(k, obj) {
+		try { localStorage.setItem(k, JSON.stringify(obj)); } catch (e) {}
+	}
+	function showResizeBadge(txt, x, y) {
+		var b = document.getElementById("revir-resize-badge");
+		if (!b) return;
+		b.textContent = txt;
+		b.style.display = "block";
+		b.style.left = Math.min(window.innerWidth - 130, x + 14) + "px";
+		b.style.top = Math.max(8, Math.min(window.innerHeight - 34, y + 14)) + "px";
+	}
+	function hideResizeBadge() {
+		var b = document.getElementById("revir-resize-badge");
+		if (b) b.style.display = "none";
+	}
+
+	function applySavedModalSize(card, titleStr, isDrawer) {
+		if (!card || card.classList.contains("fullscreen")) return;
+		var store = loadResizeStore(MODAL_STORE_KEY);
+		var mKey = (isDrawer ? "drawer:" : "modal:") + String(titleStr || "");
+		var sv = store[mKey];
+		if (sv && sv.w) {
+			var maxW = Math.round((window.innerWidth || 1200) * (isDrawer ? 0.96 : 0.98));
+			card.style.width = Math.max(360, Math.min(maxW, sv.w)) + "px";
+			card.style.maxWidth = isDrawer ? "96vw" : "98vw";
+		} else {
+			card.style.width = "";
+			card.style.maxWidth = "";
+		}
+		if (!isDrawer && sv && sv.h) {
+			var maxH = Math.round((window.innerHeight || 800) * 0.96);
+			card.style.height = Math.max(240, Math.min(maxH, sv.h)) + "px";
+			card.style.maxHeight = "96vh";
+		} else {
+			card.style.height = "";
+			card.style.maxHeight = "";
+		}
+	}
+
+	function initResizableModal() {
+		var card = document.getElementById("revir-modal-card");
+		if (!card || card.dataset.modalResizeInit === "1") return;
+		card.dataset.modalResizeInit = "1";
+		card.querySelectorAll("[data-mres]").forEach(function(handle) {
+			var mode = handle.dataset.mres;
+			handle.addEventListener("pointerdown", function(e) {
+				if (e.button !== 0 || card.classList.contains("fullscreen")) return;
+				e.preventDefault();
+				e.stopPropagation();
+				var isDrawer = card.classList.contains("drawer");
+				var rect = card.getBoundingClientRect();
+				var startX = e.clientX;
+				var startY = e.clientY;
+				var startW = rect.width;
+				var startH = rect.height;
+				var vw = window.innerWidth || 1200;
+				var vh = window.innerHeight || 800;
+				var store = loadResizeStore(MODAL_STORE_KEY);
+				var mKey = (isDrawer ? "drawer:" : "modal:") + String(lastDialogTitle || "");
+				card.classList.add("revir-modal-resizing");
+
+				function onMove(mv) {
+					var dx = mv.clientX - startX;
+					var dy = mv.clientY - startY;
+					store[mKey] = store[mKey] || {};
+					if (mode === "r" || mode === "l" || mode === "se" || mode === "sw") {
+						var newW;
+						if (isDrawer) {
+							newW = Math.round(Math.max(360, Math.min(vw * 0.96, startW - dx)));
+							card.style.maxWidth = "96vw";
+						} else {
+							var deltaW = (mode === "l" || mode === "sw") ? (-dx * 2) : (dx * 2);
+							newW = Math.round(Math.max(360, Math.min(vw * 0.98, startW + deltaW)));
+							card.style.maxWidth = "98vw";
+						}
+						card.style.width = newW + "px";
+						store[mKey].w = newW;
+					}
+					if (!isDrawer && (mode === "b" || mode === "se" || mode === "sw")) {
+						var newH = Math.round(Math.max(240, Math.min(vh * 0.96, startH + dy * 2)));
+						card.style.height = newH + "px";
+						card.style.maxHeight = "96vh";
+						store[mKey].h = newH;
+					}
+					var curR = card.getBoundingClientRect();
+					showResizeBadge(Math.round(curR.width) + " × " + Math.round(curR.height) + " px", mv.clientX, mv.clientY);
+				}
+
+				function onUp() {
+					window.__revirLastResizeEndAt = Date.now();
+					card.classList.remove("revir-modal-resizing");
+					hideResizeBadge();
+					saveResizeStore(MODAL_STORE_KEY, store);
+					window.removeEventListener("pointermove", onMove);
+					window.removeEventListener("pointerup", onUp);
+					window.removeEventListener("pointercancel", onUp);
+				}
+
+				window.addEventListener("pointermove", onMove);
+				window.addEventListener("pointerup", onUp);
+				window.addEventListener("pointercancel", onUp);
+			});
+
+			handle.addEventListener("dblclick", function(e) {
+				e.preventDefault();
+				e.stopPropagation();
+				var isDrawer = card.classList.contains("drawer");
+				var store = loadResizeStore(MODAL_STORE_KEY);
+				var mKey = (isDrawer ? "drawer:" : "modal:") + String(lastDialogTitle || "");
+				delete store[mKey];
+				saveResizeStore(MODAL_STORE_KEY, store);
+				card.style.width = "";
+				card.style.maxWidth = "";
+				card.style.height = "";
+				card.style.maxHeight = "";
+			});
+		});
+	}
+
+	function computeTableStoreId(outer, tbl, seenMap) {
+		var scope = outer.closest("#revir-modal-body") ? ("modal:" + (lastDialogTitle || "dlg")) : ("page:" + (lastRenderedPage || "main"));
+		var expKey = outer.dataset.tblExplicit === "1" ? (outer.dataset.tblKey || "") : "";
+		var part;
+		if (expKey) {
+			part = "k:" + expKey;
+		} else {
+			var hdrs = [];
+			if (tbl) {
+				tbl.querySelectorAll("thead th").forEach(function(th) {
+					if (hdrs.length < 8) {
+						hdrs.push((th.textContent || "").replace(/[⇅▲▼]/g, "").trim().slice(0, 24));
+					}
+				});
+			}
+			part = "h:" + (hdrs.join("|") || (outer.dataset.tblKey || "tbl"));
+		}
+		var base = scope + "::" + part;
+		seenMap[base] = (seenMap[base] || 0) + 1;
+		return base + "#" + seenMap[base];
+	}
+
+	function initResizableTables() {
+		var wraps = document.querySelectorAll("#revir-main .revir-table-wrap, #revir-main .revir-md-table-wrap, #revir-modal-body .revir-table-wrap, #revir-modal-body .revir-md-table-wrap");
+		wraps.forEach(function(wrap) {
+			if (wrap.closest(".revir-a4-sheet, .revir-a4-sheet-landscape, #revir-chat-messages")) return;
+			if (!wrap.parentElement || !wrap.parentElement.classList.contains("revir-table-outer")) {
+				var outerNew = document.createElement("div");
+				outerNew.className = "revir-table-outer";
+				outerNew.dataset.tblExplicit = "0";
+				wrap.parentNode.insertBefore(outerNew, wrap);
+				outerNew.appendChild(wrap);
+			}
+		});
+
+		var store = loadResizeStore(TBL_STORE_KEY);
+		var seenMap = {};
+		document.querySelectorAll(".revir-table-outer").forEach(function(outer) {
+			if (outer.closest("#revir-chat-messages, .revir-a4-sheet, .revir-a4-sheet-landscape")) return;
+			var wrap = outer.querySelector(":scope > .revir-table-wrap, :scope > .revir-md-table-wrap");
+			if (!wrap) return;
+			var tbl = wrap.querySelector("table");
+			if (!tbl) return;
+
+			if (wrap.dataset.origMaxHeight === undefined) {
+				wrap.dataset.origMaxHeight = wrap.style.maxHeight || "";
+			}
+			var storeId = computeTableStoreId(outer, tbl, seenMap);
+			outer.dataset.tblStoreId = storeId;
+
+			var sv = store[storeId];
+			if (sv) {
+				if (sv.h) {
+					wrap.style.height = sv.h + "px";
+					wrap.style.maxHeight = sv.h + "px";
+				}
+				if (sv.ml) {
+					outer.style.marginLeft = sv.ml + "px";
+				}
+				if (sv.w) {
+					outer.style.width = sv.w + "px";
+					var pw0 = outer.parentElement ? outer.parentElement.clientWidth : 0;
+					if (pw0 > 0 && sv.w > pw0 + 2) outer.style.maxWidth = "none";
+				}
+				var ths0 = tbl.querySelectorAll("thead th");
+				if (Array.isArray(sv.cols) && sv.cols.length === ths0.length && sv.cols.every(function(x) { return typeof x === "number" && x >= 36; })) {
+					var totalColW = 0;
+					tbl.classList.add("revir-table-fixed-cols");
+					tbl.style.tableLayout = "fixed";
+					ths0.forEach(function(thEl, idx) {
+						var cw = Math.round(sv.cols[idx]);
+						thEl.style.width = cw + "px";
+						thEl.style.minWidth = cw + "px";
+						totalColW += cw;
+					});
+					tbl.style.width = "max(100%, " + totalColW + "px)";
+				}
+			}
+
+			// Sütun kenar çizgisi boyutlandırıcıları
+			tbl.querySelectorAll("thead th").forEach(function(th, cIdx, allThs) {
+				if (th.classList.contains("revir-ed-act-th")) return;
+				if (th.querySelector(":scope > .revir-col-resizer")) return;
+				var colHandle = document.createElement("span");
+				colHandle.className = "revir-col-resizer";
+				colHandle.title = "Sütun genişliğini ayarlamak için sürükleyin · Sıfırlamak için çift tıklayın";
+				colHandle.addEventListener("click", function(e) {
+					e.preventDefault();
+					e.stopPropagation();
+				});
+				colHandle.addEventListener("pointerdown", function(e) {
+					if (e.button !== 0) return;
+					e.preventDefault();
+					e.stopPropagation();
+					var colWidths = [];
+					allThs.forEach(function(h) {
+						colWidths.push(Math.max(48, Math.round(h.getBoundingClientRect().width)));
+					});
+					tbl.classList.add("revir-table-fixed-cols");
+					tbl.style.tableLayout = "fixed";
+					allThs.forEach(function(h, idx) {
+						h.style.width = colWidths[idx] + "px";
+						h.style.minWidth = colWidths[idx] + "px";
+					});
+					var startX = e.clientX;
+					var startColW = colWidths[cIdx];
+					colHandle.classList.add("active");
+					outer.classList.add("revir-tbl-resizing");
+
+					function onColMove(mv) {
+						var newCW = Math.round(Math.max(48, Math.min(960, startColW + (mv.clientX - startX))));
+						colWidths[cIdx] = newCW;
+						th.style.width = newCW + "px";
+						th.style.minWidth = newCW + "px";
+						var sumW = colWidths.reduce(function(acc, v) { return acc + v; }, 0);
+						tbl.style.width = "max(100%, " + sumW + "px)";
+						showResizeBadge("Sütun: " + newCW + " px", mv.clientX, mv.clientY);
+					}
+
+					function onColUp() {
+						tbl.dataset.colResizeAt = String(Date.now());
+						window.__revirLastResizeEndAt = Date.now();
+						colHandle.classList.remove("active");
+						outer.classList.remove("revir-tbl-resizing");
+						hideResizeBadge();
+						var stNow = loadResizeStore(TBL_STORE_KEY);
+						stNow[storeId] = stNow[storeId] || {};
+						stNow[storeId].cols = colWidths.slice();
+						saveResizeStore(TBL_STORE_KEY, stNow);
+						window.removeEventListener("pointermove", onColMove);
+						window.removeEventListener("pointerup", onColUp);
+						window.removeEventListener("pointercancel", onColUp);
+					}
+
+					window.addEventListener("pointermove", onColMove);
+					window.addEventListener("pointerup", onColUp);
+					window.addEventListener("pointercancel", onColUp);
+				});
+				colHandle.addEventListener("dblclick", function(e) {
+					e.preventDefault();
+					e.stopPropagation();
+					tbl.dataset.colResizeAt = String(Date.now());
+					tbl.classList.remove("revir-table-fixed-cols");
+					tbl.style.tableLayout = "";
+					tbl.style.width = "";
+					allThs.forEach(function(h) {
+						h.style.width = "";
+						h.style.minWidth = "";
+					});
+					var stNow = loadResizeStore(TBL_STORE_KEY);
+					if (stNow[storeId]) {
+						delete stNow[storeId].cols;
+						if (!stNow[storeId].w && !stNow[storeId].h && !stNow[storeId].ml) delete stNow[storeId];
+						saveResizeStore(TBL_STORE_KEY, stNow);
+					}
+				});
+				th.appendChild(colHandle);
+			});
+
+			if (outer.dataset.tblResizeInit === "1") return;
+			outer.dataset.tblResizeInit = "1";
+
+			function startOuterResize(e, mode) {
+				if (e.button !== 0) return;
+				e.preventDefault();
+				e.stopPropagation();
+				var startX = e.clientX;
+				var startY = e.clientY;
+				var rect = outer.getBoundingClientRect();
+				var wrapRect = wrap.getBoundingClientRect();
+				var startW = rect.width;
+				var startH = wrapRect.height;
+				var startML = parseFloat(getComputedStyle(outer).marginLeft) || 0;
+				var parentW = outer.parentElement ? outer.parentElement.getBoundingClientRect().width : startW;
+				var maxOuterW = Math.max(parentW, Math.round((window.innerWidth || 1200) * 1.4), 1600);
+				var liveState = Object.assign({}, (loadResizeStore(TBL_STORE_KEY)[storeId] || {}));
+				outer.classList.add("revir-tbl-resizing");
+
+				function onMove(mv) {
+					var dx = mv.clientX - startX;
+					var dy = mv.clientY - startY;
+
+					if (mode === "r" || mode === "se") {
+						var rawW = Math.round(Math.max(220, Math.min(maxOuterW - startML, startW + dx)));
+						if (startML === 0 && Math.abs(rawW - parentW) <= 6) {
+							outer.style.width = "100%";
+							outer.style.maxWidth = "100%";
+							delete liveState.w;
+						} else {
+							outer.style.width = rawW + "px";
+							outer.style.maxWidth = rawW > parentW + 2 ? "none" : "100%";
+							liveState.w = rawW;
+						}
+					} else if (mode === "l" || mode === "sw") {
+						var newML = Math.round(Math.max(0, Math.min(startML + startW - 220, startML + dx)));
+						var newWL = Math.round(Math.max(220, startW - (newML - startML)));
+						if (newML === 0 && Math.abs(newWL - parentW) <= 6) {
+							outer.style.marginLeft = "";
+							outer.style.width = "100%";
+							outer.style.maxWidth = "100%";
+							delete liveState.ml;
+							delete liveState.w;
+						} else {
+							outer.style.marginLeft = newML ? (newML + "px") : "";
+							outer.style.width = newWL + "px";
+							outer.style.maxWidth = (newML + newWL) > parentW + 2 ? "none" : "100%";
+							if (newML) liveState.ml = newML;
+							else delete liveState.ml;
+							liveState.w = newWL;
+						}
+					}
+
+					if (mode === "b" || mode === "se" || mode === "sw") {
+						var newH = Math.round(Math.max(96, Math.min(2200, startH + dy)));
+						wrap.style.height = newH + "px";
+						wrap.style.maxHeight = newH + "px";
+						liveState.h = newH;
+					}
+
+					var curW = Math.round(outer.getBoundingClientRect().width);
+					var curH = Math.round(wrap.getBoundingClientRect().height);
+					showResizeBadge(curW + " × " + curH + " px", mv.clientX, mv.clientY);
+				}
+
+				function onUp() {
+					window.__revirLastResizeEndAt = Date.now();
+					outer.classList.remove("revir-tbl-resizing");
+					hideResizeBadge();
+					var stFinal = loadResizeStore(TBL_STORE_KEY);
+					if (liveState.w || liveState.h || liveState.ml || liveState.cols) {
+						stFinal[storeId] = liveState;
+					} else {
+						delete stFinal[storeId];
+					}
+					store = stFinal;
+					saveResizeStore(TBL_STORE_KEY, stFinal);
+					window.removeEventListener("pointermove", onMove);
+					window.removeEventListener("pointerup", onUp);
+					window.removeEventListener("pointercancel", onUp);
+				}
+
+				window.addEventListener("pointermove", onMove);
+				window.addEventListener("pointerup", onUp);
+				window.addEventListener("pointercancel", onUp);
+			}
+
+			function resetOuter(resetW, resetH, resetCols) {
+				var stNow = loadResizeStore(TBL_STORE_KEY);
+				stNow[storeId] = stNow[storeId] || {};
+				if (resetW) {
+					outer.style.width = "";
+					outer.style.maxWidth = "";
+					outer.style.marginLeft = "";
+					delete stNow[storeId].w;
+					delete stNow[storeId].ml;
+				}
+				if (resetH) {
+					wrap.style.height = "";
+					wrap.style.maxHeight = wrap.dataset.origMaxHeight || "";
+					delete stNow[storeId].h;
+				}
+				if (resetCols) {
+					tbl.classList.remove("revir-table-fixed-cols");
+					tbl.style.tableLayout = "";
+					tbl.style.width = "";
+					tbl.querySelectorAll("thead th").forEach(function(h) {
+						h.style.width = "";
+						h.style.minWidth = "";
+					});
+					delete stNow[storeId].cols;
+				}
+				if (!stNow[storeId].w && !stNow[storeId].h && !stNow[storeId].ml && !stNow[storeId].cols) {
+					delete stNow[storeId];
+				}
+				store = stNow;
+				saveResizeStore(TBL_STORE_KEY, stNow);
+			}
+
+			[
+				["l", "revir-tbl-handle-l", "Tablo sol kenarını sürükleyerek genişliği ayarlayın · Sıfırlamak için çift tıklayın", true, false, false],
+				["r", "revir-tbl-handle-r", "Tablo sağ kenarını sürükleyerek genişliği ayarlayın · Sıfırlamak için çift tıklayın", true, false, false],
+				["b", "revir-tbl-handle-b", "Tablo alt kenarını sürükleyerek yüksekliği ayarlayın · Sıfırlamak için çift tıklayın", false, true, false],
+				["sw", "revir-tbl-handle-sw", "Köşeden sürükleyerek boyutlandırın · Sıfırlamak için çift tıklayın", true, true, true],
+				["se", "revir-tbl-handle-se", "Köşeden sürükleyerek tablo boyutunu ayarlayın · Sıfırlamak için çift tıklayın", true, true, true]
+			].forEach(function(cfg) {
+				var hEl = document.createElement("div");
+				hEl.className = cfg[1];
+				hEl.title = cfg[2];
+				hEl.addEventListener("pointerdown", function(e) { startOuterResize(e, cfg[0]); });
+				hEl.addEventListener("dblclick", function(e) {
+					e.preventDefault();
+					e.stopPropagation();
+					resetOuter(cfg[3], cfg[4], cfg[5]);
+				});
+				outer.appendChild(hEl);
+			});
+		});
+	}
+
+	window.__revirInitResizableTables = initResizableTables;
+	initResizableModal();
 
 	var INITIAL_DATA = __REVIR_INITIAL_JSON__;
 	function bootInitial() {

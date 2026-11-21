@@ -160,8 +160,42 @@ class TestRevirUI(unittest.TestCase):
                 self.assertNotIn("revir-chat-tts-btn", body)
                 self.assertNotIn('id="revir-voice-bar"', body)
                 self.assertIn('ev.target.closest("#revir-chat-bubble, #revir-fab-btn")', body)
+                # Edge/corner table & modal resizing CSS/HTML/JS hooks
+                self.assertIn("revir-table-outer", body)
+                self.assertIn("revir-tbl-handle-r", body)
+                self.assertIn("revir-tbl-handle-l", body)
+                self.assertIn("revir-tbl-handle-b", body)
+                self.assertIn("revir-tbl-handle-se", body)
+                self.assertIn("revir-tbl-handle-sw", body)
+                self.assertIn("revir-col-resizer", body)
+                self.assertIn("revir-modal-resize-r", body)
+                self.assertIn("revir-modal-resize-l", body)
+                self.assertIn("revir-modal-resize-b", body)
+                self.assertIn("revir-modal-resize-se", body)
+                self.assertIn('id="revir-resize-badge"', body)
+                self.assertIn("window.__revirInitResizableTables", body)
+                self.assertIn("colResizeAt", body)
+                self.assertIn("__revirLastResizeEndAt", body)
         finally:
             srv.stop()
+
+    def test_table_wrappers_and_modal_dialog_resize_markers(self):
+        def _dlg_app():
+            @revir_ui.dialog("Pencere İçi Tablo", width="large")
+            def _open():
+                revir_ui.dataframe(pd.DataFrame([{"Ad": "Ayşe", "Boy": 135}]), key="dlg_df_1")
+                revir_ui.data_editor(pd.DataFrame([{"Sutun": "A", "Aktif": True}]), key="dlg_ed_1")
+                revir_ui.markdown("| Sütun 1 | Sütun 2 |\n|---|---|\n| 10 | 20 |")
+
+            if "open_test_dlg" not in revir_ui.session_state:
+                revir_ui.session_state["open_test_dlg"] = True
+                _open()
+
+        out = revir_ui.run_action_headless(_dlg_app, {"action": "render"})
+        dlg_html = out.get("dialog_html") or ""
+        self.assertIn('class="revir-table-outer" data-tbl-key="dlg_df_1" data-tbl-explicit="1"', dlg_html)
+        self.assertIn('class="revir-table-outer" data-tbl-key="dlg_ed_1" data-tbl-explicit="1"', dlg_html)
+        self.assertIn('class="revir-md-table-wrap"', dlg_html)
 
     def test_native_audio_controller_status(self):
         ctrl = revir_ui._NativeAudioController()
