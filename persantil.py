@@ -124,7 +124,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.12.1"
+_DEFAULT_APP_VERSION = "1.12.2"
 
 
 def _load_app_version() -> str:
@@ -22146,17 +22146,81 @@ def render_bulk_class_screening_tab(default_class: str | None = None, key_ctx: s
 		ui.warning("Henüz tanımlı sınıf bulunmuyor.")
 		return
 
-	sel_c1, sel_c2 = ui.columns([1.6, 1.2])
+	sel_c1, sel_c2 = ui.columns([2.1, 1.1])
 	with sel_c1:
 		if default_class and default_class in all_classes:
 			chosen_cls = default_class
-			ui.text_input("Seçili Sınıf", value=chosen_cls, disabled=True, key=f"bulk_scr_cls_locked_{key_ctx}")
+			b_idx = all_classes.index(chosen_cls)
+			b_prev = all_classes[b_idx - 1] if b_idx > 0 else None
+			b_next = all_classes[b_idx + 1] if b_idx < len(all_classes) - 1 else None
+			nav_l, nav_m, nav_r = ui.columns([0.42, 2.8, 0.42])
+			with nav_l:
+				ui.markdown("<div style='height:22px'></div>", unsafe_allow_html=True)
+				if ui.button(
+					"◀",
+					key=f"btn_bulk_prev_cls_{key_ctx}_{chosen_cls}",
+					disabled=(b_prev is None),
+					help=f"Önceki Sınıf: {b_prev}" if b_prev else "İlk sınıftasınız",
+					use_container_width=True,
+				):
+					_close_dyn_report_builder_dialog()
+					ui.session_state["selected_screening_class"] = b_prev
+					ui.rerun()
+			with nav_m:
+				ui.text_input(
+					f"Seçili Sınıf ({b_idx + 1}/{len(all_classes)})",
+					value=chosen_cls,
+					disabled=True,
+					key=f"bulk_scr_cls_locked_{key_ctx}_{chosen_cls}",
+				)
+			with nav_r:
+				ui.markdown("<div style='height:22px'></div>", unsafe_allow_html=True)
+				if ui.button(
+					"▶",
+					key=f"btn_bulk_next_cls_{key_ctx}_{chosen_cls}",
+					disabled=(b_next is None),
+					help=f"Sonraki Sınıf: {b_next}" if b_next else "Son sınıftasınız",
+					use_container_width=True,
+				):
+					_close_dyn_report_builder_dialog()
+					ui.session_state["selected_screening_class"] = b_next
+					ui.rerun()
 		else:
-			cls_idx = 0
-			prev_cls = ui.session_state.get(f"bulk_scr_cls_sel_{key_ctx}")
-			if prev_cls in all_classes:
-				cls_idx = all_classes.index(prev_cls)
-			chosen_cls = ui.selectbox("Taranacak Sınıfı Seçin", all_classes, index=cls_idx, key=f"bulk_scr_cls_sel_{key_ctx}")
+			sel_key_bulk = f"bulk_scr_cls_sel_{key_ctx}"
+			prev_cls = ui.session_state.get(sel_key_bulk)
+			cls_idx = all_classes.index(prev_cls) if prev_cls in all_classes else 0
+			b_prev = all_classes[cls_idx - 1] if cls_idx > 0 else None
+			b_next = all_classes[cls_idx + 1] if cls_idx < len(all_classes) - 1 else None
+			nav_l, nav_m, nav_r = ui.columns([0.42, 2.8, 0.42])
+			with nav_l:
+				ui.markdown("<div style='height:22px'></div>", unsafe_allow_html=True)
+				if ui.button(
+					"◀",
+					key=f"btn_bulk_prev_cls_{key_ctx}",
+					disabled=(b_prev is None),
+					help=f"Önceki Sınıf: {b_prev}" if b_prev else "İlk sınıftasınız",
+					use_container_width=True,
+				):
+					ui.session_state[sel_key_bulk] = b_prev
+					ui.rerun()
+			with nav_m:
+				chosen_cls = ui.selectbox(
+					f"Taranacak Sınıfı Seçin ({cls_idx + 1}/{len(all_classes)})",
+					all_classes,
+					index=cls_idx,
+					key=sel_key_bulk,
+				)
+			with nav_r:
+				ui.markdown("<div style='height:22px'></div>", unsafe_allow_html=True)
+				if ui.button(
+					"▶",
+					key=f"btn_bulk_next_cls_{key_ctx}",
+					disabled=(b_next is None),
+					help=f"Sonraki Sınıf: {b_next}" if b_next else "Son sınıftasınız",
+					use_container_width=True,
+				):
+					ui.session_state[sel_key_bulk] = b_next
+					ui.rerun()
 	with sel_c2:
 		chosen_date = ui.date_input("Tarama Tarihi", value=date.today(), key=f"bulk_scr_date_{key_ctx}")
 
@@ -22391,7 +22455,11 @@ def render_school_screening() -> None:
 
 	# VIEW 2: Seçili Sınıfın Tarama Paneli ve Öğrenci Listesi
 	else:
-		hdr_c1, hdr_c2, hdr_c3 = ui.columns([1.5, 3.5, 2])
+		cur_cls_idx = all_classes.index(selected_class)
+		prev_cls_name = all_classes[cur_cls_idx - 1] if cur_cls_idx > 0 else None
+		next_cls_name = all_classes[cur_cls_idx + 1] if cur_cls_idx < len(all_classes) - 1 else None
+
+		hdr_c1, hdr_c2, hdr_c3 = ui.columns([1.4, 3.8, 1.9])
 		with hdr_c1:
 			if ui.button("⬅️ Tüm Sınıflara Dön", key="btn_back_to_all_classes", use_container_width=True):
 				_close_dyn_report_builder_dialog()
@@ -22402,7 +22470,38 @@ def render_school_screening() -> None:
 			tch_map_sel = get_class_teacher_map()
 			sel_tch = tch_map_sel.get(selected_class, "")
 			sel_tch_txt = f" · 👩‍🏫 Öğretmen: **{html.escape(sel_tch)}**" if sel_tch else ""
-			ui.markdown(f"### 🏫 **{selected_class}** Sağlık Taraması Paneli{sel_tch_txt}")
+			cls_nav_l, cls_nav_m, cls_nav_r = ui.columns([0.45, 3.4, 0.45])
+			with cls_nav_l:
+				if ui.button(
+					"◀",
+					key=f"btn_scr_prev_cls_{selected_class}",
+					disabled=(prev_cls_name is None),
+					help=f"Önceki Sınıf: {prev_cls_name}" if prev_cls_name else "İlk sınıftasınız",
+					use_container_width=True,
+				):
+					_close_dyn_report_builder_dialog()
+					ui.session_state["selected_screening_class"] = prev_cls_name
+					ui.rerun()
+			with cls_nav_m:
+				ui.markdown(
+					f"<div style='text-align:center;line-height:1.25;'>"
+					f"<span style='font-size:20px;font-weight:800;color:var(--text-heading);'>🏫 {html.escape(selected_class)}</span> "
+					f"<span style='font-size:13px;font-weight:700;color:var(--teal);background:var(--mint);padding:2px 8px;border-radius:999px;vertical-align:middle;'>{cur_cls_idx + 1} / {len(all_classes)}</span>"
+					f"<div style='font-size:13px;color:var(--text-muted);margin-top:2px;'>Sağlık Taraması Paneli{sel_tch_txt.replace('**', '')}</div>"
+					f"</div>",
+					unsafe_allow_html=True,
+				)
+			with cls_nav_r:
+				if ui.button(
+					"▶",
+					key=f"btn_scr_next_cls_{selected_class}",
+					disabled=(next_cls_name is None),
+					help=f"Sonraki Sınıf: {next_cls_name}" if next_cls_name else "Son sınıftasınız",
+					use_container_width=True,
+				):
+					_close_dyn_report_builder_dialog()
+					ui.session_state["selected_screening_class"] = next_cls_name
+					ui.rerun()
 			ui.caption(f"Sınıf Mevcudu: **{c_stats['total']}** · Taranan: **{c_stats['screened']}** · Bekleyen: **{c_stats['pending']}** · Başarı: **%{c_stats['percent']}**")
 		with hdr_c3:
 			if ui.button("⚙️ Rapor İçeriği & Sütun Ayarları (Pop-up)", type="primary", use_container_width=True, key=f"btn_scr_cls_open_report_builder_{selected_class}"):
