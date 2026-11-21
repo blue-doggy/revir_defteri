@@ -124,7 +124,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.16.4"
+_DEFAULT_APP_VERSION = "1.16.5"
 
 
 def _load_app_version() -> str:
@@ -296,6 +296,7 @@ DEFAULT_APP_SETTINGS: dict[str, str] = {
 	"calendar_quote_mode": "Karışık (Hadis-i Şerif + Özlü Söz / Günün Yazısı)",
 	"calendar_show_prayer_times": "1",
 	"calendar_auto_load_holidays": "1",
+	"graduation_grade_level": "4",
 }
 
 INCIDENT_LOCATIONS = [
@@ -1658,7 +1659,8 @@ def create_academic_year(
 	name: str,
 	start_date: str,
 	end_date: str,
-	student_policy: str = "fresh"  # "fresh", "promote", "clone", "exact"
+	student_policy: str = "fresh",  # "fresh", "promote", "clone", "exact"
+	graduation_grade: int | None = None,
 ) -> int:
 	import shutil
 	name = name.strip()
@@ -1716,7 +1718,16 @@ def create_academic_year(
 					except Exception:
 						pass
 		elif student_policy == "promote":
-			# Sınıf Terfisi & Mezuniyet: Sınıfları bir üst seviyeye aktar
+			# Sınıf Terfisi & Mezuniyet: Mezun olan sınıfları sil, alt sınıfları bir üst seviyeye aktar
+			if graduation_grade is None:
+				try:
+					grad_grade = int(get_app_settings().get("graduation_grade_level") or 4)
+				except Exception:
+					grad_grade = 4
+			else:
+				grad_grade = int(graduation_grade)
+			grad_grade = max(1, min(12, grad_grade))
+
 			for tbl in [
 				"medication_logs", "school_screenings", "vital_readings",
 				"measurements", "visits"
@@ -1725,24 +1736,44 @@ def create_academic_year(
 					conn.execute(f"DELETE FROM {tbl}")
 				except Exception:
 					pass
+
 			classes = conn.execute("SELECT id, name FROM classes").fetchall()
+			graduating_ids: list[int] = []
+			to_promote: list[tuple[int, int, str]] = []
 			for cid, cname in classes:
-				cname_clean = cname.strip()
-				m = re.match(r"^(\d+)(.*)$", cname_clean)
-				if m:
-					g = int(m.group(1))
-					sfx = m.group(2)
-					if g >= 4:
-						new_c = f"Mezun {g}{sfx}"
-					else:
-						new_c = f"{g + 1}{sfx}"
-					try:
-						conn.execute("UPDATE classes SET name=? WHERE id=?", (new_c, cid))
-					except Exception:
-						pass
+				m = re.match(r"^(\d+)(.*)$", (cname or "").strip())
+				if not m:
+					continue
+				g = int(m.group(1))
+				sfx = m.group(2)
+				if g >= grad_grade:
+					graduating_ids.append(cid)
+				else:
+					to_promote.append((cid, g, sfx))
+
+			for cid in graduating_ids:
+				try:
+					conn.execute("DELETE FROM classes WHERE id=?", (cid,))
+				except Exception:
+					pass
+
+			# Üstten alta doğru güncelle ki UNIQUE(name) çakışması olmasın (3-A->4-A sonra 2-A->3-A)
+			for cid, g, sfx in sorted(to_promote, key=lambda x: x[1], reverse=True):
+				new_c = f"{g + 1}{sfx}"
+				try:
+					conn.execute("UPDATE classes SET name=? WHERE id=?", (new_c, cid))
+				except Exception:
+					pass
+
+			surviving_ids = {
+				str(r[0]) for r in conn.execute("SELECT id FROM students").fetchall()
+			}
 			src_kisi = get_current_person_data_dir()
 			if src_kisi.exists():
 				for jf in src_kisi.glob("kisi_*.json"):
+					sid_part = jf.stem[5:] if jf.stem.startswith("kisi_") else ""
+					if sid_part not in surviving_ids:
+						continue
 					try:
 						(kisi_dir / jf.name).write_bytes(jf.read_bytes())
 					except Exception:
@@ -28443,10 +28474,33 @@ def render_academic_year_settings() -> None:
 		with ny_c3:
 			new_y_end = ui.date_input("Bitiş Tarihi", value=date.today() + timedelta(days=280), key="new_ay_end_inp")
 
+		ui.markdown("###### 🎓 Mezun Olacak Sınıf Seviyesi Ayarı:")
+		_ay_settings = get_app_settings()
+		try:
+			_saved_grad_grade = max(1, min(12, int(_ay_settings.get("graduation_grade_level") or 4)))
+		except Exception:
+			_saved_grad_grade = 4
+		_grad_grade_labels = {
+			4: "4. Sınıf (İlkokul Mezuniyeti)",
+			8: "8. Sınıf (Ortaokul Mezuniyeti)",
+			12: "12. Sınıf (Lise Mezuniyeti)",
+		}
+		_grad_options = list(range(1, 13))
+		sel_grad_grade = ui.selectbox(
+			"Mezun Olacak Sınıf Seviyesi",
+			_grad_options,
+			index=_grad_options.index(_saved_grad_grade),
+			format_func=lambda lvl: _grad_grade_labels.get(lvl, f"{lvl}. Sınıf"),
+			key="ay_graduation_grade_select",
+			help="Sınıf Atlatma & Mezuniyet (Terfi Modu) seçildiğinde bu seviye ve üzerindeki sınıflar öğrencileriyle birlikte yeni yıl veritabanından silinir.",
+		)
+		if int(sel_grad_grade) != _saved_grad_grade:
+			save_app_settings({"graduation_grade_level": str(int(sel_grad_grade))})
+
 		ui.markdown("###### 👥 Öğrenci ve Sınıf Başlangıç Politikası:")
 		policy_options = {
 			"fresh": "🟢 Sıfırdan Temiz Sayfa (Tavsiye Edilen — Yeni Öğrenci Girişi): Eski yıla ait hiçbir öğrenci ve revir kaydı yeni yıla aktarılmaz. Yeni kayıt olacak öğrenciler için tertemiz sıfır kilometre bir revir defteri açılır.",
-			"promote": "🎓 Sınıf Atlatma & Mezuniyet (Terfi Modu): Öğrencileri bir üst sınıfa aktarır (Örn: 1-A -> 2-A, 4-A -> Mezun). Vizit ve muayene kayıtları temizlenerek yeni yıl için sıfırlanır.",
+			"promote": f"🎓 Sınıf Atlatma & Mezuniyet (Terfi Modu): {sel_grad_grade}. sınıf ve üzeri mezun olan sınıfları (öğrencileriyle birlikte) siler; alt sınıfları bir üst sınıfa aktarır (Örn: 1-A -> 2-A, {sel_grad_grade}-A -> Silinir). Vizit ve muayene kayıtları temizlenerek yeni yıl için sıfırlanır.",
 			"clone": "📋 Mevcut Öğrenci Kadrosunu Klonla: Öğrenci ve sınıf kadrosu aynen korunur, revir vizitleri ve muayene kayıtları sıfırlanır.",
 			"exact": "💾 Tam Kopya: Tüm öğrenci ve muayene kayıtlarını olduğu gibi yeni yıla kopyalar."
 		}
@@ -28468,7 +28522,8 @@ def render_academic_year_settings() -> None:
 					new_y_name.strip(),
 					new_y_start.isoformat(),
 					new_y_end.isoformat(),
-					student_policy=selected_policy_key
+					student_policy=selected_policy_key,
+					graduation_grade=int(sel_grad_grade),
 				)
 				set_active_academic_year(new_id)
 				ui.success(f"'{new_y_name.strip()}' eğitim yılı başarıyla oluşturuldu, bağımsız veritabanı hazırlandı ve aktif eğitim yılı yapıldı!")
