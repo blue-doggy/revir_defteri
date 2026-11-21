@@ -52,6 +52,7 @@ def isolated_real_db():
         try:
             try:
                 persantil.ensure_db_initialized.clear()
+                persantil.clear_all_data_caches()
             except Exception:
                 pass
             persantil.ensure_db_initialized()

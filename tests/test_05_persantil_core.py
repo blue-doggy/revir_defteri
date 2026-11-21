@@ -173,6 +173,30 @@ class TestPersantilCoreAndUI(unittest.TestCase):
                 self.assertIn("main_html", out)
                 self.assertNotIn("Çalışma Zamanı Hatası", out["main_html"], f"{page_fn.__name__} raised runtime error!")
 
+    def test_06_students_table_columns_and_name_click(self):
+        with self.connect() as c:
+            c.execute("INSERT INTO classes(name) VALUES ('4-A')")
+            c.execute(
+                "INSERT INTO students(class_id, full_name, student_no, sex, birth_date, person_type) VALUES (1, 'Ayşe Yılmaz', '305', 'K', '2016-11-22', 'Öğrenci')"
+            )
+            c.commit()
+        revir_ui.reset_session()
+        out = revir_ui.run_action_headless(persantil.render_students, {"action": "render"})
+        html = out["main_html"]
+        self.assertIn("Şube Adı", html)
+        self.assertIn("Okul No", html)
+        self.assertIn("Ad Soyad", html)
+        self.assertIn("Cinsiyet", html)
+        self.assertIn("10 yıl", html)
+
+        # Simulate clicking the "Ad Soyad" cell on row 0 -> opens dossier dialog
+        out_click = revir_ui.run_action_headless(
+            persantil.render_students,
+            {"action": "df_select", "key": "profile_roster_table_0", "value": {"rows": [0], "cells": [[0, "Ad Soyad"]]}},
+        )
+        self.assertIsNotNone(out_click.get("dialog_html"))
+        self.assertIn("Ayşe Yılmaz", out_click.get("dialog_html") or "")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

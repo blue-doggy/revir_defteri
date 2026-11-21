@@ -124,7 +124,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.16.7"
+_DEFAULT_APP_VERSION = "1.16.8"
 
 
 def _load_app_version() -> str:
@@ -8599,6 +8599,11 @@ def get_students_column_config() -> dict:
 			help="Öğrencinin Kişi Dosyasını (Detay & İşlem) açmak için tıklayın",
 			width="small",
 		),
+		"Ad Soyad": ui.column_config.TextColumn(
+			"Ad Soyad",
+			help="Öğrenci dosyasına ulaşmak için öğrenci adına tıklayın",
+		),
+		"Yaş": ui.column_config.TextColumn("Yaş"),
 		"Yaş (Ay)": ui.column_config.NumberColumn("Yaş (Ay)", format="%d ay"),
 		"Boy (cm)": ui.column_config.NumberColumn("Boy (cm)", format="%.1f cm"),
 		"Boy Z-Skor": ui.column_config.NumberColumn("Boy Z-Skor", format="%+.2f SDS"),
@@ -12042,7 +12047,7 @@ def _handle_floating_gemini_chat(payload: dict[str, Any], chat_history: list[dic
 		downloads, exp_note = _execute_gemini_chat_export(export_spec, int(context_pid) if context_pid else None, reply_txt)
 		if exp_note:
 			reply_txt = (reply_txt + exp_note).strip()
-		if str(export_spec.get("action") or "").strip().lower() in ("create_classes", "create_profiles"):
+		if str(export_spec.get("action") or "").strip().lower() == "create_classes":
 			refresh_ui = True
 
 	# 2. Yapılandırılmış Veri / Belge Yazma Önerisi (Onay Kartı Hazırla)
@@ -17240,8 +17245,18 @@ def render_students() -> None:
 	display_students = students.drop(columns=["Kayıt Türü", "Görev / Statü"], errors="ignore") if not students.empty else students
 	if not display_students.empty:
 		display_students = display_students.copy()
+		if "Sınıf" in display_students.columns:
+			display_students = display_students.rename(columns={"Sınıf": "Şube Adı"})
+		if "Yaş (Ay)" in display_students.columns:
+			display_students["Yaş"] = display_students["Yaş (Ay)"].apply(
+				lambda m: f"{int(float(m) // 12)} yıl" if pd.notna(m) and float(m) >= 0 else "—"
+			)
+			display_students = display_students.drop(columns=["Yaş (Ay)"], errors="ignore")
 		if "📂 Dosya" not in display_students.columns:
 			display_students.insert(0, "📂 Dosya", "📂 Aç")
+		front_cols = [c for c in ("id", "📂 Dosya", "Şube Adı", "Okul No", "Ad Soyad", "Cinsiyet", "Yaş") if c in display_students.columns]
+		other_cols = [c for c in display_students.columns if c not in front_cols]
+		display_students = display_students[front_cols + other_cols]
 
 	# Seçili öğrenci hızlı eylem şeridini tablonun hemen üstünde göster
 	if is_section_visible("students_selected_card"):
@@ -17279,7 +17294,7 @@ def render_students() -> None:
 					render_person_data_file_editor(active_person_obj["id"], section_key="stu_page")
 
 	if is_section_visible("students_table"):
-		ui.caption(f"Toplam **{len(students)}** öğrenci listeleniyor ({clin_filter}) · Satıra tıklayarak seçin, **📂 Aç** ile Kişi Dosyasını açın.")
+		ui.caption(f"Toplam **{len(students)}** öğrenci listeleniyor ({clin_filter}) · Satıra tıklayarak seçin, **öğrenci adına** veya **📂 Aç** sütununa tıklayarak Kişi Dosyasını açın.")
 		if is_kvkk_privacy_active():
 			ui.info("🛡️ **KVKK Gizlilik Modu Aktif:** Ekrandaki ad/soyad, veli adı, telefon ve klinik sağlık verileri maskelenmiştir. Word/Excel indirmeleri gerçek verilerle üretilmeye devam eder.")
 		app_cfg = get_app_settings()
@@ -17304,7 +17319,7 @@ def render_students() -> None:
 		for c in selected_cells:
 			c_row = c[0] if isinstance(c, (tuple, list)) else (c.get("row") if isinstance(c, dict) else None)
 			c_col = c[1] if isinstance(c, (tuple, list)) else (c.get("column") if isinstance(c, dict) else None)
-			if c_col in ("📂 Dosya", "Dosya", "📂") and c_row is not None and 0 <= int(c_row) < len(students):
+			if c_col in ("📂 Dosya", "Dosya", "📂", "Ad Soyad") and c_row is not None and 0 <= int(c_row) < len(students):
 				dosya_clicked_row = int(c_row)
 				break
 
