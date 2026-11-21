@@ -124,7 +124,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.14.0"
+_DEFAULT_APP_VERSION = "1.15.0"
 
 
 def _load_app_version() -> str:
@@ -166,6 +166,7 @@ PAGES = [
 	"💓 Vital Takip",
 	"📋 Sağlık Profili ve Bakım Planı",
 	"📏 Ölçüm ve Gelişim",
+	"📅 Takvim & Planlama",
 	"🖨️ Raporlar",
 	"📁 Evraklar",
 	"⚙️ Ayarlar",
@@ -292,6 +293,9 @@ DEFAULT_APP_SETTINGS: dict[str, str] = {
 	"gemini_floating_chat": "1",
 	"gemini_model": "gemini-3-flash-preview",
 	"gemini_api_key": "",
+	"calendar_quote_mode": "Karışık (Hadis-i Şerif + Özlü Söz / Günün Yazısı)",
+	"calendar_show_prayer_times": "1",
+	"calendar_auto_load_holidays": "1",
 }
 
 INCIDENT_LOCATIONS = [
@@ -1352,6 +1356,34 @@ def initialize_db() -> None:
 				notes TEXT,
 				created_at TEXT NOT NULL
 			);
+			CREATE TABLE IF NOT EXISTS calendar_events (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				event_date TEXT NOT NULL,
+				title TEXT NOT NULL,
+				category TEXT NOT NULL DEFAULT 'revir_etkinlik',
+				symbol_type TEXT NOT NULL DEFAULT 'event',
+				is_civil_holiday INTEGER NOT NULL DEFAULT 0,
+				is_half_day INTEGER NOT NULL DEFAULT 0,
+				profession_group TEXT,
+				start_time TEXT,
+				end_time TEXT,
+				description TEXT,
+				source TEXT NOT NULL DEFAULT 'manual',
+				is_completed INTEGER NOT NULL DEFAULT 0,
+				created_at TEXT NOT NULL
+			);
+			CREATE TABLE IF NOT EXISTS calendar_daily_notes (
+				note_date TEXT PRIMARY KEY,
+				quote_text TEXT,
+				quote_source TEXT,
+				hadith_text TEXT,
+				hadith_source TEXT,
+				day_significance TEXT,
+				custom_note TEXT,
+				prayer_cache_json TEXT,
+				updated_at TEXT NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_calendar_events_date ON calendar_events(event_date);
 			CREATE INDEX IF NOT EXISTS idx_students_class_id ON students(class_id);
 			CREATE INDEX IF NOT EXISTS idx_students_type ON students(person_type);
 			CREATE INDEX IF NOT EXISTS idx_visits_student_id ON visits(student_id);
@@ -3509,6 +3541,22 @@ PAGE_SECTIONS_REGISTRY: dict[str, dict[str, Any]] = {
 			"name": "Dönemsel Ölçüm Geçmişi Tablosu",
 			"desc": "Tüm boy-kilo ölçümleri ve z-skoru değişim kayıtları",
 			"icon": "📋",
+			"default": True,
+			"essential": True,
+		},
+	},
+	"📅 Takvim & Planlama": {
+		"calendar_monthly_grid": {
+			"name": "Aylık İnteraktif Takvim Izgarası",
+			"desc": "İş günleri, hafta sonları, kırmızı memur tatilleri, 🇹🇷 milli ve 🌙 dini bayramlar",
+			"icon": "📅",
+			"default": True,
+			"essential": True,
+		},
+		"calendar_daily_leaf": {
+			"name": "Günlük Takvim Yaprağı, Ezan Vakitleri & Hadis/Özlü Söz",
+			"desc": "Seçili günün meslek grubu, tatil durumu, canlı ezan vakti sayacı ve günün sözü",
+			"icon": "🗓️",
 			"default": True,
 			"essential": True,
 		},
@@ -29840,6 +29888,38 @@ def render_settings() -> None:
 					ui.success("✅ Görünüm ve çalışma alanı ayarları kaydedildi.")
 					ui.rerun()
 
+			with ui.container(border=True):
+				from school_calendar import QUOTE_MODE_OPTIONS
+				ui.markdown("#### 📅 Takvim Yaprağı, Hadis-i Şerif / Özlü Söz ve Ezan Vakti Sayacı Tercihleri")
+				ui.caption("Gelişim & Plan → **Takvim & Planlama** sayfasındaki günlük takvim yaprağında gösterilecek söz/hadis türünü ve seçili ile göre ezan vakti geri sayım sayacını özelleştirin.")
+				cal_c1, cal_c2, cal_c3 = ui.columns([1.8, 1.1, 1.1])
+				cur_q_mode = current_cfg.get("calendar_quote_mode", QUOTE_MODE_OPTIONS[0])
+				qm_idx = QUOTE_MODE_OPTIONS.index(cur_q_mode) if cur_q_mode in QUOTE_MODE_OPTIONS else 0
+				with cal_c1:
+					sel_q_mode = ui.selectbox("📜 Takvim Yaprağı Günün Yazısı (Hadis / Özlü Söz)", QUOTE_MODE_OPTIONS, index=qm_idx, key="cfg_cal_quote_mode")
+				with cal_c2:
+					ui.write("")
+					sel_show_prayer = ui.toggle(
+						f"🕌 Ezan Vakitleri & Sayaç ({current_cfg.get('default_province', 'Ankara')})",
+						value=(str(current_cfg.get("calendar_show_prayer_times", "1")) != "0"),
+						key="cfg_cal_show_prayer",
+					)
+				with cal_c3:
+					ui.write("")
+					sel_auto_hol = ui.toggle(
+						"🇹🇷 Resmi & Dini Tatilleri Otomatik İşaretle",
+						value=(str(current_cfg.get("calendar_auto_load_holidays", "1")) != "0"),
+						key="cfg_cal_auto_holidays",
+					)
+				if ui.button("💾 Takvim Yaprağı ve Ezan Vakti Ayarlarını Kaydet", type="primary", key="btn_save_calendar_settings"):
+					save_app_settings({
+						"calendar_quote_mode": sel_q_mode,
+						"calendar_show_prayer_times": "1" if sel_show_prayer else "0",
+						"calendar_auto_load_holidays": "1" if sel_auto_hol else "0",
+					})
+					ui.success("✅ Takvim yaprağı, söz/hadis ve ezan vakti sayacı tercihleri kaydedildi.")
+					ui.rerun()
+
 		# ======================================================================
 		# GRUP 3: MODÜL & FORM GÖRÜNÜRLÜĞÜ (3 GÖRÜNÜRLÜK AYARI TEK ÇATIDA)
 		# ======================================================================
@@ -30879,6 +30959,7 @@ def main() -> None:
 		("GELİŞİM & PLAN", [
 			{"value": "📋 Sağlık Profili ve Bakım Planı", "icon": "📋", "label": "Sağlık Profili & Plan"},
 			{"value": "📏 Ölçüm ve Gelişim", "icon": "📏", "label": "Ölçüm & Gelişim"},
+			{"value": "📅 Takvim & Planlama", "icon": "📅", "label": "Takvim & Planlama"},
 		]),
 		("BELGE & SİSTEM", [
 			{"value": "🖨️ Raporlar", "icon": "🖨️", "label": "Raporlar"},
@@ -30951,6 +31032,15 @@ def main() -> None:
 		render_health_profile_and_plan()
 	elif page_clean == "Ölçüm ve Gelişim":
 		render_measurements()
+	elif page_clean in ("Takvim & Planlama", "Takvim ve Planlama"):
+		from school_calendar import render_calendar_and_planning_page
+		render_calendar_and_planning_page(
+			connect_db_fn=connect_db,
+			get_app_settings_fn=get_app_settings,
+			save_app_settings_fn=save_app_settings,
+			get_active_gemini_config_fn=_get_active_gemini_config,
+			get_tr_provinces_fn=get_tr_provinces,
+		)
 	elif page_clean == "Raporlar":
 		render_reports()
 	elif page_clean == "Evraklar":

@@ -2019,4 +2019,156 @@ SADECE aşağıdaki JSON yapısını döndür (değişmeyecek satır/paragraflar
 	return True, parsed, used_m
 
 
+def generate_calendar_events_with_ai(
+	*,
+	api_key: str,
+	model: str,
+	year: int,
+	month: int | None = None,
+	preset_type: str = "custom",
+	custom_prompt: str = "",
+	selected_exams: list[str] | None = None,
+) -> tuple[bool, dict[str, Any], str]:
+	"""
+	Gemini AI kullanarak resmi tatilleri, yarım gün arife/28 Ekim çalışmalarını,
+	dini bayram ve kandilleri, seçim/idari izin tatillerini, ÖSYM/MEB sınavlarını,
+	belirli gün ve haftaları veya meslek günlerini yapılandırılmış takvim kayıtları olarak üretir.
+	"""
+	period_txt = f"{year} yılı {month}. ayı" if month else f"{year} yılı tamamı"
+	exams_txt = ", ".join(selected_exams) if selected_exams else "YKS (TYT-AYT-YDT), LGS, KPSS, MSÜ, ALES, DGS, YDS, İOKBS Bursluluk"
+
+	preset_instructions = {
+		"official_holidays": (
+			f"{period_txt} için Türkiye Cumhuriyeti resmi tatillerini (1 Ocak, 23 Nisan, 1 Mayıs, 19 Mayıs, "
+			"15 Temmuz, 30 Ağustos, 29 Ekim), devlet memurları için yarım gün mesai olan günleri (28 Ekim öğleden sonra, "
+			"Ramazan Bayramı Arifesi, Kurban Bayramı Arifesi), Ramazan ve Kurban Bayramı günlerini ve önemli kandil/dini günleri "
+			"eksiksiz çıkar. Milli bayramlarda symbol_type='tr_flag', dini bayram ve kandillerde symbol_type='crescent' kullan."
+		),
+		"osym_exams": (
+			f"{period_txt} içinde gerçekleşen veya planlanan ÖSYM ve MEB merkezi sınavlarını ({exams_txt}) "
+			"tarihleri, sınav saatleri (ör. 10:15) ve kısa açıklamalarıyla çıkar. symbol_type='exam', category='osym_sinav' kullan."
+		),
+		"special_days": (
+			f"{period_txt} içindeki MEB Belirli Gün ve Haftaları, sağlık takvimi günlerini (Tıp Bayramı, Hemşireler Günü, "
+			"Eczacılar Günü, Diş Hekimleri Günü, Dünya Diyabet Günü, Yeşilay Haftası, Otizm Farkındalık Günü vb.) ve "
+			"meslek grubu günlerini (Öğretmenler Günü, Avukatlar Günü, Gazeteciler Günü, Mühendisler Günü, Hemşireler Günü vb.) çıkar."
+		),
+		"election_or_custom": (
+			f"{period_txt} bağlamında kullanıcının şu özel takvim talimatını yerine getir: {custom_prompt or 'Okul ve revir takvim planı oluştur'}"
+		),
+	}
+	task_desc = preset_instructions.get(preset_type, preset_instructions["election_or_custom"])
+	if custom_prompt and preset_type != "election_or_custom":
+		task_desc += f"\nEk kullanıcı isteği: {custom_prompt}"
+
+	prompt = f"""Sen Türkiye'deki devlet okulları, kamu kurumları ve okul revirleri için çalışan uzman bir Resmi Takvim ve Planlama Asistanısın.
+Hedef Dönem: {period_txt}
+Görev: {task_desc}
+
+Kurallar:
+1. Tarihleri kesinlikle "YYYY-MM-DD" formatında (`event_date`) yaz.
+2. Devlet memurları için resmi tatil olan günlerde `is_civil_holiday: true` yap (kırmızı tatil günü). Kandil geceleri veya kutlama haftaları resmi tatil değildir (`is_civil_holiday: false`).
+3. 28 Ekim ve Bayram Arifeleri gibi yarım gün mesailerde `is_half_day: true` ve `is_civil_holiday: true` yap.
+4. `symbol_type` alanı yalnızca şu değerlerden biri olabilir:
+   - "tr_flag" (29 Ekim, 23 Nisan, 19 Mayıs, 30 Ağustos, 15 Temmuz, 10 Kasım, 18 Mart gibi Milli Bayramlar ve Ulusal Günler)
+   - "crescent" (Ramazan Bayramı, Kurban Bayramı, Arife, Kandiller, Kadir Gecesi, Aşure Günü gibi Dini Günler)
+   - "half_day" (Yarım gün mesai)
+   - "exam" (ÖSYM ve MEB Sınavları)
+   - "profession" (Meslek grubu günleri: Tıp Bayramı, Hemşireler Günü, Öğretmenler Günü vb.)
+   - "ballot" (Seçim tatili / idari izin)
+   - "health" (Sağlık haftası / revir tarama / aşı günü)
+   - "event" (Diğer belirli gün, hafta veya etkinlik)
+5. `category` alanı yalnızca şu değerlerden biri olabilir:
+   "milli_bayram", "dini_bayram", "resmi_tatil", "yarim_gun", "secim_idari_tatil", "osym_sinav", "meslek_gunu", "belirli_gun", "revir_etkinlik"
+
+SADECE aşağıdaki JSON yapısını döndür:
+{{
+  "summary": "Üretilen takvim kayıtlarının kısa Türkçe özeti",
+  "events": [
+    {{
+      "event_date": "{year}-10-29",
+      "title": "29 Ekim Cumhuriyet Bayramı",
+      "category": "milli_bayram",
+      "symbol_type": "tr_flag",
+      "is_civil_holiday": true,
+      "is_half_day": false,
+      "profession_group": "",
+      "start_time": "09:00",
+      "end_time": "17:00",
+      "description": "Cumhuriyetin ilanı - Devlet memurları ve okullar için tam gün resmi tatil."
+    }}
+  ]
+}}"""
+
+	ok, raw, used_m = call_gemini(
+		prompt,
+		api_key=api_key,
+		model=model,
+		expect_json=True,
+		temperature=0.2,
+		timeout=35.0,
+	)
+	if not ok:
+		return False, {"error": raw}, used_m
+	parsed = _parse_json_response(raw)
+	if not parsed or not isinstance(parsed.get("events"), list):
+		return False, {"error": "Gemini takvim yanıtı JSON olarak ayrıştırılamadı."}, used_m
+	return True, parsed, used_m
+
+
+def generate_daily_leaf_content_with_ai(
+	*,
+	api_key: str,
+	model: str,
+	target_date: str,
+	quote_mode: str = "Karışık (Hadis + Özlü Söz)",
+	day_context: str = "",
+	province: str = "Ankara",
+) -> tuple[bool, dict[str, Any], str]:
+	"""
+	Seçili gün için klasik Türk 'Takvim Yaprağı' içeriği üretir:
+	- O günün hangi meslek grubunun günü olduğu / hangi tatil veya belirli gün olduğu
+	- Ayarlarda seçilen tercihe göre sahih kaynaklı Hadis-i Şerif, Özlü Söz veya Karışık Takvim Yaprağı yazısı.
+	"""
+	prompt = f"""Sen geleneksel ve modern Türk 'Takvim Yaprağı' kültürünü çok iyi bilen bir asistansın.
+Seçili Tarih: {target_date}
+İl: {province}
+Günün Bilinen Tatil / Özel Gün Bağlamı: {day_context or 'Standart gün'}
+Kullanıcının Söz/Hadis Gösterim Tercihi: {quote_mode}
+
+Lütfen bu tarihe özel olarak şunları üret:
+1. O gün Türkiye'de veya dünyada hangi meslek grubunun günü (ör. Hemşireler, Hekimler, Öğretmenler, Eczacılar, Mühendisler, İtfaiyeciler, Çiftçiler, Madenciler vb. veya o güne en yakın meslek/topluluk) ve hangi tatil/belirli gün olduğu.
+2. Sahih kaynaklı (Buhârî, Müslim, Tirmizî, Ebû Dâvûd, Riyâzü's-Sâlihîn vb.) ahlak, sağlık, merhamet, ilim, sabır veya yardımlaşma temalı bir Hadis-i Şerif ve kaynağı.
+3. Günün anlam ve önemine uygun bir Özlü Söz / Atasözü ve söyleyeni.
+4. Klasik takvim yaprağı arkası tadında 2-3 cümlelik "Günün Takvim Yaprağı Notu".
+
+SADECE aşağıdaki JSON yapısını döndür:
+{{
+  "day_significance": "Günün anlam ve önemi / tatil ve belirli gün özeti",
+  "profession_group": "O günün meslek grubu veya 'Tüm Kamu & Sağlık Çalışanları'",
+  "profession_note": "Meslek grubuna veya günün çalışanlarına özel kısa tebrik/anlam notu",
+  "hadith_text": "Hadis-i Şerif metni",
+  "hadith_source": "Kaynak (Örn: Buhârî, İlim, 10)",
+  "quote_text": "Özlü söz veya atasözü metni",
+  "quote_author": "Söyleyen / Kaynak",
+  "leaf_back_note": "Takvim yaprağı arkası 2-3 cümlelik faydalı/hikmetli günün yazısı"
+}}"""
+
+	ok, raw, used_m = call_gemini(
+		prompt,
+		api_key=api_key,
+		model=model,
+		expect_json=True,
+		temperature=0.35,
+		timeout=25.0,
+	)
+	if not ok:
+		return False, {"error": raw}, used_m
+	parsed = _parse_json_response(raw)
+	if not parsed:
+		return False, {"error": "Takvim yaprağı yanıtı JSON olarak ayrıştırılamadı."}, used_m
+	return True, parsed, used_m
+
+
+
 
