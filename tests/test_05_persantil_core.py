@@ -1,0 +1,178 @@
+"""Comprehensive unit & integration tests for persantil.py (data, math, DB CRUD, exports, and headless UI)."""
+from __future__ import annotations
+
+import sys
+import unittest
+from datetime import date, datetime
+from pathlib import Path
+from unittest import mock
+
+import pandas as pd
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+import persantil
+import revir_ui
+from tests.db_test_helper import isolated_real_db
+
+
+class TestPersantilCoreAndUI(unittest.TestCase):
+    def setUp(self):
+        self.ctx = isolated_real_db()
+        self.tmp_p, self.db_p, self.connect = self.ctx.__enter__()
+        revir_ui.reset_session()
+
+    def tearDown(self):
+        self.ctx.__exit__(None, None, None)
+
+    def test_01_settings_icons_assets_and_templates(self):
+        self.assertTrue(len(persantil._load_app_version()) > 0)
+        self.assertIsNotNone(persantil.get_app_icon())
+        self.assertIsInstance(persantil.is_dark_mode_active({"dark_mode_adaptation": "Açık Mod (Her Zaman Aydınlık)"}), bool)
+        theme = persantil.THEME_PRESETS["Klinik Turkuaz (Varsayılan)"]
+        css = persantil.build_app_css(
+            "'DM Sans', sans-serif",
+            "",
+            "15px",
+            "1.4rem",
+            theme,
+            "Klinik Turkuaz (Varsayılan)",
+            "Otomatik (Sistem Temasına ve Dark Mode'a Uyarla)",
+        )
+        self.assertIn("<style", css)
+
+        cfg = persantil.get_app_settings()
+        self.assertIn("graduation_grade_level", cfg)
+        persantil.save_app_settings({"school_name": "Deneme İlkokulu ĞÜŞİÖÇ", "graduation_grade_level": "8"})
+        cfg2 = persantil.get_app_settings()
+        self.assertEqual(cfg2["school_name"], "Deneme İlkokulu ĞÜŞİÖÇ")
+        self.assertEqual(cfg2["graduation_grade_level"], "8")
+
+        tpl = persantil.get_care_plan_templates()
+        self.assertIsInstance(tpl, dict)
+        persantil.save_care_plan_templates(tpl)
+        persantil.reset_care_plan_templates()
+        sec_tpl = persantil.get_care_plan_section_templates("Astım")
+        self.assertIsInstance(sec_tpl, dict)
+
+        provs = persantil.get_tr_provinces()
+        self.assertIsInstance(provs, list)
+
+    def test_02_academic_years_and_backups(self):
+        years = persantil.get_all_academic_years()
+        self.assertGreaterEqual(len(years), 1)
+        active = persantil.get_active_academic_year()
+        self.assertIsNotNone(active)
+
+        # Seed classes & students into master DB for promote test
+        with self.connect() as c:
+            for cname in ["Anasınıfı", "1-A", "3-A", "4-A", "5-A"]:
+                cur = c.execute("INSERT INTO classes(name) VALUES (?)", (cname,))
+                cid = cur.lastrowid
+                c.execute(
+                    "INSERT INTO students(class_id, full_name, sex, birth_date, person_type) VALUES (?, ?, 'E', '2016-05-01', 'Öğrenci')",
+                    (cid, f"Öğrenci {cname}"),
+                )
+            c.commit()
+
+        y_id = persantil.create_academic_year("2028-2029", "2028-09-01", "2029-06-15", student_policy="promote", graduation_grade=4)
+        self.assertGreater(y_id, 0)
+        persantil.update_academic_year(y_id, "2028-2029 Güncel", "2028-09-05", "2029-06-20")
+        persantil.set_active_academic_year(y_id)
+        y_db = self.tmp_p / "egitim_yillari" / "2028_2029" / "revir_defteri.db"
+        import sqlite3
+        with sqlite3.connect(y_db) as yc:
+            names = sorted([r[0] for r in yc.execute("SELECT name FROM classes").fetchall()])
+            self.assertEqual(names, ["2-A", "4-A", "Anasınıfı"])
+
+        # Test backups
+        self.assertIn("KB", persantil.format_file_size(2048))
+        b_res = persantil.run_daily_auto_backup(force=True)
+        self.assertIsNotNone(b_res)
+        blist = persantil.list_auto_backups()
+        self.assertGreaterEqual(len(blist), 1)
+
+        # Switch back & delete test year
+        persantil.set_active_academic_year(years[0]["id"])
+        persantil.delete_academic_year(y_id)
+
+    def test_03_who_math_and_growth_evaluation(self):
+        age_m = persantil.age_in_months("2016-05-01", date(2026, 5, 1))
+        self.assertAlmostEqual(age_m, 120.0, delta=0.5)
+        self.assertIsNone(persantil.age_in_months("invalid-date", date(2026, 5, 1)))
+
+        # Test WHO LMS / SDS / Percentile helpers if present
+        p50 = persantil.percentile(0.0)
+        self.assertAlmostEqual(p50, 50.0, delta=0.5)
+        self.assertLess(persantil.percentile(-3.0), 1.0)
+        self.assertGreater(persantil.percentile(3.0), 99.0)
+        self.assertIsInstance(persantil.get_percentile_band(50.0), str)
+
+        ev = persantil.evaluate_measurement(138.0, "Boy (cm)", "E", 120)
+        self.assertTrue(ev is None or isinstance(ev, dict))
+        curves = persantil.generate_who_percentile_curves("Boy (cm)", "E", 0, 72)
+        self.assertIsInstance(curves, pd.DataFrame)
+
+    def test_04_kvkk_and_person_crud_and_clinical_records(self):
+        revir_ui.session_state["kvkk_privacy_mode"] = True
+        masked = persantil.mask_kvkk_value("Ahmet Yılmaz", "name")
+        self.assertNotEqual(masked, "Ahmet Yılmaz")
+        self.assertEqual(persantil.mask_kvkk_value("", "name"), "")
+
+        with self.connect() as c:
+            c.execute("INSERT INTO classes(name) VALUES ('2-B')")
+            c.execute(
+                "INSERT INTO students(class_id, full_name, student_no, sex, birth_date, person_type) VALUES (1, 'Elif Demir', '102', 'K', '2018-03-15', 'Öğrenci')"
+            )
+            c.commit()
+
+        p = persantil.get_person_by_id(1)
+        self.assertEqual(p["full_name"], "Elif Demir")
+        persantil.set_active_person(1)
+        latest = persantil.get_person_latest_measurements(1)
+        self.assertIsInstance(latest, dict)
+        dis = persantil.get_person_disability_profile(1, person=p)
+        self.assertIsInstance(dis, dict)
+        self.assertIsInstance(persantil.format_disability_badge_text(dis), str)
+
+    def test_05_headless_render_all_major_pages(self):
+        with self.connect() as c:
+            c.execute("INSERT INTO classes(name) VALUES ('1-A')")
+            c.execute(
+                "INSERT INTO students(class_id, full_name, student_no, sex, birth_date, person_type) VALUES (1, 'Can Öztürk', '201', 'E', '2019-09-01', 'Öğrenci')"
+            )
+            c.commit()
+        persantil.set_active_person(1)
+
+        pages = [
+            persantil.render_overview,
+            persantil.render_students,
+            persantil.render_civilians,
+            persantil.render_health_profile_and_plan,
+            persantil.render_visit,
+            persantil.render_medication_tracker,
+            persantil.render_vital_tracking,
+            persantil.render_measurements,
+            persantil.render_school_screening,
+            persantil.render_reports,
+            persantil.render_academic_year_settings,
+            persantil.render_documents_depot,
+            persantil.render_settings,
+            persantil.render_insulin_diabetes,
+        ]
+        for page_fn in pages:
+            with self.subTest(page=page_fn.__name__):
+                revir_ui.reset_session()
+                revir_ui.session_state["active_person_id"] = 1
+                with mock.patch("school_calendar.get_prayer_times_for_province", return_value={
+                    "İmsak": "06:00", "Güneş": "07:30", "Öğle": "12:50", "İkindi": "15:20", "Akşam": "17:45", "Yatsı": "19:05"
+                }):
+                    out = revir_ui.run_action_headless(page_fn, {"action": "render"})
+                self.assertIn("main_html", out)
+                self.assertNotIn("Çalışma Zamanı Hatası", out["main_html"], f"{page_fn.__name__} raised runtime error!")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

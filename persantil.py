@@ -124,7 +124,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.16.5"
+_DEFAULT_APP_VERSION = "1.16.6"
 
 
 def _load_app_version() -> str:
@@ -184,7 +184,8 @@ def get_app_icon():
 		if APP_ICON_PATH.exists():
 			try:
 				from PIL import Image as _PILImg
-				_CACHED_ICON = _PILImg.open(APP_ICON_PATH)
+				with _PILImg.open(APP_ICON_PATH) as _im:
+					_CACHED_ICON = _im.copy()
 			except Exception:
 				_CACHED_ICON = "✚"
 		else:
