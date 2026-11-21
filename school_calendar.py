@@ -2486,3 +2486,113 @@ def render_calendar_settings_tab(
 						ui.session_state["_cal_settings_flash"] = f"✅ '{m_title.strip()}' ({d_parsed.strftime('%d.%m.%Y')}) takvime eklendi."
 						ui.rerun()
 
+
+# ---------------------------------------------------------------------------
+# GENEL BAKIŞ (OVERVIEW) TAKVİM & YAKLAŞAN ETKİNLİKLER BİLEŞENİ
+# ---------------------------------------------------------------------------
+
+def render_overview_calendar_widget(
+	*,
+	connect_db_fn: Callable,
+	get_active_gemini_config_fn: Callable,
+) -> None:
+	"""Genel Bakış (Bento Sağ Panel) üzerinde bugünkü ve yaklaşan 14 günlük takvim etkinliklerini gösterir."""
+	today_d = date.today()
+	today_iso = today_d.isoformat()
+	end_iso = (today_d + timedelta(days=14)).isoformat()
+
+	# Yılın temel tatilleri henüz eklenmemişse otomatik hazırla
+	ov_seed_key = f"_cal_seeded_{today_d.year}"
+	if not ui.session_state.get(ov_seed_key):
+		try:
+			ensure_year_builtin_holidays_seeded(today_d.year, connect_db_fn, include_special_days=False)
+			ui.session_state[ov_seed_key] = True
+		except Exception:
+			pass
+
+	with connect_db_fn() as conn:
+		rows = conn.execute(
+			"""SELECT id, event_date, title, category, symbol_type, is_civil_holiday,
+			          is_half_day, start_time, end_time, is_completed
+			   FROM calendar_events
+			   WHERE event_date >= ? AND event_date <= ?
+			   ORDER BY event_date ASC, is_civil_holiday DESC, start_time ASC, id ASC
+			   LIMIT 12""",
+			(today_iso, end_iso),
+		).fetchall()
+
+	with ui.container(border=True):
+		ov_h1, ov_h2, ov_h3 = ui.columns([2.0, 0.5, 1.0])
+		with ov_h1:
+			ui.markdown("##### 📅 Takvim & Yaklaşan Etkinlikler")
+		with ov_h2:
+			if ui.button("➕", key="ov_bento_cal_add", help="Bugüne etkinlik / plan ekle", use_container_width=True):
+				open_calendar_event_manager_dialog(
+					sel_iso=today_iso,
+					connect_db_fn=connect_db_fn,
+					get_active_gemini_config_fn=get_active_gemini_config_fn,
+				)
+		with ov_h3:
+			if ui.button("Takvime Git ↗", key="ov_bento_cal_go", use_container_width=True):
+				ui.session_state["cal_selected_date"] = today_iso
+				ui.session_state["cal_view_year"] = today_d.year
+				ui.session_state["cal_view_month"] = today_d.month
+				ui.session_state["target_page"] = "📅 Takvim & Planlama"
+				ui.session_state["main_menu_page"] = "📅 Takvim & Planlama"
+				ui.rerun()
+
+		active_weeks = get_active_meb_weeks_for_date(today_d)
+		if active_weeks:
+			wk_titles = " · ".join(w["title"] for w in active_weeks[:2])
+			ui.caption(f"🏫 **Bu Hafta:** {wk_titles}")
+
+		if not rows:
+			ui.caption("Önümüzdeki 14 gün içinde kayıtlı takvim etkinliği veya resmi tatil bulunmuyor. Sağ üstteki **➕** butonuyla hemen ekleyebilirsiniz.")
+			return
+
+		for r in rows[:7]:
+			ev_id = int(r["id"])
+			ev_d_str = str(r["event_date"])[:10]
+			try:
+				ev_d = date.fromisoformat(ev_d_str)
+				if ev_d == today_d:
+					d_lbl = "BUGÜN"
+				elif ev_d == today_d + timedelta(days=1):
+					d_lbl = "YARIN"
+				else:
+					d_lbl = f"{ev_d.day:02d} {TR_MONTH_NAMES[ev_d.month][:3]}"
+			except Exception:
+				d_lbl = ev_d_str
+
+			sym_html = render_symbol_badge(r["symbol_type"] or "event")
+			t_rng = " - ".join(filter(None, [r["start_time"], r["end_time"]]))
+			t_html = f"<span style='color:var(--teal);font-weight:700;font-size:11.5px;'>⏰ {html.escape(t_rng)}</span>" if t_rng else ""
+			is_hol = bool(r["is_civil_holiday"])
+			is_done = bool(r["is_completed"])
+			d_bg = "#fee2e2" if is_hol else ("#dbeafe" if ev_d_str == today_iso else "#f1f5f9")
+			d_fg = "#dc2626" if is_hol else ("#1d4ed8" if ev_d_str == today_iso else "#334155")
+			ttl_style = "text-decoration:line-through;opacity:0.65;" if is_done else ""
+
+			c_row, c_btn = ui.columns([4.8, 0.85])
+			with c_row:
+				ui.markdown(
+					f"""<div class="revir-op-row" style="padding:6px 9px;display:flex;align-items:center;justify-content:space-between;gap:8px;">
+						<div style="display:flex;align-items:center;gap:7px;min-width:0;">
+							<span style="background:{d_bg};color:{d_fg};padding:2px 7px;border-radius:6px;font-size:11px;font-weight:800;white-space:nowrap;">{html.escape(d_lbl)}</span>
+							{sym_html}
+							<span style="font-weight:700;font-size:13px;color:var(--text-heading);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;{ttl_style}">{html.escape(str(r['title'] or ''))}</span>
+						</div>
+						<div style="white-space:nowrap;">{t_html}</div>
+					</div>""",
+					unsafe_allow_html=True,
+				)
+			with c_btn:
+				if ui.button("✓" if not is_done else "↩️", key=f"ov_cal_done_{ev_id}", help="Tamamlandı olarak işaretle", use_container_width=True):
+					with connect_db_fn() as conn:
+						conn.execute("UPDATE calendar_events SET is_completed = ? WHERE id = ?", (0 if is_done else 1, ev_id))
+					ui.rerun()
+
+		if len(rows) > 7:
+			ui.caption(f"… ve önümüzdeki 14 gün içinde {len(rows) - 7} takvim kaydı daha.")
+
+

@@ -124,7 +124,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.16.1"
+_DEFAULT_APP_VERSION = "1.16.2"
 
 
 def _load_app_version() -> str:
@@ -3337,6 +3337,13 @@ PAGE_SECTIONS_REGISTRY: dict[str, dict[str, Any]] = {
 			"icon": "📊",
 			"default": True,
 			"essential": False,
+		},
+		"overview_calendar_events": {
+			"name": "Takvim & Yaklaşan Etkinlikler Özeti",
+			"desc": "Bugünkü ve önümüzdeki 14 günün takvim etkinlikleri, resmi tatiller ve sınavlar",
+			"icon": "📅",
+			"default": True,
+			"essential": True,
 		},
 		"overview_pending_followups": {
 			"name": "Bekleyen İzlemler ve Sevk Sonuçları",
@@ -16081,6 +16088,16 @@ def render_overview() -> None:
 						ui.bar_chart(v_df.set_index("visit_date")["vizit_sayisi"], height=215, color="#0ea5e9")
 					else:
 						ui.caption("Son 14 gün için vizit verisi henüz oluşmadı.")
+			except Exception:
+				pass
+
+		if is_section_visible("overview_calendar_events"):
+			try:
+				from school_calendar import render_overview_calendar_widget
+				render_overview_calendar_widget(
+					connect_db_fn=connect_db,
+					get_active_gemini_config_fn=_get_active_gemini_config,
+				)
 			except Exception:
 				pass
 
