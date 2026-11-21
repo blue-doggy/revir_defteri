@@ -1,14 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Okul Revir Defteri ve Sağlık Takip Sistemi - PyInstaller Paketleme (.spec)
+Okul Revir Defteri ve Sağlık Takip Sistemi - Çapraz Platform PyInstaller Paketleme (.spec)
 
 Derleme Komutu:
     python -m PyInstaller RevirDefteri.spec --clean -y
 
-Çıktı Klasörü (Tek Klasör / onedir):
-    dist/RevirDefteri/RevirDefteri.exe
+Çıktılar:
+    Windows : dist/RevirDefteri/RevirDefteri.exe
+    macOS   : dist/RevirDefteri.app
 """
 
+import sys
 from pathlib import Path
 from PyInstaller.utils.hooks import (
     collect_data_files,
@@ -18,6 +20,15 @@ from PyInstaller.utils.hooks import (
 )
 
 PROJECT_ROOT = Path(SPECPATH).resolve()
+IS_MACOS = sys.platform == "darwin"
+IS_WINDOWS = sys.platform == "win32"
+
+_version_file = PROJECT_ROOT / "VERSION"
+APP_VERSION = (
+    _version_file.read_text(encoding="utf-8").strip()
+    if _version_file.exists()
+    else "1.13.0"
+)
 
 datas = [
     (str(PROJECT_ROOT / "persantil.py"), "."),
@@ -32,6 +43,8 @@ datas = [
     (str(PROJECT_ROOT / "turkiye-il-ilce-mahalle-koy.json"), "."),
     (str(PROJECT_ROOT / "persantil veriler"), "persantil veriler"),
 ]
+if (PROJECT_ROOT / "app_icon.icns").exists():
+    datas.append((str(PROJECT_ROOT / "app_icon.icns"), "."))
 
 binaries = []
 hiddenimports = [
@@ -53,17 +66,42 @@ hiddenimports = [
     "PIL.ImageOps",
     "PIL.ImageDraw",
     "webview",
-    "webview.platforms.edgechromium",
-    "webview.platforms.winforms",
-    "clr",
-    "pythonnet",
-    "clr_loader",
     "truststore",
     "psutil",
+    "sounddevice",
+    "_sounddevice_data",
 ]
 
-# Altair, python-docx, openpyxl, pymupdf, pywebview ve pythonnet bağımlılıkları
-for pkg_name in ("altair", "docx", "openpyxl", "pymupdf", "webview", "clr_loader", "pythonnet"):
+collect_packages = [
+    "altair",
+    "docx",
+    "openpyxl",
+    "pymupdf",
+    "webview",
+    "sounddevice",
+    "_sounddevice_data",
+]
+
+if IS_WINDOWS:
+    hiddenimports += [
+        "webview.platforms.edgechromium",
+        "webview.platforms.winforms",
+        "clr",
+        "pythonnet",
+        "clr_loader",
+    ]
+    collect_packages += ["clr_loader", "pythonnet"]
+elif IS_MACOS:
+    hiddenimports += [
+        "webview.platforms.cocoa",
+        "objc",
+        "Foundation",
+        "AppKit",
+        "WebKit",
+        "PyObjCTools",
+    ]
+
+for pkg_name in collect_packages:
     try:
         datas += collect_data_files(pkg_name)
         binaries += collect_dynamic_libs(pkg_name)
@@ -81,6 +119,8 @@ for meta_pkg in (
     "pandas",
     "pillow",
     "packaging",
+    "sounddevice",
+    "truststore",
 ):
     try:
         datas += copy_metadata(meta_pkg)
@@ -106,6 +146,12 @@ excludes = [
     "scipy",
     "matplotlib",
 ]
+
+if IS_MACOS:
+    _icns = PROJECT_ROOT / "app_icon.icns"
+    APP_ICON = str(_icns if _icns.exists() else (PROJECT_ROOT / "app_icon.png"))
+else:
+    APP_ICON = str(PROJECT_ROOT / "app_icon.ico")
 
 a = Analysis(
     [str(PROJECT_ROOT / "desktop_app.py")],
@@ -139,7 +185,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=str(PROJECT_ROOT / "app_icon.ico"),
+    icon=APP_ICON,
 )
 
 coll = COLLECT(
@@ -151,3 +197,23 @@ coll = COLLECT(
     upx_exclude=[],
     name="RevirDefteri",
 )
+
+if IS_MACOS:
+    app = BUNDLE(
+        coll,
+        name="RevirDefteri.app",
+        icon=APP_ICON,
+        bundle_identifier="com.okulrevir.revirdefteri",
+        info_plist={
+            "CFBundleName": "RevirDefteri",
+            "CFBundleDisplayName": "Okul Revir Defteri",
+            "CFBundleShortVersionString": APP_VERSION,
+            "CFBundleVersion": APP_VERSION,
+            "NSHighResolutionCapable": True,
+            "LSMinimumSystemVersion": "11.0",
+            "NSMicrophoneUsageDescription": (
+                "Okul Revir Defteri sesli komut ve Gemini AI sesli sohbet "
+                "özellikleri için mikrofon erişimi gereklidir."
+            ),
+        },
+    )

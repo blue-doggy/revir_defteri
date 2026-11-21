@@ -7,4 +7,6 @@ altair>=5.0.0
 PyMuPDF>=1.24.0
 python-docx>=1.1.0
 Pillow>=10.0.0
-easyocr>=1.7.2
+truststore>=0.8.0
+# Opsiyonel yerel OCR (PyTorch ~2GB gerektirir; PyInstaller derlemesinde haric tutulur):
+# easyocr>=1.7.2

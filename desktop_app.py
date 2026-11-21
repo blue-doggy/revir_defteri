@@ -34,7 +34,7 @@ def _ensure_standard_streams() -> None:
 
 _ensure_standard_streams()
 
-_DEFAULT_APP_VERSION = "1.13.0"
+_DEFAULT_APP_VERSION = "1.14.0"
 
 
 def _load_app_version() -> str:
@@ -89,6 +89,11 @@ def resolve_runtime_paths() -> dict[str, Path]:
 	env_data = os.environ.get("REVIR_DATA_DIR", "").strip()
 	if env_data:
 		data_dir = Path(env_data).resolve()
+		data_dir.mkdir(parents=True, exist_ok=True)
+	elif sys.platform == "darwin" and is_frozen:
+		# macOS .app paketi icinde veritabani tutmak guncellemede veri kaybina yol acar;
+		# her zaman ~/Library/Application Support/RevirDefteri kullanilir.
+		data_dir = Path.home() / "Library" / "Application Support" / "RevirDefteri"
 		data_dir.mkdir(parents=True, exist_ok=True)
 	elif _is_dir_writable(exe_dir):
 		data_dir = exe_dir
