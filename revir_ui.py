@@ -865,6 +865,7 @@ class _AppSession:
 		self.floating_chat_enabled: bool = False
 		self.floating_chat_label: str = "KVKK Korumalı"
 		self.floating_chat_handler: Callable | None = None
+		self.floating_chat_export_handler: Callable | None = None
 		self.chat_history: list[dict[str, str]] = []
 		self.topbar_html: str = ""
 		self.topbar_action_handler: Callable | None = None
@@ -2474,12 +2475,31 @@ def rerun(*, scope: str = "app") -> None:
 	raise _RerunException(scope=scope)
 
 
-def configure_floating_chat(enabled: bool, label: str = "KVKK Korumalı", handler: Callable | None = None) -> None:
+def configure_floating_chat(
+	enabled: bool,
+	label: str = "KVKK Korumalı",
+	handler: Callable | None = None,
+	export_handler: Callable | None = None,
+) -> None:
 	ctx = _get_ctx()
 	ctx.session.floating_chat_enabled = bool(enabled)
 	ctx.session.floating_chat_label = str(label or "KVKK Korumalı")
 	if handler is not None:
 		ctx.session.floating_chat_handler = handler
+	if export_handler is not None:
+		ctx.session.floating_chat_export_handler = export_handler
+
+
+def register_download(data: bytes, file_name: str, mime: str = "application/octet-stream") -> str:
+	"""Herhangi bir işleyiciden (örn. Gemini Sohbet) indirilebilir dosya kaydı açar ve indirme token'ı döndürür."""
+	token = f"ai_dl_{secrets.token_urlsafe(12)}"
+	with _ACTIVE_SESSION.lock:
+		ai_keys = [k for k in _ACTIVE_SESSION.downloads.keys() if str(k).startswith("ai_dl_")]
+		while len(ai_keys) >= 40:
+			old_k = ai_keys.pop(0)
+			_ACTIVE_SESSION.downloads.pop(old_k, None)
+		_ACTIVE_SESSION.downloads[token] = (bytes(data), str(file_name or "rapor.bin"), str(mime or "application/octet-stream"))
+	return token
 
 
 def configure_topbar(html_str: str, action_handler: Callable | None = None) -> None:
@@ -3527,6 +3547,9 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 }
 .revir-chat-hbtn:hover { background: rgba(255,255,255,0.3); }
 .revir-chat-hbtn.active { background: #ffffff; color: #0284c7 !important; box-shadow: 0 2px 6px rgba(0,0,0,0.18); }
+.revir-chat-hbtn.stop-tts { display: none; width: auto; padding: 0 9px; gap: 4px; font-size: 11.5px; font-weight: 800; background: #ef4444; color: #ffffff !important; border: 1px solid rgba(255,255,255,0.55); animation: revirPulse 1.15s infinite; }
+.revir-chat-hbtn.stop-tts.speaking { display: inline-flex; }
+.revir-chat-hbtn.stop-tts:hover { background: #dc2626; }
 
 .revir-chat-chips {
 	display: flex; gap: 6px; overflow-x: auto; padding: 8px 12px;
@@ -3564,7 +3587,7 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 	box-shadow: 0 2px 6px rgba(0,0,0,0.04);
 }
 .revir-cmsg-tools {
-	display: flex; align-items: center; justify-content: flex-end; gap: 6px;
+	display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 4px;
 	margin-top: 6px; padding-top: 4px; border-top: 1px dashed var(--line, #e2e8f0);
 }
 .revir-cmsg-tbtn {
@@ -3572,6 +3595,38 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 	font-size: 11px; font-weight: 600; cursor: pointer; padding: 2px 6px; border-radius: 5px;
 }
 .revir-cmsg-tbtn:hover { background: rgba(13,148,136,0.12); color: var(--teal, #0d9488); }
+.revir-cmsg-tbtn.speaking { background: #fef2f2; color: #dc2626 !important; border: 1px solid #fecaca; font-weight: 700; }
+.revir-cmsg-downloads {
+	display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; padding-top: 7px;
+	border-top: 1px solid var(--line, #e2e8f0);
+}
+.revir-cmsg-dlbtn {
+	display: inline-flex; align-items: center; gap: 6px; padding: 6px 11px;
+	border-radius: 9px; border: 1px solid rgba(13,148,136,0.35);
+	background: linear-gradient(135deg, rgba(13,148,136,0.12) 0%, rgba(2,132,199,0.12) 100%);
+	color: var(--teal, #0f766e); font-size: 12px; font-weight: 700; cursor: pointer;
+	font-family: inherit; transition: all 0.15s;
+}
+.revir-cmsg-dlbtn:hover { background: var(--teal, #0d9488); color: #ffffff !important; border-color: var(--teal, #0d9488); transform: translateY(-1px); }
+
+.revir-voice-bar {
+	display: none; flex-direction: column; gap: 6px; padding: 8px 12px;
+	background: linear-gradient(90deg, rgba(239,68,68,0.10) 0%, rgba(249,115,22,0.08) 100%);
+	border-top: 1px solid rgba(239,68,68,0.28); flex-shrink: 0;
+}
+.revir-voice-bar.active { display: flex; }
+.revir-voice-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11.8px; font-weight: 700; color: #dc2626; }
+.revir-voice-meter { width: 100%; height: 6px; border-radius: 999px; background: rgba(148,163,184,0.28); overflow: hidden; }
+.revir-voice-meter-fill { height: 100%; width: 6%; border-radius: 999px; background: linear-gradient(90deg, #10b981, #f59e0b, #ef4444); transition: width 0.12s linear; }
+.revir-voice-actions { display: flex; gap: 6px; justify-content: flex-end; }
+.revir-voice-abtn {
+	border: none; border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 700;
+	cursor: pointer; font-family: inherit;
+}
+.revir-voice-abtn.send { background: #0d9488; color: #ffffff; }
+.revir-voice-abtn.send:hover { background: #0f766e; }
+.revir-voice-abtn.cancel { background: rgba(100,116,139,0.16); color: var(--text-main, #0f172a); }
+.revir-voice-abtn.cancel:hover { background: rgba(239,68,68,0.18); color: #dc2626; }
 
 .revir-chat-files {
 	display: none; flex-wrap: wrap; gap: 5px; padding: 6px 12px;
@@ -3683,22 +3738,35 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 			</div>
 		</div>
 		<div class="revir-chat-hdr-btns">
-			<button id="revir-chat-tts-btn" type="button" class="revir-chat-hbtn" title="Sesli Yanıt Okuma (Aç / Kapat)" onclick="window.__revirToggleChatTTS()">🔇</button>
+			<button id="revir-chat-stop-tts-btn" type="button" class="revir-chat-hbtn stop-tts" title="Sesli Okumayı Hemen Durdur" onclick="window.__revirStopSpeaking()">⏹️ Durdur</button>
+			<button id="revir-chat-tts-btn" type="button" class="revir-chat-hbtn" title="Otomatik Sesli Okuma (Aç / Kapat)" onclick="window.__revirToggleChatTTS()">🔇</button>
 			<button type="button" class="revir-chat-hbtn" title="Sohbeti Temizle" onclick="window.__revirClearChat()">🗑️</button>
 			<button type="button" class="revir-chat-hbtn" title="Pencereyi Büyüt / Küçült" onclick="window.__revirExpandChat()">⤢</button>
 			<button type="button" class="revir-chat-hbtn" title="Küçült" onclick="window.__revirToggleChatBubble()">✕</button>
 		</div>
 	</div>
 	<div class="revir-chat-chips">
-		<button type="button" class="revir-chat-qchip" onclick="window.__revirQuickPrompt('Seçili kişinin sağlık, büyüme ve revir profilini kısaca özetle.')">🩺 Seçili Kişiyi Özetle</button>
-		<button type="button" class="revir-chat-qchip" onclick="window.__revirQuickPrompt('Bugünkü revir başvurularını ve dikkat edilmesi gerekenleri özetle.')">📊 Bugünkü Revir Özeti</button>
-		<button type="button" class="revir-chat-qchip" onclick="window.__revirQuickPrompt('Seçili kişinin kronik durumuna göre okul içi acil müdahale adımları nelerdir?')">🚨 Acil Müdahale Rehberi</button>
-		<button type="button" class="revir-chat-qchip" onclick="document.getElementById('revir-chat-file-inp').click()">📎 Tahlil / Belge Yükle</button>
+		<button type="button" class="revir-chat-qchip" onclick="window.__revirQuickPrompt('Seçili kişinin sağlık, büyüme, özel gereksinim ve revir profilini kısaca özetle.')">🩺 Kişiyi Özetle</button>
+		<button type="button" class="revir-chat-qchip" onclick="window.__revirQuickPrompt('Seçili kişinin kapsamlı sağlık raporunu Word (.docx) dosyası olarak hazırla.')">📄 Word Raporu</button>
+		<button type="button" class="revir-chat-qchip" onclick="window.__revirQuickPrompt('Bugünkü revir başvurularını Excel (.xlsx) tablosu olarak hazırla ve özetle.')">📊 Excel Liste</button>
+		<button type="button" class="revir-chat-qchip" onclick="window.__revirQuickPrompt('Engelli veya özel gereksinimli öğrencilerin listesini Excel olarak çıkar.')">♿ Özel Gereksinim Excel</button>
+		<button type="button" class="revir-chat-qchip" onclick="document.getElementById('revir-chat-file-inp').click()">📎 Dosya Ekle</button>
 	</div>
 	<div id="revir-chat-messages" class="revir-chat-msgs">
 		<div class="revir-cmsg revir-cmsg-ai">
 			<p>Merhaba! Ben <strong>Gemini Klinik Asistan</strong>. 🩺</p>
-			<p>Bana yazılı soru sorabilir, <strong>📎 Dosya Ekle</strong> ile tahlil/PDF/görsel/Excel yükleyebilir veya <strong>🎙️ Mikrofon</strong> tuşuyla sesli konuşabilirsiniz.</p>
+			<p>Bana yazılı veya <strong>🎙️ sesli</strong> soru sorabilir (konuşmanız bitince otomatik gönderilir), <strong>📎 dosya</strong> ekleyebilir veya <em>"Bu öğrencinin raporunu Word yap"</em> / <em>"Son başvuruları Excel olarak ver"</em> diyerek doğrudan indirilebilir <strong>Word / Excel</strong> raporları hazırlatabilirsiniz.</p>
+		</div>
+	</div>
+	<div id="revir-voice-bar" class="revir-voice-bar">
+		<div class="revir-voice-top">
+			<span id="revir-voice-status">🎙️ Dinleniyor... Konuşabilirsiniz</span>
+			<span id="revir-voice-timer">0.0s</span>
+		</div>
+		<div class="revir-voice-meter"><div id="revir-voice-meter-fill" class="revir-voice-meter-fill"></div></div>
+		<div class="revir-voice-actions">
+			<button type="button" class="revir-voice-abtn cancel" onclick="window.__revirCancelVoice()">✖ İptal</button>
+			<button type="button" class="revir-voice-abtn send" onclick="window.__revirStopAndSendVoice()">📤 Durdur ve Gönder</button>
 		</div>
 	</div>
 	<div id="revir-chat-files" class="revir-chat-files"></div>
@@ -4505,10 +4573,56 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 	var chatFiles = [];
 	var chatTtsEnabled = false;
 	var chatBusy = false;
+	var ttsPlaying = false;
+	var ttsActiveBtn = null;
+	var ttsPollTimer = null;
 	var voiceRec = null;
 	var mediaRecorder = null;
 	var audioChunks = [];
 	var isRecordingVoice = false;
+	var voicePollTimer = null;
+	var voiceStopping = false;
+
+	function setTtsVisualState(playing, btnEl) {
+		ttsPlaying = !!playing;
+		var stopBtn = document.getElementById("revir-chat-stop-tts-btn");
+		if (stopBtn) {
+			stopBtn.classList.toggle("speaking", ttsPlaying);
+		}
+		if (ttsActiveBtn && ttsActiveBtn !== btnEl) {
+			ttsActiveBtn.textContent = "🔊 Dinle";
+			ttsActiveBtn.classList.remove("speaking");
+			ttsActiveBtn = null;
+		}
+		if (ttsPlaying && btnEl) {
+			ttsActiveBtn = btnEl;
+			ttsActiveBtn.textContent = "⏹️ Durdur";
+			ttsActiveBtn.classList.add("speaking");
+		} else if (!ttsPlaying && ttsActiveBtn) {
+			ttsActiveBtn.textContent = "🔊 Dinle";
+			ttsActiveBtn.classList.remove("speaking");
+			ttsActiveBtn = null;
+		}
+		if (!ttsPlaying && ttsPollTimer) {
+			clearInterval(ttsPollTimer);
+			ttsPollTimer = null;
+		}
+	}
+
+	window.__revirStopSpeaking = function(silent) {
+		setTtsVisualState(false, null);
+		if (window.speechSynthesis) {
+			try { window.speechSynthesis.cancel(); } catch (e) {}
+		}
+		fetch("/api/tts_stop", {
+			method: "POST",
+			headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
+			body: "{}"
+		}).catch(function(){});
+		if (!silent) {
+			showToast("⏹️ Sesli okuma durduruldu");
+		}
+	};
 
 	window.__revirToggleChatBubble = function() {
 		var b = document.getElementById("revir-chat-bubble");
@@ -4532,39 +4646,90 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 			btn.textContent = chatTtsEnabled ? "🔊" : "🔇";
 			btn.classList.toggle("active", chatTtsEnabled);
 		}
-		if (!chatTtsEnabled) {
-			if (window.speechSynthesis) {
-				try { window.speechSynthesis.cancel(); } catch (e) {}
-			}
-			fetch("/api/tts_stop", {
-				method: "POST",
-				headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
-				body: "{}"
-			}).catch(function(){});
+		if (!chatTtsEnabled || ttsPlaying) {
+			window.__revirStopSpeaking(true);
 		}
-		showToast(chatTtsEnabled ? "🔊 Sesli yanıt okuma açıldı" : "🔇 Sesli yanıt okuma kapatıldı");
+		showToast(chatTtsEnabled ? "🔊 Otomatik sesli okuma açıldı" : "🔇 Otomatik sesli okuma kapatıldı");
 	};
 
-	window.__revirSpeakText = function(txt) {
+	window.__revirSpeakText = function(txt, btnEl) {
 		if (!txt) return;
-		var clean = String(txt).replace(/[*#_`~>-]+/g, " ").replace(/\s+/g, " ").trim();
+		if (ttsPlaying && btnEl && ttsActiveBtn === btnEl) {
+			window.__revirStopSpeaking(false);
+			return;
+		}
+		window.__revirStopSpeaking(true);
+		var clean = String(txt)
+			.replace(/```[\s\S]*?```/g, " ")
+			.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+			.replace(/[*#_`~>|]+/g, " ")
+			.replace(/\s+/g, " ")
+			.trim();
+		if (!clean) return;
+		setTtsVisualState(true, btnEl || null);
 		fetch("/api/tts_speak", {
 			method: "POST",
 			headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
 			body: JSON.stringify({ text: clean })
 		}).then(function(r) { return r.json(); }).then(function(res) {
-			if (!res || !res.handled) {
-				if (window.speechSynthesis) {
-					try {
-						window.speechSynthesis.cancel();
-						var utt = new SpeechSynthesisUtterance(clean);
-						utt.lang = "tr-TR";
-						utt.rate = 1.04;
-						window.speechSynthesis.speak(utt);
-					} catch (e) {}
+			if (!ttsPlaying) return;
+			if (res && res.handled) {
+				if (ttsPollTimer) clearInterval(ttsPollTimer);
+				ttsPollTimer = setInterval(function() {
+					if (!ttsPlaying) {
+						clearInterval(ttsPollTimer);
+						ttsPollTimer = null;
+						return;
+					}
+					fetch("/api/tts_status", {
+						method: "POST",
+						headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
+						body: "{}"
+					}).then(function(r2) { return r2.json(); }).then(function(st) {
+						if (!st || !st.speaking) {
+							setTtsVisualState(false, null);
+						}
+					}).catch(function() {});
+				}, 650);
+			} else if (window.speechSynthesis) {
+				try {
+					window.speechSynthesis.cancel();
+					var utt = new SpeechSynthesisUtterance(clean);
+					utt.lang = "tr-TR";
+					utt.rate = 1.04;
+					utt.onend = function() { setTtsVisualState(false, null); };
+					utt.onerror = function() { setTtsVisualState(false, null); };
+					window.speechSynthesis.speak(utt);
+				} catch (e) {
+					setTtsVisualState(false, null);
 				}
+			} else {
+				setTtsVisualState(false, null);
 			}
-		}).catch(function() {});
+		}).catch(function() {
+			setTtsVisualState(false, null);
+		});
+	};
+
+	window.__revirExportChatMsg = function(plainText, fmt) {
+		if (!plainText) return;
+		showToast(fmt === "xlsx" ? "📊 Excel dosyası hazırlanıyor..." : "📄 Word dosyası hazırlanıyor...");
+		fetch("/api/gemini_export_msg", {
+			method: "POST",
+			headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
+			body: JSON.stringify({ text: plainText, format: fmt || "docx" })
+		})
+		.then(function(r) { return r.json(); })
+		.then(function(res) {
+			if (res && res.ok && res.token) {
+				window.__revirDownload(res.token, res.file_name || ("gemini_rapor." + (fmt || "docx")));
+			} else {
+				showToast("❌ Dosya oluşturulamadı: " + ((res && res.error) || "Bilinmeyen hata"));
+			}
+		})
+		.catch(function(err) {
+			showToast("❌ Dışa aktarma hatası: " + err);
+		});
 	};
 
 	function renderChatFileChips() {
@@ -4608,12 +4773,26 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 		}
 	};
 
-	function appendChatMsg(role, htmlContent, plainText) {
+	function appendChatMsg(role, htmlContent, plainText, downloads) {
 		var box = document.getElementById("revir-chat-messages");
 		if (!box) return null;
 		var div = document.createElement("div");
 		div.className = "revir-cmsg " + (role === "user" ? "revir-cmsg-user" : "revir-cmsg-ai");
 		div.innerHTML = htmlContent;
+		if (role === "ai" && Array.isArray(downloads) && downloads.length) {
+			var dlWrap = document.createElement("div");
+			dlWrap.className = "revir-cmsg-downloads";
+			downloads.forEach(function(d) {
+				if (!d || !d.token) return;
+				var dbtn = document.createElement("button");
+				dbtn.type = "button";
+				dbtn.className = "revir-cmsg-dlbtn";
+				dbtn.textContent = d.label || ("📥 " + (d.file_name || "Raporu İndir"));
+				dbtn.onclick = function() { window.__revirDownload(d.token, d.file_name || "rapor"); };
+				dlWrap.appendChild(dbtn);
+			});
+			div.appendChild(dlWrap);
+		}
 		if (role === "ai" && plainText) {
 			var tools = document.createElement("div");
 			tools.className = "revir-cmsg-tools";
@@ -4621,7 +4800,22 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 			spkBtn.type = "button";
 			spkBtn.className = "revir-cmsg-tbtn";
 			spkBtn.textContent = "🔊 Dinle";
-			spkBtn.onclick = function() { window.__revirSpeakText(plainText); };
+			spkBtn.onclick = function() { window.__revirSpeakText(plainText, spkBtn); };
+
+			var docBtn = document.createElement("button");
+			docBtn.type = "button";
+			docBtn.className = "revir-cmsg-tbtn";
+			docBtn.title = "Bu yanıtı resmi Word (.docx) dosyasına aktar";
+			docBtn.textContent = "📄 Word";
+			docBtn.onclick = function() { window.__revirExportChatMsg(plainText, "docx"); };
+
+			var xlsBtn = document.createElement("button");
+			xlsBtn.type = "button";
+			xlsBtn.className = "revir-cmsg-tbtn";
+			xlsBtn.title = "Bu yanıtı Excel (.xlsx) tablosuna aktar";
+			xlsBtn.textContent = "📊 Excel";
+			xlsBtn.onclick = function() { window.__revirExportChatMsg(plainText, "xlsx"); };
+
 			var cpBtn = document.createElement("button");
 			cpBtn.type = "button";
 			cpBtn.className = "revir-cmsg-tbtn";
@@ -4631,6 +4825,8 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 				showToast("📋 Yanıt panoya kopyalandı");
 			};
 			tools.appendChild(spkBtn);
+			tools.appendChild(docBtn);
+			tools.appendChild(xlsBtn);
 			tools.appendChild(cpBtn);
 			div.appendChild(tools);
 		}
@@ -4646,12 +4842,10 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 	};
 
 	window.__revirClearChat = function() {
+		window.__revirStopSpeaking(true);
 		var box = document.getElementById("revir-chat-messages");
 		if (box) {
 			box.innerHTML = '<div class="revir-cmsg revir-cmsg-ai"><p>Sohbet geçmişi temizlendi. Size nasıl yardımcı olabilirim?</p></div>';
-		}
-		if (window.speechSynthesis) {
-			try { window.speechSynthesis.cancel(); } catch (e) {}
 		}
 		fetch("/api/gemini_chat_clear", {
 			method: "POST",
@@ -4683,7 +4877,7 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 		if (msgTxt) {
 			userHtml += "<p>" + escHtml(msgTxt) + "</p>";
 		}
-		var userBubble = appendChatMsg("user", userHtml || "<p>🎙️ Sesli mesaj gönderildi...</p>", "");
+		var userBubble = appendChatMsg("user", userHtml || "<p>🎙️ Sesli mesaj işleniyor...</p>", "");
 		var waitBubble = appendChatMsg("ai", '<p style="color:var(--text-muted);">⏳ <em>Gemini yanıt hazırlıyor...</em></p>', "");
 		chatBusy = true;
 
@@ -4694,7 +4888,7 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 				message: msgTxt,
 				attachments: filesToSend,
 				voice_audio_b64: hasVoice ? voicePayload.data_b64 : "",
-				voice_audio_mime: hasVoice ? (voicePayload.mime || "audio/webm") : ""
+				voice_audio_mime: hasVoice ? (voicePayload.mime || "audio/wav") : ""
 			})
 		})
 		.then(function(r) { return r.json(); })
@@ -4704,9 +4898,15 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 				userBubble.innerHTML = '<div style="font-size:11.5px;opacity:0.9;margin-bottom:4px;">🎙️ Sesli Mesaj</div><p>' + escHtml(res.transcribed) + "</p>";
 			}
 			if (res.ok) {
-				appendChatMsg("ai", res.reply_html || ("<p>" + escHtml(res.reply_text || "") + "</p>"), res.reply_text || "");
-				if (chatTtsEnabled || hasVoice) {
-					window.__revirSpeakText(res.reply_text || "");
+				var msgDiv = appendChatMsg(
+					"ai",
+					res.reply_html || ("<p>" + escHtml(res.reply_text || "") + "</p>"),
+					res.reply_text || "",
+					res.downloads || []
+				);
+				if (chatTtsEnabled) {
+					var btnInMsg = msgDiv ? msgDiv.querySelector(".revir-cmsg-tbtn") : null;
+					window.__revirSpeakText(res.reply_text || "", btnInMsg);
 				}
 			} else {
 				appendChatMsg("ai", '<p style="color:#dc2626;">❌ ' + escHtml(res.error || "Yanıt alınamadı.") + "</p>", "");
@@ -4721,14 +4921,34 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 		});
 	};
 
-	// Sesli Konuşma: Doğrudan Python Yerel Mikrofon Kaydedicisi (CoreAudio / WASAPI) + Tarayıcı Yedeği
+	function setVoiceBarVisible(visible, statusText, levelPct, elapsedSec) {
+		var bar = document.getElementById("revir-voice-bar");
+		var stEl = document.getElementById("revir-voice-status");
+		var tmEl = document.getElementById("revir-voice-timer");
+		var fillEl = document.getElementById("revir-voice-meter-fill");
+		if (bar) bar.classList.toggle("active", !!visible);
+		if (stEl && statusText) stEl.textContent = statusText;
+		if (tmEl && typeof elapsedSec === "number") tmEl.textContent = elapsedSec.toFixed(1) + "s";
+		if (fillEl && typeof levelPct === "number") fillEl.style.width = Math.max(4, Math.min(100, Math.round(levelPct))) + "%";
+	}
+
+	function stopVoicePoll() {
+		if (voicePollTimer) {
+			clearInterval(voicePollTimer);
+			voicePollTimer = null;
+		}
+	}
+
+	// Sesli Konuşma: Otomatik Sessizlik Algılamalı (VAD) Python Yerel Mikrofon + Manuel Durdur & Gönder
 	window.__revirToggleVoiceMic = function() {
-		var micBtn = document.getElementById("revir-chat-mic-btn");
 		if (isRecordingVoice) {
-			stopVoiceCapture();
+			stopVoiceCapture(false);
 			return;
 		}
-		// Önce Python yerel mikrofon kaydını başlat (WebView izin kısıtlamasına takılmaz)
+		if (chatBusy || voiceStopping) return;
+		window.__revirStopSpeaking(true);
+		var micBtn = document.getElementById("revir-chat-mic-btn");
+
 		fetch("/api/voice_start", {
 			method: "POST",
 			headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
@@ -4739,8 +4959,39 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 			if (res && res.ok) {
 				window.__revirUsingNativeMic = true;
 				isRecordingVoice = true;
+				voiceStopping = false;
 				if (micBtn) { micBtn.classList.add("recording"); micBtn.textContent = "⏹️"; }
-				showToast("🎙️ Mikrofon dinleniyor (" + (res.device || "Varsayılan") + ")... Göndermek için ⏹️ tuşuna basın.");
+				setVoiceBarVisible(true, "🎙️ Dinliyorum (" + (res.device || "Mikrofon") + ")... Konuşabilirsiniz", 6, 0.0);
+				stopVoicePoll();
+				voicePollTimer = setInterval(function() {
+					if (!isRecordingVoice || voiceStopping) return;
+					fetch("/api/voice_status", {
+						method: "POST",
+						headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
+						body: "{}"
+					})
+					.then(function(r2) { return r2.json(); })
+					.then(function(st) {
+						if (!isRecordingVoice || voiceStopping || !st) return;
+						var elSec = typeof st.elapsed === "number" ? st.elapsed : 0;
+						var lvl = typeof st.level === "number" ? st.level : 0;
+						if (st.error) {
+							window.__revirCancelVoice();
+							showToast("⚠️ Mikrofon hatası: " + st.error);
+							return;
+						}
+						if (st.auto_stopped) {
+							setVoiceBarVisible(true, "✅ Konuşma tamamlandı, Gemini'ye gönderiliyor...", 8, elSec);
+							stopVoiceCapture(false);
+							return;
+						}
+						var msgSt = st.speech_detected
+							? "🗣️ Konuşma algılandı — susunca otomatik gönderilecek"
+							: "🎙️ Dinliyorum — konuşmaya başlayabilirsiniz...";
+						setVoiceBarVisible(true, msgSt, lvl, elSec);
+					})
+					.catch(function() {});
+				}, 180);
 			} else {
 				window.__revirUsingNativeMic = false;
 				startBrowserMediaCapture(res && res.error ? res.error : "");
@@ -4750,6 +5001,32 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 			window.__revirUsingNativeMic = false;
 			startBrowserMediaCapture("");
 		});
+	};
+
+	window.__revirStopAndSendVoice = function() {
+		stopVoiceCapture(false);
+	};
+
+	window.__revirCancelVoice = function() {
+		stopVoicePoll();
+		isRecordingVoice = false;
+		voiceStopping = false;
+		setVoiceBarVisible(false);
+		var micBtn = document.getElementById("revir-chat-mic-btn");
+		if (micBtn) { micBtn.classList.remove("recording"); micBtn.textContent = "🎙️"; }
+		if (window.__revirUsingNativeMic) {
+			window.__revirUsingNativeMic = false;
+			fetch("/api/voice_cancel", {
+				method: "POST",
+				headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
+				body: "{}"
+			}).catch(function() {});
+		}
+		if (mediaRecorder && mediaRecorder.state !== "inactive") {
+			try { mediaRecorder.onstop = null; mediaRecorder.stop(); } catch (e) {}
+			mediaRecorder = null;
+		}
+		showToast("✖ Ses kaydı iptal edildi");
 	};
 
 	function startBrowserMediaCapture(nativeErr) {
@@ -4769,7 +5046,7 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 			mediaRecorder = new MediaRecorder(stream);
 			isRecordingVoice = true;
 			if (micBtn) { micBtn.classList.add("recording"); micBtn.textContent = "⏹️"; }
-			showToast("🎙️ Ses kaydediliyor... Göndermek için ⏹️ tuşuna basın.");
+			setVoiceBarVisible(true, "🎙️ Ses kaydediliyor... Bitince Gönder'e basın", 20, 0.0);
 
 			mediaRecorder.ondataavailable = function(e) {
 				if (e.data && e.data.size > 0) audioChunks.push(e.data);
@@ -4777,6 +5054,7 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 			mediaRecorder.onstop = function() {
 				stream.getTracks().forEach(function(t) { t.stop(); });
 				isRecordingVoice = false;
+				setVoiceBarVisible(false);
 				if (micBtn) { micBtn.classList.remove("recording"); micBtn.textContent = "🎙️"; }
 				if (!audioChunks.length) return;
 				var blob = new Blob(audioChunks, { type: mime });
@@ -4784,9 +5062,6 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 				reader.onload = function() {
 					var b64 = String(reader.result || "").split(",")[1] || "";
 					if (b64) {
-						chatTtsEnabled = true;
-						var ttsBtn = document.getElementById("revir-chat-tts-btn");
-						if (ttsBtn) { ttsBtn.textContent = "🔊"; ttsBtn.classList.add("active"); }
 						window.__revirSendChat({ data_b64: b64, mime: mime });
 					}
 				};
@@ -4795,19 +5070,33 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 			mediaRecorder.start();
 		}).catch(function(err) {
 			isRecordingVoice = false;
+			setVoiceBarVisible(false);
 			if (micBtn) { micBtn.classList.remove("recording"); micBtn.textContent = "🎙️"; }
 			showToast("⚠️ Mikrofon izni alınamadı: " + err.message);
 		});
 	}
 
-	function stopVoiceCapture() {
+	function stopVoiceCapture(cancelled) {
+		if (voiceStopping) return;
+		voiceStopping = true;
+		stopVoicePoll();
 		var micBtn = document.getElementById("revir-chat-mic-btn");
 		isRecordingVoice = false;
 		if (micBtn) { micBtn.classList.remove("recording"); micBtn.textContent = "🎙️"; }
+		setVoiceBarVisible(false);
 
 		if (window.__revirUsingNativeMic) {
 			window.__revirUsingNativeMic = false;
-			showToast("⏳ Ses kaydı işleniyor...");
+			if (cancelled) {
+				voiceStopping = false;
+				fetch("/api/voice_cancel", {
+					method: "POST",
+					headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
+					body: "{}"
+				}).catch(function() {});
+				return;
+			}
+			showToast("⏳ Ses kaydı hazırlanıyor...");
 			fetch("/api/voice_stop", {
 				method: "POST",
 				headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
@@ -4815,21 +5104,21 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 			})
 			.then(function(r) { return r.json(); })
 			.then(function(res) {
+				voiceStopping = false;
 				if (res && res.ok && res.data_b64) {
-					chatTtsEnabled = true;
-					var ttsBtn = document.getElementById("revir-chat-tts-btn");
-					if (ttsBtn) { ttsBtn.textContent = "🔊"; ttsBtn.classList.add("active"); }
 					window.__revirSendChat({ data_b64: res.data_b64, mime: res.mime || "audio/wav" });
 				} else {
-					showToast("⚠️ " + ((res && res.error) || "Ses kaydı çok kısa veya boş."));
+					showToast("⚠️ " + ((res && res.error) || "Ses kaydı çok kısa veya sessiz."));
 				}
 			})
 			.catch(function(err) {
+				voiceStopping = false;
 				showToast("❌ Ses kaydı durdurma hatası: " + err);
 			});
 			return;
 		}
 
+		voiceStopping = false;
 		if (voiceRec) {
 			try { voiceRec.stop(); } catch (e) {}
 			voiceRec = null;
@@ -4865,65 +5154,225 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 # ==============================================================================
 
 class _NativeAudioController:
-	"""WebView tarayıcı kısıtlamalarına takılmadan doğrudan Python üzerinden mikrofon kaydı ve Türkçe sesli okuma sağlar."""
+	"""Otomatik sessizlik algılamalı (VAD) yerel Python mikrofon kaydedicisi ve anında durdurulabilir Türkçe sesli okuma."""
 	def __init__(self) -> None:
-		self._lock = threading.Lock()
+		self._ctrl_lock = threading.Lock()
+		self._buf_lock = threading.Lock()
+		self._tts_lock = threading.Lock()
 		self._stream: Any = None
+		self._active: bool = False
 		self._chunks: list[Any] = []
-		self._samplerate: int = 16000
-		self._tts_proc: Any = None
+		self._samplerate: int = 44100
+		self._started_at: float = 0.0
+		self._noise_samples: list[float] = []
+		self._noise_floor: float = 200.0
+		self._speech_detected: bool = False
+		self._speech_duration: float = 0.0
+		self._silence_after_speech: float = 0.0
+		self._current_level: int = 0
+		self._auto_stopped: bool = False
+		self._stream_error: str = ""
+		self._completed_wav: bytes | None = None
+		self._completed_err: str = ""
+		self._tts_procs: list[Any] = []
 
 	def start_recording(self) -> tuple[bool, str]:
-		with self._lock:
-			self._stop_stream_unlocked()
+		self.stop_speaking()
+		with self._ctrl_lock:
+			self._close_stream_unlocked()
 			try:
 				import sounddevice as sd
-				self._chunks = []
-				self._samplerate = 16000
-
-				def _cb(indata, _frames, _time_info, _status):
-					self._chunks.append(indata.copy())
+				import numpy as np
 
 				dev_info = sd.query_devices(kind="input")
 				dev_name = str(dev_info.get("name") or "Mikrofon") if isinstance(dev_info, dict) else "Mikrofon"
-				self._stream = sd.InputStream(samplerate=self._samplerate, channels=1, dtype="int16", callback=_cb)
-				self._stream.start()
+				native_sr = int(round(float(dev_info.get("default_samplerate") or 44100))) if isinstance(dev_info, dict) else 44100
+				if native_sr < 8000 or native_sr > 96000:
+					native_sr = 44100
+
+				with self._buf_lock:
+					self._chunks = []
+					self._samplerate = native_sr
+					self._started_at = time.monotonic()
+					self._noise_samples = []
+					self._noise_floor = 180.0
+					self._speech_detected = False
+					self._speech_duration = 0.0
+					self._silence_after_speech = 0.0
+					self._current_level = 0
+					self._auto_stopped = False
+					self._stream_error = ""
+					self._completed_wav = None
+					self._completed_err = ""
+					self._active = True
+
+				def _cb(indata, frames, _time_info, _status):
+					if not self._active:
+						return
+					try:
+						chunk_copy = indata.copy()
+						rms = float(np.sqrt(np.mean(chunk_copy.astype(np.float32) ** 2))) if frames > 0 else 0.0
+						dt = float(frames) / float(self._samplerate or 44100)
+						lvl = int(min(100, max(0, (rms / 2400.0) * 100.0)))
+						with self._buf_lock:
+							if not self._active:
+								return
+							self._chunks.append(chunk_copy)
+							self._current_level = lvl
+							elapsed = time.monotonic() - self._started_at
+							if elapsed <= 0.40:
+								self._noise_samples.append(rms)
+								if self._noise_samples:
+									self._noise_floor = max(120.0, float(np.median(self._noise_samples)))
+							else:
+								thresh = max(self._noise_floor * 2.35, 320.0)
+								if rms >= thresh:
+									self._speech_duration += dt
+									self._silence_after_speech = 0.0
+									if self._speech_duration >= 0.18:
+										self._speech_detected = True
+								else:
+									if self._speech_detected:
+										self._silence_after_speech += dt
+										if self._silence_after_speech >= 1.85 and self._speech_duration >= 0.35:
+											self._auto_stopped = True
+											self._active = False
+							if elapsed >= 45.0:
+								self._auto_stopped = True
+								self._active = False
+					except Exception as cb_exc:
+						with self._buf_lock:
+							self._stream_error = str(cb_exc)
+							self._active = False
+
+				try:
+					self._stream = sd.InputStream(
+						samplerate=native_sr,
+						channels=1,
+						dtype="int16",
+						blocksize=1024,
+						callback=_cb,
+					)
+					self._stream.start()
+				except Exception:
+					# Fallback to 16kHz default blocksize
+					self._samplerate = 16000
+					self._stream = sd.InputStream(samplerate=16000, channels=1, dtype="int16", callback=_cb)
+					self._stream.start()
 				return True, dev_name
 			except Exception as exc:
+				self._active = False
 				self._stream = None
 				return False, str(exc)
 
-	def _stop_stream_unlocked(self) -> None:
-		if self._stream is not None:
+	def _close_stream_unlocked(self) -> None:
+		self._active = False
+		stream = self._stream
+		self._stream = None
+		if stream is not None:
 			try:
-				self._stream.stop()
-				self._stream.close()
+				stream.stop()
 			except Exception:
 				pass
-			self._stream = None
+			try:
+				stream.close()
+			except Exception:
+				pass
+
+	def _encode_chunks_to_wav(self, chunks: list[Any], src_sr: int) -> tuple[bool, bytes, str]:
+		if not chunks:
+			return False, b"", "Ses verisi yakalanamadı. Mikrofon bağlantınızı ve izinlerinizi kontrol edin."
+		try:
+			import numpy as np
+			import wave
+
+			pcm = np.concatenate(chunks, axis=0).reshape(-1)
+			if len(pcm) < int(src_sr * 0.25):
+				return False, b"", "Ses kaydı çok kısa (en az yarım saniye konuşun)."
+
+			max_abs = int(np.max(np.abs(pcm)))
+			rms_all = float(np.sqrt(np.mean(pcm.astype(np.float32) ** 2)))
+			if max_abs < 60 and rms_all < 18.0:
+				return False, b"", "Mikrofondan ses alınamadı (tamamen sessiz). Sistem Ayarları > Gizlilik > Mikrofon iznini ve mikrofon sesini kontrol edin."
+
+			# 16 kHz mono int16'ya temiz örnekleme indirgeme (küçük boyut + yüksek tanıma doğruluğu)
+			target_sr = 16000
+			if src_sr != target_sr and len(pcm) > 4:
+				new_len = max(1, int(round(len(pcm) * target_sr / float(src_sr))))
+				x_old = np.linspace(0.0, 1.0, len(pcm), endpoint=False)
+				x_new = np.linspace(0.0, 1.0, new_len, endpoint=False)
+				pcm_out = np.interp(x_new, x_old, pcm.astype(np.float32)).astype(np.int16)
+			else:
+				pcm_out = pcm.astype(np.int16)
+
+			buf = io.BytesIO()
+			with wave.open(buf, "wb") as wf:
+				wf.setnchannels(1)
+				wf.setsampwidth(2)
+				wf.setframerate(target_sr)
+				wf.writeframes(pcm_out.tobytes())
+			return True, buf.getvalue(), ""
+		except Exception as exc:
+			return False, b"", f"Ses kodlama hatası: {exc}"
+
+	def get_voice_status(self) -> dict[str, Any]:
+		with self._buf_lock:
+			elapsed = max(0.0, time.monotonic() - self._started_at) if self._started_at else 0.0
+			auto_st = bool(self._auto_stopped)
+			st_dict = {
+				"recording": bool(self._active),
+				"level": int(self._current_level),
+				"elapsed": round(elapsed, 2),
+				"speech_detected": bool(self._speech_detected),
+				"silence_sec": round(self._silence_after_speech, 2),
+				"auto_stopped": auto_st,
+				"error": self._stream_error,
+			}
+		if auto_st and self._stream is not None:
+			with self._ctrl_lock:
+				self._close_stream_unlocked()
+				with self._buf_lock:
+					if self._completed_wav is None and not self._completed_err:
+						chunks_snap = list(self._chunks)
+						self._chunks = []
+						sr_snap = self._samplerate
+						ok_e, wav_b, err_e = self._encode_chunks_to_wav(chunks_snap, sr_snap)
+						if ok_e:
+							self._completed_wav = wav_b
+						else:
+							self._completed_err = err_e
+		return st_dict
+
+	def cancel_recording(self) -> None:
+		with self._ctrl_lock:
+			self._close_stream_unlocked()
+			with self._buf_lock:
+				self._chunks = []
+				self._completed_wav = None
+				self._completed_err = ""
+				self._auto_stopped = False
+				self._speech_detected = False
+				self._current_level = 0
 
 	def stop_recording(self) -> tuple[bool, bytes, str]:
-		with self._lock:
-			self._stop_stream_unlocked()
-			if not self._chunks:
-				return False, b"", "Ses verisi yakalanamadı."
-			try:
-				import numpy as np
-				import wave
-				pcm = np.concatenate(self._chunks, axis=0)
+		with self._ctrl_lock:
+			self._close_stream_unlocked()
+			with self._buf_lock:
+				if self._completed_wav is not None:
+					wav_ready = self._completed_wav
+					self._completed_wav = None
+					self._completed_err = ""
+					self._chunks = []
+					return True, wav_ready, ""
+				if self._completed_err:
+					err_ready = self._completed_err
+					self._completed_err = ""
+					self._chunks = []
+					return False, b"", err_ready
+				chunks_snap = list(self._chunks)
 				self._chunks = []
-				if len(pcm) < int(self._samplerate * 0.25):
-					return False, b"", "Ses kaydı çok kısa (en az 1 saniye konuşun)."
-				buf = io.BytesIO()
-				with wave.open(buf, "wb") as wf:
-					wf.setnchannels(1)
-					wf.setsampwidth(2)
-					wf.setframerate(self._samplerate)
-					wf.writeframes(pcm.tobytes())
-				return True, buf.getvalue(), ""
-			except Exception as exc:
-				self._chunks = []
-				return False, b"", str(exc)
+				sr_snap = self._samplerate
+			return self._encode_chunks_to_wav(chunks_snap, sr_snap)
 
 	def speak_text(self, text: str) -> bool:
 		self.stop_speaking()
@@ -4932,24 +5381,50 @@ class _NativeAudioController:
 			return False
 		import sys, subprocess, shutil
 		if sys.platform == "darwin" and shutil.which("say"):
-			try:
-				self._tts_proc = subprocess.Popen(
-					["/usr/bin/say", "-v", "Yelda", "-r", "195", clean[:2500]],
-					stdout=subprocess.DEVNULL,
-					stderr=subprocess.DEVNULL,
-				)
-				return True
-			except Exception:
-				pass
+			cmds = [
+				["/usr/bin/say", "-v", "Yelda", "-r", "195", clean[:3500]],
+				["/usr/bin/say", "-r", "195", clean[:3500]],
+			]
+			for cmd in cmds:
+				try:
+					proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+					with self._tts_lock:
+						self._tts_procs.append(proc)
+					return True
+				except Exception:
+					continue
 		return False
 
+	def is_speaking(self) -> bool:
+		with self._tts_lock:
+			alive: list[Any] = []
+			for p in self._tts_procs:
+				try:
+					if p.poll() is None:
+						alive.append(p)
+				except Exception:
+					pass
+			self._tts_procs = alive
+			return bool(alive)
+
 	def stop_speaking(self) -> None:
-		if self._tts_proc is not None:
+		with self._tts_lock:
+			procs = list(self._tts_procs)
+			self._tts_procs = []
+		for p in procs:
 			try:
-				self._tts_proc.terminate()
+				if p.poll() is None:
+					p.terminate()
+					try:
+						p.wait(timeout=0.18)
+					except Exception:
+						p.kill()
+						try:
+							p.wait(timeout=0.2)
+						except Exception:
+							pass
 			except Exception:
 				pass
-			self._tts_proc = None
 
 
 _AUDIO_CTRL = _NativeAudioController()
@@ -5148,6 +5623,16 @@ class LocalUIServer:
 						self._send_bytes(HTTPStatus.OK, "application/json", json.dumps({"ok": False, "error": info_v}, ensure_ascii=False).encode("utf-8"))
 					return
 
+				if path == "/api/voice_status":
+					st_v = _AUDIO_CTRL.get_voice_status()
+					self._send_bytes(HTTPStatus.OK, "application/json", json.dumps(st_v, ensure_ascii=False).encode("utf-8"))
+					return
+
+				if path == "/api/voice_cancel":
+					_AUDIO_CTRL.cancel_recording()
+					self._send_bytes(HTTPStatus.OK, "application/json", b'{"ok":true}')
+					return
+
 				if path == "/api/voice_stop":
 					ok_s, wav_bytes, err_s = _AUDIO_CTRL.stop_recording()
 					if ok_s and wav_bytes:
@@ -5163,9 +5648,26 @@ class LocalUIServer:
 					self._send_bytes(HTTPStatus.OK, "application/json", json.dumps({"ok": True, "handled": handled}).encode("utf-8"))
 					return
 
+				if path == "/api/tts_status":
+					self._send_bytes(HTTPStatus.OK, "application/json", json.dumps({"speaking": _AUDIO_CTRL.is_speaking()}).encode("utf-8"))
+					return
+
 				if path == "/api/tts_stop":
 					_AUDIO_CTRL.stop_speaking()
 					self._send_bytes(HTTPStatus.OK, "application/json", b'{"ok":true}')
+					return
+
+				if path == "/api/gemini_export_msg":
+					try:
+						payload = self._read_json()
+						exp_handler = server_ref.session.floating_chat_export_handler
+						if not callable(exp_handler):
+							self._send_bytes(HTTPStatus.OK, "application/json", json.dumps({"ok": False, "error": "Dışa aktarma işleyicisi hazır değil."}, ensure_ascii=False).encode("utf-8"))
+							return
+						exp_res = exp_handler(payload)
+						self._send_bytes(HTTPStatus.OK, "application/json; charset=utf-8", json.dumps(exp_res, ensure_ascii=False).encode("utf-8"))
+					except Exception as exc:
+						self._send_bytes(HTTPStatus.OK, "application/json", json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False).encode("utf-8"))
 					return
 
 				if path == "/api/gemini_chat":
@@ -5199,6 +5701,11 @@ class LocalUIServer:
 		return self.url
 
 	def stop(self) -> None:
+		try:
+			_AUDIO_CTRL.stop_speaking()
+			_AUDIO_CTRL.cancel_recording()
+		except Exception:
+			pass
 		try:
 			self._httpd.shutdown()
 			self._httpd.server_close()

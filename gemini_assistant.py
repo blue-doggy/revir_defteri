@@ -33,25 +33,33 @@ import pandas as pd
 
 
 GEMINI_MODEL_OPTIONS: list[str] = [
-	"gemini-3.1-flash-lite",
 	"gemini-3-flash-preview",
-	"gemini-3.8-flash",
-	"gemini-3.1-pro-preview",
+	"gemini-3.5-flash-lite",
+	"gemini-3.1-flash-lite-preview",
+	"gemini-flash-latest",
 ]
 
 GEMINI_MODEL_LABELS: dict[str, str] = {
-	"gemini-3.1-flash-lite": "⚡ Gemini 3.1 Flash Lite (Önerilen - Ultra Hızlı ~1.5sn & Yüksek Kota)",
-	"gemini-3-flash-preview": "🚀 Gemini 3 Flash (Hızlı Klinik & Görsel Analiz)",
-	"gemini-3.8-flash": "🧠 Gemini 3.8 Flash (Yeni Nesil Klinik Akıl Yürütme)",
-	"gemini-3.1-pro-preview": "🔬 Gemini 3.1 Pro (Derin Klinik & Rapor Analizi)",
+	"gemini-3-flash-preview": "🚀 Gemini 3 Flash (Önerilen - Hızlı Klinik, Ses & Görsel Analiz)",
+	"gemini-3.5-flash-lite": "⚡ Gemini 3.5 Flash Lite (Ultra Hızlı ~1sn & Yüksek Kota)",
+	"gemini-3.1-flash-lite-preview": "💨 Gemini 3.1 Flash Lite (Hafif & Hızlı Yedek)",
+	"gemini-flash-latest": "🔄 Gemini Flash Latest (Otomatik Güncel Sürüm)",
 }
 
 _FALLBACK_MODELS: list[str] = [
-	"gemini-3.1-flash-lite",
 	"gemini-3-flash-preview",
-	"gemini-3.8-flash",
-	"gemini-3.1-pro-preview",
+	"gemini-3.5-flash-lite",
+	"gemini-3.1-flash-lite-preview",
+	"gemini-flash-latest",
 ]
+
+_LEGACY_MODEL_MAP: dict[str, str] = {
+	"gemini-3.1-flash-lite": "gemini-3-flash-preview",
+	"gemini-3.8-flash": "gemini-3-flash-preview",
+	"gemini-3.1-pro-preview": "gemini-3-flash-preview",
+	"gemini-2.5-flash": "gemini-3-flash-preview",
+	"gemini-2.5-flash-lite": "gemini-3.5-flash-lite",
+}
 
 
 # ==============================================================================
@@ -119,6 +127,111 @@ def anonymize_free_text(text: str, sensitive_names: list[str] | None = None) -> 
 	return out
 
 
+def format_disability_profile_for_ai(
+	hp_dict: dict[str, Any] | None,
+	person_dict: dict[str, Any] | None = None,
+	sensitive_names: list[str] | None = None,
+) -> str:
+	"""Yapılandırılmış engel/özel gereksinim ve uzuv-duyu fonksiyonel haritasını anonim klinik metne dönüştürür."""
+	hp = hp_dict or {}
+	p = person_dict or {}
+	has_flag = bool(int(p.get("has_disability") or 0)) if p.get("has_disability") is not None else False
+	raw_json = hp.get("disability_profile_json")
+	dp: dict[str, Any] = {}
+	if raw_json:
+		try:
+			parsed = json.loads(str(raw_json))
+			if isinstance(parsed, dict):
+				dp = parsed
+		except Exception:
+			dp = {}
+	if dp.get("has_disability"):
+		has_flag = True
+	if not has_flag:
+		return ""
+
+	bits: list[str] = []
+	rate = dp.get("disability_rate")
+	if rate is None:
+		rate = hp.get("disability_rate")
+	try:
+		rate_int = int(rate or 0)
+	except Exception:
+		rate_int = 0
+	if rate_int > 0:
+		bits.append(f"Engel Oranı: %{rate_int}")
+	rep_type = str(dp.get("report_type") or "").strip()
+	cozger = str(dp.get("cozger_level") or "").strip()
+	dep = str(dp.get("dependency_level") or "").strip()
+	if rep_type and rep_type != "Belirtilmedi":
+		bits.append(f"Rapor: {rep_type}" + (f" ({cozger})" if cozger and cozger != "Belirtilmedi" else ""))
+	if dep and dep != "Bağımsız":
+		bits.append(f"Bağımlılık Düzeyi: {dep}")
+
+	d_types = [str(x).strip() for x in (dp.get("disability_types") or []) if str(x).strip()]
+	if d_types:
+		bits.append("Engel Türleri: " + ", ".join(d_types))
+
+	mob = str(dp.get("mobility_status") or "").strip()
+	if mob and mob != "Bağımsız yürüyebiliyor":
+		bits.append(f"Hareket/Mobilite: {mob}")
+
+	limb_labels = {
+		"right_arm": "Sağ Kol",
+		"left_arm": "Sol Kol",
+		"right_hand": "Sağ El",
+		"left_hand": "Sol El",
+		"right_leg": "Sağ Bacak",
+		"left_leg": "Sol Bacak",
+	}
+	limb_map = dp.get("limb_status") if isinstance(dp.get("limb_status"), dict) else {}
+	limb_issues: list[str] = []
+	for k, lbl in limb_labels.items():
+		val = str(limb_map.get(k) or "").strip()
+		if val and not val.startswith("Normal"):
+			limb_issues.append(f"{lbl}: {val}")
+	if limb_issues:
+		bits.append("Uzuv Fonksiyon Durumu: " + "; ".join(limb_issues))
+
+	sens_labels = {
+		"right_ear": "Sağ Kulak",
+		"left_ear": "Sol Kulak",
+		"right_eye": "Sağ Göz",
+		"left_eye": "Sol Göz",
+		"speech": "Konuşma/İletişim",
+	}
+	sens_map = dp.get("sensory_status") if isinstance(dp.get("sensory_status"), dict) else {}
+	sens_issues: list[str] = []
+	for k, lbl in sens_labels.items():
+		val = str(sens_map.get(k) or "").strip()
+		if val and not val.startswith("Normal"):
+			sens_issues.append(f"{lbl}: {val}")
+	if sens_issues:
+		bits.append("Duyu/İletişim Durumu: " + "; ".join(sens_issues))
+
+	aut_notes = [str(x).strip() for x in (dp.get("autism_cognitive_notes") or []) if str(x).strip()]
+	if aut_notes:
+		bits.append("Otizm/Bilişsel/Duyusal Özellikler: " + ", ".join(aut_notes))
+
+	devs = [str(x).strip() for x in (dp.get("assistive_devices") or []) if str(x).strip()]
+	if devs:
+		bits.append("Yardımcı Cihaz/Protez: " + ", ".join(devs))
+
+	self_care = [str(x).strip() for x in (dp.get("self_care_needs") or []) if str(x).strip()]
+	if self_care:
+		bits.append("Özbakım/Destek İhtiyacı: " + ", ".join(self_care))
+
+	prec = str(dp.get("clinical_revir_precautions") or "").strip()
+	if prec:
+		bits.append("Revir & Acil Özel Dikkat: " + anonymize_free_text(prec, sensitive_names))
+
+	det = str(dp.get("detailed_notes") or "").strip()
+	if det:
+		bits.append("Engel Ek Detay: " + anonymize_free_text(det, sensitive_names))
+
+	return " ; ".join(bits) if bits else "Engel / Özel Gereksinim: Var (Detay girilmedi)"
+
+
 def build_anonymous_clinical_context(
 	person: dict[str, Any] | sqlite3.Row | None,
 	health_profile: dict[str, Any] | sqlite3.Row | None = None,
@@ -160,32 +273,36 @@ def build_anonymous_clinical_context(
 		str(p_dict.get("guardian_name") or ""),
 	]
 
-	if health_profile:
-		hp = dict(health_profile)
-		if hp.get("blood_group"):
-			parts.append(f"Kan Grubu: {hp['blood_group']}")
-		if hp.get("allergies"):
-			parts.append(f"Kayıtlı Alerjiler: {anonymize_free_text(str(hp['allergies']), sensitive)}")
+	hp_dict = dict(health_profile) if health_profile else {}
+	if hp_dict:
+		if hp_dict.get("blood_group"):
+			parts.append(f"Kan Grubu: {hp_dict['blood_group']}")
+		if hp_dict.get("allergies"):
+			parts.append(f"Kayıtlı Alerjiler: {anonymize_free_text(str(hp_dict['allergies']), sensitive)}")
 		else:
 			parts.append("Kayıtlı Alerjiler: Bilinen alerji yok")
-		if hp.get("chronic_conditions"):
-			parts.append(f"Kronik Rahatsızlıklar: {anonymize_free_text(str(hp['chronic_conditions']), sensitive)}")
-		if hp.get("medical_history"):
-			parts.append(f"Tıbbi Öykü: {anonymize_free_text(str(hp['medical_history']), sensitive)}")
-		reg_meds = hp.get("medications") or hp.get("regular_medications")
+		if hp_dict.get("chronic_conditions"):
+			parts.append(f"Kronik Rahatsızlıklar: {anonymize_free_text(str(hp_dict['chronic_conditions']), sensitive)}")
+		if hp_dict.get("medical_history"):
+			parts.append(f"Tıbbi Öykü: {anonymize_free_text(str(hp_dict['medical_history']), sensitive)}")
+		reg_meds = hp_dict.get("medications") or hp_dict.get("regular_medications")
 		if reg_meds:
 			parts.append(f"Sürekli İlaçlar: {anonymize_free_text(str(reg_meds), sensitive)}")
-		if hp.get("emergency_notes"):
-			parts.append(f"Acil Klinik Not: {anonymize_free_text(str(hp['emergency_notes']), sensitive)}")
-		sn_val = hp.get("special_needs_codes") or hp.get("special_needs")
+		if hp_dict.get("emergency_notes"):
+			parts.append(f"Acil Klinik Not: {anonymize_free_text(str(hp_dict['emergency_notes']), sensitive)}")
+		sn_val = hp_dict.get("special_needs_codes") or hp_dict.get("special_needs")
 		if sn_val:
 			parts.append(f"Özel Gereksinim/Tanı: {anonymize_free_text(str(sn_val), sensitive)}")
-		if hp.get("medical_devices"):
-			parts.append(f"Tıbbi Cihaz/Protez: {anonymize_free_text(str(hp['medical_devices']), sensitive)}")
-		if hp.get("dietary_swallowing_notes"):
-			parts.append(f"Beslenme/Yutma Güvenliği: {anonymize_free_text(str(hp['dietary_swallowing_notes']), sensitive)}")
-		if hp.get("seizure_emergency_protocol"):
-			parts.append(f"Acil Nöbet Protokolü: {anonymize_free_text(str(hp['seizure_emergency_protocol']), sensitive)}")
+		if hp_dict.get("medical_devices"):
+			parts.append(f"Tıbbi Cihaz/Protez: {anonymize_free_text(str(hp_dict['medical_devices']), sensitive)}")
+		if hp_dict.get("dietary_swallowing_notes"):
+			parts.append(f"Beslenme/Yutma Güvenliği: {anonymize_free_text(str(hp_dict['dietary_swallowing_notes']), sensitive)}")
+		if hp_dict.get("seizure_emergency_protocol"):
+			parts.append(f"Acil Nöbet Protokolü: {anonymize_free_text(str(hp_dict['seizure_emergency_protocol']), sensitive)}")
+
+	dis_ctx = format_disability_profile_for_ai(hp_dict, p_dict, sensitive)
+	if dis_ctx:
+		parts.append(f"ENGELLİLİK & FONKSİYONEL DURUM PROFİLİ: {dis_ctx}")
 
 	if latest_measurement:
 		lm = dict(latest_measurement)
@@ -220,7 +337,7 @@ def call_gemini(
 	prompt: str,
 	*,
 	api_key: str,
-	model: str = "gemini-3.1-flash-lite",
+	model: str = "gemini-3-flash-preview",
 	system_instruction: str | None = None,
 	expect_json: bool = False,
 	inline_files: list[tuple[bytes, str]] | None = None,
@@ -235,7 +352,8 @@ def call_gemini(
 	if not clean_key:
 		return False, "Gemini API anahtarı tanımlanmamış. Ayarlar > Yapay Zekâ (Gemini API) menüsünden anahtarınızı kaydedin.", ""
 
-	preferred = (model or "gemini-3.1-flash-lite").strip().replace("models/", "")
+	raw_pref = (model or "gemini-3-flash-preview").strip().replace("models/", "")
+	preferred = _LEGACY_MODEL_MAP.get(raw_pref, raw_pref)
 	models_to_try = [preferred] + [m for m in _FALLBACK_MODELS if m != preferred]
 
 	parts: list[dict[str, Any]] = []
@@ -330,7 +448,7 @@ def _parse_json_response(raw_text: str) -> dict[str, Any]:
 	return {}
 
 
-def test_gemini_connection(api_key: str, model: str = "gemini-3.1-flash-lite") -> tuple[bool, str, str]:
+def test_gemini_connection(api_key: str, model: str = "gemini-3-flash-preview") -> tuple[bool, str, str]:
 	ok, txt, used_model = call_gemini(
 		"Merhaba! Okul revir sistemi bağlantı testi için tek cümleyle Türkçe 'Gemini Klinik Asistan bağlantısı başarılı.' yaz.",
 		api_key=api_key,
@@ -667,31 +785,161 @@ def generate_meb_activity_narrative(
 	start_date_str: str,
 	end_date_str: str,
 	school_name: str,
+	missing_data_notes: list[str] | None = None,
+	custom_instruction: str = "",
 ) -> tuple[bool, str, str]:
 	safe_stats = {
 		k: v for k, v in stats.items()
 		if k in (
-			"students_total", "civilians_total", "classes_total", "visits_total",
-			"student_visits", "civilian_visits", "guardian_contacted_cnt", "referral_cnt",
-			"screened_students", "screening_coverage_pct", "meas_total", "bmi_eval_total",
-			"bmi_normal_cnt", "bmi_under_cnt", "bmi_over_cnt", "bmi_obese_cnt",
-			"stunted_cnt", "chronic_or_allergy_cnt", "care_plans_total", "care_plans_active",
-			"active_meds_cnt", "doses_given_cnt", "isolation_total", "top_complaints",
+			"students_total", "adults_total", "civilians_total", "classes_total", "visits_total",
+			"student_visits", "civilian_visits", "guardian_contacted_cnt", "guardian_notified_cnt", "referral_cnt",
+			"screened_students", "screened_cohort_cnt", "screening_coverage_pct", "meas_total", "bmi_eval_total",
+			"bmi_normal_cnt", "bmi_normal", "bmi_under_cnt", "bmi_underweight", "bmi_over_cnt", "bmi_overweight",
+			"bmi_obese_cnt", "bmi_obese", "stunted_cnt", "height_stunted", "chronic_or_allergy_cnt",
+			"chronic_cnt", "allergy_cnt", "special_needs_cnt", "disability_cnt", "disability_summary_counts",
+			"care_plans_total", "care_plans_period", "care_plans_active",
+			"active_meds_cnt", "active_med_plans", "doses_given_cnt", "isolation_total", "isolation_period_cnt",
+			"seizure_period_cnt", "vax_students_cnt", "vax_done_cnt", "vax_pending_cnt",
+			"inventory_critical_cnt", "fridge_logs_cnt", "fridge_alerts_cnt", "top_complaints", "complaint_distribution",
 		)
 	}
-	prompt = f"""T.C. Millî Eğitim Bakanlığı (MEB) standartlarına uygun olarak '{school_name}' revirinin {start_date_str} - {end_date_str} dönemi resmi faaliyet raporu için 'Dönem İçi Yapılan Sağlık Hizmetleri ve Genel Değerlendirme Metni' hazırla.
+	miss_block = ""
+	if missing_data_notes:
+		miss_block = "\n[OTOMATİK TESPİT EDİLEN EKSİK / TAMAMLANMASI GEREKEN VERİLER]:\n- " + "\n- ".join(missing_data_notes)
+	inst_block = f"\n[KULLANICININ ÖZEL TALİMATI / ODAK]: {custom_instruction.strip()}" if custom_instruction and custom_instruction.strip() else ""
+
+	prompt = f"""T.C. Millî Eğitim Bakanlığı (MEB) standartlarına uygun olarak '{school_name}' revirinin {start_date_str} - {end_date_str} dönemi resmi faaliyet raporu için 'Dönem İçi Yapılan Sağlık Hizmetleri, Eksik Veri Analizi ve Genel Değerlendirme Metni' hazırla.
 
 [DÖNEM İSTATİSTİKLERİ]:
-{json.dumps(safe_stats, ensure_ascii=False, default=str)}
+{json.dumps(safe_stats, ensure_ascii=False, default=str)}{miss_block}{inst_block}
 
-Kurumsal, resmi ve akıcı bir Türkçe ile (yaklaşık 2-3 paragraf halinde):
-- Poliklinik/revir başvuru ve triyaj hizmetlerini,
-- Periyodik okul taramaları ve DSÖ (WHO) büyüme-gelişme/persantil izlemlerini,
-- Kronik hastalığı olan öğrencilerin NANDA bakım planı ve ilaç takip süreçlerini,
-- Bulaşıcı hastalık/salgın kontrolü ve sağlık eğitimi önerilerini
-özetleyen resmi rapor değerlendirme metnini doğrudan yaz (başlık veya markdown kod bloğu olmadan doğrudan rapora basılacak resmi metin olarak döndür)."""
+Kurumsal, resmi ve akıcı bir Türkçe ile (markdown kod bloğu kullanmadan, doğrudan resmi rapora basılacak temiz başlık ve paragraflar halinde):
+1. Poliklinik/revir başvuru, triyaj ve sevk hizmetlerini,
+2. Periyodik okul taramaları ve DSÖ (WHO) büyüme-gelişme/persantil izlemlerini,
+3. Kronik hastalığı ve engellilik/özel gereksinimi olan öğrencilerin bakım, uyarlama ve ilaç takip süreçlerini,
+4. Dönemde girilmemiş / eksik kalan kayıt ve tarama alanlarına yönelik tespitleri ve bir sonraki dönem için öncelikli eylem önerilerini
+kapsayıcı ve net biçimde yaz."""
 
-	return call_gemini(prompt, api_key=api_key, model=model)
+	return call_gemini(prompt, api_key=api_key, model=model, timeout=22.0)
+
+
+def generate_student_report_ai_analysis(
+	*,
+	api_key: str,
+	model: str,
+	anon_context: str,
+	clinical_snapshot: dict[str, Any],
+	missing_data_items: list[str],
+	has_disability: bool = False,
+	custom_instruction: str = "",
+) -> tuple[bool, str, str]:
+	"""
+	Öğrenci sağlık raporu için KVKK uyumlu Gemini Klinik Değerlendirme, Eksik Veri Tespiti ve
+	(varsa) Engellilik/Özel Gereksinim Uyum Raporu metni üretir.
+	"""
+	sys_inst = (
+		"Sen deneyimli bir okul sağlığı hemşiresi ve pediatrik sağlık raporlama uzmanısın. "
+		"Anonim öğrenci verilerinden yola çıkarak resmi okul sağlık raporuna eklenecek net, nesnel, "
+		"tıbbi açıdan doğru, gereksiz süslemeden uzak, doğrudan yazdırılabilir Türkçe değerlendirme bölümleri hazırlarsın. "
+		"Öğrencinin gerçek adını uydurma; gerektiğinde 'Öğrenci' ifadesini kullan. Tanı koyma, hemşirelik değerlendirmesi ve izlem/uyarlama önerisi sun."
+	)
+	miss_txt = "\n- ".join(missing_data_items) if missing_data_items else "Temel profil ve izlem verileri büyük ölçüde girilmiş görünüyor."
+	dis_rule = (
+		"2. **Engellilik / Özel Gereksinim & Okul İçi Uyarlama Değerlendirmesi:** Öğrencinin profilinde tanımlı engel oranı, engel türleri, hareket/uzuv/duyu fonksiyon durumu ve revir dikkat notlarına göre sınıf, beden eğitimi, acil tahliye, iletişim ve revir muayene uyarlamalarını somut olarak yaz."
+		if has_disability
+		else "(Öğrencide engellilik/özel gereksinim kaydı bulunmadığından engellilik başlığı AÇMA.)"
+	)
+	extra_inst = f"\n[HEMŞİRENİN ÖZEL TALİMATI]: {custom_instruction.strip()}" if custom_instruction and custom_instruction.strip() else ""
+
+	prompt = f"""Aşağıdaki anonim öğrenci klinik verilerini inceleyerek resmi öğrenci sağlık raporuna eklenecek değerlendirme metnini hazırla.
+
+[ANONİM ÖĞRENCİ KLİNİK PROFİLİ]:
+{anon_context}
+
+[ÖZET KAYIT İSTATİSTİKLERİ VE SON BULGULAR]:
+{json.dumps(clinical_snapshot, ensure_ascii=False, default=str)}
+
+[SİSTEMDE GİRİLMEMİŞ / EKSİK TESPİT EDİLEN VERİLER]:
+- {miss_txt}{extra_inst}
+
+Lütfen doğrudan Word ve PDF raporuna basılabilecek temiz, profesyonel bir Türkçe ile (kod bloğu veya selamlama olmadan) şu bölümleri oluştur:
+1. **Genel Klinik ve Gelişim Değerlendirmesi:** Büyüme/persantil, vital bulgular, tahliller, revir başvuru sıklığı ve kronik/alerji durumunun kısa ve bütüncül özeti.
+{dis_rule}
+3. **Girilmemiş / Eksik Veriler ve Tamamlanması Gereken Kayıtlar:** Yukarıda saptanan eksik verilere dayanarak hangi bilgilerin/taramaların tamamlanması gerektiğini maddeler halinde belirt.
+4. **Ekstra Değinilmesi Gereken Noktalar ve İzlem Önerileri:** Verilerdeki örüntülere göre okul hemşiresi, öğretmen ve veli için öne çıkan ek dikkat noktaları ve takip önerileri."""
+
+	return call_gemini(
+		prompt,
+		api_key=api_key,
+		model=model,
+		system_instruction=sys_inst,
+		temperature=0.25,
+		timeout=24.0,
+	)
+
+
+def generate_screening_batch_ai_analysis(
+	*,
+	api_key: str,
+	model: str,
+	cohort_summary: dict[str, Any],
+	missing_audit: list[str],
+	custom_instruction: str = "",
+) -> tuple[bool, str, str]:
+	"""Toplu tarama ve persantil raporu için anonim epidemiyolojik analiz, eksik veri denetimi ve ekstra öneriler üretir."""
+	sys_inst = (
+		"Sen okul sağlığı epidemiyolojisi ve toplu tarama raporlaması konusunda uzman bir okul sağlığı hemşiresisin. "
+		"Anonim sınıf ve tarama istatistiklerinden yola çıkarak resmi okul tarama raporuna eklenecek net, kurumsal Türkçe değerlendirme metni yazarsın."
+	)
+	miss_txt = "\n- ".join(missing_audit) if missing_audit else "Seçili kapsamdaki temel tarama sütunları büyük ölçüde doldurulmuş."
+	extra_inst = f"\n[KULLANICI ÖZEL TALİMATI]: {custom_instruction.strip()}" if custom_instruction and custom_instruction.strip() else ""
+
+	prompt = f"""Aşağıdaki anonim toplu okul taraması ve persantil istatistiklerini analiz ederek rapora eklenecek değerlendirme bölümünü hazırla:
+
+[TARAMA KAPSAMI VE ANONİM İSTATİSTİKLER]:
+{json.dumps(cohort_summary, ensure_ascii=False, default=str)}
+
+[TESPİT EDİLEN EKSİK / GİRİLMEMİŞ TARAMA VERİLERİ]:
+- {miss_txt}{extra_inst}
+
+Lütfen doğrudan Word / Excel / PDF raporuna eklenecek şekilde (selamlama ve kod bloğu olmadan) şu 3 başlıkla Türkçe yanıt ver:
+1. **Genel Tarama ve Gelişim Değerlendirmesi**
+2. **Eksik / Girilmemiş Veriler ve Tamamlama Planı**
+3. **Ekstra Değinilmesi Gereken Klinik Noktalar ve Okul İçi Öneriler** (risk kümeleri, özel gereksinimli/engelli öğrenci destekleri, veli bilgilendirme öncelikleri)"""
+
+	return call_gemini(
+		prompt,
+		api_key=api_key,
+		model=model,
+		system_instruction=sys_inst,
+		temperature=0.25,
+		timeout=24.0,
+	)
+
+
+def revise_report_ai_text(
+	*,
+	api_key: str,
+	model: str,
+	current_text: str,
+	instruction: str,
+	anon_context: str = "",
+) -> tuple[bool, str, str]:
+	"""Mevcut rapor değerlendirme metnini kullanıcının özel talimatına göre yeniden düzenler."""
+	sys_inst = (
+		"Sen resmi okul sağlığı raporlarını düzenleyen uzman bir editör ve okul sağlığı hemşiresisin. "
+		"Kullanıcının verdiği düzenleme talimatını eksiksiz uygular, yalnızca doğrudan rapora konacak güncellenmiş temiz Türkçe metni döndürürsün."
+	)
+	ctx_line = f"\n[ANONİM BAĞLAM]: {anon_context}\n" if anon_context else ""
+	prompt = f"""Aşağıdaki mevcut rapor metnini kullanıcının talimatına göre yeniden düzenle.{ctx_line}
+[MEVCUT RAPOR METNİ]:
+{current_text}
+
+[DÜZENLEME TALİMATI]:
+{instruction}
+
+Yalnızca güncellenmiş nihai rapor metnini döndür (giriş cümlesi veya açıklama ekleme)."""
+	return call_gemini(prompt, api_key=api_key, model=model, system_instruction=sys_inst, temperature=0.25, timeout=22.0)
 
 
 # ==============================================================================
@@ -701,8 +949,8 @@ Kurumsal, resmi ve akıcı bir Türkçe ile (yaklaşık 2-3 paragraf halinde):
 _DB_SCHEMA_HINT = """
 Tablolar:
 - classes(id, name, teacher_name)
-- students(id, class_id, person_type, student_no, full_name, sex, birth_date, guardian_name, guardian_phone, notes, country, province, district, village)
-- health_profiles(student_id, guardian_name, guardian_phone, allergies, chronic_conditions, medical_history, medications, blood_group, emergency_notes, special_needs_codes, medical_devices, dietary_swallowing_notes, seizure_emergency_protocol, wears_glasses, vision_right, vision_left, hair_screening, hearing_right, hearing_left, health_behavior, harmful_habits, psychosocial_status, last_screened_at)
+- students(id, class_id, person_type, student_no, full_name, sex, birth_date, guardian_name, guardian_phone, notes, country, province, district, village, has_disability)
+- health_profiles(student_id, guardian_name, guardian_phone, allergies, chronic_conditions, medical_history, medications, blood_group, emergency_notes, special_needs_codes, medical_devices, dietary_swallowing_notes, seizure_emergency_protocol, wears_glasses, vision_right, vision_left, hair_screening, hearing_right, hearing_left, health_behavior, harmful_habits, psychosocial_status, last_screened_at, disability_rate, disability_profile_json, ai_report_notes, ai_report_include)
 - visits(id, student_id, visit_date, visit_time, complaint, symptoms, observation, action, guardian_contacted, referral, follow_up, follow_up_status, follow_up_result, incident_location, witness_teacher)
 - vital_readings(id, student_id, measured_at, systolic_mmhg, diastolic_mmhg, pulse_bpm, temperature_c, spo2_pct, glucose_mg_dl, glucose_context, notes)
 - measurements(id, student_id, measured_on, height_cm, weight_kg, head_circ_cm, age_months, bmi)
@@ -821,19 +1069,43 @@ def chat_with_gemini_assistant(
 	history: list[dict[str, str]] | None = None,
 	attachments: list[dict[str, str]] | None = None,
 	voice_audio_b64: str = "",
-	voice_audio_mime: str = "audio/webm",
+	voice_audio_mime: str = "audio/wav",
 	anon_person_context: str = "",
 	school_context: str = "",
 	sensitive_names: list[str] | None = None,
-) -> tuple[bool, str, str, str]:
+	available_classes: list[str] | None = None,
+) -> tuple[bool, str, str, str, dict[str, Any] | None]:
 	"""
 	Yüzen sohbet balonundan gelen metin, çoklu dosya eki ve/veya ses kaydını yanıtlar.
-	Dönüş: (başarılı_mı, yanıt_metni, kullanılan_model, ses_kaydı_varsa_çözümlenen_kullanıcı_metni)
+	Kullanıcı Word/Excel/PDF veya hazır program raporu isterse programın yerel belge oluşturucusunu
+	tetikleyen yapılandırılmış `export_spec` döndürür.
+	Dönüş: (başarılı_mı, yanıt_metni, kullanılan_model, ses_çözümü, export_spec_veya_None)
 	"""
+	cls_hint = ", ".join(available_classes[:30]) if available_classes else "Belirtilmedi"
 	sys_inst = (
 		"Sen 'Revir Defteri' masaüstü okul sağlığı yazılımının içinde yer alan KVKK korumalı 'Gemini Klinik Asistan'sın. "
 		"Okul revir hemşiresine pediatrik triyaj, büyüme-gelişme (WHO persantil/Z-skoru), NANDA bakım planları, "
-		"ilaç etkileşimleri, tahlil/evrak yorumlama ve okul sağlığı yönetimi konularında hızlı, doğru, Türkçe ve öz yanıtlar verirsin. "
+		"engellilik/özel gereksinim uyarlamaları, ilaç etkileşimleri, tahlil/evrak yorumlama ve okul sağlığı yönetimi konularında hızlı, doğru, Türkçe ve öz yanıtlar verirsin.\n\n"
+		"ÖNEMLİ YETENEK — GERÇEK WORD (.docx) VE EXCEL (.xlsx) RAPOR OLUŞTURMA:\n"
+		"Programın yerel Word ve Excel oluşturma motorlarını doğrudan tetikleyebilirsin! "
+		"Kullanıcı senden herhangi bir raporu, listeyi, tabloyu, tutanağı veya belgeyi Word (.docx), Excel (.xlsx), PDF/HTML olarak hazırlamanı/vermeni isterse, "
+		"önce kullanıcıya kısa ve net bir Türkçe açıklama yaz, ardından yanıtının EN SONUNA tek satırda şu JSON komut etiketini ekle:\n"
+		"[[REVIR_EXPORT:{...}]]\n\n"
+		"Kullanabileceğin `action` değerleri:\n"
+		"1) Seçili kişinin tam resmi sağlık raporu (Word): {\"action\":\"student_report\",\"format\":\"docx\"}\n"
+		"2) Belirli bir sınıfın toplu sağlık raporu (Word): {\"action\":\"class_report\",\"class_name\":\"5-A\",\"format\":\"docx\"}\n"
+		"3) MEB Dönem/Yıl Sonu resmi faaliyet raporu (Word): {\"action\":\"meb_activity\",\"format\":\"docx\",\"extra_notes\":\"...\"}\n"
+		"4) Seçili kişinin aşı kartı (Word): {\"action\":\"vaccination_card\",\"format\":\"docx\"}\n"
+		"5) Seçili kişinin nöbet & özel gereksinim acil protokolü (Word): {\"action\":\"seizure_protocol\",\"format\":\"docx\"}\n"
+		"6) Revir stok & malzeme envanter raporu (Word): {\"action\":\"inventory_report\",\"format\":\"docx\"}\n"
+		"7) Buzdolabı soğuk zincir aylık ısı çizelgesi (Word): {\"action\":\"fridge_report\",\"format\":\"docx\"}\n"
+		"8) Tüm veritabanı tam Excel yedeği/kitabı: {\"action\":\"all_workbook\",\"format\":\"xlsx\"}\n"
+		"9) Veritabanından özel filtreli liste/rapor (Excel ve/veya Word, KVKK gereği yerel SQLite'da çalışır):\n"
+		"   {\"action\":\"sql_export\",\"format\":\"xlsx\" veya \"docx\" veya \"both\",\"title\":\"Rapor Başlığı\",\"sql\":\"SELECT ...\"}\n"
+		"   Not: SQL yalnızca güvenli salt-okunur SELECT olmalı, Türkçe sütun takma adları kullanmalı ve en fazla LIMIT 200 olmalı.\n"
+		"10) Özel metin/dilekçe/veli mektubu/BEP uyarlama/özel tablo belgesi (Word veya Excel):\n"
+		"   {\"action\":\"custom_doc\",\"format\":\"docx\" veya \"xlsx\" veya \"both\",\"title\":\"Belge Başlığı\",\"subtitle\":\"Alt Başlık\",\"sections\":[{\"heading\":\"Başlık\",\"body\":\"İçerik...\"}],\"table\":{\"headers\":[\"Sütun1\",\"Sütun2\"],\"rows\":[[\"Değer1\",\"Değer2\"]]}}\n\n"
+		"Kullanıcı dosya/Word/Excel/rapor çıktısı istemiyorsa [[REVIR_EXPORT:...]] etiketini EKLEME. "
 		"Kısa, maddeli ve okunması kolay yanıtlar üret."
 	)
 
@@ -862,7 +1134,7 @@ def chat_with_gemini_assistant(
 		try:
 			vbytes = base64.b64decode(voice_audio_b64)
 			if vbytes:
-				inline_files.append((vbytes, voice_audio_mime or "audio/webm"))
+				inline_files.append((vbytes, voice_audio_mime or "audio/wav"))
 				has_voice = True
 		except Exception:
 			pass
@@ -878,9 +1150,10 @@ def chat_with_gemini_assistant(
 	safe_user_msg = anonymize_free_text(user_message, sensitive_names)
 	ctx_parts: list[str] = []
 	if school_context:
-		ctx_parts.append(f"[OKUL & REVİR DURUMU]: {school_context}")
+		ctx_parts.append(f"[OKUL & REVİR DURUMU]: {school_context} | Mevcut Sınıflar: {cls_hint}")
 	if anon_person_context:
 		ctx_parts.append(f"[SEÇİLİ KİŞİ ANONİM KLİNİK PROFİLİ]: {anon_person_context}")
+	ctx_parts.append(f"[VERİTABANI ŞEMASI (Sadece sql_export gerekirse kullan)]:\n{_DB_SCHEMA_HINT}")
 	if hist_lines:
 		hist_joined = "\n".join(hist_lines)
 		ctx_parts.append(f"[ÖNCEKİ SOHBET GEÇMİŞİ]:\n{hist_joined}")
@@ -890,9 +1163,11 @@ def chat_with_gemini_assistant(
 
 	if has_voice and not safe_user_msg.strip():
 		ctx_parts.append(
-			"[KULLANICI SESLİ MESAJ GÖNDERDİ]: Ekli ses kaydını dinle. "
-			"Yanıtının ilk satırına kullanıcının ne söylediğini `[SES_ÇÖZÜMÜ]: <söylenen cümle>` biçiminde yaz, "
-			"alt satırda ise sorusuna Türkçe klinik yanıtını ver."
+			"[KULLANICI SESLİ MESAJ GÖNDERDİ]: Ekli Türkçe ses kaydını dikkatle dinle. "
+			"Eğer ses kaydı sessizse, yalnızca ortam gürültüsü varsa veya anlaşılır bir insan konuşması yoksa ASLA metin uydurma; "
+			"ilk satıra `[SES_ÇÖZÜMÜ]: (Anlaşılamadı)` yaz ve nazikçe tekrar konuşmasını iste. "
+			"Konuşma anlaşılırsa ilk satıra kullanıcının söylediği tam cümleyi `[SES_ÇÖZÜMÜ]: <söylenen cümle>` biçiminde yaz, "
+			"alt satırda ise sorusuna veya rapor/Word/Excel talebine yanıt ver."
 		)
 	else:
 		ctx_parts.append(f"[HEMŞİRENİN MESAJI]: {safe_user_msg or 'Ekli dosyayı/sesi inceleyip yorumla.'}")
@@ -904,10 +1179,10 @@ def chat_with_gemini_assistant(
 		model=model,
 		system_instruction=sys_inst,
 		inline_files=inline_files if inline_files else None,
-		timeout=30.0,
+		timeout=26.0,
 	)
 	if not ok:
-		return False, raw_reply, used_model, ""
+		return False, raw_reply, used_model, "", None
 
 	transcribed = ""
 	clean_reply = raw_reply
@@ -916,5 +1191,24 @@ def chat_with_gemini_assistant(
 		transcribed = m_tr.group(1).strip()
 		clean_reply = m_tr.group(2).strip() or transcribed
 
-	return True, clean_reply, used_model, transcribed
+	export_spec: dict[str, Any] | None = None
+	m_exp = re.search(r"\[\[REVIR_EXPORT\s*:\s*(\{.*?\})\s*\]\]", clean_reply, re.S)
+	if not m_exp:
+		# Handle nested braces inside JSON block cleanly
+		tag_idx = clean_reply.find("[[REVIR_EXPORT:")
+		if tag_idx != -1:
+			end_idx = clean_reply.rfind("]]")
+			if end_idx > tag_idx:
+				json_chunk = clean_reply[tag_idx + len("[[REVIR_EXPORT:"):end_idx].strip()
+				parsed_exp = _parse_json_response(json_chunk)
+				if parsed_exp:
+					export_spec = parsed_exp
+				clean_reply = (clean_reply[:tag_idx] + clean_reply[end_idx + 2:]).strip()
+	else:
+		parsed_exp = _parse_json_response(m_exp.group(1))
+		if parsed_exp:
+			export_spec = parsed_exp
+		clean_reply = (clean_reply[:m_exp.start()] + clean_reply[m_exp.end():]).strip()
+
+	return True, clean_reply, used_model, transcribed, export_spec
 
