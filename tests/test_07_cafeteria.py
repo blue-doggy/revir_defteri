@@ -1242,6 +1242,146 @@ class TestCafeteriaModule(unittest.TestCase):
         self.assertTrue(str(revir_ui.session_state.get("caf_menu_wk_pick")).startswith("1. Hafta"))
         self.assertIn("01.10.2026", out5["main_html"])
 
+    def test_invoice_click_popup_edit_add_remove_and_selectable_statistics(self):
+        # 1. Create two multi-item invoices and verify stored items + summary on purchases list
+        pid_oct = caf.upsert_purchase_invoice(
+            self.connect,
+            invoice_date="2026-10-05",
+            invoice_no="FTR-1001",
+            supplier_name="Anadolu Toptan",
+            category="Bakliyat & Kuru Gıda",
+            items=[
+                {"item_name": "Kırmızı Mercimek", "category": "Bakliyat & Kuru Gıda", "quantity": 10.0, "unit_type": "kg", "unit_price": 45.0, "vat_rate": 0.0},
+            ],
+        )
+        pid_nov = caf.upsert_purchase_invoice(
+            self.connect,
+            invoice_date="2026-11-10",
+            invoice_no="FTR-1102",
+            supplier_name="Güneş Gıda",
+            category="Bakliyat & Kuru Gıda",
+            items=[
+                {"item_name": "Pirinç", "category": "Bakliyat & Kuru Gıda", "quantity": 10.0, "unit_type": "kg", "unit_price": 50.0, "vat_rate": 0.0},
+                {"item_name": "Ayçiçek Yağı", "category": "Yağ & Baharat", "quantity": 5.0, "unit_type": "litre", "unit_price": 80.0, "vat_rate": 0.0},
+            ],
+        )
+        self.assertGreater(pid_oct, 0)
+        self.assertGreater(pid_nov, 0)
+
+        p_all, _ = caf.get_purchases_and_items(self.connect, year_month="Tümü")
+        by_pid = {int(p["id"]): p for p in p_all}
+        self.assertEqual(by_pid[pid_nov]["item_count"], 2)
+        self.assertIn("Pirinç", by_pid[pid_nov]["items_summary"])
+        self.assertIn("50 ₺", by_pid[pid_nov]["items_summary"])
+
+        # 2. Headless UI: clicking row 0 (pid_nov, newest) opens invoice pop-up modal
+        revir_ui.reset_session()
+        revir_ui.session_state["caf_purch_scope_flt"] = "Tüm Tarihler"
+        ctx_api = {
+            "connect_db": self.connect,
+            "get_app_settings": persantil.get_app_settings,
+            "save_app_settings": persantil.save_app_settings,
+            "_get_active_gemini_config": persantil._get_active_gemini_config,
+            "mask_kvkk_value": persantil.mask_kvkk_value,
+            "clear_all_data_caches": persantil.clear_all_data_caches,
+            "is_section_visible": persantil.is_section_visible,
+        }
+        tab_fn = lambda: caf._render_tab_purchases_and_expenses(ctx_api, "2026-11", persantil.get_app_settings())
+        out_init = revir_ui.run_action_headless(tab_fn, {"action": "render"})
+        self.assertNotIn("Çalışma Zamanı Hatası", out_init["main_html"])
+        self.assertIn("Kayıtlı Faturalar Listesi", out_init["main_html"])
+        self.assertIn("FTR-1102", out_init["main_html"])
+
+        out_open = revir_ui.run_action_headless(
+            tab_fn,
+            {"action": "df_select", "key": "caf_invoices_list_tbl", "value": {"rows": [0], "cells": [[0, "Fatura No"]]}},
+        )
+        dlg_html = str(out_open.get("dialog_html") or "")
+        self.assertIn("Pirinç", dlg_html)
+        self.assertIn("Ayçiçek Yağı", dlg_html)
+        self.assertIn("caf_dlg_i_items_editor", dlg_html)
+
+        # Test "+ Yeni Ürün Satırı Ekle" keeps dialog open cleanly
+        out_add_row = revir_ui.run_action_headless(tab_fn, {"action": "click", "key": "caf_dlg_i_btn_add_row"})
+        self.assertIn("caf_dlg_i_items_editor", str(out_add_row.get("dialog_html") or ""))
+
+        # Re-open fresh dialog cleanly to apply name/price edit, deletion, and new item addition
+        revir_ui.run_action_headless(tab_fn, {"action": "close_dialog", "all": True})
+        revir_ui.run_action_headless(
+            tab_fn,
+            {"action": "df_select", "key": "caf_invoices_list_tbl", "value": {"rows": [0], "cells": [[0, "Fatura No"]]}},
+        )
+        # Rename row 0 -> Osmancık Pirinç @ 62.0, delete row 1 (Ayçiçek Yağı), add Tereyağı @ 300.0
+        for mut in (
+            {"op": "cell", "row_kind": "base", "row_id": 0, "col": "Ürün Adı", "val": "Osmancık Pirinç"},
+            {"op": "cell", "row_kind": "base", "row_id": 0, "col": "Birim Fiyat (₺)", "val": 62.0},
+            {"op": "cell", "row_kind": "base", "row_id": 0, "col": "KDV (%)", "val": 0.0},
+            {"op": "delete_row", "row_kind": "base", "row_id": 1},
+            {"op": "add_row"},
+            {"op": "cell", "row_kind": "added", "row_id": 0, "col": "Ürün Adı", "val": "Tereyağı"},
+            {"op": "cell", "row_kind": "added", "row_id": 0, "col": "Kategori", "val": "Süt & Kahvaltılık"},
+            {"op": "cell", "row_kind": "added", "row_id": 0, "col": "Miktar", "val": 2.0},
+            {"op": "cell", "row_kind": "added", "row_id": 0, "col": "Miktar Çeşidi", "val": "kg"},
+            {"op": "cell", "row_kind": "added", "row_id": 0, "col": "Birim Fiyat (₺)", "val": 300.0},
+            {"op": "cell", "row_kind": "added", "row_id": 0, "col": "KDV (%)", "val": 0.0},
+        ):
+            revir_ui.run_action_headless(tab_fn, {"action": "data_editor", "key": "caf_dlg_i_items_editor", "value": mut})
+
+        out_saved = revir_ui.run_action_headless(tab_fn, {"action": "click", "key": "caf_dlg_i_btn_save_inv"})
+        self.assertIsNone(out_saved.get("dialog_html"))
+
+        updated = caf.get_purchase_by_id(self.connect, pid_nov)
+        self.assertIsNotNone(updated)
+        u_items = {it["item_name"]: it for it in updated["items"]}
+        self.assertEqual(set(u_items.keys()), {"Osmancık Pirinç", "Tereyağı"})
+        self.assertAlmostEqual(u_items["Osmancık Pirinç"]["unit_price"], 62.0, places=2)
+        self.assertAlmostEqual(u_items["Tereyağı"]["unit_price"], 300.0, places=2)
+        # 10*62 + 2*300 = 1220.0 TL
+        self.assertAlmostEqual(updated["total_amount"], 1220.0, places=2)
+
+        # 3. Verify analytics backend + multi-sheet Excel + selectable statistics UI filtering
+        caf.upsert_purchase_invoice(
+            self.connect,
+            invoice_date="2026-11-18",
+            invoice_no="FTR-1109",
+            supplier_name="Güneş Gıda",
+            category="Bakliyat & Kuru Gıda",
+            items=[
+                {"item_name": "Osmancık Pirinç", "category": "Bakliyat & Kuru Gıda", "quantity": 10.0, "unit_type": "kg", "unit_price": 70.0, "vat_rate": 0.0},
+            ],
+        )
+        an = caf.compute_purchase_analytics(self.connect, year_month="Tümü", product_name="Osmancık Pirinç")
+        self.assertEqual(an["summary"]["invoice_count"], 3)
+        self.assertEqual(an["summary"]["top_product_name"], "Osmancık Pirinç")
+        self.assertAlmostEqual(an["summary"]["total_spend_tl"], 450.0 + 1220.0 + 700.0, places=2)
+        self.assertTrue(any(p["Ürün Adı"] == "Osmancık Pirinç" and p["Toplam Miktar"] == 20.0 for p in an["product_summary"]))
+        self.assertEqual(len(an["monthly_trend"]), 2)
+        self.assertEqual(len(an["product_history"]), 2)
+        self.assertTrue(any(c["Ürün"] == "Osmancık Pirinç" and c["Son Fiyat (₺)"] == 70.0 for c in an["price_changes"]))
+
+        an_xlsx = caf.build_purchase_analytics_excel(an, "Tüm Tarihler")
+        wb_an = openpyxl.load_workbook(io.BytesIO(an_xlsx), read_only=True)
+        try:
+            self.assertEqual(
+                wb_an.sheetnames,
+                ["Ozet_KPI", "Urun_Bazli", "Kategori_Bazli", "Tedarikci_Analizi", "Aylik_Trend", "Fiyat_Degisimi"],
+            )
+        finally:
+            wb_an.close()
+
+        # Select ONLY Kategori + Tekil Ürün Geçmişi views in UI and verify others are hidden
+        revir_ui.session_state["caf_stat_views"] = [caf.PURCHASE_STAT_VIEWS[1], caf.PURCHASE_STAT_VIEWS[5]]
+        revir_ui.session_state["caf_stat_prod_pick"] = "Osmancık Pirinç"
+        out_stats = revir_ui.run_action_headless(tab_fn, {"action": "render"})
+        import html as _html_m
+        st_html = str(out_stats.get("main_html") or "")
+        self.assertNotIn("Çalışma Zamanı Hatası", st_html)
+        self.assertIn(f"<h5 class='revir-h5'>{_html_m.escape(caf.PURCHASE_STAT_VIEWS[1])}</h5>", st_html)
+        self.assertIn(f"<h5 class='revir-h5'>{_html_m.escape(caf.PURCHASE_STAT_VIEWS[5])}</h5>", st_html)
+        self.assertIn("Osmancık Pirinç", st_html)
+        self.assertNotIn(f"<h5 class='revir-h5'>{_html_m.escape(caf.PURCHASE_STAT_VIEWS[0])}</h5>", st_html)
+        self.assertNotIn(f"<h5 class='revir-h5'>{_html_m.escape(caf.PURCHASE_STAT_VIEWS[2])}</h5>", st_html)
+
 
 if __name__ == "__main__":
     unittest.main()
