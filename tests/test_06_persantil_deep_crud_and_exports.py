@@ -303,6 +303,158 @@ class TestPersantilDeepCRUDAndExports(unittest.TestCase):
             self.assertEqual(res_nokey["active_page"], "⚙️ Ayarlar")
             self.assertIn("API anahtarı", res_nokey["main_html"])
 
+    def test_github_release_update_check_download_and_installer_open(self):
+        import io as _io
+        import urllib.error
+        import revir_ui
+
+        # 1. Version parsing and comparison boundaries
+        self.assertEqual(persantil._parse_version_tuple("RevirDefteri_Kurulum_v1.16.16.exe"), (1, 16, 16))
+        self.assertEqual(persantil._parse_version_tuple("RevirDefteri_macOS_arm64_v1.17.2.dmg"), (1, 17, 2))
+        self.assertEqual(persantil._compare_versions("v1.16.9", "1.16.16"), -1)
+        self.assertEqual(persantil._compare_versions("1.16", "1.16.0"), 0)
+        self.assertEqual(persantil._compare_versions("v2.0.0", "1.99.99"), 1)
+
+        sample_releases = [
+            {
+                "tag_name": "v1.99.0",
+                "name": "Okul Revir Defteri v1.99.0",
+                "draft": False,
+                "prerelease": False,
+                "html_url": "https://github.com/blue-doggy/revir_defteri/releases/tag/v1.99.0",
+                "published_at": "2026-11-22T11:00:00Z",
+                "body": "- Yeni ozellikler\n- Hata duzeltmeleri",
+                "assets": [
+                    {
+                        "name": "RevirDefteri_Kurulum_v1.99.0.exe",
+                        "size": 115000000,
+                        "browser_download_url": "https://github.com/blue-doggy/revir_defteri/releases/download/v1.99.0/RevirDefteri_Kurulum_v1.99.0.exe",
+                        "content_type": "application/x-msdownload",
+                        "updated_at": "2026-11-22T11:05:00Z",
+                    }
+                    # Note: .dmg not yet built for v1.99.0!
+                ],
+            },
+            {
+                "tag_name": "v1.98.0",
+                "name": "Okul Revir Defteri v1.98.0",
+                "draft": False,
+                "prerelease": False,
+                "html_url": "https://github.com/blue-doggy/revir_defteri/releases/tag/v1.98.0",
+                "published_at": "2026-11-21T11:00:00Z",
+                "body": "- macOS dmg dahil tam surum",
+                "assets": [
+                    {
+                        "name": "RevirDefteri_Kurulum_v1.98.0.exe",
+                        "size": 114000000,
+                        "browser_download_url": "https://github.com/blue-doggy/revir_defteri/releases/download/v1.98.0/RevirDefteri_Kurulum_v1.98.0.exe",
+                    },
+                    {
+                        "name": "RevirDefteri_macOS_arm64_v1.98.0.dmg",
+                        "size": 148000000,
+                        "browser_download_url": "https://github.com/blue-doggy/revir_defteri/releases/download/v1.98.0/RevirDefteri_macOS_arm64_v1.98.0.dmg",
+                    },
+                ],
+            },
+        ]
+
+        class _FakeResp:
+            def __init__(self, payload_bytes: bytes):
+                self._buf = _io.BytesIO(payload_bytes)
+
+            def read(self, n: int = -1) -> bytes:
+                return self._buf.read(n)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        import json as _json
+        api_bytes = _json.dumps(sample_releases).encode("utf-8")
+
+        # 2. Windows detects v1.99.0 .exe, macOS selects v1.98.0 .dmg (and notes v1.99.0 pending)
+        with mock.patch("urllib.request.urlopen", side_effect=lambda req, timeout=12: _FakeResp(api_bytes)):
+            win_res = persantil.check_for_github_release_updates(platform_override="win32", current_version="1.16.16")
+        self.assertTrue(win_res["success"])
+        self.assertTrue(win_res["has_updates"])
+        self.assertEqual(win_res["latest_version"], "1.99.0")
+        self.assertEqual(win_res["asset"]["name"], "RevirDefteri_Kurulum_v1.99.0.exe")
+        self.assertEqual(win_res["asset"]["size_bytes"], 115000000)
+        self.assertIn("MB", win_res["asset"]["size_str"])
+
+        with mock.patch("urllib.request.urlopen", side_effect=lambda req, timeout=12: _FakeResp(api_bytes)):
+            mac_res = persantil.check_for_github_release_updates(platform_override="darwin", current_version="1.16.16")
+        self.assertTrue(mac_res["success"])
+        self.assertTrue(mac_res["has_updates"])
+        self.assertEqual(mac_res["latest_version"], "1.98.0")
+        self.assertEqual(mac_res["asset"]["name"], "RevirDefteri_macOS_arm64_v1.98.0.dmg")
+        self.assertIn("v1.99.0", mac_res["pending_build_note"])
+
+        # Already up to date against macOS .dmg v1.98.0
+        with mock.patch("urllib.request.urlopen", side_effect=lambda req, timeout=12: _FakeResp(api_bytes)):
+            mac_cur = persantil.check_for_github_release_updates(platform_override="darwin", current_version="1.98.0")
+        self.assertTrue(mac_cur["success"])
+        self.assertFalse(mac_cur["has_updates"])
+
+        # Network failure graceful handling
+        with mock.patch("urllib.request.urlopen", side_effect=urllib.error.URLError("offline")):
+            err_res = persantil.check_for_github_release_updates()
+        self.assertFalse(err_res["success"])
+        self.assertFalse(err_res["has_updates"])
+        self.assertIn("bağlanılamadı", err_res["message"])
+
+        # 3. Streaming installer download & launch helpers in tmp dir
+        dl_dir = self.tmp_p / "downloads"
+        fake_dmg = b"DMG_PAYLOAD_" * 500
+        with mock.patch("urllib.request.urlopen", side_effect=lambda req, timeout=120: _FakeResp(fake_dmg)):
+            ok_dl, dl_path, msg_dl = persantil.download_github_release_asset(
+                "https://github.com/blue-doggy/revir_defteri/releases/download/v1.98.0/RevirDefteri_macOS_arm64_v1.98.0.dmg",
+                "RevirDefteri_macOS_arm64_v1.98.0.dmg",
+                expected_size=len(fake_dmg),
+                target_dir=dl_dir,
+            )
+        self.assertTrue(ok_dl, msg_dl)
+        self.assertIsNotNone(dl_path)
+        self.assertEqual(dl_path.read_bytes(), fake_dmg)
+
+        # Invalid URL rejected
+        ok_bad, _, _ = persantil.download_github_release_asset("http://insecure/file.exe", "file.exe", target_dir=dl_dir)
+        self.assertFalse(ok_bad)
+
+        # Installer open & reveal commands (mocked Popen / os.startfile)
+        import os as _os
+        import subprocess as _sp
+        with mock.patch.object(_sp, "Popen") as p_mock:
+            ok_op, _ = persantil.open_downloaded_installer(dl_path, platform_override="darwin", reveal_only=False)
+            self.assertTrue(ok_op)
+            p_mock.assert_called_with(["open", str(dl_path)], close_fds=True)
+
+            ok_rv, _ = persantil.open_downloaded_installer(dl_path, platform_override="darwin", reveal_only=True)
+            self.assertTrue(ok_rv)
+            p_mock.assert_called_with(["open", "-R", str(dl_path)], close_fds=True)
+
+            # Windows launcher & reveal
+            with mock.patch.object(_os, "startfile", create=True) as sf_mock:
+                ok_win, _ = persantil.open_downloaded_installer(dl_path, platform_override="win32", reveal_only=False)
+                self.assertTrue(ok_win)
+                sf_mock.assert_called_with(str(dl_path))
+            ok_win_rv, _ = persantil.open_downloaded_installer(dl_path, platform_override="win32", reveal_only=True)
+            self.assertTrue(ok_win_rv)
+            p_mock.assert_called_with(["explorer", f"/select,{dl_path}"], close_fds=True)
+
+        # 4. Headless UI Settings -> Sürüm & Güncelleme displays asset info and download button
+        revir_ui.reset_session()
+        revir_ui.session_state["main_menu_page"] = "⚙️ Ayarlar"
+        revir_ui.session_state["settings_vertical_nav"] = "💾 Veri, İçe Aktar & Sistem"
+        revir_ui.session_state["last_update_check_result"] = mac_res
+        out_ui = revir_ui.run_action_headless(persantil.main, {"action": "init"})
+        html_ui = out_ui.get("main_html") or ""
+        self.assertIn("RevirDefteri_macOS_arm64_v1.98.0.dmg", html_ui)
+        self.assertIn(mac_res["asset"]["size_str"], html_ui)
+        self.assertIn("Güncelleme Paketini İndir", html_ui)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
