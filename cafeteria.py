@@ -176,6 +176,58 @@ def format_allergen_badge(allergen: str) -> str:
 	return ALLERGEN_BADGE_MAP.get(canon, f"⚠️ {canon}" if canon else "")
 
 
+_MEAL_TIME_SETTING_KEYS: dict[str, tuple[str, str]] = {
+	"Sabah Kahvaltısı": ("cafeteria_time_breakfast", "08:00 - 08:45"),
+	"Öğle Yemeği": ("cafeteria_time_lunch", "12:00 - 13:00"),
+	"İkindi Ara Öğünü": ("cafeteria_time_snack", "15:00 - 15:30"),
+}
+
+
+def parse_service_schedule_from_cfg(app_cfg: dict[str, str] | None = None) -> dict[str, Any]:
+	"""Yemekhane ayarlarından haftalık hizmet günü, günlük öğün sayısı, aktif öğünler ve saatleri çözümler."""
+	cfg = app_cfg or {}
+	raw_wd = str(cfg.get("cafeteria_service_weekdays") or "0,1,2,3,4").strip()
+	wds: set[int] = set()
+	for tok in raw_wd.split(","):
+		t = tok.strip()
+		if t.isdigit() and 0 <= int(t) <= 6:
+			wds.add(int(t))
+	if not wds:
+		wds = {0, 1, 2, 3, 4}
+
+	try:
+		days_pw = max(1, min(7, int(float(str(cfg.get("cafeteria_service_days_per_week") or len(wds))))))
+	except Exception:
+		days_pw = len(wds)
+
+	raw_slots = [s.strip() for s in str(cfg.get("cafeteria_active_meal_slots") or "").split(",") if s.strip() in MEAL_SLOTS]
+	try:
+		meals_pd = max(1, min(3, int(float(str(cfg.get("cafeteria_meals_per_day") or (len(raw_slots) or 1))))))
+	except Exception:
+		meals_pd = len(raw_slots) or 1
+
+	if not raw_slots:
+		if meals_pd == 1:
+			raw_slots = ["Öğle Yemeği"]
+		elif meals_pd == 2:
+			raw_slots = ["Sabah Kahvaltısı", "Öğle Yemeği"]
+		else:
+			raw_slots = list(MEAL_SLOTS)
+
+	meal_times: dict[str, str] = {}
+	for sl, (cfg_k, def_v) in _MEAL_TIME_SETTING_KEYS.items():
+		meal_times[sl] = str(cfg.get(cfg_k) or def_v).strip() or def_v
+
+	return {
+		"days_per_week": days_pw,
+		"weekdays_set": wds,
+		"weekday_names": [TR_WEEKDAYS_SHORT[i] for i in sorted(wds)],
+		"meals_per_day": meals_pd,
+		"active_meal_slots": raw_slots,
+		"meal_times": meal_times,
+	}
+
+
 # ==============================================================================
 # 2. VERİTABANI ŞEMASI (8 TABLO — İDEMPOTENT)
 # ==============================================================================
@@ -735,8 +787,9 @@ def get_month_workdays_info(
 	*,
 	include_weekends: bool = False,
 	treat_half_day_as_workday: bool = True,
+	service_weekdays: set[int] | None = None,
 ) -> list[dict[str, Any]]:
-	"""Seçili ayın günlerini okul takvimindeki tatillere göre iş günü / tatil olarak sınıflandırır."""
+	"""Seçili ayın günlerini okul takvimindeki tatillere ve yemekhane haftalık çalışma günlerine göre sınıflandırır."""
 	ym_clean = str(year_month or date.today().strftime("%Y-%m"))[:7]
 	yy, mm = [int(x) for x in ym_clean.split("-")]
 	try:
@@ -746,6 +799,7 @@ def get_month_workdays_info(
 		pass
 
 	events_by_date: dict[str, list[dict[str, Any]]] = {}
+	cfg_map: dict[str, str] = {}
 	with connect_db_fn() as conn:
 		ensure_cafeteria_tables(conn)
 		try:
@@ -758,6 +812,13 @@ def get_month_workdays_info(
 				events_by_date.setdefault(d_k, []).append(dict(r))
 		except Exception:
 			pass
+		try:
+			for s_r in conn.execute("SELECT key, value FROM app_settings WHERE key LIKE 'cafeteria_%'").fetchall():
+				cfg_map[str(s_r["key"])] = str(s_r["value"])
+		except Exception:
+			pass
+
+	active_wds = set(service_weekdays) if service_weekdays is not None else parse_service_schedule_from_cfg(cfg_map)["weekdays_set"]
 
 	_, num_days = calendar.monthrange(yy, mm)
 	out: list[dict[str, Any]] = []
@@ -776,7 +837,8 @@ def get_month_workdays_info(
 		half_titles = [str(e.get("title") or "Yarım Gün") for e in evs if bool(e.get("is_half_day"))]
 		is_holiday = bool(full_hol_titles)
 		is_half = bool(half_titles)
-		is_work = (include_weekends or not is_wknd) and (not is_holiday) and (treat_half_day_as_workday or not is_half)
+		is_service_day = include_weekends or (wd in active_wds)
+		is_work = is_service_day and (not is_holiday) and (treat_half_day_as_workday or not is_half)
 		out.append({
 			"date_iso": d_iso,
 			"day_num": d_num,
@@ -1208,6 +1270,79 @@ def _build_weekly_grid_rows(days_list: list[dict[str, Any]], include_weekends: b
 	return rows
 
 
+def _prepare_a4_menu_context(
+	connect_db_fn: Callable[[], sqlite3.Connection],
+	*,
+	year_month: str,
+	scope: str,
+	week_index: int,
+	active_slots: list[str] | None,
+	include_weekends: bool,
+	skip_empty_days: bool,
+	school_meta: dict[str, str] | None,
+) -> dict[str, Any]:
+	"""A4 HTML ve Word çıktıları için gün filtresi (boş günleri otomatik çıkarma), hizmet düzeni ve yemek saatlerini hazırlar."""
+	ym = str(year_month or date.today().strftime("%Y-%m"))[:7]
+	yy, mm = [int(x) for x in ym.split("-")]
+	month_title = f"{TR_MONTH_NAMES.get(mm, mm)} {yy}"
+	meta = dict(school_meta or {})
+	if not meta:
+		try:
+			with connect_db_fn() as conn:
+				for sr in conn.execute("SELECT key, value FROM app_settings").fetchall():
+					meta[str(sr["key"])] = str(sr["value"])
+		except Exception:
+			pass
+
+	sched = parse_service_schedule_from_cfg(meta)
+	slots = [s for s in (active_slots or sched["active_meal_slots"] or ["Öğle Yemeği"]) if s]
+	meal_times = sched["meal_times"]
+	days_info = get_month_workdays_info(connect_db_fn, ym, include_weekends=include_weekends)
+	plans = get_menu_plans_for_month(connect_db_fn, ym)
+
+	weeks = _group_month_days_by_week(days_info)
+	if scope == "weekly" and weeks:
+		safe_idx = max(0, min(week_index, len(weeks) - 1))
+		raw_days = weeks[safe_idx]
+		range_txt = f"{raw_days[0]['date_iso']} – {raw_days[-1]['date_iso']}"
+	else:
+		safe_idx = 0
+		raw_days = [d for d in days_info if d.get("is_workday")]
+		range_txt = ""
+
+	if skip_empty_days:
+		target_days = [
+			d for d in raw_days
+			if any(plans.get((d["date_iso"], sl)) and plans[(d["date_iso"], sl)].get("dish_names") for sl in slots)
+		]
+	else:
+		target_days = raw_days
+
+	if scope == "weekly" and weeks:
+		scope_label = f"{safe_idx + 1}. Hafta Yemek Menüsü ({range_txt} · {len(target_days)} Menü Günü)"
+	else:
+		scope_label = f"{month_title} Aylık Yemek Menüsü ({len(target_days)} Menü Günü)"
+
+	days_names_s = ", ".join(nm[:3] for nm in sched["weekday_names"])
+	slot_times_parts = [f"{sl}: {meal_times.get(sl, '')}" if meal_times.get(sl) else sl for sl in slots]
+	schedule_line = f"Haftalık Hizmet: {sched['days_per_week']} Gün ({days_names_s}) · Günlük {len(slots)} Öğün · " + " | ".join(slot_times_parts)
+	eff_wknds = include_weekends or any(wd >= 5 for wd in sched["weekdays_set"])
+
+	return {
+		"ym": ym,
+		"yy": yy,
+		"mm": mm,
+		"slots": slots,
+		"meal_times": meal_times,
+		"plans": plans,
+		"target_days": target_days,
+		"scope_label": scope_label,
+		"schedule_line": schedule_line,
+		"meta": meta,
+		"eff_wknds": eff_wknds,
+	}
+
+
 def build_menu_a4_html(
 	connect_db_fn: Callable[[], sqlite3.Connection],
 	*,
@@ -1219,27 +1354,31 @@ def build_menu_a4_html(
 	show_allergens: bool = True,
 	include_weekends: bool = False,
 	layout_mode: str = "standard",
+	skip_empty_days: bool = True,
 	signers: list[tuple[str, str]] | None = None,
 	school_meta: dict[str, str] | None = None,
 ) -> str:
 	"""Aylık veya haftalık menüyü standart, tek A4 kompakt veya haftalık ızgara düzeninde imzalı HTML olarak oluşturur."""
-	ym = str(year_month or date.today().strftime("%Y-%m"))[:7]
-	yy, mm = [int(x) for x in ym.split("-")]
-	month_title = f"{TR_MONTH_NAMES.get(mm, mm)} {yy}"
-	slots = [s for s in (active_slots or ["Öğle Yemeği"]) if s]
-	days_info = get_month_workdays_info(connect_db_fn, ym, include_weekends=include_weekends)
-	plans = get_menu_plans_for_month(connect_db_fn, ym)
+	ctx_p = _prepare_a4_menu_context(
+		connect_db_fn,
+		year_month=year_month,
+		scope=scope,
+		week_index=week_index,
+		active_slots=active_slots,
+		include_weekends=include_weekends,
+		skip_empty_days=skip_empty_days,
+		school_meta=school_meta,
+	)
+	yy, mm = ctx_p["yy"], ctx_p["mm"]
+	slots = ctx_p["slots"]
+	meal_times = ctx_p["meal_times"]
+	plans = ctx_p["plans"]
+	target_days = ctx_p["target_days"]
+	scope_label = ctx_p["scope_label"]
+	schedule_line = ctx_p["schedule_line"]
+	meta = ctx_p["meta"]
+	eff_wknds = ctx_p["eff_wknds"]
 
-	weeks = _group_month_days_by_week(days_info)
-	if scope == "weekly" and weeks:
-		safe_idx = max(0, min(week_index, len(weeks) - 1))
-		target_days = weeks[safe_idx]
-		scope_label = f"{safe_idx + 1}. Hafta Menüsü ({target_days[0]['date_iso']} – {target_days[-1]['date_iso']})"
-	else:
-		target_days = [d for d in days_info if d.get("is_workday")]
-		scope_label = f"{month_title} Aylık Yemek Menüsü ({len(target_days)} İş Günü)"
-
-	meta = school_meta or {}
 	inst_top = html.escape(meta.get("institution_top_header") or "T.C. MİLLÎ EĞİTİM BAKANLIĞI")
 	school_nm = html.escape(meta.get("school_name") or "Okul / Kurum Yemekhanesi")
 	custom_board_note = str(meta.get("cafeteria_board_note") or "").strip()
@@ -1265,9 +1404,9 @@ def build_menu_a4_html(
 	is_grid = (layout_mode == "weekly_grid")
 
 	if is_grid:
-		wd_cols = [0, 1, 2, 3, 4] + ([5, 6] if include_weekends else [])
+		wd_cols = sorted({int(d["weekday"]) for d in target_days}) or [0, 1, 2, 3, 4]
 		hdr_cols = [f"<th>{TR_WEEKDAYS_SHORT[wd]}</th>" for wd in wd_cols]
-		grid_weeks = _build_weekly_grid_rows(target_days, include_weekends)
+		grid_weeks = _build_weekly_grid_rows(target_days, eff_wknds or any(w >= 5 for w in wd_cols))
 		rows_html = []
 		for wk_dict in grid_weeks:
 			tds = []
@@ -1281,7 +1420,8 @@ def build_menu_a4_html(
 				for sl in slots:
 					rec = plans.get((d_iso, sl))
 					if rec and rec.get("dish_names"):
-						sl_hdr = f"<div class='grid-sl'>{html.escape(sl)}</div>" if len(slots) > 1 else ""
+						tm_s = f" ({html.escape(meal_times[sl])})" if meal_times.get(sl) else ""
+						sl_hdr = f"<div class='grid-sl'>{html.escape(sl)}{tm_s}</div>" if (len(slots) > 1 or tm_s) else ""
 						d_lines = "<br>".join(f"• {html.escape(str(nm))}" for nm in rec["dish_names"])
 						m_bits = []
 						kv = _safe_float(rec.get("total_kcal"), 0.0)
@@ -1324,7 +1464,10 @@ def build_menu_a4_html(
 				cells.append(f"<td class='col-tot'><b>{day_kcal:g} kcal</b></td>" if day_kcal > 0 else "<td class='col-tot'>—</td>")
 			rows_html.append(f"<tr>{''.join(cells)}</tr>")
 
-		hdr_cols = ["<th>Tarih / Gün</th>"] + [f"<th>{html.escape(sl)}</th>" for sl in slots]
+		hdr_cols = ["<th>Tarih / Gün</th>"] + [
+			f"<th>{html.escape(sl)}" + (f"<br><small style='font-weight:500;opacity:.92'>{html.escape(meal_times[sl])}</small>" if meal_times.get(sl) else "") + "</th>"
+			for sl in slots
+		]
 		if show_kcal and len(slots) > 1:
 			hdr_cols.append("<th>Günlük Toplam</th>")
 
@@ -1357,6 +1500,7 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Aria
 .antet-top {{ font-size: 10.5px; color: #64748b; letter-spacing: .5px; }}
 .antet-school {{ font-size: 15px; font-weight: 800; color: #0f766e; margin-top: 2px; }}
 .antet-title {{ font-size: 12.5px; font-weight: 700; color: #1e293b; margin-top: 2px; }}
+.antet-sched {{ font-size: 10px; color: #475569; margin-top: 3px; }}
 table {{ width: 100%; border-collapse: collapse; font-size: {tbl_font}; table-layout: {'fixed' if is_grid else 'auto'}; }}
 th, td {{ border: 1px solid #cbd5e1; padding: {cell_pad}; vertical-align: top; text-align: left; }}
 th {{ background: #0f766e; color: #fff; font-weight: 700; text-align: center; }}
@@ -1394,10 +1538,11 @@ tr:nth-child(even) td {{ background: #f8fafc; }}
     <div class='antet-top'>{inst_top}</div>
     <div class='antet-school'>{school_nm}</div>
     <div class='antet-title'>{html.escape(scope_label)}</div>
+    <div class='antet-sched'>{html.escape(schedule_line)}</div>
   </div>
   <table>
     <thead><tr>{''.join(hdr_cols)}</tr></thead>
-    <tbody>{''.join(rows_html) if rows_html else '<tr><td colspan="5" class="empty-cell">Bu dönem için iş günü bulunamadı.</td></tr>'}</tbody>
+    <tbody>{''.join(rows_html) if rows_html else f'<tr><td colspan="{max(2, len(hdr_cols))}" class="empty-cell">Bu dönem için öğün girilmiş gün bulunamadı.</td></tr>'}</tbody>
   </table>
   <div class='note-line'>{footer_note}</div>
   <div class='sig-row'>{sig_html}</div>
@@ -1454,6 +1599,7 @@ def build_menu_a4_docx(
 	show_allergens: bool = True,
 	include_weekends: bool = False,
 	layout_mode: str = "standard",
+	skip_empty_days: bool = True,
 	signers: list[tuple[str, str]] | None = None,
 	school_meta: dict[str, str] | None = None,
 ) -> bytes:
@@ -1462,23 +1608,26 @@ def build_menu_a4_docx(
 	docx = dx["docx"]
 	Cm, Pt, RGBColor = dx["Cm"], dx["Pt"], dx["RGBColor"]
 
-	ym = str(year_month or date.today().strftime("%Y-%m"))[:7]
-	yy, mm = [int(x) for x in ym.split("-")]
-	month_title = f"{TR_MONTH_NAMES.get(mm, mm)} {yy}"
-	slots = [s for s in (active_slots or ["Öğle Yemeği"]) if s]
-	days_info = get_month_workdays_info(connect_db_fn, ym, include_weekends=include_weekends)
-	plans = get_menu_plans_for_month(connect_db_fn, ym)
+	ctx_p = _prepare_a4_menu_context(
+		connect_db_fn,
+		year_month=year_month,
+		scope=scope,
+		week_index=week_index,
+		active_slots=active_slots,
+		include_weekends=include_weekends,
+		skip_empty_days=skip_empty_days,
+		school_meta=school_meta,
+	)
+	yy, mm = ctx_p["yy"], ctx_p["mm"]
+	slots = ctx_p["slots"]
+	meal_times = ctx_p["meal_times"]
+	plans = ctx_p["plans"]
+	target_days = ctx_p["target_days"]
+	scope_label = ctx_p["scope_label"]
+	schedule_line = ctx_p["schedule_line"]
+	meta = ctx_p["meta"]
+	eff_wknds = ctx_p["eff_wknds"]
 
-	weeks = _group_month_days_by_week(days_info)
-	if scope == "weekly" and weeks:
-		safe_idx = max(0, min(week_index, len(weeks) - 1))
-		target_days = weeks[safe_idx]
-		scope_label = f"{safe_idx + 1}. Hafta Yemek Menüsü ({target_days[0]['date_iso']} – {target_days[-1]['date_iso']})"
-	else:
-		target_days = [d for d in days_info if d.get("is_workday")]
-		scope_label = f"{month_title} Aylık Yemek Menüsü ({len(target_days)} İş Günü)"
-
-	meta = school_meta or {}
 	inst_top = meta.get("institution_top_header") or "T.C. MİLLÎ EĞİTİM BAKANLIĞI"
 	school_nm = meta.get("school_name") or "Okul / Kurum Yemekhanesi"
 	custom_board_note = str(meta.get("cafeteria_board_note") or "").strip()
@@ -1512,6 +1661,7 @@ def build_menu_a4_docx(
 		(inst_top, 8.5 if is_compact else 9.5, False, RGBColor(100, 116, 139)),
 		(school_nm.upper(), 11.0 if is_compact else 12.5, True, RGBColor(15, 118, 110)),
 		(scope_label, 10.0 if is_compact else 11.0, True, RGBColor(30, 41, 59)),
+		(schedule_line, 7.8 if is_compact else 8.5, False, RGBColor(71, 85, 105)),
 	]:
 		p = doc.add_paragraph()
 		p.alignment = dx["WD_ALIGN_PARAGRAPH"].CENTER
@@ -1551,10 +1701,16 @@ def build_menu_a4_docx(
 	body_fsz = 7.2 if is_compact else 8.5
 	meta_fsz = 6.5 if is_compact else 7.5
 
-	if is_grid:
-		wd_cols = [0, 1, 2, 3, 4] + ([5, 6] if include_weekends else [])
+	if not target_days:
+		p_emp = doc.add_paragraph()
+		p_emp.alignment = dx["WD_ALIGN_PARAGRAPH"].CENTER
+		r_emp = p_emp.add_run("Bu dönem için henüz öğün girilmiş gün bulunmamaktadır.")
+		r_emp.font.size = Pt(9.5)
+		r_emp.font.color.rgb = RGBColor(100, 116, 139)
+	elif is_grid:
+		wd_cols = sorted({int(d["weekday"]) for d in target_days}) or [0, 1, 2, 3, 4]
 		cols_hdr = [TR_WEEKDAYS_SHORT[wd] for wd in wd_cols]
-		grid_weeks = _build_weekly_grid_rows(target_days, include_weekends)
+		grid_weeks = _build_weekly_grid_rows(target_days, eff_wknds or any(w >= 5 for w in wd_cols))
 		tbl = doc.add_table(rows=max(1, len(grid_weeks)) + 1, cols=len(cols_hdr))
 		tbl.alignment = dx["WD_TABLE_ALIGNMENT"].CENTER
 		tbl.autofit = True
@@ -1579,8 +1735,9 @@ def build_menu_a4_docx(
 				for sl in slots:
 					rec = plans.get((d_iso, sl))
 					if rec and rec.get("dish_names"):
-						if len(slots) > 1:
-							rs = cp.add_run(f"[{sl}]\n")
+						tm_s = f" · {meal_times[sl]}" if meal_times.get(sl) else ""
+						if len(slots) > 1 or tm_s:
+							rs = cp.add_run(f"[{sl}{tm_s}]\n")
 							rs.font.size = Pt(meta_fsz)
 							rs.bold = True
 						r_d = cp.add_run("\n".join(f"• {nm}" for nm in rec["dish_names"]) + "\n")
@@ -1597,8 +1754,12 @@ def build_menu_a4_docx(
 							r_m.font.size = Pt(meta_fsz)
 							r_m.font.color.rgb = RGBColor(153, 27, 27) if rec.get("allergens") else RGBColor(146, 64, 14)
 	else:
-		cols_hdr = ["Tarih / Gün"] + slots + (["Toplam Kalori"] if (show_kcal and len(slots) > 1) else [])
-		tbl = doc.add_table(rows=max(1, len(target_days)) + 1, cols=len(cols_hdr))
+		slot_hdrs = [
+			f"{sl}\n({meal_times[sl]})" if meal_times.get(sl) else sl
+			for sl in slots
+		]
+		cols_hdr = ["Tarih / Gün"] + slot_hdrs + (["Toplam Kalori"] if (show_kcal and len(slots) > 1) else [])
+		tbl = doc.add_table(rows=len(target_days) + 1, cols=len(cols_hdr))
 		tbl.alignment = dx["WD_TABLE_ALIGNMENT"].CENTER
 		tbl.autofit = True
 		_render_hdr(tbl, cols_hdr)
@@ -2994,130 +3155,238 @@ def _fmt_ym(ym_s: str) -> str:
 		return ym_s
 
 
-def _render_tab_dishes(ctx_api: dict[str, Any]) -> None:
+def _get_dish_planned_usages(connect_db_fn: Callable[[], sqlite3.Connection], dish_id: int) -> list[dict[str, str]]:
+	"""Verilen yemeğin planlı menülerde geçtiği tarih ve öğünleri döndürür."""
+	out: list[dict[str, str]] = []
+	with connect_db_fn() as conn:
+		ensure_cafeteria_tables(conn)
+		rows = conn.execute(
+			"SELECT plan_date, meal_slot, year_month, dish_ids_json FROM cafeteria_menu_plans ORDER BY plan_date ASC, meal_slot ASC"
+		).fetchall()
+		for r in rows:
+			try:
+				d_ids = [int(x) for x in json.loads(r["dish_ids_json"] or "[]")]
+			except Exception:
+				d_ids = []
+			if int(dish_id) in d_ids:
+				out.append({"Tarih": str(r["plan_date"]), "Öğün": str(r["meal_slot"]), "Dönem": str(r["year_month"])})
+	return out
+
+
+def _render_dish_editor_body(
+	ctx_api: dict[str, Any],
+	*,
+	editing_dish: dict[str, Any] | None,
+	key_prefix: str,
+	in_dialog: bool = False,
+) -> None:
+	"""Yemek adı, makro besinler, AI malzeme çözücü, ölçeklenebilir malzeme tablosu ve alerji/menü etki bölümlerini çizer."""
 	connect_db_fn = ctx_api["connect_db"]
 	is_on, api_key, model = ctx_api["_get_active_gemini_config"]()
 	mask_fn = ctx_api["mask_kvkk_value"]
 
-	ui.markdown("### 🍲 Kayıtlı Yemekler Bankası, AI Malzeme/Kalori & Alerjen Çözümleyici")
-	ui.caption("Daha önce pişirdiğiniz veya planladığınız yemekleri kaydedin; dilediğiniz yemeğin içindeki malzemeleri Gemini AI ile otomatik çıkarıp tablodan miktar ve malzemeleri özgürce düzenleyin.")
-
-	dishes = get_all_dishes(connect_db_fn)
-	dish_map = {f"{d['name']} ({d['category']} · {d['total_kcal']:g} kcal)": d for d in dishes}
-
-	top_c1, top_c2 = ui.columns([2.2, 1.0], vertical_alignment="center")
-	with top_c1:
-		edit_choices = ["➕ Yeni Yemek Ekle"] + list(dish_map.keys())
-		picked_lbl = ui.selectbox("Düzenlenecek veya İncelenecek Yemek", edit_choices, key="caf_dish_picker")
-	with top_c2:
-		if picked_lbl != "➕ Yeni Yemek Ekle" and ui.button("🗑️ Seçili Yemeği Sil", type="secondary", use_container_width=True, key="caf_btn_del_dish"):
-			del_d = dish_map[picked_lbl]
-			delete_dish_by_id(connect_db_fn, int(del_d["id"]))
-			ui.session_state.pop("caf_dish_edit_draft", None)
-			ui.success(f"'{del_d['name']}' yemekler bankasından silindi.")
-			ui.rerun()
-
-	editing_dish = dish_map.get(picked_lbl) if picked_lbl != "➕ Yeni Yemek Ekle" else None
 	sel_sig = f"id:{editing_dish['id']}" if editing_dish else "new"
-	if ui.session_state.get("caf_dish_loaded_sig") != sel_sig:
-		ui.session_state["caf_dish_loaded_sig"] = sel_sig
+	sig_k = f"{key_prefix}_loaded_sig"
+	draft_k = f"{key_prefix}_edit_draft"
+	if ui.session_state.get(sig_k) != sel_sig:
+		ui.session_state[sig_k] = sel_sig
 		if editing_dish:
-			ui.session_state["caf_d_name"] = editing_dish["name"]
-			ui.session_state["caf_d_cat"] = editing_dish["category"] if editing_dish["category"] in DISH_CATEGORIES else DISH_CATEGORIES[1]
-			ui.session_state["caf_d_port"] = float(editing_dish.get("portion_g") or 250.0)
-			ui.session_state["caf_d_rec"] = str(editing_dish.get("recipe_notes") or "")
-			ui.session_state["caf_dish_edit_draft"] = [dict(x) for x in (editing_dish.get("ingredients") or [])]
+			ui.session_state[f"{key_prefix}_name"] = editing_dish["name"]
+			ui.session_state[f"{key_prefix}_cat"] = editing_dish["category"] if editing_dish["category"] in DISH_CATEGORIES else DISH_CATEGORIES[1]
+			ui.session_state[f"{key_prefix}_port"] = float(editing_dish.get("portion_g") or 250.0)
+			ui.session_state[f"{key_prefix}_prot"] = float(editing_dish.get("protein_g") or 0.0)
+			ui.session_state[f"{key_prefix}_fat"] = float(editing_dish.get("fat_g") or 0.0)
+			ui.session_state[f"{key_prefix}_rec"] = str(editing_dish.get("recipe_notes") or "")
+			ui.session_state[f"{key_prefix}_ex_als"] = [a for a in (editing_dish.get("allergens") or []) if a in ALLERGEN_BADGE_MAP]
+			ui.session_state[draft_k] = [dict(x) for x in (editing_dish.get("ingredients") or [])]
 		else:
-			ui.session_state["caf_d_name"] = ""
-			ui.session_state["caf_d_cat"] = DISH_CATEGORIES[1]
-			ui.session_state["caf_d_port"] = 250.0
-			ui.session_state["caf_d_rec"] = ""
-			ui.session_state["caf_dish_edit_draft"] = []
+			ui.session_state[f"{key_prefix}_name"] = ""
+			ui.session_state[f"{key_prefix}_cat"] = DISH_CATEGORIES[1]
+			ui.session_state[f"{key_prefix}_port"] = 250.0
+			ui.session_state[f"{key_prefix}_prot"] = 0.0
+			ui.session_state[f"{key_prefix}_fat"] = 0.0
+			ui.session_state[f"{key_prefix}_rec"] = ""
+			ui.session_state[f"{key_prefix}_ex_als"] = []
+			ui.session_state[draft_k] = []
 
-	with ui.container(border=True):
-		dc1, dc2, dc3 = ui.columns([2.0, 1.3, 0.9])
-		with dc1:
-			d_name = ui.text_input("Yemek Adı*", placeholder="Örn: Mercimek Çorbası, İzmir Köfte, Fırın Makarna", key="caf_d_name")
-		with dc2:
-			d_cat = ui.selectbox("Kategori", DISH_CATEGORIES, key="caf_d_cat")
-		with dc3:
-			d_port = ui.number_input("Porsiyon (g)", min_value=20.0, step=10.0, key="caf_d_port")
+	# Bölüm 1: Temel Kimlik & Porsiyon
+	if in_dialog:
+		ui.markdown("##### 1️⃣ Temel Yemek Bilgileri & Porsiyon")
+	dc1, dc2, dc3, dc4, dc5 = ui.columns([2.0, 1.3, 0.85, 0.85, 0.85])
+	with dc1:
+		d_name = ui.text_input("Yemek Adı*", placeholder="Örn: Mercimek Çorbası, İzmir Köfte", key=f"{key_prefix}_name")
+	with dc2:
+		d_cat = ui.selectbox("Kategori", DISH_CATEGORIES, key=f"{key_prefix}_cat")
+	with dc3:
+		d_port = ui.number_input("Porsiyon (g)", min_value=20.0, step=10.0, key=f"{key_prefix}_port")
+	with dc4:
+		d_prot = ui.number_input("Protein (g)", min_value=0.0, step=1.0, key=f"{key_prefix}_prot")
+	with dc5:
+		d_fat = ui.number_input("Yağ (g)", min_value=0.0, step=1.0, key=f"{key_prefix}_fat")
 
-		ai_c1, ai_c2 = ui.columns([2.2, 1.3], vertical_alignment="center")
-		with ai_c1:
-			ai_note = ui.text_input("AI Reçete İpucu (Opsiyonel)", placeholder="Örn: İlkokul porsiyonu, tereyağlı, glütensiz", key="caf_d_ai_note")
-		with ai_c2:
-			if ui.button("✨ Yapay Zekâ ile Malzeme, Kalori & Alerjen Çıkar", disabled=not is_on, type="primary" if is_on else "secondary", use_container_width=True, key="caf_btn_ai_dish"):
-				if not str(d_name or "").strip():
-					ui.warning("Lütfen önce yemek adını yazın.")
+	# Bölüm 2: AI Malzeme & Besin Çözümleyici
+	if in_dialog:
+		ui.markdown("##### 2️⃣ Yapay Zekâ Reçete & Malzeme Çözümleyici")
+	ai_c1, ai_c2 = ui.columns([2.2, 1.3], vertical_alignment="center")
+	with ai_c1:
+		ai_note = ui.text_input("AI Reçete İpucu (Opsiyonel)", placeholder="Örn: İlkokul porsiyonu, tereyağlı, glütensiz", key=f"{key_prefix}_ai_note")
+	with ai_c2:
+		if ui.button("✨ Yapay Zekâ ile Malzeme, Kalori & Alerjen Çıkar", disabled=not is_on, type="primary" if is_on else "secondary", use_container_width=True, key=f"{key_prefix}_btn_ai"):
+			if not str(d_name or "").strip():
+				ui.warning("Lütfen önce yemek adını yazın.")
+			else:
+				with ui.spinner(f"Gemini AI '{d_name}' için 1 porsiyon malzeme ve besin analizini çıkarıyor..."):
+					ok_d, res_d, used_m = gai.generate_dish_ingredients_and_nutrition_with_gemini(
+						api_key=api_key, model=model, dish_name=d_name, category=d_cat, extra_notes=ai_note
+					)
+				if ok_d:
+					ui.session_state[draft_k] = res_d.get("ingredients") or []
+					if res_d.get("portion_g"):
+						ui.session_state[f"{key_prefix}_port"] = float(res_d["portion_g"])
+					if res_d.get("protein_g") is not None:
+						ui.session_state[f"{key_prefix}_prot"] = float(res_d.get("protein_g") or 0.0)
+					if res_d.get("fat_g") is not None:
+						ui.session_state[f"{key_prefix}_fat"] = float(res_d.get("fat_g") or 0.0)
+					if res_d.get("recipe_notes"):
+						ui.session_state[f"{key_prefix}_rec"] = str(res_d["recipe_notes"])
+					ui.success(f"✅ {len(ui.session_state[draft_k])} malzeme Gemini ({used_m}) ile hazırlandı! Tablodan dilediğiniz gibi düzenleyebilirsiniz.")
+					ui.rerun()
 				else:
-					with ui.spinner(f"Gemini AI '{d_name}' için 1 porsiyon malzeme ve besin analizini çıkarıyor..."):
-						ok_d, res_d, used_m = gai.generate_dish_ingredients_and_nutrition_with_gemini(
-							api_key=api_key, model=model, dish_name=d_name, category=d_cat, extra_notes=ai_note
-						)
-					if ok_d:
-						ui.session_state["caf_dish_edit_draft"] = res_d.get("ingredients") or []
-						if res_d.get("portion_g"):
-							ui.session_state["caf_d_port"] = float(res_d["portion_g"])
-						if res_d.get("recipe_notes"):
-							ui.session_state["caf_d_rec"] = str(res_d["recipe_notes"])
-						ui.success(f"✅ {len(ui.session_state['caf_dish_edit_draft'])} malzeme Gemini ({used_m}) ile hazırlandı! Aşağıdaki tablodan dilediğiniz gibi değiştirebilirsiniz.")
-						ui.rerun()
-					else:
-						ui.error(f"AI hatası: {(res_d or {}).get('error', 'Yanıt alınamadı')}")
+					ui.error(f"AI hatası: {(res_d or {}).get('error', 'Yanıt alınamadı')}")
 
-		draft_ings: list[dict[str, Any]] = ui.session_state.get("caf_dish_edit_draft") or []
-		auto_scale = ui.checkbox("⚖️ Malzeme miktarını değiştirdiğimde kaloriyi oranla (AI kapalıyken de çalışır)", value=True, key="caf_d_autoscale")
-		df_ing_in = pd.DataFrame([
-			{
-				"Malzeme": x.get("ingredient_name") or "",
-				"Miktar": _safe_float(x.get("amount"), 0.0),
-				"Birim": x.get("unit") if x.get("unit") in INGREDIENT_UNITS else "g",
-				"Kalori (kcal)": _safe_float(x.get("kcal_portion"), 0.0),
-				"Karb (g)": _safe_float(x.get("carbs_portion_g"), 0.0),
-				"Alerjen": _normalize_allergen_label(x.get("allergen_tag") or ""),
-			}
-			for x in draft_ings
-		]) if draft_ings else pd.DataFrame(columns=["Malzeme", "Miktar", "Birim", "Kalori (kcal)", "Karb (g)", "Alerjen"])
+	# Bölüm 3: Malzeme Listesi & Otomatik Miktar Oranlama
+	if in_dialog:
+		ui.markdown("##### 3️⃣ Malzeme Listesi & Otomatik Kalori Oranlama")
+	draft_ings: list[dict[str, Any]] = ui.session_state.get(draft_k) or []
+	auto_scale = ui.checkbox("⚖️ Malzeme miktarını değiştirdiğimde kaloriyi oranla (AI kapalıyken de çalışır)", value=True, key=f"{key_prefix}_autoscale")
+	df_ing_in = pd.DataFrame([
+		{
+			"Malzeme": x.get("ingredient_name") or "",
+			"Miktar": _safe_float(x.get("amount"), 0.0),
+			"Birim": x.get("unit") if x.get("unit") in INGREDIENT_UNITS else "g",
+			"Kalori (kcal)": _safe_float(x.get("kcal_portion"), 0.0),
+			"Karb (g)": _safe_float(x.get("carbs_portion_g"), 0.0),
+			"Alerjen": _normalize_allergen_label(x.get("allergen_tag") or ""),
+		}
+		for x in draft_ings
+	]) if draft_ings else pd.DataFrame(columns=["Malzeme", "Miktar", "Birim", "Kalori (kcal)", "Karb (g)", "Alerjen"])
 
-		ed_ing_df = ui.data_editor(
-			df_ing_in,
-			num_rows="dynamic",
-			use_container_width=True,
-			hide_index=True,
-			key="caf_dish_ing_editor",
-			column_config={
-				"Malzeme": ui.column_config.TextColumn("Malzeme Adı", required=True),
-				"Miktar": ui.column_config.NumberColumn("Miktar", min_value=0.0, step=5.0),
-				"Birim": ui.column_config.SelectboxColumn("Birim", options=INGREDIENT_UNITS),
-				"Kalori (kcal)": ui.column_config.NumberColumn("Kalori (kcal)", min_value=0.0, step=1.0),
-				"Karb (g)": ui.column_config.NumberColumn("Karb (g)", min_value=0.0, step=0.5),
-				"Alerjen": ui.column_config.SelectboxColumn("Alerjen Uyarısı", options=TR_ALLERGEN_OPTIONS),
-			},
-		)
+	ed_ing_df = ui.data_editor(
+		df_ing_in,
+		num_rows="dynamic",
+		use_container_width=True,
+		hide_index=True,
+		key=f"{key_prefix}_ing_editor_{sel_sig}",
+		column_config={
+			"Malzeme": ui.column_config.TextColumn("Malzeme Adı", required=True),
+			"Miktar": ui.column_config.NumberColumn("Miktar", min_value=0.0, step=5.0),
+			"Birim": ui.column_config.SelectboxColumn("Birim", options=INGREDIENT_UNITS),
+			"Kalori (kcal)": ui.column_config.NumberColumn("Kalori (kcal)", min_value=0.0, step=1.0),
+			"Karb (g)": ui.column_config.NumberColumn("Karb (g)", min_value=0.0, step=0.5),
+			"Alerjen": ui.column_config.SelectboxColumn("Alerjen Uyarısı", options=TR_ALLERGEN_OPTIONS),
+		},
+	)
 
-		scaled_ings = scale_edited_ingredients(draft_ings, ed_ing_df, auto_scale_nutrition=auto_scale)
-		tot_k, tot_c, dish_allergens = compute_dish_nutrition_from_ingredients(scaled_ings)
-		al_badges = " · ".join(format_allergen_badge(a) for a in dish_allergens) if dish_allergens else "Belirgin 14 temel alerjen yok"
+	scaled_ings = scale_edited_ingredients(draft_ings, ed_ing_df, auto_scale_nutrition=auto_scale)
+	tot_k, tot_c, dish_allergens = compute_dish_nutrition_from_ingredients(scaled_ings)
+	extra_als = ui.multiselect(
+		"Ek Manuel Alerjen Etiketleri (Malzeme dışı / Eser miktar)",
+		[a for a in TR_ALLERGEN_OPTIONS if a],
+		key=f"{key_prefix}_ex_als",
+	)
+	merged_allergens = list(dish_allergens)
+	for ea in (extra_als or []):
+		if ea and ea not in merged_allergens:
+			merged_allergens.append(ea)
+	al_badges = " · ".join(format_allergen_badge(a) for a in merged_allergens) if merged_allergens else "Belirgin 14 temel alerjen yok"
 
-		m1, m2, m3, m4 = ui.columns(4)
-		m1.metric("Porsiyon Kalorisi", f"{tot_k:g} kcal")
-		m2.metric("Karbonhidrat (Diyabet Uyumu)", f"{tot_c:g} g")
-		m3.metric("Tespit Edilen Alerjen", f"{len(dish_allergens)} tür")
-		est_cost = estimate_dish_portion_cost(connect_db_fn, int(editing_dish["id"])) if editing_dish else None
-		cost_lbl = f"{est_cost['estimated_cost_tl']:,.2f} ₺" if (est_cost and est_cost["matched_count"] > 0) else "Fiyat Eşleşmedi"
-		m4.metric("Tahmini 1 Porsiyon Maliyeti", cost_lbl, delta=(f"{est_cost['matched_count']}/{est_cost['total_ingredients']} malzeme" if est_cost and est_cost["total_ingredients"] else None))
-		if dish_allergens:
-			ui.warning(f"⚠️ **Yemek Alerjen Uyarısı:** {al_badges}")
-			stu_hits = match_allergens_against_school(connect_db_fn, dish_allergens)
-			if stu_hits:
-				hit_txt = ", ".join(f"{mask_fn(h['full_name'], 'name')} ({h['class_name']} - {h['matched']})" for h in stu_hits[:8])
-				ui.error(f"🚨 **Okulda Çakışan Alerjik / Çölyaklı / Özel Diyet Kişi ({len(stu_hits)}):** {hit_txt}")
-		else:
-			ui.info(f"🟢 {al_badges}")
+	# Bölüm 4: Besin Özeti, Revir Çapraz Güvenliği & Menü Kullanımı
+	if in_dialog:
+		ui.markdown("##### 4️⃣ Besin Özeti, Alerjen Çakışması & Menü Kullanımı")
+	m1, m2, m3, m4 = ui.columns(4)
+	m1.metric("Porsiyon Kalorisi", f"{tot_k:g} kcal")
+	m2.metric("Karbonhidrat", f"{tot_c:g} g")
+	m3.metric("Protein / Yağ", f"{d_prot:g}g / {d_fat:g}g")
+	m4.metric("Alerjen Türü", f"{len(merged_allergens)} tür")
+	if merged_allergens:
+		ui.warning(f"⚠️ **Yemek Alerjen Uyarısı:** {al_badges}")
+		stu_hits = match_allergens_against_school(connect_db_fn, merged_allergens)
+		if stu_hits:
+			hit_txt = ", ".join(f"{mask_fn(h['full_name'], 'name')} ({h['class_name']} - {h['matched']})" for h in stu_hits[:8])
+			ui.error(f"🚨 **Okulda Çakışan Alerjik / Çölyaklı / Özel Diyet Kişi ({len(stu_hits)}):** {hit_txt}")
+	else:
+		ui.info(f"🟢 {al_badges}")
 
-		d_rec = ui.text_input("Tarif / Pişirme Notu", key="caf_d_rec", placeholder="Kısa hazırlık veya servis notu...")
-		if ui.button("💾 Yemeği ve Malzemelerini Kaydet / Güncelle", type="primary", use_container_width=True, key="caf_btn_save_dish"):
+	if in_dialog and editing_dish:
+		usages = _get_dish_planned_usages(connect_db_fn, int(editing_dish["id"]))
+		if usages:
+			with ui.expander(f"📅 Bu Yemeğin Kullanıldığı Planlı Öğünler ({len(usages)}) — Kaydedince Kalori/Alerjen Otomatik Güncellenir"):
+				ui.dataframe(pd.DataFrame(usages), hide_index=True, use_container_width=True)
+
+	# Bölüm 5: Tarif / Pişirme Notu & İşlemler
+	if in_dialog:
+		ui.markdown("##### 5️⃣ Tarif / Servis Notu & Kayıt İşlemleri")
+	d_rec = ui.text_input("Tarif / Pişirme Notu", key=f"{key_prefix}_rec", placeholder="Kısa hazırlık veya servis notu...")
+
+	if in_dialog and editing_dish:
+		b1, b2, b3, b4 = ui.columns([1.8, 1.3, 1.0, 0.8])
+		with b1:
+			if ui.button("💾 Değişiklikleri Kaydet", type="primary", use_container_width=True, key=f"{key_prefix}_btn_save"):
+				try:
+					saved_id = upsert_dish_with_ingredients(
+						connect_db_fn,
+						dish_id=int(editing_dish["id"]),
+						name=d_name,
+						category=d_cat,
+						portion_g=d_port,
+						ingredients=scaled_ings,
+						protein_g=d_prot,
+						fat_g=d_fat,
+						extra_allergens=extra_als,
+						recipe_notes=d_rec,
+						source="ai" if is_on else str(editing_dish.get("source") or "manual"),
+					)
+					ui.session_state[sig_k] = None
+					ui.session_state["caf_dish_loaded_sig"] = None
+					ui.session_state["caf_dish_toast"] = f"✅ '{d_name}' (#{saved_id}) güncellendi ve bağlı menüler yenilendi ({tot_k:g} kcal)."
+					ui.close_dialog(all_dialogs=True)
+					ui.rerun()
+				except Exception as exc:
+					ui.error(str(exc))
+		with b2:
+			if ui.button("📑 Kopyasını Oluştur", type="secondary", use_container_width=True, key=f"{key_prefix}_btn_clone"):
+				try:
+					clone_name = f"{str(d_name).strip()} (Kopya)"
+					new_id = upsert_dish_with_ingredients(
+						connect_db_fn,
+						name=clone_name,
+						category=d_cat,
+						portion_g=d_port,
+						ingredients=scaled_ings,
+						protein_g=d_prot,
+						fat_g=d_fat,
+						extra_allergens=extra_als,
+						recipe_notes=d_rec,
+						source="manual",
+					)
+					ui.session_state["caf_dish_toast"] = f"✅ '{clone_name}' (#{new_id}) yeni yemek olarak çoğaltıldı."
+					ui.close_dialog(all_dialogs=True)
+					ui.rerun()
+				except Exception as exc:
+					ui.error(str(exc))
+		with b3:
+			if ui.button("🗑️ Sil", type="secondary", use_container_width=True, key=f"{key_prefix}_btn_del"):
+				delete_dish_by_id(connect_db_fn, int(editing_dish["id"]))
+				ui.session_state[sig_k] = None
+				ui.session_state["caf_dish_toast"] = f"🗑️ '{editing_dish['name']}' yemekler bankasından silindi."
+				ui.close_dialog(all_dialogs=True)
+				ui.rerun()
+		with b4:
+			if ui.button("Kapat", use_container_width=True, key=f"{key_prefix}_btn_close"):
+				ui.close_dialog(all_dialogs=True)
+				ui.rerun()
+	else:
+		if ui.button("💾 Yemeği ve Malzemelerini Kaydet / Güncelle", type="primary", use_container_width=True, key=f"{key_prefix}_btn_save"):
 			try:
 				saved_id = upsert_dish_with_ingredients(
 					connect_db_fn,
@@ -3126,15 +3395,58 @@ def _render_tab_dishes(ctx_api: dict[str, Any]) -> None:
 					category=d_cat,
 					portion_g=d_port,
 					ingredients=scaled_ings,
+					protein_g=d_prot,
+					fat_g=d_fat,
+					extra_allergens=extra_als,
 					recipe_notes=d_rec,
 					source="ai" if is_on else "manual",
 				)
-				ui.session_state["caf_dish_edit_draft"] = scaled_ings
-				ui.session_state["caf_dish_loaded_sig"] = None
+				ui.session_state[draft_k] = scaled_ings
+				ui.session_state[sig_k] = None
 				ui.success(f"✅ '{d_name}' (#{saved_id}) yemekler bankasına kaydedildi ve bağlı menüler güncellendi ({tot_k:g} kcal).")
 				ui.rerun()
 			except Exception as exc:
 				ui.error(str(exc))
+
+
+@ui.dialog("🍽️ Yemek Detayı, Malzeme & Besin Düzenleyici", width="large")
+def open_dish_editor_dialog(ctx_api: dict[str, Any], dish_id: int) -> None:
+	"""Tablodan adına tıklanan yemeğin tüm bilgilerini düzenlemek için açılan 5 bölümlü pop-up pencere."""
+	dishes = get_all_dishes(ctx_api["connect_db"])
+	target = next((d for d in dishes if int(d["id"]) == int(dish_id)), None)
+	if not target:
+		ui.warning("Seçilen yemek bulunamadı.")
+		if ui.button("Kapat", key="caf_dlg_missing_close"):
+			ui.close_dialog(all_dialogs=True)
+		return
+	src_lbl = "🤖 Gemini AI Destekli" if target.get("source") == "ai" else "✍️ Manuel / Kurum Reçetesi"
+	ui.caption(f"Kayıt #{int(target['id'])} · Kaynak: {src_lbl} · Son Güncelleme: {target.get('updated_at') or '—'}")
+	_render_dish_editor_body(ctx_api, editing_dish=target, key_prefix="caf_dlg_d", in_dialog=True)
+
+
+def _render_tab_dishes(ctx_api: dict[str, Any]) -> None:
+	connect_db_fn = ctx_api["connect_db"]
+	is_on, api_key, model = ctx_api["_get_active_gemini_config"]()
+
+	ui.markdown("### 🍲 Kayıtlı Yemekler Bankası, AI Malzeme/Kalori & Alerjen Çözümleyici")
+	ui.caption("Yeni yemek ekleyin veya aşağıdaki **Kayıtlı Yemekler Listesi** tablosunda yemek adına tıklayarak pop-up düzenleme ekranını açın.")
+	if ui.session_state.get("caf_dish_toast"):
+		ui.success(ui.session_state.pop("caf_dish_toast"))
+
+	dishes = get_all_dishes(connect_db_fn)
+	dish_map = {f"{d['name']} ({d['category']} · {d['total_kcal']:g} kcal)": d for d in dishes}
+
+	top_c1, top_c2 = ui.columns([2.2, 1.0], vertical_alignment="center")
+	with top_c1:
+		edit_choices = ["➕ Yeni Yemek Ekle"] + list(dish_map.keys())
+		picked_lbl = ui.selectbox("Düzenlenecek veya Eklenecek Yemek", edit_choices, key="caf_dish_picker")
+	editing_dish = dish_map.get(picked_lbl) if picked_lbl != "➕ Yeni Yemek Ekle" else None
+	with top_c2:
+		if editing_dish and ui.button("🪟 Seçili Yemeği Pop-up'ta Aç", type="secondary", use_container_width=True, key="caf_btn_open_popup_dish"):
+			open_dish_editor_dialog(ctx_api, int(editing_dish["id"]))
+
+	with ui.container(border=True):
+		_render_dish_editor_body(ctx_api, editing_dish=editing_dish, key_prefix="caf_d", in_dialog=False)
 
 	if dishes:
 		missing_dishes = [d for d in dishes if not (d.get("ingredients") or []) or float(d.get("total_kcal") or 0) <= 0]
@@ -3174,20 +3486,44 @@ def _render_tab_dishes(ctx_api: dict[str, Any]) -> None:
 
 		ui.markdown("---")
 		ui.markdown(f"##### 📚 Kayıtlı Yemekler Listesi ({len(dishes)})")
+		ui.caption("💡 Pop-up düzenleme ekranını açmak için tablodaki **Yemek Adı** hücresine tıklayın.")
 		df_list = pd.DataFrame([
 			{
+				"id": int(d["id"]),
 				"Yemek Adı": d["name"],
 				"Kategori": d["category"],
 				"Porsiyon (g)": d["portion_g"],
 				"Kalori (kcal)": d["total_kcal"],
 				"Karb (g)": d["carbs_g"],
 				"Malzeme Sayısı": len(d.get("ingredients") or []),
-				"Tahmini Maliyet (₺)": (lambda c: c["estimated_cost_tl"] if c["matched_count"] > 0 else None)(estimate_dish_portion_cost(connect_db_fn, int(d["id"]))),
 				"Alerjen Uyarısı": " · ".join(format_allergen_badge(a) for a in (d.get("allergens") or [])) or "—",
 			}
 			for d in dishes
 		])
-		ui.dataframe(df_list, hide_index=True, use_container_width=True)
+		tbl_ev = ui.dataframe(
+			df_list,
+			hide_index=True,
+			use_container_width=True,
+			on_select="rerun",
+			selection_mode=["single-row", "single-cell"],
+			key="caf_dishes_list_tbl",
+			column_config={
+				"id": None,
+				"Yemek Adı": ui.column_config.TextColumn("Yemek Adı", help="Detay, malzeme, kalori ve alerjen düzenlemek için tıklayın"),
+			},
+		)
+		sel_cells = getattr(tbl_ev.selection, "cells", []) or []
+		clicked_dish_row = None
+		for c in sel_cells:
+			c_row = c[0] if isinstance(c, (tuple, list)) else (c.get("row") if isinstance(c, dict) else None)
+			c_col = c[1] if isinstance(c, (tuple, list)) else (c.get("column") if isinstance(c, dict) else None)
+			if c_col == "Yemek Adı" and c_row is not None and 0 <= int(c_row) < len(df_list):
+				clicked_dish_row = int(c_row)
+				break
+		if clicked_dish_row is not None:
+			clicked_did = int(df_list.iloc[clicked_dish_row]["id"])
+			ui.clear_dataframe_selection("caf_dishes_list_tbl")
+			open_dish_editor_dialog(ctx_api, clicked_did)
 
 
 def _render_tab_menu_planner(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict[str, str]) -> None:
@@ -3200,16 +3536,17 @@ def _render_tab_menu_planner(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict
 	dish_lbl_to_id = {f"{d['name']} ({d['total_kcal']:g} kcal)": int(d["id"]) for d in dishes}
 	id_to_dish_lbl = {v: k for k, v in dish_lbl_to_id.items()}
 
+	sched = parse_service_schedule_from_cfg(app_cfg)
 	cfg_c1, cfg_c2, cfg_c3 = ui.columns([1.8, 1.1, 1.1])
 	with cfg_c1:
 		active_slots = ui.multiselect(
 			"Planlanacak Öğünler",
 			MEAL_SLOTS,
-			default=["Öğle Yemeği"],
+			default=sched["active_meal_slots"],
 			key="caf_menu_active_slots",
-		) or ["Öğle Yemeği"]
+		) or sched["active_meal_slots"]
 	with cfg_c2:
-		inc_wknd = ui.checkbox("Hafta Sonlarını da Göster", value=False, key="caf_menu_inc_wknd")
+		inc_wknd = ui.checkbox("Hafta Sonlarını da Göster", value=any(wd >= 5 for wd in sched["weekdays_set"]), key="caf_menu_inc_wknd")
 	with cfg_c3:
 		auto_sync_diab = ui.checkbox("💉 Diyabete Oto-Eşitle", value=True, key="caf_menu_auto_sync_diab")
 
@@ -3219,9 +3556,10 @@ def _render_tab_menu_planner(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict
 	plans = get_menu_plans_for_month(connect_db_fn, sel_ym)
 
 	tot_planned_days = len({p[0] for p in plans.keys()})
+	slot_times_disp = " · ".join(f"{sl} ({sched['meal_times'][sl]})" for sl in active_slots if sched["meal_times"].get(sl))
 	ui.info(
-		f"📅 **{_fmt_ym(sel_ym)} İş Günü Özeti:** Toplam **{len(workdays)} iş günü** · "
-		f"Planlanmış gün: **{tot_planned_days}**"
+		f"📅 **{_fmt_ym(sel_ym)} Hizmet & İş Günü Özeti:** Haftada **{sched['days_per_week']} gün**, günde **{len(active_slots)} öğün** "
+		f"({slot_times_disp}) · Ay toplamı **{len(workdays)} hizmet günü** · Planlanmış gün: **{tot_planned_days}**"
 		+ (f" · Resmi/İdari Tatil ({len(holidays_in_month)}): " + ", ".join(f"{h['day_num']} ({h['holiday_title']})" for h in holidays_in_month[:4]) if holidays_in_month else "")
 	)
 
@@ -3497,9 +3835,34 @@ def _render_tab_menu_planner(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict
 			if len(active_slots) > 1 and day_tot_kcal > 0:
 				ui.caption(f"📊 **Gün Toplamı:** `{day_tot_kcal:g} kcal`")
 
+	# Yalnızca Öğün Girilmiş Günler Özeti (Boş Günler Otomatik Çıkarılır)
+	planned_only_rows: list[dict[str, Any]] = []
+	for d in workdays:
+		d_iso = d["date_iso"]
+		if not any(plans.get((d_iso, sl)) and plans[(d_iso, sl)].get("dish_names") for sl in active_slots):
+			continue
+		for sl in active_slots:
+			rec = plans.get((d_iso, sl))
+			if rec and rec.get("dish_names"):
+				t_s = sched["meal_times"].get(sl, "")
+				planned_only_rows.append({
+					"Tarih": f"{d['day_num']:02d}.{sel_ym[5:7]}.{sel_ym[:4]} ({d['weekday_name']})",
+					"Öğün": f"{sl} ({t_s})" if t_s else sl,
+					"Yemekler": ", ".join(rec["dish_names"]),
+					"Kalori (kcal)": rec.get("total_kcal") or 0.0,
+					"Alerjen": ", ".join(rec.get("allergens") or []) or "—",
+				})
+	ui.markdown("---")
+	ui.markdown(f"#### 📋 Planlanmış Menü Listesi ({len(planned_only_rows)} Öğün — Öğün Girilmemiş Günler Otomatik Çıkarılır)")
+	if planned_only_rows:
+		ui.dataframe(pd.DataFrame(planned_only_rows), hide_index=True, use_container_width=True)
+	else:
+		ui.caption("Seçili ay için henüz öğün girilmiş gün bulunmuyor.")
+
 	# A4 Çıktı ve İmzalı Belge Oluşturucu
 	ui.markdown("---")
-	ui.markdown("#### 🖨️ Resmi A4 Menü Çıktısı (Aylık / Haftalık & İsim-Ünvan-İmza)")
+	ui.markdown("#### 🖨️ Resmi A4 Menü Çıktısı (Aylık / Haftalık, Saat Bilgili & İsim-Ünvan-İmza)")
+	ui.caption("ℹ️ A4 çıktıda yalnızca menü/öğün girilen günler basılır; öğün girilmemiş günler listeye dahil edilmez ve ayarlardaki hizmet günü/saat bilgisi çıktıya işlenir.")
 	p_c1, p_c2, p_c3, p_c4 = ui.columns([1.4, 1.3, 0.8, 0.8])
 	with p_c1:
 		pr_scope = ui.radio("Çıktı Kapsamı", ["📅 Tüm Ay", "🗓️ Seçili Hafta"], horizontal=True, key="caf_print_scope")
@@ -3876,8 +4239,9 @@ def _render_tab_diners_and_cash(ctx_api: dict[str, Any], sel_ym: str, app_cfg: d
 					for r in stu_all
 					if int(r["id"]) not in linked_sids
 				}
+				def_meals_cnt = parse_service_schedule_from_cfg(app_cfg)["meals_per_day"]
 				picked_links = ui.multiselect("Kayıtlı Öğrenci / Personel Seç", list(link_opts.keys()), key="caf_link_stu_ms")
-				link_meals = ui.number_input("Günlük Öğün Sayısı", min_value=1, max_value=3, value=1, key="caf_link_meals")
+				link_meals = ui.number_input("Günlük Öğün Sayısı", min_value=1, max_value=3, value=def_meals_cnt, key="caf_link_meals")
 				if ui.button("📥 Seçilenleri Yemek Listesine Ekle", type="primary", use_container_width=True, disabled=not picked_links, key="caf_btn_link_stu"):
 					cnt_add = import_school_people_as_diners(connect_db_fn, [link_opts[k] for k in picked_links], daily_meals_count=int(link_meals))
 					ui.success(f"✅ {cnt_add} kişi yemek yiyenler listesine eklendi.")
@@ -3887,7 +4251,7 @@ def _render_tab_diners_and_cash(ctx_api: dict[str, Any], sel_ym: str, app_cfg: d
 					fn_new = ui.text_input("Serbest Kişi Adı Soyadı*")
 					r_new = ui.selectbox("Statü", DINER_ROLE_TYPES)
 					d_new = ui.text_input("Sınıf / Bölüm", placeholder="Örn: 3-A veya Mutfak")
-					m_new = ui.number_input("Günlük Öğün", min_value=1, max_value=3, value=1)
+					m_new = ui.number_input("Günlük Öğün", min_value=1, max_value=3, value=def_meals_cnt)
 					ex_new = ui.checkbox("Ücretsiz / Burslu")
 					if ui.form_submit_button("➕ Listeye Ekle", use_container_width=True):
 						if not clean_name_valid(fn_new):
@@ -4310,11 +4674,29 @@ def _render_tab_diners_and_cash(ctx_api: dict[str, Any], sel_ym: str, app_cfg: d
 def _render_tab_settings_and_exports(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict[str, str]) -> None:
 	connect_db_fn = ctx_api["connect_db"]
 	save_cfg_fn = ctx_api.get("save_app_settings")
-	ui.markdown("### ⚙️ Yemekhane Ayarları, A4 İmza Ünvanları & Toplu Excel Çıktısı")
+	sched = parse_service_schedule_from_cfg(app_cfg)
+	ui.markdown("### ⚙️ Yemekhane Ayarları, Haftalık Çalışma / Öğün Saatleri, İmza & Toplu Excel Çıktısı")
 
 	with ui.container(border=True):
-		ui.markdown("##### ✍️ A4 Menü Çıktısı Alt İmza & Varsayılan Öğün Tarifesi")
+		ui.markdown("##### 🗓️ Haftalık Yemek Günü, Günlük Öğün Sayısı, Yemek Saatleri & İmza Ayarları")
 		with ui.form("caf_form_settings"):
+			wd_name_to_idx = {TR_WEEKDAYS_SHORT[i]: i for i in range(7)}
+			default_wd_names = [TR_WEEKDAYS_SHORT[i] for i in sorted(sched["weekdays_set"])]
+
+			hs1, hs2 = ui.columns([1.0, 2.2])
+			days_pw_in = hs1.number_input("Haftada Kaç Gün Yemek Çıkıyor?", min_value=1, max_value=7, step=1, value=sched["days_per_week"])
+			sel_wds_in = hs2.multiselect("Yemek Çıkan Günler", list(wd_name_to_idx.keys()), default=default_wd_names)
+
+			hs3, hs4 = ui.columns([1.0, 2.2])
+			meals_pd_in = hs3.number_input("Günde Kaç Öğün Yemek Çıkıyor?", min_value=1, max_value=3, step=1, value=sched["meals_per_day"])
+			sel_slots_in = hs4.multiselect("Aktif Yemek Öğünleri", MEAL_SLOTS, default=sched["active_meal_slots"])
+
+			tm1, tm2, tm3 = ui.columns(3)
+			t_bkf_in = tm1.text_input("Sabah Kahvaltısı Saati", value=sched["meal_times"]["Sabah Kahvaltısı"], placeholder="08:00 - 08:45")
+			t_lun_in = tm2.text_input("Öğle Yemeği Saati", value=sched["meal_times"]["Öğle Yemeği"], placeholder="12:00 - 13:00")
+			t_snk_in = tm3.text_input("İkindi Ara Öğünü Saati", value=sched["meal_times"]["İkindi Ara Öğünü"], placeholder="15:00 - 15:30")
+
+			ui.markdown("---")
 			sc1, sc2 = ui.columns(2)
 			def_stu_p = sc1.number_input("Varsayılan Öğrenci Öğün Ücreti (₺)", min_value=0.0, step=5.0, value=_safe_float(app_cfg.get("cafeteria_default_meal_price"), 75.0))
 			def_stf_p = sc2.number_input("Varsayılan Öğretmen/Personel Öğün Ücreti (₺)", min_value=0.0, step=5.0, value=_safe_float(app_cfg.get("cafeteria_default_staff_price"), 90.0))
@@ -4333,7 +4715,36 @@ def _render_tab_settings_and_exports(ctx_api: dict[str, Any], sel_ym: str, app_c
 			)
 
 			if ui.form_submit_button("💾 Yemekhane Ayarlarını Kaydet", type="primary", use_container_width=True) and callable(save_cfg_fn):
+				picked_wd_idxs = sorted(wd_name_to_idx[n] for n in sel_wds_in if n in wd_name_to_idx)
+				if set(picked_wd_idxs) != sched["weekdays_set"] and picked_wd_idxs:
+					chosen_wd_idxs = picked_wd_idxs
+					final_days_pw = len(chosen_wd_idxs)
+				elif int(days_pw_in) != sched["days_per_week"] or not picked_wd_idxs:
+					final_days_pw = max(1, min(7, int(days_pw_in)))
+					chosen_wd_idxs = list(range(final_days_pw))
+				else:
+					chosen_wd_idxs = picked_wd_idxs
+					final_days_pw = len(chosen_wd_idxs)
+
+				picked_slots = [s for s in sel_slots_in if s in MEAL_SLOTS]
+				if picked_slots != sched["active_meal_slots"] and picked_slots:
+					chosen_slots = picked_slots
+					final_meals_pd = len(chosen_slots)
+				elif int(meals_pd_in) != sched["meals_per_day"] or not picked_slots:
+					final_meals_pd = max(1, min(3, int(meals_pd_in)))
+					chosen_slots = ["Öğle Yemeği"] if final_meals_pd == 1 else (["Sabah Kahvaltısı", "Öğle Yemeği"] if final_meals_pd == 2 else list(MEAL_SLOTS))
+				else:
+					chosen_slots = picked_slots
+					final_meals_pd = len(chosen_slots)
+
 				save_cfg_fn({
+					"cafeteria_service_days_per_week": str(final_days_pw),
+					"cafeteria_service_weekdays": ",".join(str(i) for i in chosen_wd_idxs),
+					"cafeteria_meals_per_day": str(final_meals_pd),
+					"cafeteria_active_meal_slots": ",".join(chosen_slots),
+					"cafeteria_time_breakfast": t_bkf_in.strip() or "08:00 - 08:45",
+					"cafeteria_time_lunch": t_lun_in.strip() or "12:00 - 13:00",
+					"cafeteria_time_snack": t_snk_in.strip() or "15:00 - 15:30",
 					"cafeteria_default_meal_price": str(def_stu_p),
 					"cafeteria_default_staff_price": str(def_stf_p),
 					"cafeteria_sig1_role": s1_r.strip(),
@@ -4344,9 +4755,10 @@ def _render_tab_settings_and_exports(ctx_api: dict[str, Any], sel_ym: str, app_c
 					"cafeteria_sig3_name": s3_n.strip(),
 					"cafeteria_board_note": b_note_in.strip(),
 				})
+				ui.session_state.pop("caf_menu_active_slots", None)
 				if callable(ctx_api.get("clear_all_data_caches")):
 					ctx_api["clear_all_data_caches"]()
-				ui.success("✅ Yemekhane tarife ve imza ayarları kaydedildi.")
+				ui.success("✅ Yemekhane çalışma düzeni, yemek saatleri, tarife ve imza ayarları kaydedildi.")
 				ui.rerun()
 
 	with ui.expander("🏫 A4 Menü İçin Resmi Okul Logosu / Mühür Yükle (PNG/JPG)", expanded=False):

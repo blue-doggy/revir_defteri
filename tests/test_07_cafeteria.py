@@ -879,6 +879,75 @@ class TestCafeteriaModule(unittest.TestCase):
         cmd_hits = persantil._handle_cmd_search("Hünkar")
         self.assertTrue(any(h.get("title") == "Hünkar Beğendi" and h.get("value") == "🍽️ Yemekhane Yönetimi" for h in cmd_hits))
 
+    def test_dishes_table_no_cost_col_and_popup_dialog_and_schedule_skip_empty_a4(self):
+        d_id = caf.upsert_dish_with_ingredients(
+            self.connect,
+            name="Yayla Çorbası",
+            category="Çorba",
+            ingredients=[{"ingredient_name": "Yoğurt", "amount": 60, "unit": "g", "kcal_portion": 45, "carbs_portion_g": 4, "allergen_tag": "Süt"}],
+        )
+        # 1. Dishes tab must NOT include Tahmini Maliyet column in Kayıtlı Yemekler Listesi
+        ctx_api = {
+            "connect_db": persantil.connect_db,
+            "get_app_settings": persantil.get_app_settings,
+            "save_app_settings": persantil.save_app_settings,
+            "_get_active_gemini_config": persantil._get_active_gemini_config,
+            "mask_kvkk_value": persantil.mask_kvkk_value,
+            "clear_all_data_caches": persantil.clear_all_data_caches,
+            "is_section_visible": persantil.is_section_visible,
+        }
+        out_dishes = revir_ui.run_action_headless(lambda: caf._render_tab_dishes(ctx_api), {"action": "render"})
+        self.assertNotIn("Tahmini Maliyet (₺)", str(out_dishes.get("main_html") or ""))
+
+        # 2. Pop-up editor dialog renders all 5 planned sections cleanly
+        out_dlg = revir_ui.run_action_headless(lambda: caf.open_dish_editor_dialog(ctx_api, d_id), {"action": "render"})
+        dlg_html = str(out_dlg.get("dialog_html") or "")
+        for sec_marker in ("Temel Yemek Bilgileri", "Yapay Zekâ", "Malzeme Listesi", "Besin Özeti", "Tarif / Servis Notu"):
+            self.assertIn(sec_marker, dlg_html)
+
+        # 3. Settings: 6 days/week (Mon-Sat), 2 meals/day, custom meal hours -> reflected in workdays & A4 outputs
+        persantil.save_app_settings({
+            "cafeteria_service_days_per_week": "6",
+            "cafeteria_service_weekdays": "0,1,2,3,4,5",
+            "cafeteria_meals_per_day": "2",
+            "cafeteria_active_meal_slots": "Sabah Kahvaltısı,Öğle Yemeği",
+            "cafeteria_time_breakfast": "08:15 - 08:45",
+            "cafeteria_time_lunch": "12:15 - 13:00",
+        })
+        persantil.clear_all_data_caches()
+
+        days_oct = caf.get_month_workdays_info(self.connect, "2026-10")
+        by_iso = {d["date_iso"]: d for d in days_oct}
+        self.assertTrue(by_iso["2026-10-03"]["is_workday"])   # Saturday included when 6 days/week configured
+        self.assertFalse(by_iso["2026-10-04"]["is_workday"])  # Sunday excluded
+
+        # 4. Plan ONLY 2026-10-05; leave 2026-10-06..31 empty -> A4 MUST omit empty days & show schedule + hours
+        caf.upsert_menu_plan_slot(self.connect, plan_date="2026-10-05", meal_slot="Öğle Yemeği", dish_ids=[d_id])
+        cfg_now = persantil.get_app_settings()
+        a4_html = caf.build_menu_a4_html(self.connect, year_month="2026-10", school_meta=cfg_now)
+        self.assertIn("05.10.2026", a4_html)
+        self.assertNotIn("06.10.2026", a4_html)
+        self.assertNotIn("07.10.2026", a4_html)
+        self.assertIn("6 Gün", a4_html)
+        self.assertIn("2 Öğün", a4_html)
+        self.assertIn("08:15 - 08:45", a4_html)
+        self.assertIn("12:15 - 13:00", a4_html)
+
+        a4_docx = caf.build_menu_a4_docx(self.connect, year_month="2026-10", school_meta=cfg_now)
+        docx_txt = _extract_docx_all_text(a4_docx)
+        self.assertIn("05.10.2026", docx_txt)
+        self.assertNotIn("06.10.2026", docx_txt)
+        self.assertNotIn("07.10.2026", docx_txt)
+        self.assertIn("6 Gün", docx_txt)
+        self.assertIn("08:15 - 08:45", docx_txt)
+        self.assertIn("12:15 - 13:00", docx_txt)
+
+        # 5. Completely empty month returns clean empty message without blank rows
+        emp_html = caf.build_menu_a4_html(self.connect, year_month="2026-12", school_meta=cfg_now)
+        self.assertIn("öğün girilmiş gün bulunamadı", emp_html)
+        emp_docx = _extract_docx_all_text(caf.build_menu_a4_docx(self.connect, year_month="2026-12", school_meta=cfg_now))
+        self.assertIn("öğün girilmiş gün bulunmamaktadır", emp_docx)
+
 
 if __name__ == "__main__":
     unittest.main()
