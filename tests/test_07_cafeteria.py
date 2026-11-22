@@ -1194,6 +1194,54 @@ class TestCafeteriaModule(unittest.TestCase):
         self.assertNotIn("Çalışma Zamanı Hatası", out_m["main_html"])
         self.assertIn("Karbonhidrat (g) Göster", out_m["main_html"])
 
+    def test_menu_planner_week_arrow_navigation_top_and_bottom(self):
+        revir_ui.reset_session()
+        revir_ui.session_state["caf_global_sel_ym"] = "2026-10"
+        cfg_now = persantil.get_app_settings()
+        ctx_api = {
+            "connect_db": self.connect,
+            "get_app_settings": persantil.get_app_settings,
+            "save_app_settings": persantil.save_app_settings,
+            "_get_active_gemini_config": persantil._get_active_gemini_config,
+            "mask_kvkk_value": persantil.mask_kvkk_value,
+            "clear_all_data_caches": persantil.clear_all_data_caches,
+            "is_section_visible": persantil.is_section_visible,
+        }
+        render_fn = lambda: caf._render_tab_menu_planner(ctx_api, "2026-10", cfg_now)
+
+        # Initial render: Week 1 active, top & bottom left/right arrows rendered
+        out1 = revir_ui.run_action_headless(render_fn, {"action": "render"})
+        h1 = out1["main_html"]
+        self.assertNotIn("Çalışma Zamanı Hatası", h1)
+        self.assertEqual(h1.count("◀ Önceki Hafta"), 2)
+        self.assertEqual(h1.count("Sonraki Hafta ▶"), 2)
+        self.assertIn("caf_btn_prev_wk_top", h1)
+        self.assertIn("caf_btn_next_wk_top", h1)
+        self.assertIn("caf_btn_prev_wk_bot", h1)
+        self.assertIn("caf_btn_next_wk_bot", h1)
+        self.assertIn("01.10.2026", h1)
+        self.assertTrue(str(revir_ui.session_state.get("caf_menu_wk_pick")).startswith("1. Hafta"))
+
+        # Click TOP right arrow -> switches to Week 2
+        out2 = revir_ui.run_action_headless(render_fn, {"action": "click", "key": "caf_btn_next_wk_top"})
+        self.assertTrue(str(revir_ui.session_state.get("caf_menu_wk_pick")).startswith("2. Hafta"))
+        self.assertIn("05.10.2026", out2["main_html"])
+
+        # Click BOTTOM right arrow -> switches to Week 3
+        out3 = revir_ui.run_action_headless(render_fn, {"action": "click", "key": "caf_btn_next_wk_bot"})
+        self.assertTrue(str(revir_ui.session_state.get("caf_menu_wk_pick")).startswith("3. Hafta"))
+        self.assertIn("12.10.2026", out3["main_html"])
+
+        # Click BOTTOM left arrow -> returns to Week 2
+        out4 = revir_ui.run_action_headless(render_fn, {"action": "click", "key": "caf_btn_prev_wk_bot"})
+        self.assertTrue(str(revir_ui.session_state.get("caf_menu_wk_pick")).startswith("2. Hafta"))
+        self.assertIn("05.10.2026", out4["main_html"])
+
+        # Click TOP left arrow -> returns to Week 1
+        out5 = revir_ui.run_action_headless(render_fn, {"action": "click", "key": "caf_btn_prev_wk_top"})
+        self.assertTrue(str(revir_ui.session_state.get("caf_menu_wk_pick")).startswith("1. Hafta"))
+        self.assertIn("01.10.2026", out5["main_html"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4155,6 +4155,38 @@ def _render_tab_menu_planner(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict
 			cnt_s = sync_cafeteria_month_to_diabetes(connect_db_fn, sel_ym)
 			ui.success(f"✅ {cnt_s} öğün İnsülin & Diyabet Yönetimi modülüyle eşitlendi.")
 
+	def _render_week_nav_bar(pos_tag: str) -> None:
+		nav_l, nav_c, nav_r = ui.columns([1.05, 2.3, 1.05], vertical_alignment="center")
+		with nav_l:
+			if ui.button(
+				"◀ Önceki Hafta",
+				key=f"caf_btn_prev_wk_{pos_tag}",
+				disabled=(wk_idx <= 0),
+				use_container_width=True,
+				help="Bir önceki haftaya geç",
+			):
+				ui.session_state["caf_menu_wk_pick"] = wk_labels[wk_idx - 1]
+				ui.rerun()
+		with nav_c:
+			ui.markdown(
+				f"<div style='text-align:center;font-weight:700;font-size:13px;padding:6px 10px;border-radius:8px;"
+				f"background:rgba(15,118,110,0.08);border:1px solid rgba(15,118,110,0.25);'>"
+				f"🗓️ {html.escape(wk_labels[wk_idx])} &nbsp;·&nbsp; ({wk_idx + 1} / {len(weeks)})</div>",
+				unsafe_allow_html=True,
+			)
+		with nav_r:
+			if ui.button(
+				"Sonraki Hafta ▶",
+				key=f"caf_btn_next_wk_{pos_tag}",
+				disabled=(wk_idx >= len(weeks) - 1),
+				use_container_width=True,
+				help="Bir sonraki haftaya geç",
+			):
+				ui.session_state["caf_menu_wk_pick"] = wk_labels[wk_idx + 1]
+				ui.rerun()
+
+	_render_week_nav_bar("top")
+
 	diab_stus = get_diabetic_students_for_menu(connect_db_fn)
 	for d in weeks[wk_idx]:
 		d_iso = d["date_iso"]
@@ -4227,6 +4259,8 @@ def _render_tab_menu_planner(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict
 
 			if len(active_slots) > 1 and day_tot_kcal > 0:
 				ui.caption(f"📊 **Gün Toplamı:** `{day_tot_kcal:g} kcal`")
+
+	_render_week_nav_bar("bot")
 
 	# Yalnızca Öğün Girilmiş Günler Özeti (Boş Günler Otomatik Çıkarılır)
 	planned_only_rows: list[dict[str, Any]] = []
