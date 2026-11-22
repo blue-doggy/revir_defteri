@@ -256,6 +256,53 @@ class TestPersantilDeepCRUDAndExports(unittest.TestCase):
             stu = c.execute("SELECT class_id FROM students WHERE full_name='Ali Can'").fetchone()
             self.assertEqual(stu["class_id"], row_a["id"])
 
+    def test_topbar_ai_pill_toggles_ai_mode_and_redirects_without_key(self):
+        import gemini_assistant
+        import revir_ui
+
+        persantil.save_app_settings({"gemini_enabled": "1", "gemini_floating_chat": "1"})
+        persantil.clear_all_data_caches()
+
+        # 1. With API key configured: clicking topbar AI pill toggles AI OFF then back ON
+        with mock.patch.object(gemini_assistant, "get_api_key", return_value="AIzaFakeKey12345"):
+            res_init = revir_ui.run_action_headless(persantil.main, {"action": "init"})
+            self.assertIn("🤖 AI ·", res_init["topbar_html"])
+            self.assertIn("window.__revirTopbarAction('toggle_ai', '')", res_init["topbar_html"])
+            self.assertTrue(res_init["floating_chat_enabled"])
+
+            # Click pill -> AI OFF
+            res_off = revir_ui.run_action_headless(
+                persantil.main,
+                {"action": "topbar_action", "key": "toggle_ai", "value": ""},
+            )
+            self.assertIn("⚪ AI Kapalı", res_off["topbar_html"])
+            self.assertFalse(res_off["floating_chat_enabled"])
+            self.assertEqual(persantil.get_app_settings().get("gemini_enabled"), "0")
+            self.assertFalse(revir_ui.session_state.get("cfg_gemini_enabled_toggle"))
+
+            # Click pill again -> AI ON
+            res_on = revir_ui.run_action_headless(
+                persantil.main,
+                {"action": "topbar_action", "key": "toggle_ai", "value": ""},
+            )
+            self.assertIn("🤖 AI ·", res_on["topbar_html"])
+            self.assertTrue(res_on["floating_chat_enabled"])
+            self.assertEqual(persantil.get_app_settings().get("gemini_enabled"), "1")
+            self.assertTrue(revir_ui.session_state.get("cfg_gemini_enabled_toggle"))
+
+        # 2. Without API key configured: clicking topbar AI pill navigates to Gemini AI settings with warning
+        revir_ui.reset_session()
+        persantil.save_app_settings({"gemini_enabled": "0", "gemini_api_key": ""})
+        persantil.clear_all_data_caches()
+        with mock.patch.object(gemini_assistant, "get_api_key", return_value=""):
+            revir_ui.run_action_headless(persantil.main, {"action": "init"})
+            res_nokey = revir_ui.run_action_headless(
+                persantil.main,
+                {"action": "topbar_action", "key": "toggle_ai", "value": ""},
+            )
+            self.assertEqual(res_nokey["active_page"], "⚙️ Ayarlar")
+            self.assertIn("API anahtarı", res_nokey["main_html"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

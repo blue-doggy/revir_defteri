@@ -124,7 +124,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.16.15"
+_DEFAULT_APP_VERSION = "1.16.16"
 
 
 def _load_app_version() -> str:
@@ -12885,6 +12885,8 @@ def open_gemini_api_guide_dialog() -> None:
 
 def render_gemini_ai_settings_panel(current_cfg: dict[str, str]) -> None:
 	ui.markdown("### 🤖 Yapay Zekâ (Gemini API) & KVKK Anonimleştirme Ayarları")
+	if ui.session_state.pop("_ai_key_needed_warn", False):
+		ui.warning("⚠️ AI modunu aktif edebilmek için lütfen aşağıya geçerli bir Google Gemini API anahtarı girip kaydedin.")
 	ui.caption(
 		"Revir Defteri'ndeki 7 klinik yapay zekâ senaryosunu ve sağ alt köşedeki yüzen Gemini sohbet balonunu (dosya ekleme & sesli konuşma destekli) buradan yönetebilirsiniz."
 	)
@@ -31458,6 +31460,26 @@ def _handle_topbar_action(act_key: str, act_val: Any) -> None:
 	if act_key == "toggle_kvkk":
 		ui.session_state["kvkk_privacy_mode"] = not bool(ui.session_state.get("kvkk_privacy_mode", False))
 		ui.rerun(scope="fragment")
+	elif act_key == "toggle_ai":
+		cfg = get_app_settings()
+		cur_en = str(cfg.get("gemini_enabled", "1")).strip() != "0"
+		has_key = bool(gai.get_api_key(cfg, APP_DIR))
+		if not has_key:
+			save_app_settings({"gemini_enabled": "1"})
+			ui.session_state["cfg_gemini_enabled_toggle"] = True
+			ui.session_state["_ai_key_needed_warn"] = True
+			clear_all_data_caches()
+			ui.close_dialog(all_dialogs=True)
+			ui.session_state["settings_vertical_nav"] = "🤖 Yapay Zekâ (Gemini) & KVKK"
+			ui.session_state["target_page"] = "⚙️ Ayarlar"
+			ui.rerun()
+		else:
+			nxt_en = not cur_en
+			save_app_settings({"gemini_enabled": "1" if nxt_en else "0"})
+			ui.session_state["cfg_gemini_enabled_toggle"] = nxt_en
+			clear_all_data_caches()
+			_sync_floating_chat_ui()
+			ui.rerun(scope="fragment")
 	elif act_key == "cycle_dark":
 		cfg = get_app_settings()
 		cur_dm = cfg.get("dark_mode_adaptation", DARK_MODE_OPTIONS[0])
@@ -31633,7 +31655,7 @@ def _handle_cmd_exec(item: dict[str, Any]) -> None:
 		ui.rerun(scope="fragment")
 
 
-def _build_topbar_html(cur_page: str, active_person: dict | sqlite3.Row | None, is_dark: bool, ai_on: bool, ai_model: str) -> str:
+def _build_topbar_html(cur_page: str, active_person: dict | sqlite3.Row | None, is_dark: bool, ai_on: bool, ai_model: str, has_ai_key: bool | None = None) -> str:
 	active_ay = get_active_academic_year()
 	is_arch = active_ay["end_date"] < date.today().isoformat()
 	ay_cls = "revir-tb-pill archive" if is_arch else "revir-tb-pill"
@@ -31656,8 +31678,15 @@ def _build_topbar_html(cur_page: str, active_person: dict | sqlite3.Row | None, 
 	kvkk_lbl = "🛡️ KVKK Açık" if kvkk_on else "🛡️ KVKK"
 	dk_ico = "☀️" if is_dark else "🌙"
 	dk_tip = "Aydınlık Moda Geç" if is_dark else "Karanlık Moda Geç"
-	ai_click = "window.__revirToggleChatBubble()" if ai_on else "window.__revirTopbarAction('goto_settings_group', '🤖 Yapay Zekâ (Gemini) & KVKK')"
+	has_key_flag = bool(gai.get_api_key(get_app_settings(), APP_DIR)) if has_ai_key is None else bool(has_ai_key)
+	ai_cls = "revir-tb-pill kvkk-on" if ai_on else "revir-tb-pill"
 	ai_lbl = f"🤖 AI · {ai_model.replace('gemini-', '')}" if ai_on else "⚪ AI Kapalı"
+	if ai_on:
+		ai_tip = "AI Modu Açık — Kapatmak için tıklayın"
+	elif has_key_flag:
+		ai_tip = "AI Modu Kapalı — Açmak için tıklayın"
+	else:
+		ai_tip = "AI Modu Kapalı (API Anahtarı Yok) — Ayarlamak için tıklayın"
 
 	return (
 		f'<div class="revir-tb-left">'
@@ -31672,7 +31701,7 @@ def _build_topbar_html(cur_page: str, active_person: dict | sqlite3.Row | None, 
 		f'<div class="revir-tb-right">'
 		f'<button type="button" class="{kvkk_cls}" title="KVKK Ekran Maskelemesini Aç / Kapat" onclick="window.__revirTopbarAction(\'toggle_kvkk\', \'\')">{kvkk_lbl}</button>'
 		f'<button type="button" class="revir-tb-icon-btn" title="{dk_tip}" onclick="window.__revirTopbarAction(\'cycle_dark\', \'\')">{dk_ico}</button>'
-		f'<button type="button" class="revir-tb-pill" title="Gemini Klinik Asistan (⌘J)" onclick="{ai_click}">{html.escape(ai_lbl)}</button>'
+		f'<button type="button" class="{ai_cls}" title="{html.escape(ai_tip, quote=True)}" onclick="window.__revirTopbarAction(\'toggle_ai\', \'\')">{html.escape(ai_lbl)}</button>'
 		f'</div>'
 	)
 
@@ -31743,11 +31772,11 @@ def main() -> None:
 
 	active_id = ui.session_state.get("active_person_id")
 	active_person = get_person_by_id(active_id) if active_id else None
-	_ai_on, _, _ai_m = _get_active_gemini_config()
+	_ai_on, _ai_key, _ai_m = _get_active_gemini_config()
 	_sync_floating_chat_ui(cur_page_val)
 
 	# Üst Bağlam Çubuğu & Global Komut Paleti (Cmd/Ctrl+K)
-	ui.configure_topbar(_build_topbar_html(cur_page_val, active_person, is_dark, _ai_on, _ai_m), action_handler=_handle_topbar_action)
+	ui.configure_topbar(_build_topbar_html(cur_page_val, active_person, is_dark, _ai_on, _ai_m, has_ai_key=bool(_ai_key)), action_handler=_handle_topbar_action)
 	ui.configure_command_palette(search_handler=_handle_cmd_search, exec_handler=_handle_cmd_exec)
 
 	# Yan menü canlı bildirim rozetleri
