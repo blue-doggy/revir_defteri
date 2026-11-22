@@ -1041,6 +1041,14 @@ Tablolar:
 - insulin_bolus_logs(id, student_id, log_date, log_time, meal_type, bg_mg_dl, ketone_status, menu_carbs_g, menu_consumed_pct, extra_carbs_g, total_carbs_g, activity_level, activity_duration_min, activity_reduction_pct, icr_used, isf_used, iob_units, carb_dose_units, correction_dose_units, calculated_dose_units, applied_dose_units, injection_site, meal_summary, ai_commentary, administered_by, notes)
 - calendar_events(id, event_date, title, category, symbol_type, is_civil_holiday, is_half_day, profession_group, start_time, end_time, description, source, is_completed, created_at)
 - calendar_daily_notes(note_date, quote_text, quote_source, hadith_text, hadith_source, day_significance, profession_override, custom_note, updated_at)
+- cafeteria_dishes(id, name, category, portion_g, total_kcal, carbs_g, protein_g, fat_g, allergens_json, recipe_notes, source)
+- cafeteria_dish_ingredients(id, dish_id, ingredient_name, amount, unit, kcal_portion, carbs_portion_g, allergen_tag)
+- cafeteria_menu_plans(id, year_month, plan_date, meal_slot, dish_ids_json, custom_items_json, total_kcal, total_carbs_g, allergens_json, notes)
+- cafeteria_purchases(id, invoice_date, year_month, invoice_no, supplier_name, category, subtotal_amount, vat_amount, total_amount, payment_status, notes)
+- cafeteria_purchase_items(id, purchase_id, item_name, category, quantity, unit_type, unit_price, vat_rate, line_total, expiry_date, notes)
+- cafeteria_diners(id, student_id, full_name, role_type, class_or_dept, daily_meals_count, fee_exempt, allergies_override, is_active)
+- cafeteria_monthly_fees(id, year_month, diner_id, workdays_in_month, planned_days, meals_per_day, unit_meal_price, discount_or_adjustment, expected_amount)
+- cafeteria_cash_ledger(id, tx_date, year_month, tx_type, diner_id, for_person_name, delivered_by_name, received_by_name, amount, payment_method, receipt_no, notes)
 - tr_locations(id, province, district, village)
 - lms_reference(id, indicator, sex, age_months, l, m, s)
 - wfa_reference(sex, age_days, l, m, s, source)
@@ -1310,7 +1318,19 @@ def chat_with_gemini_assistant(
 		"   {\"action\":\"delete_records\",\"classes\":[\"A Şubesi\"],\"delete_empty_classes\":false,\"students\":[],\"calendar_events\":[{\"event_date\":\"YYYY-MM-DD\",\"title\":\"Etkinlik Adı\"}]}\n"
 		"16) Mevcut sınıf / şube adlarını güncelleme, sadeleştirme veya yeniden adlandırma (öğrencileri ve sınıf öğretmenlerini koruyarak yeni ada taşır/birleştirir; her zaman onay kartı ile uygulanır):\n"
 		"   {\"action\":\"rename_classes\",\"replace_from\":\"Özel Eğitim Ana Sınıfı / \",\"replace_to\":\"\",\"renames\":[{\"old_name\":\"Eski Ad\",\"new_name\":\"Yeni Ad\"}]}\n"
-		"   Not: Toplu önek/metin temizleme için `replace_from` ve `replace_to` kullanabilir veya tek tek `renames` listesi verebilirsin.\n\n"
+		"   Not: Toplu önek/metin temizleme için `replace_from` ve `replace_to` kullanabilir veya tek tek `renames` listesi verebilirsin.\n"
+		"17) Yemekhane Yemekler Bankasına yemek ve malzeme/kalori/alerjen ekleme veya güncelleme (onay kartı zorunlu):\n"
+		"   {\"action\":\"cafeteria_upsert_dishes\",\"dishes\":[{\"name\":\"Mercimek Çorbası\",\"category\":\"Çorba\",\"portion_g\":250,\"ingredients\":[{\"ingredient_name\":\"Kırmızı Mercimek\",\"amount\":50,\"unit\":\"g\",\"kcal_portion\":170,\"carbs_portion_g\":30,\"allergen_tag\":\"\"}],\"recipe_notes\":\"\"}]}\n"
+		"18) Yemekhane menü planına tarih ve öğüne göre yemek yazma/güncelleme (onay kartı zorunlu):\n"
+		"   {\"action\":\"cafeteria_plan_menu\",\"plans\":[{\"plan_date\":\"YYYY-MM-DD\",\"meal_slot\":\"Öğle Yemeği\",\"dishes\":[{\"name\":\"Mercimek Çorbası\",\"kcal\":170,\"carbs_g\":30,\"allergen\":\"\"}]}]}\n"
+		"19) Yemekhane gelen ürün & fatura/gider kaydı oluşturma (onay kartı zorunlu):\n"
+		"   {\"action\":\"cafeteria_record_purchase\",\"invoice_date\":\"YYYY-MM-DD\",\"invoice_no\":\"\",\"supplier_name\":\"Tedarikçi\",\"category\":\"Sebze & Meyve\",\"items\":[{\"item_name\":\"Domates\",\"category\":\"Sebze & Meyve\",\"quantity\":10,\"unit_type\":\"kg\",\"unit_price\":35.0,\"vat_rate\":1}]}\n"
+		"20) Yemekhane tahsilatı (getiren isim, öğrenci, tutar) veya okula kasa teslimi işleme (onay kartı zorunlu):\n"
+		"   {\"action\":\"cafeteria_record_cash\",\"transactions\":[{\"tx_date\":\"YYYY-MM-DD\",\"tx_type\":\"IN_PAYMENT | OUT_SCHOOL_HANDOVER\",\"for_person_name\":\"Öğrenci veya Okul İdaresi\",\"delivered_by_name\":\"Parayı Getiren İsim\",\"received_by_name\":\"Teslim Alan\",\"amount\":1500.0,\"payment_method\":\"Nakit\",\"notes\":\"\"}]}\n"
+		"21) Yemekhane kayıtlarını SİLME (YALNIZCA kullanıcı açıkça 'sil / kaldır' dediğinde; tüm detaylar onay kartında gösterilir):\n"
+		"   {\"action\":\"cafeteria_delete_records\",\"dish_names\":[],\"plan_dates\":[{\"plan_date\":\"YYYY-MM-DD\",\"meal_slot\":\"\"}],\"purchase_ids\":[],\"diner_names\":[],\"cash_tx_ids\":[]}\n"
+		"22) Yemekhane aylık A4 menüsü (Word/HTML) veya tam Excel kitabı dışa aktarma:\n"
+		"   {\"action\":\"cafeteria_export\",\"year_month\":\"YYYY-MM\",\"format\":\"docx | xlsx\"}\n\n"
 		"KRİTİK GÜVENLİK VE ONAY KURALI (VERİ YAZMA / SİLME):\n"
 		"- Veritabanına herhangi bir veri yazacak (sınıf/öğrenci/öğretmen/etkinlik/ölçüm ekleme veya güncelleme) ya da silecek bir komut aldığında:\n"
 		"  1) Yanıtının metin kısmında YAPACAĞIN İŞLEMİ adım adım açıkça TARİF ET (hangi sınıfların/kişilerin/kayıtların ekleneceğini, güncelleneceğini veya silineceğini madde madde yaz) ve 'Onaylıyor musunuz? Aşağıdaki onay kartından onaylayabilirsiniz.' diye kullanıcıdan onay iste.\n"
@@ -2838,3 +2858,255 @@ Doğrudan Word/PDF raporuna konacak temiz, kod bloksuz şu 4 başlıkla oluştur
 3. **🔍 Eksik Kayıtlar ve Revir İş Yükü Öncelikleri**
 4. **🏛️ Okul İdaresinin Desteğini / Kararını Gerektiren Somut Maddeler**"""
 	return call_gemini(prompt, api_key=api_key, model=model, temperature=0.22, timeout=24.0)
+
+
+# ==============================================================================
+# 14. YEMEKHANE YÖNETİMİ AI MODÜLLERİ (MALZEME, MENÜ, FATURA, ÖDEME & CRUD)
+# ==============================================================================
+
+def generate_dish_ingredients_and_nutrition_with_gemini(
+	*,
+	api_key: str,
+	model: str,
+	dish_name: str,
+	category: str = "Ana Yemek",
+	extra_notes: str = "",
+) -> tuple[bool, dict[str, Any], str]:
+	"""Yemek adından 1 porsiyon malzeme listesi, miktar, birim kalori, karbonhidrat ve Türk Gıda Kodeksi alerjenlerini çıkarır."""
+	prompt = f"""Türk okul yemekhanesi beslenme standartlarına göre aşağıdaki yemek için **1 öğrenci porsiyonu** malzeme listesini, miktarlarını, porsiyon kalorilerini, karbonhidrat gramajlarını ve Türk Gıda Kodeksi alerjenlerini hesapla.
+
+[YEMEK ADI]: {dish_name}
+[KATEGORİ]: {category}
+[ÖZEL İSTEK / NOT]: {extra_notes or 'Standart okul yemekhanesi porsiyonu'}
+
+Geçerli `allergen_tag` değerleri (yoksa boş string "" kullan):
+"Gluten (Buğday/Arpa)", "Süt ve Süt Ürünleri (Laktoz)", "Yumurta", "Yer Fıstığı", "Sert Kabuklu Yemişler", "Soya", "Balık", "Kabuklular", "Yumuşakçalar", "Susam", "Hardal", "Kereviz", "Acı Bakla", "Sülfit"
+
+Geçerli `unit` değerleri: "g", "ml", "adet", "yemek kaşığı", "çay kaşığı", "su bardağı", "porsiyon"
+
+SADECE aşağıdaki JSON şemasını döndür:
+{{
+  "portion_g": 250,
+  "protein_g": 12.0,
+  "fat_g": 8.0,
+  "recipe_notes": "Kısa okul mutfağı hazırlık / sunum notu",
+  "ingredients": [
+    {{
+      "ingredient_name": "Kırmızı Mercimek",
+      "amount": 50,
+      "unit": "g",
+      "kcal_portion": 170,
+      "carbs_portion_g": 30.0,
+      "allergen_tag": ""
+    }}
+  ]
+}}"""
+	ok, raw, used_m = call_gemini(prompt, api_key=api_key, model=model, expect_json=True, temperature=0.18, timeout=24.0)
+	if not ok:
+		return False, {"error": raw}, used_m
+	parsed = _parse_json_response(raw)
+	if not parsed or not isinstance(parsed.get("ingredients"), list):
+		return False, {"error": "Yemek malzemeleri JSON olarak ayrıştırılamadı."}, used_m
+	clean_ings: list[dict[str, Any]] = []
+	for ing in parsed.get("ingredients") or []:
+		if not isinstance(ing, dict) or not str(ing.get("ingredient_name") or "").strip():
+			continue
+		clean_ings.append({
+			"ingredient_name": str(ing.get("ingredient_name") or "").strip(),
+			"amount": float(ing.get("amount") or 0.0),
+			"unit": str(ing.get("unit") or "g").strip() or "g",
+			"kcal_portion": float(ing.get("kcal_portion") or 0.0),
+			"carbs_portion_g": float(ing.get("carbs_portion_g") or 0.0),
+			"allergen_tag": str(ing.get("allergen_tag") or "").strip(),
+		})
+	return True, {
+		"portion_g": float(parsed.get("portion_g") or 250.0),
+		"protein_g": float(parsed.get("protein_g") or 0.0),
+		"fat_g": float(parsed.get("fat_g") or 0.0),
+		"recipe_notes": str(parsed.get("recipe_notes") or "").strip(),
+		"ingredients": clean_ings,
+	}, used_m
+
+
+def generate_monthly_cafeteria_menu_with_gemini(
+	*,
+	api_key: str,
+	model: str,
+	year_month: str,
+	workdays_list: list[dict[str, Any]],
+	meal_slots: list[str],
+	available_dishes: list[dict[str, Any]],
+	custom_instruction: str = "",
+) -> tuple[bool, dict[str, Any], str]:
+	"""Seçili ayın iş günleri için mevcut Yemekler Bankası öncelikli dengeli yemekhane menüsü oluşturur."""
+	prompt = f"""Bir okul beslenme uzmanı olarak aşağıdaki iş günleri ve öğünler için dengeli, çeşitli ve çocuklar için sağlıklı Türkçe yemekhane menüsü oluştur.
+Öncelikle `[KAYITLI YEMEKLER BANKASI]` listesindeki yemek adlarını kullan; eksik çeşit gerekiyorsa uygun gerçekçi Türk okul yemeği isimleri ve tahmini kalori/karbonhidrat ekle.
+
+[AY]: {year_month}
+[ÖĞÜN SLOTLARI]: {json.dumps(meal_slots, ensure_ascii=False)}
+[İŞ GÜNLERİ]: {json.dumps(workdays_list[:25], ensure_ascii=False)}
+[KAYITLI YEMEKLER BANKASI]: {json.dumps(available_dishes[:60], ensure_ascii=False)}
+[ÖZEL TALİMAT]: {custom_instruction or 'Her güne dengeli çorba + ana yemek + yardımcı yemek/salata/içecek dağıt.'}
+
+SADECE aşağıdaki JSON yapısını döndür:
+{{
+  "plans": [
+    {{
+      "plan_date": "YYYY-MM-DD",
+      "meal_slot": "Öğle Yemeği",
+      "dishes": [
+        {{"name": "Mercimek Çorbası", "kcal": 170, "carbs_g": 24, "allergen": ""}},
+        {{"name": "İzmir Köfte", "kcal": 320, "carbs_g": 18, "allergen": "Gluten (Buğday/Arpa)"}}
+      ]
+    }}
+  ]
+}}"""
+	ok, raw, used_m = call_gemini(prompt, api_key=api_key, model=model, expect_json=True, temperature=0.3, timeout=34.0)
+	if not ok:
+		return False, {"error": raw}, used_m
+	parsed = _parse_json_response(raw)
+	if not parsed or not isinstance(parsed.get("plans"), list):
+		return False, {"error": "Aylık menü JSON çıktısı ayrıştırılamadı."}, used_m
+	return True, {"plans": parsed["plans"]}, used_m
+
+
+def parse_cafeteria_invoice_with_gemini(
+	*,
+	api_key: str,
+	model: str,
+	file_bytes: bytes | None = None,
+	file_name: str = "",
+	raw_text: str = "",
+	strict_kvkk_pdf: bool = False,
+) -> tuple[bool, dict[str, Any], str]:
+	"""Yemekhaneye gelen ürün faturasını/fişini/irsaliyesini okuyup tedarikçi, tarih, miktar çeşidi ve fiyat satırları çıkarır."""
+	inline_files: list[tuple[bytes, str]] = []
+	doc_txt = anonymize_free_text(raw_text[:12000]) if raw_text else ""
+	if file_bytes and file_name:
+		in_item, txt_b = _build_strict_clinical_doc_input(
+			file_bytes, file_name, sensitive_names=None, strict_kvkk_pdf=strict_kvkk_pdf
+		)
+		inline_files.extend(in_item)
+		if txt_b:
+			doc_txt = (doc_txt + "\n" + txt_b).strip()[:14000]
+
+	prompt = f"""Aşağıdaki yemekhane alım faturası / irsaliye / market fişinden fatura bilgilerini ve her ürün satırını çıkar.
+
+[DOSYA ADI]: {file_name or 'Metin'}
+{('[BELGE METNİ]: ' + doc_txt) if doc_txt else ''}
+
+Geçerli `unit_type` değerleri: "kg", "g", "litre", "ml", "adet", "koli", "paket", "bağ", "teneke", "çuval"
+Geçerli `category` değerleri: "Sebze & Meyve", "Et / Tavuk / Balık", "Süt & Kahvaltılık", "Bakliyat & Kuru Gıda", "Yağ & Baharat", "Unlu Mamul & Ekmek", "İçecek", "Temizlik & Mutfak Sarf", "Diğer"
+
+SADECE aşağıdaki JSON şemasını döndür:
+{{
+  "invoice_date": "YYYY-MM-DD",
+  "invoice_no": "Fatura no veya boş",
+  "supplier_name": "Tedarikçi veya firma adı",
+  "category": "En uygun kategori",
+  "items": [
+    {{
+      "item_name": "Ürün adı",
+      "category": "Kategori",
+      "quantity": 10.0,
+      "unit_type": "kg",
+      "unit_price": 45.0,
+      "vat_rate": 1.0,
+      "expiry_date": ""
+    }}
+  ]
+}}"""
+	ok, raw, used_m = call_gemini(
+		prompt,
+		api_key=api_key,
+		model=model,
+		inline_files=inline_files if inline_files else None,
+		expect_json=True,
+		temperature=0.1,
+		timeout=30.0,
+	)
+	if not ok:
+		return False, {"error": raw}, used_m
+	parsed = _parse_json_response(raw)
+	if not parsed or not isinstance(parsed.get("items"), list):
+		return False, {"error": "Fatura kalemleri JSON olarak ayrıştırılamadı."}, used_m
+	return True, parsed, used_m
+
+
+def parse_cafeteria_menu_or_payments_text_with_gemini(
+	*,
+	api_key: str,
+	model: str,
+	task_mode: str = "menu",
+	workdays_list: list[str] | None = None,
+	raw_text: str = "",
+	file_bytes: bytes | None = None,
+	file_name: str = "",
+	strict_kvkk_pdf: bool = False,
+) -> tuple[bool, dict[str, Any], str]:
+	"""Yemekhane menü belgesini (`menu`) veya ödeme/tahsilat mesajını (`payments`) yapılandırılmış JSON'a çevirir."""
+	inline_files: list[tuple[bytes, str]] = []
+	doc_txt = raw_text[:12000] if raw_text else ""
+	if file_bytes and file_name:
+		in_item, txt_b = _build_strict_clinical_doc_input(
+			file_bytes, file_name, sensitive_names=None, strict_kvkk_pdf=strict_kvkk_pdf
+		)
+		inline_files.extend(in_item)
+		if txt_b:
+			doc_txt = (doc_txt + "\n" + txt_b).strip()[:14000]
+
+	if task_mode == "payments":
+		prompt = f"""Aşağıdaki okul yemekhanesi ücret ödeme metninden / listesinden her ödeme satırını çıkar.
+
+[ÖDEME METNİ]:
+{doc_txt}
+
+SADECE şu JSON şemasını döndür:
+{{
+  "payments": [
+    {{
+      "tx_date": "{datetime.now().strftime('%Y-%m-%d')}",
+      "for_person_name": "Kimin adına (öğrenci/kişi adı)",
+      "delivered_by_name": "Ücreti getiren / teslim eden kişi adı",
+      "amount": 1500.0,
+      "payment_method": "Nakit | IBAN / Havale | Kart",
+      "notes": ""
+    }}
+  ]
+}}"""
+	else:
+		prompt = f"""Aşağıdaki okul yemek menüsü belgesinden tarih ve öğünlere göre yemekleri çıkar.
+Tarih yoksa `[İŞ GÜNLERİ]` listesinden sırayla eşle: {json.dumps(workdays_list or [], ensure_ascii=False)}
+
+[DOSYA / METİN]:
+{doc_txt}
+
+SADECE şu JSON şemasını döndür:
+{{
+  "plans": [
+    {{
+      "plan_date": "YYYY-MM-DD",
+      "meal_slot": "Öğle Yemeği",
+      "dishes": [
+        {{"name": "Tarhana Çorbası", "kcal": 160, "carbs_g": 22, "allergen": "Gluten (Buğday/Arpa)"}}
+      ]
+    }}
+  ]
+}}"""
+
+	ok, raw, used_m = call_gemini(
+		prompt,
+		api_key=api_key,
+		model=model,
+		inline_files=inline_files if inline_files else None,
+		expect_json=True,
+		temperature=0.1,
+		timeout=30.0,
+	)
+	if not ok:
+		return False, {"error": raw}, used_m
+	parsed = _parse_json_response(raw)
+	if not parsed:
+		return False, {"error": "Yemekhane belgesi JSON olarak ayrıştırılamadı."}, used_m
+	return True, parsed, used_m
+
