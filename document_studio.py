@@ -1599,9 +1599,13 @@ def apply_extracted_clinical_record(
 	apply_disability: bool = False,
 	apply_diabetes: bool = False,
 	apply_visit_note: bool = False,
+	apply_vaccinations: bool = False,
+	apply_screenings: bool = False,
 	source_filename: str = "",
 	source_bytes: bytes | None = None,
 	age_in_months_fn=None,
+	moh_schedule: list[dict[str, Any]] | None = None,
+	save_screening_fn=None,
 ) -> list[str]:
 	"""Onaylanmış Gemini evrak çıkarımını gerçek SQLite tablolarına (kesin şema uyumuyla) işler."""
 	applied_log: list[str] = []
@@ -1869,6 +1873,138 @@ def apply_extracted_clinical_record(
 			idm.save_diabetes_profile(connect_db_fn, student_id, upd_p)
 			applied_log.append("💉 Diyabet / İnsülin profili (İKO / İDF) güncellendi")
 
+	# 9. Aşı Takibi (student_vaccinations)
+	if apply_vaccinations:
+		vacs = extracted.get("vaccinations") or []
+		if isinstance(vacs, dict):
+			vacs = [vacs]
+		sched_list = [v for v in (moh_schedule or []) if isinstance(v, dict) and v.get("code")]
+		sched_by_code = {str(v["code"]): v for v in sched_list}
+
+		def _resolve_vaccine_meta(rec: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+			raw_code = str(rec.get("vaccine_code") or "").strip()
+			if raw_code and raw_code in sched_by_code:
+				return raw_code, sched_by_code[raw_code]
+			v_fold = tr_fold(rec.get("vaccine_name") or "")
+			d_fold = tr_fold(rec.get("dose_name") or "")
+			if v_fold and sched_list:
+				for meta in sched_list:
+					mv = tr_fold(meta.get("vaccine") or "")
+					md = tr_fold(meta.get("dose") or "")
+					if (v_fold in mv or mv in v_fold) and (not d_fold or d_fold in md or md in d_fold):
+						return str(meta["code"]), meta
+			if raw_code:
+				return raw_code, None
+			return "", None
+
+		vac_ins = 0
+		with connect_db_fn() as _vc:
+			for v_rec in vacs:
+				if not isinstance(v_rec, dict):
+					continue
+				v_code, v_meta = _resolve_vaccine_meta(v_rec)
+				if not v_code:
+					continue
+				v_name = str(v_meta["vaccine"] if v_meta else (v_rec.get("vaccine_name") or v_code)).strip()
+				d_name = str(v_meta["dose"] if v_meta else (v_rec.get("dose_name") or "1. Doz")).strip()
+				p_lbl = str(v_meta["period_label"] if v_meta else "Diğer").strip()
+				p_mos = int(v_meta.get("period_months") or 0) if v_meta else 0
+				adm_d = str(v_rec.get("administered_date") or "").strip()[:10] or None
+				fac_v = str(v_rec.get("facility") or "").strip() or "Aile Sağlığı Merkezi (ASM)"
+				lot_v = str(v_rec.get("lot_number") or "").strip() or None
+				not_v = str(v_rec.get("notes") or "").strip() or None
+				_vc.execute(
+					"""INSERT INTO student_vaccinations(
+						student_id, vaccine_code, vaccine_name, dose_name, period_label,
+						period_months, is_done, administered_date, facility, lot_number, notes, updated_at
+					) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+					ON CONFLICT(student_id, vaccine_code) DO UPDATE SET
+						is_done=excluded.is_done,
+						administered_date=COALESCE(excluded.administered_date, student_vaccinations.administered_date),
+						facility=COALESCE(excluded.facility, student_vaccinations.facility),
+						lot_number=COALESCE(excluded.lot_number, student_vaccinations.lot_number),
+						notes=COALESCE(excluded.notes, student_vaccinations.notes),
+						updated_at=excluded.updated_at""",
+					(
+						student_id, v_code, v_name, d_name, p_lbl, p_mos,
+						1 if v_rec.get("is_done", True) else 0,
+						adm_d, fac_v, lot_v, not_v, now_iso,
+					),
+				)
+				vac_ins += 1
+		if vac_ins:
+			applied_log.append(f"💉 {vac_ins} aşı dozu takvim kaydına işlendi")
+
+	# 10. Okul Taraması (school_screenings)
+	if apply_screenings:
+		scr = extracted.get("school_screenings") or {}
+		if isinstance(scr, list):
+			scr = scr[0] if scr and isinstance(scr[0], dict) else {}
+		if isinstance(scr, dict) and any(
+			scr.get(k) not in (None, "")
+			for k in ("height_cm", "weight_kg", "head_circ_cm", "temperature_c", "pulse_bpm", "spo2_pct", "wears_glasses", "vision_right", "vision_left", "hair_screening", "hearing_right", "hearing_left", "health_behavior", "psychosocial_status", "notes")
+		):
+			s_dt = str(scr.get("screening_date") or doc_dt).strip()[:10]
+			if not re.match(r"^\d{4}-\d{2}-\d{2}$", s_dt):
+				s_dt = doc_dt
+
+			def _sflt(v: Any) -> float | None:
+				try:
+					return float(str(v).replace(",", ".")) if v not in (None, "") else None
+				except Exception:
+					return None
+
+			if callable(save_screening_fn):
+				save_screening_fn(
+					student_id=student_id,
+					screening_date=s_dt,
+					height_cm=_sflt(scr.get("height_cm")),
+					weight_kg=_sflt(scr.get("weight_kg")),
+					head_circ_cm=_sflt(scr.get("head_circ_cm")),
+					temperature_c=_sflt(scr.get("temperature_c")),
+					pulse_bpm=_sflt(scr.get("pulse_bpm")),
+					spo2_pct=_sflt(scr.get("spo2_pct")),
+					wears_glasses=str(scr.get("wears_glasses") or "").strip() or None,
+					vision_right=str(scr.get("vision_right") or "").strip() or None,
+					vision_left=str(scr.get("vision_left") or "").strip() or None,
+					hair_screening=str(scr.get("hair_screening") or "").strip() or None,
+					hearing_right=str(scr.get("hearing_right") or "").strip() or None,
+					hearing_left=str(scr.get("hearing_left") or "").strip() or None,
+					health_behavior=str(scr.get("health_behavior") or "").strip() or None,
+					psychosocial_status=str(scr.get("psychosocial_status") or "").strip() or None,
+					notes=str(scr.get("notes") or f"Sohbet / Evraktan aktarıldı ({source_filename})").strip(),
+				)
+			else:
+				with connect_db_fn() as _sc:
+					_sc.execute(
+						"""INSERT INTO school_screenings(
+							student_id, screening_date, height_cm, weight_kg, head_circ_cm,
+							temperature_c, pulse_bpm, spo2_pct, wears_glasses, vision_right,
+							vision_left, hair_screening, hearing_right, hearing_left,
+							health_behavior, harmful_habits, psychosocial_status, notes, screened_by, created_at
+						) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+						(
+							student_id, s_dt, _sflt(scr.get("height_cm")), _sflt(scr.get("weight_kg")), _sflt(scr.get("head_circ_cm")),
+							_sflt(scr.get("temperature_c")), _sflt(scr.get("pulse_bpm")), _sflt(scr.get("spo2_pct")),
+							str(scr.get("wears_glasses") or "").strip() or None,
+							str(scr.get("vision_right") or "").strip() or None,
+							str(scr.get("vision_left") or "").strip() or None,
+							str(scr.get("hair_screening") or "").strip() or None,
+							str(scr.get("hearing_right") or "").strip() or None,
+							str(scr.get("hearing_left") or "").strip() or None,
+							str(scr.get("health_behavior") or "").strip() or None,
+							str(scr.get("harmful_habits") or "").strip() or None,
+							str(scr.get("psychosocial_status") or "").strip() or None,
+							str(scr.get("notes") or f"Sohbet / Evraktan aktarıldı ({source_filename})").strip(),
+							None, now_iso,
+						),
+					)
+					_sc.execute(
+						"UPDATE health_profiles SET last_screened_at=COALESCE(?, last_screened_at), updated_at=? WHERE student_id=?",
+						(s_dt, now_iso, student_id),
+					)
+			applied_log.append("🏫 Okul sağlık taraması kaydı işlendi")
+
 	return applied_log
 
 
@@ -1927,6 +2063,12 @@ def render_smart_document_importer_dialog(ctx_api: dict[str, Any], initial_file_
 			except Exception:
 				ext_txt = ""
 		with ui.spinner("Gemini belgeyi okuyor ve klinik bilgileri ayrıştırıyor..."):
+			strict_pdf_mode = False
+			if callable(ctx_api.get("get_app_settings")):
+				try:
+					strict_pdf_mode = str(ctx_api["get_app_settings"]().get("gemini_strict_kvkk_pdf", "0")).strip() == "1"
+				except Exception:
+					strict_pdf_mode = False
 			ok_ex, ex_data, used_m = gai.extract_clinical_record_from_document_with_gemini(
 				api_key=gai_key,
 				model=gai_model,
@@ -1934,6 +2076,7 @@ def render_smart_document_importer_dialog(ctx_api: dict[str, Any], initial_file_
 				file_name=src_name,
 				extracted_text=ext_txt,
 				extra_instruction=extra_note,
+				strict_kvkk_pdf=strict_pdf_mode,
 			)
 		ui.session_state[res_key] = {"ok": ok_ex, "data": ex_data, "model": used_m, "name": src_name}
 		ui.rerun(scope="fragment")
@@ -1983,6 +2126,7 @@ def render_smart_document_importer_dialog(ctx_api: dict[str, Any], initial_file_
 		vit_d = data.get("vitals") or {}
 		meas_d = data.get("measurements") or {}
 		meds_d = data.get("medications") or []
+		vacs_d = data.get("vaccinations") or []
 		dis_d = data.get("disability") or {}
 		diab_d = data.get("diabetes") or {}
 		v_note_d = str(data.get("visit_note_suggestion") or "").strip()
@@ -2000,6 +2144,7 @@ def render_smart_document_importer_dialog(ctx_api: dict[str, Any], initial_file_
 			c_labs = ui.checkbox(f"🧪 Laboratuvar Sonuçlarını İşle ({len(labs_d)} parametre)", value=bool(labs_d), disabled=not labs_d, key=f"si_chk_lab_{res_key}")
 			c_vt = ui.checkbox(f"💓 Vital Bulguları Kaydet {'(Veri bulundu)' if has_vt else '(Veri yok)'}", value=has_vt, disabled=not has_vt, key=f"si_chk_vt_{res_key}")
 			c_ms = ui.checkbox(f"📏 Boy / Kilo Ölçümü Kaydet {'(Veri bulundu)' if has_ms else '(Veri yok)'}", value=has_ms, disabled=not has_ms, key=f"si_chk_ms_{res_key}")
+			c_vac = ui.checkbox(f"💉 Aşı Takvimine İşle ({len(vacs_d)} doz)", value=bool(vacs_d), disabled=not vacs_d, key=f"si_chk_vac_{res_key}")
 		with chk2:
 			c_meds = ui.checkbox(f"💊 İlaç Takip Listesine Ekle ({len(meds_d)} ilaç)", value=bool(meds_d), disabled=not meds_d, key=f"si_chk_med_{res_key}")
 			c_dis = ui.checkbox(f"♿ Özel Gereksinim / Engel Profilini Güncelle {'(Tespit edildi)' if dis_d.get('has_disability') else '(Yok)'}", value=bool(dis_d.get("has_disability")), disabled=not dis_d.get("has_disability"), key=f"si_chk_dis_{res_key}")
@@ -2010,6 +2155,8 @@ def render_smart_document_importer_dialog(ctx_api: dict[str, Any], initial_file_
 			ui.dataframe(pd.DataFrame(labs_d)[["test_name", "value_text", "unit", "ref_range", "flag"]].rename(columns={"test_name": "Test", "value_text": "Sonuç", "unit": "Birim", "ref_range": "Referans", "flag": "Durum"}), use_container_width=True, height=180)
 		if meds_d:
 			ui.dataframe(pd.DataFrame(meds_d), use_container_width=True, height=140)
+		if vacs_d:
+			ui.dataframe(pd.DataFrame(vacs_d), use_container_width=True, height=140)
 		if data.get("inferred_risks_and_actions"):
 			ui.info("🧠 **Belgeden Çıkarılan Dikkat Noktaları:**\n" + "\n".join(f"- {x}" for x in data["inferred_risks_and_actions"]))
 
@@ -2030,9 +2177,12 @@ def render_smart_document_importer_dialog(ctx_api: dict[str, Any], initial_file_
 				apply_disability=c_dis,
 				apply_diabetes=c_diab,
 				apply_visit_note=c_vis,
+				apply_vaccinations=c_vac,
 				source_filename=src_name,
 				source_bytes=src_bytes,
 				age_in_months_fn=ctx_api.get("age_in_months"),
+				moh_schedule=ctx_api.get("MOH_VACCINE_SCHEDULE"),
+				save_screening_fn=ctx_api.get("save_school_screening"),
 			)
 			if save_to_depot and src_bytes and src_name:
 				evrak_dir: Path = ctx_api["EVRAKLAR_DIR"]

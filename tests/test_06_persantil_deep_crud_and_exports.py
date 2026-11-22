@@ -455,6 +455,131 @@ class TestPersantilDeepCRUDAndExports(unittest.TestCase):
         self.assertIn(mac_res["asset"]["size_str"], html_ui)
         self.assertIn("Güncelleme Paketini İndir", html_ui)
 
+    def test_ai_phases_1_2_3_integration_and_headless_ui(self):
+        import io as _io
+        import gemini_assistant
+        import revir_ui
+
+        # 1. Stale "sesli" UI text removed, Katı KVKK PDF Mode added & persisted, new context chips cover all pages
+        revir_ui.reset_session()
+        revir_ui.session_state["main_menu_page"] = "⚙️ Ayarlar"
+        revir_ui.session_state["settings_vertical_nav"] = "🤖 Yapay Zekâ (Gemini) & KVKK"
+        out_set = revir_ui.run_action_headless(persantil.main, {"action": "init"})
+        set_html = out_set.get("main_html") or ""
+        self.assertNotIn("Sesli Konuşma", set_html)
+        self.assertNotIn("sesli konuşma", set_html)
+        self.assertIn("Katı KVKK PDF Modu", set_html)
+
+        with mock.patch.object(persantil, "_get_active_gemini_config", return_value=(True, "k", "m")):
+            cmds = persantil._handle_cmd_search("Gemini Klinik")
+        self.assertTrue(all("Sesli" not in c["subtitle"] for c in cmds))
+
+        for pg in ("📅 Takvim & Planlama", "🖨️ Raporlar", "📏 Ölçüm ve Gelişim", "💓 Vital Takip", "📋 Sağlık Profili ve Bakım Planı", "🧑‍💼 Yetişkinler"):
+            chips = persantil._build_context_chat_chips(pg)
+            self.assertGreaterEqual(len(chips), 4)
+            self.assertNotEqual(chips[0]["label"], "🩺 Kişiyi Özetle")
+
+        # 2. Chat [[REVIR_WRITE]] supports student_vaccinations & school_screenings WITH mandatory confirmation
+        with self.connect() as c:
+            c.execute("INSERT INTO classes(name) VALUES ('2-B')")
+            cid = c.execute("SELECT id FROM classes WHERE name='2-B'").fetchone()["id"]
+            c.execute("INSERT INTO students(class_id, full_name, student_no, birth_date, sex, person_type) VALUES (?, 'Deniz Aydın', '77', '2018-04-05', 'E', 'Öğrenci')", (cid,))
+            sid = c.execute("SELECT id FROM students WHERE full_name='Deniz Aydın'").fetchone()["id"]
+            c.execute("INSERT INTO classes(name) VALUES ('Sivil / Diğer')")
+            c.execute("INSERT INTO students(class_id, full_name, student_no, sex, person_type) VALUES ((SELECT id FROM classes WHERE name='Sivil / Diğer'), 'Öğrt. Kemal Çelik', 'Öğretmen', 'E', 'Sivil / diğer kişi')")
+            c.execute("INSERT INTO isolation_records(student_id, disease_name, detected_date, expected_return_date, status, notes, created_at) VALUES (?, 'Suçiçeği', '2026-11-20', '2026-11-27', 'İzolasyonda / İstirahatte', 'Ev izlemi', '2026-11-20T09:00')", (sid,))
+            c.execute("INSERT INTO seizure_logs(student_id, seizure_date, seizure_time, duration_seconds, seizure_type, triggers, observations, created_at) VALUES (?, '2026-11-18', '10:15', 40, 'Absans', 'Uykusuzluk', 'Kısa dalma', '2026-11-18T10:20')", (sid,))
+            c.execute("INSERT INTO infirmary_inventory(item_name, category, quantity, min_threshold, expiry_date, updated_at) VALUES ('Gazlı Bez', 'Pansuman', 2, 5, '2026-12-01', '2026-11-22')")
+            c.execute("INSERT INTO fridge_temp_logs(log_date, log_time, fridge_temp_c, room_temp_c, created_at) VALUES ('2026-11-22', '08:30', 9.2, 22.0, '2026-11-22T08:30')")
+            c.commit()
+
+        write_spec = {
+            "person_hint": "Deniz Aydın",
+            "document_type": "Aşı ve Tarama",
+            "document_date": "2026-11-21",
+            "vaccinations": [{"vaccine_code": "kkk_2", "is_done": True, "administered_date": "2026-11-15", "facility": "ASM"}],
+            "school_screenings": {"screening_date": "2026-11-21", "height_cm": 128.0, "weight_kg": 26.5, "vision_right": "10/10"},
+        }
+        with mock.patch.object(persantil, "_get_active_gemini_config", return_value=(True, "k", "m")), \
+             mock.patch.object(gemini_assistant, "chat_with_gemini_assistant", return_value=(True, "Aşı ve tarama kartı onayınıza hazır.", "m", "", None, write_spec)):
+            chat_res = persantil._handle_floating_gemini_chat({"message": "Deniz Aydın aşı ve tarama kaydını ekle"}, [])
+        self.assertTrue(chat_res["ok"])
+        self.assertIsNotNone(chat_res.get("write_proposal"))
+        self.assertTrue(any("Aşı Takvimi" in it for it in chat_res["write_proposal"]["items"]))
+        self.assertTrue(any("Okul Sağlık Taraması" in it for it in chat_res["write_proposal"]["items"]))
+
+        # Before confirmation, DB must remain empty
+        with self.connect() as c:
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM student_vaccinations WHERE student_id=?", (sid,)).fetchone()[0], 0)
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM school_screenings WHERE student_id=?", (sid,)).fetchone()[0], 0)
+
+        ap_res = persantil._handle_floating_gemini_apply_write({"token": chat_res["write_proposal"]["token"], "student_id": sid})
+        self.assertTrue(ap_res["ok"], ap_res)
+        with self.connect() as c:
+            vac_row = c.execute("SELECT vaccine_code, is_done FROM student_vaccinations WHERE student_id=?", (sid,)).fetchone()
+            scr_row = c.execute("SELECT height_cm, weight_kg FROM school_screenings WHERE student_id=?", (sid,)).fetchone()
+        self.assertEqual(vac_row["vaccine_code"], "kkk_2")
+        self.assertEqual(scr_row["height_cm"], 128.0)
+
+        # 3. Phase 3 AI complex screening column mapper normalizes weird headers + meter/gram units locally
+        df_weird = pd.DataFrame([
+            {"Şube": "2-B", "Ad": "Deniz", "Soyad": "Aydın", "Cins": "Erkek", "D.Tar": "2018-04-05", "Boy (m)": 1.32, "Ağırlık (g)": 28400},
+        ])
+        x_buf = _io.BytesIO()
+        df_weird.to_excel(x_buf, index=False)
+        fake_ai_map = {
+            "mode": "column_mapping",
+            "explanation": "Boy m->cm, kilo g->kg çevrildi.",
+            "column_map": {"class_name": "Şube", "first_name": "Ad", "last_name": "Soyad", "sex": "Cins", "birth_date": "D.Tar", "height_cm": "Boy (m)", "weight_kg": "Ağırlık (g)"},
+            "height_unit": "m",
+            "weight_unit": "g",
+        }
+        with mock.patch.object(gemini_assistant, "map_screening_table_with_gemini", return_value=(True, fake_ai_map, "m")):
+            ok_map, mapped_rows, map_note = persantil.parse_screening_file_with_ai_fallback(x_buf.getvalue(), "tarama_farkli.xlsx", "k", "m")
+        self.assertTrue(ok_map)
+        self.assertEqual(len(mapped_rows), 1)
+        self.assertEqual(mapped_rows[0]["full_name"], "Deniz Aydın")
+        self.assertAlmostEqual(mapped_rows[0]["height_cm"], 132.0)
+        self.assertAlmostEqual(mapped_rows[0]["weight_kg"], 28.4)
+        self.assertIn("çevrildi", map_note)
+
+        # 4. Headless UI smoke check for all new Faz 2 & Faz 3 panels with AI ON
+        with mock.patch.object(persantil, "_get_active_gemini_config", return_value=(True, "k", "m")):
+            person_row = persantil.get_person_by_id(sid)
+            with self.connect() as _chp:
+                hp_row = _chp.execute("SELECT * FROM health_profiles WHERE student_id=?", (sid,)).fetchone()
+
+            revir_ui.reset_session()
+            vac_out = revir_ui.run_action_headless(lambda: persantil._render_dossier_tab_vaccinations(person_row, sid, hp_row))
+            self.assertIn("Gemini AI Aşı Asistanı", vac_out["main_html"])
+
+            revir_ui.reset_session()
+            sz_out = revir_ui.run_action_headless(lambda: persantil._render_dossier_tab_seizures(person_row, sid, hp_row))
+            self.assertIn("Acil Eylem Kartı", sz_out["main_html"])
+
+            revir_ui.reset_session()
+            iso_out = revir_ui.run_action_headless(persantil.render_outbreak_and_isolation_panel)
+            self.assertIn("Bulaşıcı Hastalık Veli", iso_out["main_html"])
+
+            revir_ui.reset_session()
+            inv_out = revir_ui.run_action_headless(persantil._render_med_tab_infirmary_inventory)
+            self.assertIn("Stok Önceliklendirme", inv_out["main_html"])
+
+            revir_ui.reset_session()
+            cc_out = revir_ui.run_action_headless(lambda: persantil._render_med_tab_cold_chain("Hemşire"))
+            self.assertIn("Soğuk Zincir Risk Analizi", cc_out["main_html"])
+
+            revir_ui.reset_session()
+            rep_out = revir_ui.run_action_headless(persantil.render_reports)
+            self.assertIn("1 Sayfalık Yönetici Brifingi", rep_out["main_html"])
+
+            revir_ui.reset_session()
+            with self.connect() as _c_civ:
+                civ_id = _c_civ.execute("SELECT id FROM students WHERE full_name LIKE '%Kemal%'").fetchone()["id"]
+            persantil.set_active_person(civ_id)
+            civ_out = revir_ui.run_action_headless(persantil.render_civilians)
+            self.assertIn("Periyodik İşyeri", civ_out["main_html"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

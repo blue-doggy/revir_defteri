@@ -124,7 +124,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.16.17"
+_DEFAULT_APP_VERSION = "1.17.0"
 
 
 def _load_app_version() -> str:
@@ -294,6 +294,7 @@ DEFAULT_APP_SETTINGS: dict[str, str] = {
 	"gemini_floating_chat": "1",
 	"gemini_model": "gemini-3-flash-preview",
 	"gemini_api_key": "",
+	"gemini_strict_kvkk_pdf": "0",
 	"calendar_quote_mode": "Karışık (Hadis-i Şerif + Özlü Söz / Günün Yazısı)",
 	"calendar_show_prayer_times": "1",
 	"calendar_auto_load_holidays": "1",
@@ -11080,6 +11081,639 @@ def render_gemini_medication_safety_shield(
 				ui.success(msg)
 
 
+def _apply_local_person_placeholder(text: str, full_name: str) -> str:
+	"""Gemini çıktılarındaki KVKK yer tutucularını yalnızca yerel ekranda/çıktıda gerçek adla doldurur."""
+	fn = str(full_name or "Öğrenci")
+	out = str(text or "")
+	for tok in ("[ÖĞRENCİ_ADI]", "[Öğrenci Adı]", "[OGRENCI_ADI]", "[KİŞİ_ADI]"):
+		out = out.replace(tok, fn)
+	return out
+
+
+def _render_ai_editable_draft_card(
+	*,
+	title: str,
+	subtitle: str,
+	text_value: str,
+	text_key: str,
+	doc_title: str,
+	doc_file_name: str,
+	dl_key: str,
+	height: int = 150,
+) -> None:
+	"""Düzenlenebilir AI metin alanı ve tek tık Word (.docx) indirme bileşeni."""
+	edited = ui.text_area(title, value=text_value, height=height, key=text_key)
+	dl_txt = str(edited or text_value or "").strip()
+	if dl_txt:
+		ui.download_button(
+			"📥 Resmi Word Belgesi Olarak İndir (.docx)",
+			data=lambda _t=doc_title, _s=subtitle, _b=dl_txt: build_ai_custom_report_docx(_t, subtitle=_s, raw_markdown=_b),
+			file_name=doc_file_name,
+			mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+			type="secondary",
+			use_container_width=True,
+			key=dl_key,
+		)
+
+
+def render_gemini_vaccination_ai_panel(person: sqlite3.Row, person_id: int, vac_summary: dict[str, Any], age_desc: str) -> None:
+	is_on, api_key, model = _get_active_gemini_config()
+	if not is_on:
+		return
+	cfg = get_app_settings()
+	strict_pdf = str(cfg.get("gemini_strict_kvkk_pdf", "0")).strip() == "1"
+	cur_months = age_in_months(person["birth_date"], date.today()) if person["birth_date"] else None
+	full_name = str(person["full_name"] or "Öğrenci")
+	scan_state_k = f"gai_vac_scan_{person_id}"
+	letter_state_k = f"gai_vac_notice_{person_id}"
+
+	with ui.container(border=True):
+		ui.markdown("##### 🤖 Gemini AI Aşı Asistanı <small>(e-Nabız / ASM Kartı Okuyucu & Veli/ASM Mektup Taslağı)</small>", unsafe_allow_html=True)
+		c_up, c_not = ui.columns([1.45, 1.05])
+		with c_up:
+			vac_file = ui.file_uploader(
+				"📄 Aşı Kartı / e-Nabız Çıktısı Yükle (PDF, Görsel, Word, Excel)",
+				type=["pdf", "png", "jpg", "jpeg", "webp", "docx", "xlsx", "csv", "txt"],
+				key=f"vac_ai_uploader_{person_id}",
+			)
+			if ui.button("✨ Aşı Kartını Gemini ile Oku (Önizlemeli)", disabled=(vac_file is None), use_container_width=True, key=f"btn_vac_ai_scan_{person_id}"):
+				anon_ctx, _, _ = _build_person_anon_bundle(person_id)
+				with ui.spinner("Gemini AI aşı kartını T.C. Sağlık Bakanlığı takvimiyle eşleştiriyor..."):
+					ok_v, v_res, used_v = gai.parse_vaccination_card_with_gemini(
+						api_key=api_key,
+						model=model,
+						file_bytes=vac_file.getvalue(),
+						file_name=vac_file.name,
+						moh_schedule=MOH_VACCINE_SCHEDULE,
+						age_months=cur_months,
+						anon_context=anon_ctx,
+						strict_kvkk_pdf=strict_pdf,
+					)
+				ui.session_state[scan_state_k] = {"ok": ok_v, "data": v_res, "model": used_v}
+		with c_not:
+			ui.caption(f"👤 Öğrenci Yaşı: **{age_desc}** · Eksik / Gecikmiş: **{len(vac_summary.get('overdue_list') or [])}** doz")
+			if ui.button("📨 Veli & ASM Aşı Bilgilendirme Mektubu Üret", use_container_width=True, type="secondary", key=f"btn_vac_ai_notice_{person_id}"):
+				anon_ctx, _, _ = _build_person_anon_bundle(person_id)
+				with ui.spinner("Gemini AI veli ve ASM yönlendirme metinlerini hazırlıyor..."):
+					ok_n, n_res, used_n = gai.generate_vaccination_notice_with_gemini(
+						api_key=api_key,
+						model=model,
+						anon_context=anon_ctx,
+						overdue_list=list(vac_summary.get("overdue_list") or []),
+						up_to_date_pct=float(vac_summary.get("percent") or 0.0),
+						school_name=cfg.get("school_name", "Okul Reviri"),
+						nurse_name=cfg.get("nurse_name", "Okul Revir Sorumlusu"),
+					)
+				ui.session_state[letter_state_k] = {"ok": ok_n, "data": n_res, "model": used_n}
+
+		scan_saved = ui.session_state.get(scan_state_k)
+		if isinstance(scan_saved, dict):
+			if not scan_saved.get("ok"):
+				ui.error(f"Aşı kartı okuma hatası: {(scan_saved.get('data') or {}).get('error', 'Bilinmeyen hata')}")
+			else:
+				s_data = scan_saved["data"]
+				matched = s_data.get("matched_vaccines") or []
+				ui.info(f"🤖 **Önizleme ({scan_saved.get('model')}):** {s_data.get('summary', '')}")
+				if matched:
+					sched_map = {v["code"]: v for v in MOH_VACCINE_SCHEDULE}
+					prev_rows = [
+						{
+							"Seç": True,
+							"Kod": r["vaccine_code"],
+							"Aşı": (sched_map.get(r["vaccine_code"]) or {}).get("vaccine", r["vaccine_code"]),
+							"Doz": (sched_map.get(r["vaccine_code"]) or {}).get("dose", ""),
+							"Tarih": r.get("administered_date") or "",
+							"Kurum": r.get("facility") or "",
+							"Lot/Not": r.get("lot_number") or r.get("notes") or "",
+						}
+						for r in matched
+					]
+					ed_vac_df = ui.data_editor(
+						pd.DataFrame(prev_rows),
+						hide_index=True,
+						use_container_width=True,
+						key=f"vac_ai_preview_tbl_{person_id}",
+						column_config={
+							"Seç": ui.column_config.CheckboxColumn("Kaydet", default=True),
+							"Kod": ui.column_config.TextColumn("Kod", disabled=True),
+						},
+					)
+					b_ap1, b_ap2 = ui.columns([2.2, 1.0])
+					with b_ap1:
+						if ui.button("✅ Onayla ve Seçili Aşıları Takvime Kaydet", type="primary", use_container_width=True, key=f"btn_vac_ai_commit_{person_id}"):
+							to_save = []
+							for _, row_v in ed_vac_df.iterrows():
+								if not bool(row_v.get("Seç")):
+									continue
+								to_save.append({
+									"vaccine_code": str(row_v["Kod"]),
+									"is_done": True,
+									"administered_date": clean_text(row_v.get("Tarih")) or None,
+									"facility": clean_text(row_v.get("Kurum")) or "Aile Sağlığı Merkezi (ASM)",
+									"lot_number": None,
+									"notes": clean_text(row_v.get("Lot/Not")) or None,
+								})
+							if to_save:
+								save_bulk_student_vaccinations(person_id, to_save)
+								ui.session_state.pop(scan_state_k, None)
+								ui.success(f"✅ {len(to_save)} aşı dozu onayınızla öğrencinin aşı takvimine kaydedildi.")
+								ui.rerun(scope="fragment")
+							else:
+								ui.warning("Kaydetmek için en az bir satırı işaretleyin.")
+					with b_ap2:
+						if ui.button("✖ Önizlemeyi Kapat", use_container_width=True, key=f"btn_vac_ai_dismiss_{person_id}"):
+							ui.session_state.pop(scan_state_k, None)
+							ui.rerun(scope="fragment")
+				else:
+					ui.warning("Belgeden Sağlık Bakanlığı takvimiyle eşleşen aşı dozu çıkarılamadı.")
+
+		notice_saved = ui.session_state.get(letter_state_k)
+		if isinstance(notice_saved, dict):
+			if not notice_saved.get("ok"):
+				ui.error(f"Mektup üretme hatası: {(notice_saved.get('data') or {}).get('error', 'Bilinmeyen hata')}")
+			else:
+				ndata = notice_saved["data"]
+				safe_fn = mask_kvkk_value(full_name, "name")
+				g_ltr = _apply_local_person_placeholder(ndata.get("guardian_letter", ""), full_name)
+				a_ltr = _apply_local_person_placeholder(ndata.get("asm_referral_note", ""), full_name)
+				nt1, nt2 = ui.tabs(["📨 Veli Bilgilendirme Mektubu", "🏥 ASM Bilgi / Yönlendirme Notu"])
+				with nt1:
+					_render_ai_editable_draft_card(
+						title="Veli Bilgilendirme Mektubu (Düzenlenebilir)",
+						subtitle=f"{safe_fn} · Aşı Durumu Bilgilendirmesi",
+						text_value=g_ltr,
+						text_key=f"txt_vac_g_ltr_{person_id}",
+						doc_title="EKSİK AŞI VELİ BİLGİLENDİRME MEKTUBU",
+						doc_file_name=f"asi_veli_mektubu_{person_id}_{date.today().isoformat()}.docx",
+						dl_key=f"dl_vac_g_ltr_{person_id}",
+						height=135,
+					)
+				with nt2:
+					_render_ai_editable_draft_card(
+						title="ASM Bilgi / Yönlendirme Notu",
+						subtitle=f"{safe_fn} · Aile Sağlığı Merkezi Notu",
+						text_value=a_ltr,
+						text_key=f"txt_vac_asm_ltr_{person_id}",
+						doc_title="AİLE SAĞLIĞI MERKEZİ AŞI BİLGİ NOTU",
+						doc_file_name=f"asi_asm_yonlendirme_{person_id}_{date.today().isoformat()}.docx",
+						dl_key=f"dl_vac_asm_ltr_{person_id}",
+						height=135,
+					)
+
+
+def render_gemini_seizure_ai_panel(person: sqlite3.Row, person_id: int, hp: sqlite3.Row | None, logs: list[dict]) -> None:
+	is_on, api_key, model = _get_active_gemini_config()
+	if not is_on:
+		return
+	full_name = str(person["full_name"] or "Öğrenci")
+	proto_txt = clean_text(hp["seizure_emergency_protocol"]) if (hp and hasattr(hp, "keys") and "seizure_emergency_protocol" in hp.keys()) else ""
+	dev_txt = clean_text(hp["medical_devices"]) if (hp and hasattr(hp, "keys") and "medical_devices" in hp.keys()) else ""
+	state_k = f"gai_seizure_ai_{person_id}"
+
+	with ui.container(border=True):
+		c_hdr, c_btn = ui.columns([2.5, 1.5], vertical_alignment="center")
+		with c_hdr:
+			ui.markdown("##### 🤖 Gemini AI Nöbet Örüntüsü & Öğretmen Acil Eylem Kartı", unsafe_allow_html=True)
+			ui.caption("Sınıf/nöbetçi öğretmenler için sadeleştirilmiş acil ilk yardım kartı ve nöbet örüntü analizi üretir.")
+		with c_btn:
+			if ui.button("⚡ Acil Eylem Kartı & Analiz Üret", type="secondary", use_container_width=True, key=f"btn_gai_seizure_{person_id}"):
+				anon_ctx, _, _ = _build_person_anon_bundle(person_id)
+				cfg = get_app_settings()
+				with ui.spinner("Gemini AI nöbet verilerinden öğretmen acil eylem kartını hazırlıyor..."):
+					ok_s, s_res, used_s = gai.analyze_seizures_and_teacher_card_with_gemini(
+						api_key=api_key,
+						model=model,
+						anon_context=anon_ctx,
+						seizure_protocol=proto_txt,
+						medical_devices=dev_txt,
+						logs_summary=logs,
+						school_name=cfg.get("school_name", "Okul Reviri"),
+						nurse_name=cfg.get("nurse_name", "Okul Revir Sorumlusu"),
+					)
+				ui.session_state[state_k] = {"ok": ok_s, "data": s_res, "model": used_s}
+
+		saved = ui.session_state.get(state_k)
+		if isinstance(saved, dict):
+			if not saved.get("ok"):
+				ui.error(f"Nöbet analiz hatası: {(saved.get('data') or {}).get('error', 'Bilinmeyen hata')}")
+			else:
+				sd = saved["data"]
+				if sd.get("pattern_analysis"):
+					ui.info(f"🧠 **Klinik Örüntü & Hemşire Özeti ({saved.get('model')}):**\n\n{sd['pattern_analysis']}")
+				t_card = _apply_local_person_placeholder(sd.get("teacher_emergency_card", ""), full_name)
+				safe_slug = _slugify_person_name(full_name)
+				_render_ai_editable_draft_card(
+					title="👩‍🏫 Sınıf & Nöbetçi Öğretmen Acil Eylem Kartı (Düzenlenebilir)",
+					subtitle=f"Öğrenci: {mask_kvkk_value(full_name, 'name')} ({person['class_name']}) · Sınıf Acil Eylem Kartı",
+					text_value=t_card,
+					text_key=f"txt_gai_seizure_card_{person_id}",
+					doc_title="SINIF İÇİ EPİLEPSİ / NÖBET ACİL EYLEM KARTI",
+					doc_file_name=f"Ogretmen_Nobet_Acil_Karti_{safe_slug}.docx",
+					dl_key=f"dl_gai_seizure_card_{person_id}",
+					height=155,
+				)
+
+
+def render_gemini_isolation_ai_panel(active_iso: list[dict], outbreaks: list[dict]) -> None:
+	is_on, api_key, model = _get_active_gemini_config()
+	if not is_on or (not active_iso and not outbreaks):
+		return
+	with ui.expander("🤖 Gemini AI Bulaşıcı Hastalık Veli & Sınıf Duyurusu / Dezenfeksiyon Listesi"):
+		opts: dict[str, dict[str, Any]] = {}
+		for rec in active_iso:
+			lbl = f"🏠 {mask_kvkk_value(rec['full_name'], 'name')} · {rec['class_name']} — {rec['disease_name']} ({_format_iso_tr(rec.get('detected_date'))})"
+			opts[lbl] = {"kind": "iso", "rec": rec}
+		for idx_o, ob in enumerate(outbreaks):
+			lbl = f"🚨 Küme: {ob['cluster_name']} — {ob['class_name']} ({int(ob['case_count'])} vaka)"
+			opts[lbl] = {"kind": "outbreak", "ob": ob, "idx": idx_o}
+
+		c1, c2 = ui.columns([2.6, 1.4], vertical_alignment="center")
+		with c1:
+			sel_lbl = ui.selectbox("Bildirim Hazırlanacak Kayıt / Küme", list(opts.keys()), key="gai_iso_sel")
+		with c2:
+			run_iso_ai = ui.button("📨 İletişim Taslakları Üret", type="primary", use_container_width=True, key="btn_gai_iso_gen")
+
+		if run_iso_ai and sel_lbl in opts:
+			cfg = get_app_settings()
+			picked = opts[sel_lbl]
+			ob_brief = [{"sinif": o["class_name"], "kume": o["cluster_name"], "vaka": o["case_count"]} for o in outbreaks[:5]]
+			if picked["kind"] == "iso":
+				r = picked["rec"]
+				target_name = str(r.get("full_name") or "Öğrenci")
+				cls_nm = str(r.get("class_name") or "Belirtilmedi")
+				dis_nm = str(r.get("disease_name") or "Bulaşıcı Hastalık")
+				det_dt = str(r.get("detected_date") or "")
+				exp_dt = str(r.get("expected_return_date") or "")
+				doc_req = bool(r.get("doctor_clearance_required", True))
+				notes_raw = clean_text(r.get("notes"))
+			else:
+				o = picked["ob"]
+				target_name = "Öğrencimiz"
+				cls_nm = str(o.get("class_name") or "Belirtilmedi")
+				dis_nm = str(o.get("cluster_name") or "Salgın Kümesi")
+				det_dt = date.today().isoformat()
+				exp_dt = ""
+				doc_req = True
+				notes_raw = str(o.get("recommended_action") or "")
+
+			with ui.spinner("Gemini AI KVKK korumalı veli, öğretmen ve hijyen metinlerini hazırlıyor..."):
+				ok_i, i_res, used_i = gai.generate_isolation_communications_with_gemini(
+					api_key=api_key,
+					model=model,
+					disease_name=dis_nm,
+					class_name=cls_nm,
+					detected_date=det_dt,
+					expected_return_date=exp_dt,
+					doctor_clearance_required=doc_req,
+					notes_masked=notes_raw,
+					outbreaks_summary=ob_brief,
+					school_name=cfg.get("school_name", "Okul Reviri"),
+					nurse_name=cfg.get("nurse_name", "Okul Revir Sorumlusu"),
+				)
+			ui.session_state["gai_iso_comm_res"] = {
+				"ok": ok_i,
+				"data": i_res,
+				"model": used_i,
+				"full_name": target_name,
+				"class_name": cls_nm,
+				"disease": dis_nm,
+			}
+
+		iso_saved = ui.session_state.get("gai_iso_comm_res")
+		if isinstance(iso_saved, dict):
+			if not iso_saved.get("ok"):
+				ui.error(f"İzolasyon iletişim hatası: {(iso_saved.get('data') or {}).get('error', 'Bilinmeyen hata')}")
+			else:
+				d_iso = iso_saved["data"]
+				g_txt = _apply_local_person_placeholder(d_iso.get("guardian_letter", ""), iso_saved.get("full_name", "Öğrenci"))
+				t_txt = d_iso.get("class_teacher_notice", "")
+				h_txt = d_iso.get("hygiene_checklist", "")
+				it1, it2, it3 = ui.tabs(["📨 Veli Bilgilendirme", "🏫 Sınıf / Öğretmen Duyurusu (Anonim)", "🧼 Dezenfeksiyon Listesi"])
+				with it1:
+					_render_ai_editable_draft_card(
+						title="Veli İzlem ve Okula Dönüş Bilgilendirmesi",
+						subtitle=f"{iso_saved.get('class_name')} · {iso_saved.get('disease')}",
+						text_value=g_txt,
+						text_key="txt_gai_iso_guardian",
+						doc_title="BULAŞICI HASTALIK İZOLASYON VELİ BİLGİLENDİRMESİ",
+						doc_file_name=f"izolasyon_veli_mektubu_{date.today().isoformat()}.docx",
+						dl_key="dl_gai_iso_guardian",
+					)
+				with it2:
+					_render_ai_editable_draft_card(
+						title="Sınıf Öğretmeni / Sınıf Velileri Duyurusu (Kimliksiz)",
+						subtitle=f"{iso_saved.get('class_name')} · Koruyucu Sağlık Duyurusu",
+						text_value=t_txt,
+						text_key="txt_gai_iso_teacher",
+						doc_title="SINIF ENFEKSİYON KONTROL VE BELİRTİ İZLEM DUYURUSU",
+						doc_file_name=f"sinif_enfeksiyon_duyurusu_{date.today().isoformat()}.docx",
+						dl_key="dl_gai_iso_teacher",
+					)
+				with it3:
+					_render_ai_editable_draft_card(
+						title="Sınıf & Ortak Alan Dezenfeksiyon Kontrol Listesi",
+						subtitle=f"{iso_saved.get('class_name')} · Hijyen Protokolü",
+						text_value=h_txt,
+						text_key="txt_gai_iso_hygiene",
+						doc_title="OKUL DEZENFEKSİYON VE HİJYEN KONTROL LİSTESİ",
+						doc_file_name=f"dezenfeksiyon_listesi_{date.today().isoformat()}.docx",
+						dl_key="dl_gai_iso_hygiene",
+					)
+
+
+def render_gemini_inventory_ai_panel(alerts: dict[str, list[dict]], total_items: int) -> None:
+	is_on, api_key, model = _get_active_gemini_config()
+	if not is_on or total_items <= 0:
+		return
+	with ui.container(border=True):
+		c_l, c_r = ui.columns([2.5, 1.5], vertical_alignment="center")
+		with c_l:
+			ui.markdown("##### 🤖 Gemini AI Stok Önceliklendirme & Resmi İstem/İmha Tutanağı", unsafe_allow_html=True)
+			ui.caption("Kritik eşik altı ve miadı (SKT) yaklaşan/geçen ürünleri yorumlayıp resmi talep veya imha tutanağı taslağı oluşturur.")
+		with c_r:
+			if ui.button("📋 İstem & SKT Tutanağı Üret", type="secondary", use_container_width=True, key="btn_gai_inv_report"):
+				cfg = get_app_settings()
+				with ui.spinner("Gemini AI envanter ve SKT alarmlarını analiz ediyor..."):
+					ok_iv, iv_res, used_iv = gai.analyze_inventory_and_procurement_with_gemini(
+						api_key=api_key,
+						model=model,
+						alerts=alerts,
+						total_items=total_items,
+						school_name=cfg.get("school_name", "Okul Reviri"),
+						nurse_name=cfg.get("nurse_name", "Okul Revir Sorumlusu"),
+					)
+				ui.session_state["gai_inv_ai_res"] = {"ok": ok_iv, "data": iv_res, "model": used_iv}
+
+		saved = ui.session_state.get("gai_inv_ai_res")
+		if isinstance(saved, dict):
+			if not saved.get("ok"):
+				ui.error(f"Envanter AI hatası: {(saved.get('data') or {}).get('error', 'Bilinmeyen hata')}")
+			else:
+				ivd = saved["data"]
+				ui.info(f"📦 **Tedarik Önceliği ({saved.get('model')}):** {ivd.get('priority_summary', '')}\n\n⛔ **SKT / İmha Uyarısı:** {ivd.get('disposal_warning', '—')}")
+				_render_ai_editable_draft_card(
+					title="Okul Müdürlüğüne Resmi Malzeme İstem / SKT Tutanağı (Düzenlenebilir)",
+					subtitle=f"Sayım Tarihi: {date.today().strftime('%d.%m.%Y')} · Toplam {total_items} Kalem",
+					text_value=ivd.get("procurement_petition", ""),
+					text_key="txt_gai_inv_petition",
+					doc_title="REVİR MALZEME İSTEM VE MİAD KONTROL TUTANAĞI",
+					doc_file_name=f"Revir_Malzeme_Istem_Tutanagi_{date.today().isoformat()}.docx",
+					dl_key="dl_gai_inv_petition",
+				)
+
+
+def render_gemini_cold_chain_ai_panel(ym_norm: str, month_logs: list[dict]) -> None:
+	is_on, api_key, model = _get_active_gemini_config()
+	if not is_on or not month_logs:
+		return
+	with ui.container(border=True):
+		c_l, c_r = ui.columns([2.5, 1.5], vertical_alignment="center")
+		with c_l:
+			ui.markdown("##### 🤖 Gemini AI Soğuk Zincir Risk Analizi & Sapma Tutanağı", unsafe_allow_html=True)
+			ui.caption("2.0–8.0 °C dışına çıkan ölçümleri veya aylık ısı kararlılığını değerlendirip resmi izlem/ihlal tutanağı üretir.")
+		with c_r:
+			if ui.button("❄️ Soğuk Zincir Analizi Üret", type="secondary", use_container_width=True, key="btn_gai_cc_report"):
+				cfg = get_app_settings()
+				breaches = [lg for lg in month_logs if is_fridge_temp_alert(lg.get("fridge_temp_c"))]
+				compact_logs = [
+					{
+						"tarih": lg.get("log_date"),
+						"saat": lg.get("log_time"),
+						"dolap_c": lg.get("fridge_temp_c"),
+						"oda_c": lg.get("room_temp_c"),
+						"nem": lg.get("humidity_pct"),
+						"not": gai.anonymize_free_text(clean_text(lg.get("notes"))),
+					}
+					for lg in month_logs[:40]
+				]
+				compact_breach = [
+					{
+						"tarih": lg.get("log_date"),
+						"saat": lg.get("log_time"),
+						"dolap_c": lg.get("fridge_temp_c"),
+						"not": gai.anonymize_free_text(clean_text(lg.get("notes"))),
+					}
+					for lg in breaches[:20]
+				]
+				with ui.spinner("Gemini AI soğuk zincir verilerini analiz ediyor..."):
+					ok_cc, cc_res, used_cc = gai.generate_cold_chain_breach_report_with_gemini(
+						api_key=api_key,
+						model=model,
+						year_month=ym_norm,
+						month_logs_summary=compact_logs,
+						breach_logs=compact_breach,
+						school_name=cfg.get("school_name", "Okul Reviri"),
+						nurse_name=cfg.get("nurse_name", "Okul Revir Sorumlusu"),
+					)
+				ui.session_state["gai_cc_ai_res"] = {"ok": ok_cc, "data": cc_res, "model": used_cc}
+
+		saved = ui.session_state.get("gai_cc_ai_res")
+		if isinstance(saved, dict):
+			if not saved.get("ok"):
+				ui.error(f"Soğuk zincir AI hatası: {(saved.get('data') or {}).get('error', 'Bilinmeyen hata')}")
+			else:
+				ccd = saved["data"]
+				ui.warning(f"🌡️ **Stabilite Risk Değerlendirmesi ({saved.get('model')}):** {ccd.get('risk_assessment', '')}\n\n🛠️ **Önerilen Aksiyonlar:** {ccd.get('immediate_actions', '')}")
+				_render_ai_editable_draft_card(
+					title="Resmi Soğuk Zincir İzlem / Sapma Tutanağı (Düzenlenebilir)",
+					subtitle=f"Dönem: {ym_norm}",
+					text_value=ccd.get("official_report_text", ""),
+					text_key="txt_gai_cc_report",
+					doc_title="SOĞUK ZİNCİR BUZDOLABI İZLEM VE SAPMA TUTANAĞI",
+					doc_file_name=f"Soguk_Zincir_Tutanak_{ym_norm}.docx",
+					dl_key="dl_gai_cc_report",
+				)
+
+
+def render_gemini_adult_health_ai_panel(person: sqlite3.Row) -> None:
+	is_on, api_key, model = _get_active_gemini_config()
+	if not is_on or not person:
+		return
+	pid = int(person["id"])
+	state_k = f"gai_adult_ai_{pid}"
+	if ui.button("🩺✨ AI Periyodik İşyeri / Yetişkin Sağlık Özeti Üret", type="secondary", use_container_width=True, key=f"btn_gai_adult_{pid}"):
+		anon_ctx, _, _ = _build_person_anon_bundle(pid)
+		cfg = get_app_settings()
+		with connect_db() as conn:
+			vit_rows = conn.execute(
+				"SELECT measured_at, systolic_mmhg, diastolic_mmhg, pulse_bpm, temperature_c, spo2_pct, glucose_mg_dl, glucose_context FROM vital_readings WHERE student_id=? ORDER BY measured_at DESC LIMIT 12",
+				(pid,),
+			).fetchall()
+			v_cnt = conn.execute("SELECT COUNT(*) FROM visits WHERE student_id=?", (pid,)).fetchone()[0]
+		v_list = [dict(r) for r in vit_rows]
+		role_lbl = str(person["student_no"] or person["person_type"] or "Personel")
+		with ui.spinner("Gemini AI personel/yetişkin sağlık risk özetini oluşturuyor..."):
+			ok_a, a_res, used_a = gai.analyze_adult_preventive_health_with_gemini(
+				api_key=api_key,
+				model=model,
+				anon_context=anon_ctx,
+				vitals_summary=v_list,
+				visit_count=int(v_cnt or 0),
+				role_label=role_lbl,
+				school_name=cfg.get("school_name", "Okul Reviri"),
+				nurse_name=cfg.get("nurse_name", "Okul Revir Sorumlusu"),
+			)
+		ui.session_state[state_k] = {"ok": ok_a, "data": a_res, "model": used_a}
+
+	saved = ui.session_state.get(state_k)
+	if isinstance(saved, dict):
+		with ui.container(border=True):
+			if not saved.get("ok"):
+				ui.error(f"Yetişkin AI özeti hatası: {(saved.get('data') or {}).get('error', 'Bilinmeyen hata')}")
+			else:
+				ad = saved["data"]
+				ui.markdown(f"###### 🤖 Periyodik İşyeri / Yetişkin Sağlık Özeti <small>({saved.get('model')})</small>", unsafe_allow_html=True)
+				ui.info(f"**🩺 Genel Risk Özeti:** {ad.get('risk_summary', '—')}\n\n**🏫 Kurum İçi Ergonomi & Yaşam Önerileri:** {ad.get('workplace_health_tips', '—')}\n\n**🏥 Hekim Yönlendirme Notu:** {ad.get('physician_referral_note', '—')}")
+
+
+def _apply_ai_column_mapping_to_df(df_in: pd.DataFrame, ai_spec: dict[str, Any], fallback_class: str = "") -> list[dict[str, Any]]:
+	"""Gemini AI'nın döndürdüğü column_map ve birim dönüşümünü yerel DataFrame satırlarına KVKK güvenli uygular."""
+	if df_in is None or df_in.empty:
+		return []
+	cmap = ai_spec.get("column_map") or {}
+	h_unit = str(ai_spec.get("height_unit") or "cm").strip().lower()
+	w_unit = str(ai_spec.get("weight_unit") or "kg").strip().lower()
+
+	def _col_pick(key: str) -> str | None:
+		cand = str(cmap.get(key) or "").strip()
+		if not cand:
+			return None
+		if cand in df_in.columns:
+			return cand
+		cand_f = cand.lower()
+		for c in df_in.columns:
+			if str(c).strip().lower() == cand_f:
+				return c
+		return None
+
+	c_cls = _col_pick("class_name")
+	c_fn = _col_pick("full_name")
+	c_first = _col_pick("first_name")
+	c_last = _col_pick("last_name")
+	c_sex = _col_pick("sex")
+	c_dob = _col_pick("birth_date")
+	c_h = _col_pick("height_cm")
+	c_w = _col_pick("weight_kg")
+
+	def _sex_norm(v: Any) -> str | None:
+		s = str(v or "").strip().upper()
+		if s.startswith(("E", "M")) or "ERKEK" in s or "BOY" in s:
+			return "Erkek"
+		if s.startswith(("K", "F")) or "KIZ" in s or "GIRL" in s:
+			return "Kız"
+		return None
+
+	out_rows: list[dict[str, Any]] = []
+	for _, row in df_in.iterrows():
+		if c_fn and not pd.isna(row.get(c_fn)):
+			fn_val = clean_text(row.get(c_fn))
+		else:
+			p1 = clean_text(row.get(c_first)) if (c_first and not pd.isna(row.get(c_first))) else ""
+			p2 = clean_text(row.get(c_last)) if (c_last and not pd.isna(row.get(c_last))) else ""
+			fn_val = f"{p1} {p2}".strip()
+		if not fn_val or fn_val.lower() in {"nan", "none", "ad soyad", "adı soyadı", "isim"}:
+			continue
+
+		cls_val = (clean_text(row.get(c_cls)) if (c_cls and not pd.isna(row.get(c_cls))) else "") or fallback_class or ""
+		sex_val = _sex_norm(row.get(c_sex)) if c_sex else None
+		dob_val = parse_birth_date(row.get(c_dob)) if c_dob else None
+
+		raw_h = numeric_value(row.get(c_h)) if (c_h and not pd.isna(row.get(c_h))) else None
+		if raw_h is not None and (h_unit == "m" or (0.4 < raw_h < 2.5)):
+			raw_h = raw_h * 100.0
+		h_val = normalize_height(raw_h)
+
+		raw_w = numeric_value(row.get(c_w)) if (c_w and not pd.isna(row.get(c_w))) else None
+		if raw_w is not None and (w_unit == "g" or raw_w > 400.0):
+			raw_w = raw_w / 1000.0
+		w_val = normalize_weight(raw_w, is_adult=False)
+
+		out_rows.append({
+			"class_name": cls_val,
+			"full_name": fn_val,
+			"sex": sex_val,
+			"birth_date": dob_val,
+			"height_cm": h_val,
+			"weight_kg": w_val,
+		})
+	return out_rows
+
+
+def parse_screening_file_with_ai_fallback(file_bytes: bytes, file_name: str, api_key: str, model: str, strict_kvkk_pdf: bool = False) -> tuple[bool, list[dict[str, Any]], str]:
+	"""Excel/CSV/Word/Görsel tarama dosyasını Gemini sütun eşleyici veya satır okuyucu ile çözümler."""
+	lower_fn = (file_name or "").lower()
+	dfs_found: list[tuple[str, pd.DataFrame]] = []
+	raw_text = ""
+
+	try:
+		if lower_fn.endswith((".xlsx", ".xls")):
+			df_x = pd.read_excel(io.BytesIO(file_bytes), dtype=object)
+			if not df_x.empty:
+				dfs_found.append(("", df_x))
+		elif lower_fn.endswith((".csv", ".txt")):
+			try:
+				df_c = pd.read_csv(io.BytesIO(file_bytes), sep=None, engine="python", dtype=object)
+			except Exception:
+				df_c = pd.read_csv(io.BytesIO(file_bytes), dtype=object)
+			if not df_c.empty:
+				dfs_found.append(("", df_c))
+		elif lower_fn.endswith(".docx"):
+			tables_found, para_lines = _extract_docx_screening_tables_and_lines(file_bytes)
+			for cls_h, df_t in tables_found:
+				if df_t is not None and not df_t.empty:
+					dfs_found.append((cls_h, df_t))
+			raw_text = "\n".join(para_lines)
+	except Exception:
+		pass
+
+	if dfs_found:
+		all_mapped: list[dict[str, Any]] = []
+		first_expl = ""
+		for cls_hint, df_part in dfs_found:
+			headers = [str(c) for c in df_part.columns]
+			samples = [[str(v) if not pd.isna(v) else "" for v in df_part.iloc[i].tolist()] for i in range(min(4, len(df_part)))]
+			ok_m, spec_m, _used = gai.map_screening_table_with_gemini(
+				api_key=api_key,
+				model=model,
+				headers=headers,
+				sample_rows=samples,
+			)
+			if ok_m:
+				if not first_expl:
+					first_expl = str(spec_m.get("explanation") or "")
+				all_mapped.extend(_apply_ai_column_mapping_to_df(df_part, spec_m, fallback_class=cls_hint))
+		if all_mapped:
+			return True, all_mapped, first_expl or f"{len(all_mapped)} satır AI sütun eşleme ile okundu."
+
+	ok_r, spec_r, used_r = gai.map_screening_table_with_gemini(
+		api_key=api_key,
+		model=model,
+		raw_text=raw_text,
+		file_bytes=file_bytes,
+		file_name=file_name,
+		strict_kvkk_pdf=strict_kvkk_pdf,
+	)
+	if not ok_r:
+		return False, [], str((spec_r or {}).get("error") or "AI tarama ayrıştırması başarısız oldu.")
+
+	rows_out: list[dict[str, Any]] = []
+	for rr in (spec_r.get("rows") or []):
+		if not isinstance(rr, dict):
+			continue
+		fn_r = clean_text(rr.get("full_name"))
+		if not fn_r:
+			continue
+		rows_out.append({
+			"class_name": clean_text(rr.get("class_name")),
+			"full_name": fn_r,
+			"sex": clean_text(rr.get("sex")) or None,
+			"birth_date": parse_birth_date(rr.get("birth_date")) or None,
+			"height_cm": normalize_height(rr.get("height_cm")),
+			"weight_kg": normalize_weight(rr.get("weight_kg"), is_adult=False),
+		})
+	return bool(rows_out), rows_out, str(spec_r.get("explanation") or f"AI ({used_r}) ile {len(rows_out)} satır okundu.")
+
+
 def render_gemini_overview_command_center(s_date: str, e_date: str) -> None:
 	is_on, api_key, model = _get_active_gemini_config()
 	if not is_on:
@@ -11535,10 +12169,18 @@ def _execute_gemini_chat_export(export_spec: dict[str, Any], active_pid: int | N
 
 		if action == "sql_export":
 			sql_q = str(export_spec.get("sql") or "").strip().rstrip(";")
-			if not sql_q or not sql_q.upper().startswith("SELECT") or gai._FORBIDDEN_SQL_RE.search(sql_q) or ";" in sql_q:
-				return [], "\n\n⚠️ *Güvenlik gereği yalnızca salt-okunur SELECT sorgusu ile rapor üretilebilir.*"
+			_is_on_sql, sql_key, sql_model = _get_active_gemini_config()
 			with connect_db() as conn:
-				df_res = pd.read_sql_query(sql_q, conn)
+				ok_sql, df_res, err_sql, _final_sql = gai.execute_safe_readonly_sql_with_repair(
+					api_key=sql_key if _is_on_sql else "",
+					model=sql_model,
+					sql_q=sql_q,
+					connection=conn,
+					question=title,
+					allow_repair=_is_on_sql,
+				)
+			if not ok_sql:
+				return [], f"\n\n⚠️ *{err_sql}*"
 			extra_note = f"\n\n✅ **Yerel veritabanından {len(df_res)} kayıt** KVKK korumalı olarak çekildi ve indirilebilir dosyanız hazırlandı:"
 			if fmt in ("xlsx", "excel", "both"):
 				b_x = build_ai_custom_report_excel(title, df=df_res, raw_markdown=fallback_reply)
@@ -11956,12 +12598,17 @@ def _normalize_write_spec(ws: dict[str, Any]) -> dict[str, Any]:
 			out[k_obj] = merged
 		elif not isinstance(v, dict):
 			out[k_obj] = {}
-	for k_list in ("lab_results", "medications"):
+	for k_list in ("lab_results", "medications", "vaccinations"):
 		v = out.get(k_list)
 		if isinstance(v, dict):
 			out[k_list] = [v]
 		elif not isinstance(v, list):
 			out[k_list] = []
+	if isinstance(out.get("school_screenings"), list):
+		lst_scr = out["school_screenings"]
+		out["school_screenings"] = lst_scr[0] if lst_scr and isinstance(lst_scr[0], dict) else {}
+	elif not isinstance(out.get("school_screenings"), dict):
+		out["school_screenings"] = {}
 	return out
 
 
@@ -11999,6 +12646,12 @@ def _summarize_write_spec_items(ws: dict[str, Any]) -> list[str]:
 	meds = [x for x in (ws.get("medications") or []) if isinstance(x, dict) and str(x.get("medication_name") or "").strip()]
 	if meds:
 		items.append("💊 İlaç Takip: " + ", ".join(str(x["medication_name"]) for x in meds[:4]))
+	vacs = [x for x in (ws.get("vaccinations") or []) if isinstance(x, dict) and (str(x.get("vaccine_code") or "").strip() or str(x.get("vaccine_name") or "").strip())]
+	if vacs:
+		items.append(f"💉 Aşı Takvimi: {len(vacs)} doz (" + ", ".join(str(x.get("vaccine_name") or x.get("vaccine_code")) for x in vacs[:3]) + ("..." if len(vacs) > 3 else "") + ")")
+	scr = ws.get("school_screenings") or {}
+	if isinstance(scr, dict) and any(scr.get(k) not in (None, "") for k in ("height_cm", "weight_kg", "wears_glasses", "vision_right", "vision_left", "hearing_right", "hearing_left", "hair_screening", "notes")):
+		items.append("🏫 Okul Sağlık Taraması kaydı")
 	if (ws.get("disability") or {}).get("has_disability"):
 		items.append("♿ Özel Gereksinim / Engel Profili güncellemesi")
 	if (ws.get("diabetes") or {}).get("is_diabetic"):
@@ -12208,6 +12861,9 @@ def _handle_floating_gemini_apply_write(payload: dict[str, Any]) -> dict[str, An
 	has_vt = any((ws.get("vitals") or {}).get(k) not in (None, "") for k in ("temperature_c", "pulse_bpm", "spo2_pct", "systolic_bp", "diastolic_bp", "glucose_mg_dl"))
 	has_ms = any((ws.get("measurements") or {}).get(k) not in (None, "") for k in ("height_cm", "weight_kg", "head_circ_cm"))
 	has_meds = bool([x for x in (ws.get("medications") or []) if isinstance(x, dict) and str(x.get("medication_name") or "").strip()])
+	has_vac = bool([x for x in (ws.get("vaccinations") or []) if isinstance(x, dict) and (str(x.get("vaccine_code") or "").strip() or str(x.get("vaccine_name") or "").strip())])
+	scr_obj = ws.get("school_screenings") or {}
+	has_scr = isinstance(scr_obj, dict) and any(scr_obj.get(k) not in (None, "") for k in ("height_cm", "weight_kg", "wears_glasses", "vision_right", "vision_left", "hearing_right", "hearing_left", "hair_screening", "notes"))
 	has_dis = bool((ws.get("disability") or {}).get("has_disability"))
 	has_diab = bool((ws.get("diabetes") or {}).get("is_diabetic"))
 	has_vis = bool(str(ws.get("visit_note_suggestion") or "").strip())
@@ -12225,9 +12881,13 @@ def _handle_floating_gemini_apply_write(payload: dict[str, Any]) -> dict[str, An
 			apply_disability=has_dis,
 			apply_diabetes=has_diab,
 			apply_visit_note=has_vis,
+			apply_vaccinations=has_vac,
+			apply_screenings=has_scr,
 			source_filename=src_name,
 			source_bytes=src_bytes,
 			age_in_months_fn=age_in_months,
+			moh_schedule=MOH_VACCINE_SCHEDULE,
+			save_screening_fn=save_school_screening,
 		)
 		should_archive = bool(payload.get("archive_doc") or payload.get("archive_attachment"))
 		if should_archive and src_bytes and src_name and src_name != "Gemini_Sohbet":
@@ -12323,6 +12983,7 @@ def _handle_floating_gemini_chat(payload: dict[str, Any], chat_history: list[dic
 	except Exception:
 		pass
 
+	strict_pdf_mode = str(get_app_settings().get("gemini_strict_kvkk_pdf", "0")).strip() == "1"
 	ok, reply_txt, used_m, transcribed, export_spec, write_spec = gai.chat_with_gemini_assistant(
 		api_key=api_key,
 		model=model,
@@ -12335,6 +12996,7 @@ def _handle_floating_gemini_chat(payload: dict[str, Any], chat_history: list[dic
 		school_context=school_ctx,
 		sensitive_names=sensitive_names,
 		available_classes=all_cls,
+		strict_kvkk_pdf=strict_pdf_mode,
 	)
 	if not ok:
 		return {"ok": False, "error": reply_txt}
@@ -12491,6 +13153,48 @@ def _build_context_chat_chips(cur_page: str) -> list[dict[str, str]]:
 			{"label": "♿ Özel Gereksinim Excel", "prompt": "Engelli veya özel gereksinimli öğrencilerin listesini Excel olarak çıkar."},
 			{"label": "🩺 Kişiyi Özetle", "prompt": "Seçili kişinin sağlık, büyüme, özel gereksinim ve revir profilini kısaca özetle."},
 			{"label": "📎 Liste/Rapor Ekle", "action": "upload"},
+		]
+	if p_clean in ("Takvim & Planlama", "Takvim ve Planlama"):
+		return [
+			{"label": "🗓️ Resmi Tatil & Belirli Günler", "prompt": "Bu ayki resmi tatilleri, MEB belirli gün ve haftalarını okul takvimine eklemem için öner."},
+			{"label": "🏫 Aylık Revir Tarama Planı", "prompt": "Önümüzdeki ay için boy-kilo, görme ve aşı tarama takvimi etkinlikleri planla."},
+			{"label": "📊 Yaklaşan Etkinlik Listesi (Excel)", "prompt": "Takvimdeki yaklaşan revir etkinliklerini Excel (.xlsx) listesi olarak çıkar."},
+			{"label": "📎 Duyuru/Yazı Ekle", "action": "upload"},
+		]
+	if p_clean == "Raporlar":
+		return [
+			{"label": "📋 Yönetici Özeti (Word)", "prompt": "Okul idaresine sunulacak dönem revir başvuruları, sevkler ve tarama oranlarını içeren 1 sayfalık yönetici brifingi Word (.docx) hazırla."},
+			{"label": "📊 Eksik Taramalar (Excel)", "prompt": "Henüz boy-kilo veya okul taraması girilmemiş öğrencilerin sınıf bazlı listesini Excel (.xlsx) olarak çıkar."},
+			{"label": "🏛️ MEB Faaliyet Raporu", "prompt": "Mevcut eğitim dönemi için MEB resmi faaliyet raporunu Word (.docx) olarak oluştur."},
+			{"label": "📎 Belge Ekle", "action": "upload"},
+		]
+	if p_clean in ("Ölçüm ve Gelişim", "Ölçüm & Gelişim"):
+		return [
+			{"label": "📉 Persantil Risk Listesi (Excel)", "prompt": "Z-skoru veya VKİ açısından büyüme geriliği / obezite riski bulunan ölçümleri Excel (.xlsx) olarak listele."},
+			{"label": "📏 Kişi Büyüme Yorumu", "prompt": "Seçili kişinin boy, kilo ve VKİ persantil seyrini WHO standartlarına göre yorumla."},
+			{"label": "📝 Ölçüm Ekle (Onaylı)", "prompt": "Ölçüm verilerini metinle veya ekli belgeden okuyup kişi dosyasına işlemek için hazırla."},
+			{"label": "📎 Tarama Dosyası Ekle", "action": "upload"},
+		]
+	if p_clean == "Vital Takip":
+		return [
+			{"label": "🌡️ Yüksek Ateş Taraması (Excel)", "prompt": "Son günlerde ateşi 37.8 °C ve üzeri kaydedilen vital ölçümleri tarih, sınıf ve öğrenciyle Excel (.xlsx) çıkar."},
+			{"label": "💓 Kişi Vital Analizi", "prompt": "Seçili kişinin son tansiyon, nabız, SpO2 ve ateş eğilimlerini değerlendir."},
+			{"label": "🚨 Aktif İzolasyonlar", "prompt": "Aktif izolasyondaki ve ateşli başvuru yapılan sınıfları enfeksiyon kontrolü açısından özetle."},
+			{"label": "📎 Vital Çizelgesi Ekle", "action": "upload"},
+		]
+	if p_clean == "Sağlık Profili ve Bakım Planı":
+		return [
+			{"label": "📋 NANDA Bakım Planı", "prompt": "Seçili öğrencinin alerji, kronik hastalık ve özel gereksinimlerine göre NANDA bakım planı taslağı hazırla."},
+			{"label": "⚡ Nöbet / Acil Eylem Kartı", "prompt": "Seçili öğrencinin varsa acil nöbet veya alerji durumuna yönelik sınıf öğretmeni acil eylem özeti yaz."},
+			{"label": "💉 Aşı Eksiklerini Sorgula", "prompt": "Aşı takviminde eksik veya gecikmiş dozu bulunan öğrencileri listele."},
+			{"label": "📎 Rapor/ÇÖZGER Ekle", "action": "upload"},
+		]
+	if p_clean in ("Yetişkinler", "Sivil Kişiler"):
+		return [
+			{"label": "🧑‍💼 Personel Risk Özeti", "prompt": "Seçili yetişkin/personelin vital, tansiyon, şeker ve kronik profiline göre işyeri koruyucu sağlık özeti yaz."},
+			{"label": "📊 Personel Vital Listesi (Excel)", "prompt": "Yetişkin / personel kategorisindeki kişilerin son tansiyon ve kan şekeri kayıtlarını Excel (.xlsx) olarak çıkar."},
+			{"label": "🩺 Revir Başvuruları", "prompt": "Personel / yetişkin revir başvurularının son dönem özetini çıkar."},
+			{"label": "📎 Tahlil/Rapor Ekle", "action": "upload"},
 		]
 	return [
 		{"label": "🩺 Kişiyi Özetle", "prompt": "Seçili kişinin sağlık, büyüme, özel gereksinim ve revir profilini kısaca özetle."},
@@ -12889,10 +13593,11 @@ def render_gemini_ai_settings_panel(current_cfg: dict[str, str]) -> None:
 	if ui.session_state.pop("_ai_key_needed_warn", False):
 		ui.warning("⚠️ AI modunu aktif edebilmek için lütfen aşağıya geçerli bir Google Gemini API anahtarı girip kaydedin.")
 	ui.caption(
-		"Revir Defteri'ndeki 7 klinik yapay zekâ senaryosunu ve sağ alt köşedeki yüzen Gemini sohbet balonunu (dosya ekleme & sesli konuşma destekli) buradan yönetebilirsiniz."
+		"Revir Defteri'ndeki klinik yapay zekâ senaryolarını ve sağ alt köşedeki yüzen Gemini sohbet balonunu (dosya & görsel analiz destekli) buradan yönetebilirsiniz."
 	)
 	cur_enabled = str(current_cfg.get("gemini_enabled", "1")).strip() != "0"
 	cur_float = str(current_cfg.get("gemini_floating_chat", "1")).strip() != "0"
+	cur_strict_pdf = str(current_cfg.get("gemini_strict_kvkk_pdf", "0")).strip() == "1"
 	cur_key = gai.get_api_key(current_cfg, APP_DIR)
 	cur_model = str(current_cfg.get("gemini_model") or "gemini-3-flash-preview").strip()
 	if cur_model not in gai.GEMINI_MODEL_OPTIONS:
@@ -12901,9 +13606,11 @@ def render_gemini_ai_settings_panel(current_cfg: dict[str, str]) -> None:
 	def _on_quick_toggle_change() -> None:
 		en_v = bool(ui.session_state.get("cfg_gemini_enabled_toggle", True))
 		fl_v = bool(ui.session_state.get("cfg_gemini_floating_toggle", True))
+		sk_v = bool(ui.session_state.get("cfg_gemini_strict_kvkk_pdf_toggle", False))
 		save_app_settings({
 			"gemini_enabled": "1" if en_v else "0",
 			"gemini_floating_chat": "1" if fl_v else "0",
+			"gemini_strict_kvkk_pdf": "1" if sk_v else "0",
 		})
 		clear_all_data_caches()
 
@@ -12918,11 +13625,18 @@ def render_gemini_ai_settings_panel(current_cfg: dict[str, str]) -> None:
 			)
 		with t_c2:
 			float_val = ui.toggle(
-				"💬 Sağ Altta Yüzen Gemini Sohbet Balonunu Göster (Dosya & Sesli Konuşma)",
+				"💬 Sağ Altta Yüzen Gemini Sohbet Balonunu Göster (Dosya & Görsel Analiz)",
 				value=cur_float,
 				key="cfg_gemini_floating_toggle",
 				on_change=_on_quick_toggle_change,
 			)
+		strict_pdf_val = ui.toggle(
+			"🔒 Katı KVKK PDF Modu (Metin katmanı içeren PDF eklerinde ham dosya yerine ad/T.C. maskelenmiş metni gönder)",
+			value=cur_strict_pdf,
+			key="cfg_gemini_strict_kvkk_pdf_toggle",
+			on_change=_on_quick_toggle_change,
+			help="Açık olduğunda dijital metin katmanına sahip PDF belgelerinden önce ad, soyad, T.C. ve telefonlar yerel olarak maskelenir; yalnızca tarama (görsel) PDF'lerde vision gönderimi kullanılır.",
+		)
 		k_c1, k_c2 = ui.columns([2.2, 1.8])
 		with k_c1:
 			api_key_inp = ui.text_input(
@@ -12949,6 +13663,7 @@ def render_gemini_ai_settings_panel(current_cfg: dict[str, str]) -> None:
 				save_app_settings({
 					"gemini_enabled": "1" if en_val else "0",
 					"gemini_floating_chat": "1" if float_val else "0",
+					"gemini_strict_kvkk_pdf": "1" if strict_pdf_val else "0",
 					"gemini_model": sel_model,
 					"gemini_api_key": api_key_inp.strip(),
 				})
@@ -13448,6 +14163,8 @@ def _render_dossier_tab_vaccinations(person: sqlite3.Row, person_id: int, hp: sq
 			key=f"dl_vac_card_{person_id}",
 			use_container_width=True,
 		)
+
+	render_gemini_vaccination_ai_panel(person, person_id, vac_summary, age_desc)
 
 	ui.markdown("---")
 	ui.markdown("##### 🏛️ T.C. Sağlık Bakanlığı Resmi Aşı Takvimi Matrisi")
@@ -14564,6 +15281,8 @@ def _render_dossier_tab_seizures(person: sqlite3.Row, person_id: int, hp: sqlite
 			key=f"dossier_dl_seizure_docx_{person_id}",
 			use_container_width=True,
 		)
+
+	render_gemini_seizure_ai_panel(person, person_id, hp, logs)
 
 	if not logs:
 		ui.info("Bu öğrenci için henüz kayıtlı nöbet atağı bulunmuyor.")
@@ -16141,6 +16860,8 @@ def render_outbreak_and_isolation_panel() -> None:
 							ui.rerun()
 		else:
 			ui.caption("Şu anda bulaşıcı hastalık nedeniyle aktif izolasyonda olan öğrenci bulunmuyor.")
+
+		render_gemini_isolation_ai_panel(active_iso, outbreaks)
 
 		with ui.expander("➕ Yeni Bulaşıcı Hastalık İzolasyon Kaydı Ekle"):
 			df_people = get_students()
@@ -17809,6 +18530,7 @@ def render_civilians() -> None:
 				c_fpath = get_person_data_file_path(active_person_obj["id"], active_person_obj["full_name"])
 				with ui.expander("📁 JSON Dosyası"):
 					render_person_data_file_editor(active_person_obj["id"], section_key="civ_page")
+			render_gemini_adult_health_ai_panel(active_person_obj)
 
 	ui.info("💡 **Birleşik Revir Kaydı:** Öğretmen, personel, veli ve ziyaretçi başvuruları artık **🩺 Revir Kaydı** sayfası içinde tek ekrandan (otomatik Yetişkin/Öğrenci ayrımı, tansiyon/şeker hızlı şablonları ve canlı vital uyarılarıyla) kaydedilmektedir.")
 
@@ -19888,6 +20610,7 @@ def _render_med_tab_infirmary_inventory() -> None:
 		)
 
 	inv_items = get_infirmary_inventory()
+	render_gemini_inventory_ai_panel(alerts, len(inv_items))
 	if inv_items:
 		inv_rows = []
 		for it in inv_items:
@@ -20082,6 +20805,8 @@ def _render_med_tab_cold_chain(nurse_name: str) -> None:
 		for lg in month_logs
 	])
 	ui.dataframe(df_cc, use_container_width=True, hide_index=True)
+
+	render_gemini_cold_chain_ai_panel(ym_norm, month_logs)
 
 	with ui.expander("🗑️ Yanlış Girilen Isı Kaydını Sil"):
 		cc_del_map = {
@@ -22692,11 +23417,47 @@ def render_screening_import_section(target_class: str | None = None) -> None:
 
 	if uploaded_file is not None:
 		try:
+			f_bytes_up = uploaded_file.getvalue()
+			f_name_up = uploaded_file.name
+			f_sig = f"{f_name_up}:{len(f_bytes_up)}"
+			ai_cache_k = f"ai_scr_mapped_{card_key}"
+			is_gai_imp, gai_imp_key, gai_imp_model = _get_active_gemini_config()
+			strict_imp_pdf = str(get_app_settings().get("gemini_strict_kvkk_pdf", "0")).strip() == "1"
+
 			with ui.spinner("Dosya / Görsel işleniyor ve tarama verileri çözümleniyor..."):
-				parsed_rows = parse_screening_file_or_image(uploaded_file.getvalue(), uploaded_file.name)
+				parsed_rows = parse_screening_file_or_image(f_bytes_up, f_name_up)
+
+			cached_ai = ui.session_state.get(ai_cache_k)
+			use_ai_rows = isinstance(cached_ai, dict) and cached_ai.get("sig") == f_sig and bool(cached_ai.get("rows"))
+			if use_ai_rows:
+				parsed_rows = cached_ai["rows"]
+				ui.info(f"🤖 **AI Karmaşık Tablo Eşleme Etkin:** {cached_ai.get('note', '')}")
+
+			if is_gai_imp:
+				ai_btn_lbl = (
+					"🤖 Sütunları / Birimleri Gemini AI ile Eşle & Normalleştir"
+					if parsed_rows
+					else "🤖 Karmaşık Dosyayı Gemini AI ile Çözümle & Sütunları Eşle"
+				)
+				ab1, ab2 = ui.columns([2.2, 1.0])
+				with ab1:
+					if ui.button(ai_btn_lbl, type="secondary" if parsed_rows else "primary", use_container_width=True, key=f"btn_ai_scr_map_{card_key}"):
+						with ui.spinner("Gemini AI tablo sütunlarını, birimlerini ve satırları akıllı eşliyor..."):
+							ok_am, am_rows, am_note = parse_screening_file_with_ai_fallback(
+								f_bytes_up, f_name_up, gai_imp_key, gai_imp_model, strict_kvkk_pdf=strict_imp_pdf
+							)
+						if ok_am and am_rows:
+							ui.session_state[ai_cache_k] = {"sig": f_sig, "rows": am_rows, "note": am_note}
+							ui.rerun()
+						else:
+							ui.error(f"AI tarama eşleme başarısız: {am_note}")
+				with ab2:
+					if use_ai_rows and ui.button("↩️ Standart Okumaya Dön", use_container_width=True, key=f"btn_ai_scr_reset_{card_key}"):
+						ui.session_state.pop(ai_cache_k, None)
+						ui.rerun()
 
 			if not parsed_rows:
-				ui.warning("⚠️ Yüklenen dosyadan veya görselden geçerli öğrenci tarama satırı tespit edilemedi. Lütfen sütun başlıklarını veya görselin netliğini kontrol edin.")
+				ui.warning("⚠️ Yüklenen dosyadan veya görselden geçerli öğrenci tarama satırı tespit edilemedi. Yukarıdaki Gemini AI eşleme butonunu deneyebilir veya sütun başlıklarını kontrol edebilirsiniz.")
 				return
 
 			with connect_db() as connection:
@@ -26825,24 +27586,27 @@ def _render_screening_report_workspace(
 				placeholder="Örn: Okul müdürlüğüne sunulacak resmi dilde özetle | Beslenme ve görme risklerini vurgula | Daha kısa maddeli yap",
 				key=scr_ai_inst_key,
 			)
-			sb1, sb2, sb3 = ui.columns([1.6, 1.4, 0.9])
+			sb1, sb2, sb_brief, sb3 = ui.columns([1.45, 1.25, 1.35, 0.85])
 			with sb1:
 				scr_gen_btn = ui.button("✨ Gemini ile Analiz Oluştur", type="primary", disabled=not is_gai_scr, use_container_width=True, key=f"{key_prefix}_btn_ai_gen")
 			with sb2:
 				scr_rev_btn = ui.button("🪄 Talimatla Düzenlet", type="secondary", disabled=(not is_gai_scr) or (not str(ui.session_state.get(scr_ai_txt_key) or "").strip()), use_container_width=True, key=f"{key_prefix}_btn_ai_rev")
+			with sb_brief:
+				scr_brief_btn = ui.button("📋 1 Sayfalık Yönetici Brifingi", type="secondary", disabled=not is_gai_scr, use_container_width=True, key=f"{key_prefix}_btn_ai_brief")
 			with sb3:
 				if ui.button("🗑️ Temizle", type="secondary", use_container_width=True, key=f"{key_prefix}_btn_ai_clr"):
 					ui.session_state[scr_ai_txt_key] = ""
 					ui.rerun()
 
+			cohort_sum = {
+				"listelenen_ogrenci_sayisi": len(report_df),
+				"siniflar": meta.get("selected_classes") or [],
+				"tarih_araligi": _format_dyn_dates_header(meta, meta.get("selected_dates")),
+				"risk_ozeti": [{"kategori": r.get("Kategori"), "sayi": r.get("Öğrenci Sayısı")} for r in risk_rows],
+				"kurum_engelli_ozel_gereksinimli_sayisi": int(dis_in_scope),
+			}
+
 			if scr_gen_btn and is_gai_scr:
-				cohort_sum = {
-					"listelenen_ogrenci_sayisi": len(report_df),
-					"siniflar": meta.get("selected_classes") or [],
-					"tarih_araligi": _format_dyn_dates_header(meta, meta.get("selected_dates")),
-					"risk_ozeti": [{"kategori": r.get("Kategori"), "sayi": r.get("Öğrenci Sayısı")} for r in risk_rows],
-					"kurum_engelli_ozel_gereksinimli_sayisi": int(dis_in_scope),
-				}
 				with ui.spinner("Gemini toplu tarama verilerini ve eksik alanları analiz ediyor..."):
 					ok_sa, txt_sa, used_sa = gai.generate_screening_batch_ai_analysis(
 						api_key=gai_key_scr,
@@ -26857,6 +27621,24 @@ def _render_screening_report_workspace(
 					ui.rerun()
 				else:
 					ui.error(f"Gemini AI hatası: {txt_sa}")
+
+			if scr_brief_btn and is_gai_scr:
+				with ui.spinner("Gemini 1 sayfalık okul yönetimi brifingini hazırlıyor..."):
+					ok_br, txt_br, used_br = gai.generate_executive_briefing_with_gemini(
+						api_key=gai_key_scr,
+						model=gai_model_scr,
+						briefing_scope="Okul Sağlık Taraması ve Persantil Değerlendirme Özeti",
+						stats_or_cohort=cohort_sum,
+						missing_audit=scr_missing_audit,
+						school_name=cfg.get("school_name", "Okul Reviri"),
+						custom_instruction=scr_inst,
+					)
+				if ok_br:
+					ui.session_state[scr_ai_txt_key] = txt_br
+					ui.success(f"✅ 1 sayfalık yönetici brifingi Gemini ({used_br}) ile oluşturuldu ve rapor çıktısına bağlandı!")
+					ui.rerun()
+				else:
+					ui.error(f"Gemini AI hatası: {txt_br}")
 
 			if scr_rev_btn and is_gai_scr:
 				cur_sa_txt = str(ui.session_state.get(scr_ai_txt_key) or "").strip()
@@ -28466,7 +29248,7 @@ def _render_meb_activity_report_tab() -> None:
 				key="meb_rep_ai_inst",
 			)
 			if is_gai_on:
-				mb1, mb2, mb3 = ui.columns([1.6, 1.4, 0.9])
+				mb1, mb2, mb_brief, mb3 = ui.columns([1.45, 1.25, 1.35, 0.85])
 				with mb1:
 					if ui.button("✨ Gemini AI ile Değerlendirme & Eksik Analizi Oluştur", type="primary", key="btn_gai_meb_narrative", use_container_width=True):
 						cfg_meb = get_app_settings()
@@ -28505,6 +29287,25 @@ def _render_meb_activity_report_tab() -> None:
 								ui.rerun()
 							else:
 								ui.error(f"Gemini AI hatası: {rev_m_txt}")
+				with mb_brief:
+					if ui.button("📋 1 Sayfalık Yönetici Brifingi", type="secondary", key="btn_gai_meb_brief", use_container_width=True):
+						cfg_meb_b = get_app_settings()
+						with ui.spinner("Gemini okul yönetimi için 1 sayfalık dönem brifingi üretiyor..."):
+							ok_mb, br_meb_txt, used_mb = gai.generate_executive_briefing_with_gemini(
+								api_key=gai_key,
+								model=gai_model,
+								briefing_scope=f"MEB Dönem Faaliyet Özeti ({meb_start.isoformat()} – {meb_end.isoformat()})",
+								stats_or_cohort=stats,
+								missing_audit=meb_missing_notes,
+								school_name=cfg_meb_b.get("school_name", "Okul Reviri"),
+								custom_instruction=meb_custom_inst,
+							)
+						if ok_mb:
+							ui.session_state["meb_rep_extra_notes"] = br_meb_txt
+							ui.session_state["_gai_meb_flash"] = f"✅ 1 sayfalık yönetici brifingi Gemini AI ({used_mb}) ile oluşturuldu ve rapora bağlandı!"
+							ui.rerun()
+						else:
+							ui.error(f"Gemini AI hatası: {br_meb_txt}")
 				with mb3:
 					if ui.button("🗑️ Temizle", type="secondary", key="btn_gai_meb_clear", use_container_width=True):
 						ui.session_state["meb_rep_extra_notes"] = ""
@@ -29476,6 +30277,8 @@ def _build_document_studio_ctx() -> dict[str, Any]:
 		"extract_pdf_text": extract_pdf_text,
 		"sync_after_person_mutation": sync_after_person_mutation,
 		"age_in_months": age_in_months,
+		"MOH_VACCINE_SCHEDULE": MOH_VACCINE_SCHEDULE,
+		"save_school_screening": save_school_screening,
 	}
 
 
@@ -31953,7 +32756,7 @@ def _handle_cmd_search(query: str) -> list[dict[str, Any]]:
 	if _cmd_ai_on:
 		quick_cmds.extend([
 			{"group": "⚡ Hızlı İşlemler", "kind": "smart_doc_import", "value": "", "icon": "🤖", "title": "Belge Oku & Öğrenciye Otomatik İşle (Gemini)", "subtitle": "Sağlık raporu, tahlil, reçete veya ÇÖZGER belgesini okuyup öğrenci dosyasına işle", "tag": "AI"},
-			{"group": "⚡ Hızlı İşlemler", "kind": "open_chat", "value": "", "icon": "🤖", "title": "Gemini Klinik Asistanı Aç", "subtitle": "Sesli soru sor, sınıf oluştur, Word/Excel ürettir veya tahlil yükle (⌘J)", "tag": "AI"},
+			{"group": "⚡ Hızlı İşlemler", "kind": "open_chat", "value": "", "icon": "🤖", "title": "Gemini Klinik Asistanı Aç", "subtitle": "Soru sor, sınıf/etkinlik oluştur, Word/Excel ürettir veya tahlil/evrak yükle (⌘J)", "tag": "AI"},
 		])
 	for cmd in quick_cmds:
 		if not q or q in _tr_fold(cmd["title"]) or q in _tr_fold(cmd["subtitle"]) or q in _tr_fold(cmd["tag"]):

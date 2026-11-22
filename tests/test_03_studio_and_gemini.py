@@ -138,6 +138,54 @@ class TestDocumentStudio(unittest.TestCase):
             self.assertIsInstance(res, list)
             self.assertGreaterEqual(len(res), 1)
 
+    def test_apply_vaccinations_and_screenings_in_clinical_record(self):
+        from tests.db_test_helper import isolated_real_db
+        with isolated_real_db() as (_tmp_p, _db_p, connect_fn):
+            with connect_fn() as conn:
+                conn.execute("INSERT INTO classes(name) VALUES ('4-A')")
+                conn.execute("INSERT INTO students(class_id, full_name, student_no, birth_date, sex, person_type) VALUES (1, 'Ece Yıldız', '202', '2016-05-12', 'K', 'Öğrenci')")
+                conn.execute("INSERT INTO health_profiles(student_id, updated_at) VALUES (1, '2026-11-22')")
+                conn.commit()
+
+            moh_mock = [
+                {"code": "kkk_2", "vaccine": "KKK (Kızamık-Kızamıkçık-Kabakulak)", "dose": "2. Doz", "period_label": "İlkokul 1", "period_months": 48},
+            ]
+            logs = document_studio.apply_extracted_clinical_record(
+                connect_fn,
+                1,
+                {
+                    "document_type": "Aşı ve Tarama",
+                    "document_date": "2026-11-21",
+                    "vaccinations": [
+                        {"vaccine_name": "KKK", "dose_name": "2. Doz", "is_done": True, "administered_date": "2026-11-10", "facility": "ASM"}
+                    ],
+                    "school_screenings": {
+                        "screening_date": "2026-11-21",
+                        "height_cm": 136.5,
+                        "weight_kg": 31.2,
+                        "vision_right": "10/10",
+                        "notes": "Sağlıklı tarama",
+                    },
+                },
+                apply_profile=False,
+                apply_labs=False,
+                apply_vitals=False,
+                apply_measurements=False,
+                apply_meds=False,
+                apply_vaccinations=True,
+                apply_screenings=True,
+                moh_schedule=moh_mock,
+            )
+            self.assertTrue(any("aşı" in x.lower() for x in logs))
+            self.assertTrue(any("tarama" in x.lower() for x in logs))
+            with connect_fn() as conn:
+                vac = conn.execute("SELECT vaccine_code, is_done FROM student_vaccinations WHERE student_id=1").fetchone()
+                scr = conn.execute("SELECT height_cm, vision_right FROM school_screenings WHERE student_id=1").fetchone()
+            self.assertEqual(vac["vaccine_code"], "kkk_2")
+            self.assertEqual(vac["is_done"], 1)
+            self.assertAlmostEqual(scr["height_cm"], 136.5)
+            self.assertEqual(scr["vision_right"], "10/10")
+
 
 class TestGeminiAssistant(unittest.TestCase):
     def test_key_and_anonymization_and_parsers(self):
@@ -284,6 +332,158 @@ class TestGeminiAssistant(unittest.TestCase):
                     ))
             finally:
                 conn.close()
+
+    def test_phase1_phase2_phase3_gemini_enhancements(self):
+        # 1. Schema hint completeness & security
+        for tbl in ("student_vaccinations", "seizure_logs", "fridge_temp_logs", "calendar_events", "calendar_daily_notes", "academic_years", "health_forms"):
+            self.assertIn(tbl, gemini_assistant._DB_SCHEMA_HINT)
+        self.assertNotIn("app_settings(", gemini_assistant._DB_SCHEMA_HINT)
+
+        self.assertTrue(gemini_assistant.is_safe_readonly_sql("SELECT COUNT(*) FROM students"))
+        self.assertFalse(gemini_assistant.is_safe_readonly_sql("DELETE FROM students"))
+        self.assertFalse(gemini_assistant.is_safe_readonly_sql("SELECT * FROM students; DROP TABLE classes"))
+        self.assertFalse(gemini_assistant.is_safe_readonly_sql("SELECT value FROM app_settings WHERE key='gemini_api_key'"))
+
+        # 2. Strict KVKK PDF extraction masks PII & omits raw PDF inline binary when text layer exists
+        import pymupdf
+        pdf_doc = pymupdf.open()
+        pg = pdf_doc.new_page()
+        pg.insert_text((50, 80), "Okul Saglik Raporu: Ahmet Yilmaz TC 12345678901 Tel 0532 111 22 33 Astim izlemi mevcuttur.")
+        pdf_bytes = pdf_doc.tobytes()
+        pdf_doc.close()
+
+        inline_strict, txt_strict = gemini_assistant._extract_attachment_context(
+            "rapor.pdf", "application/pdf", pdf_bytes, sensitive_names=["Ahmet Yilmaz"], strict_kvkk_pdf=True
+        )
+        self.assertIsNone(inline_strict)
+        self.assertIn("Katı KVKK", txt_strict)
+        self.assertNotIn("12345678901", txt_strict)
+        self.assertNotIn("Ahmet Yilmaz", txt_strict)
+
+        inline_std, _txt_std = gemini_assistant._extract_attachment_context(
+            "rapor.pdf", "application/pdf", pdf_bytes, sensitive_names=["Ahmet Yilmaz"], strict_kvkk_pdf=False
+        )
+        self.assertIsNotNone(inline_std)
+
+        # 3. SQL 1-step self-repair & security block on repaired mutating SQL
+        with tempfile.TemporaryDirectory() as tmp:
+            db_p = Path(tmp) / "repair.db"
+            conn = sqlite3.connect(db_p)
+            conn.execute("CREATE TABLE students (id INTEGER PRIMARY KEY, full_name TEXT)")
+            conn.execute("INSERT INTO students VALUES (1, 'Ayşe Demir')")
+            conn.commit()
+            try:
+                with mock.patch.object(gemini_assistant, "call_gemini", return_value=(True, json.dumps({"sql": "SELECT COUNT(*) AS adet FROM students"}), "m")):
+                    ok_r, df_r, err_r, sql_r = gemini_assistant.execute_safe_readonly_sql_with_repair(
+                        api_key="k", model="m", sql_q="SELECT nonexistent_col FROM students", connection=conn, question="Öğrenci sayısı"
+                    )
+                self.assertTrue(ok_r, err_r)
+                self.assertEqual(int(df_r.iloc[0]["adet"]), 1)
+                self.assertEqual(sql_r, "SELECT COUNT(*) AS adet FROM students")
+
+                with mock.patch.object(gemini_assistant, "call_gemini", return_value=(True, json.dumps({"sql": "DELETE FROM students"}), "m")):
+                    ok_bad, _df_bad, err_bad, _ = gemini_assistant.execute_safe_readonly_sql_with_repair(
+                        api_key="k", model="m", sql_q="SELECT nonexistent_col FROM students", connection=conn, question="Silme"
+                    )
+                self.assertFalse(ok_bad)
+                self.assertIn("SQL çalıştırma hatası", err_bad)
+            finally:
+                conn.close()
+
+        # 4. New Faz 2 & Faz 3 Gemini helpers with KVKK check + mocked call_gemini
+        captured_prompts: list[str] = []
+
+        def _fake_call_gemini(prompt, **kwargs):
+            captured_prompts.append(prompt)
+            payload = {
+                "summary": "2 aşı eşleşti",
+                "matched_vaccines": [{"vaccine_code": "hep_b_1", "is_done": True, "administered_date": "2018-01-01", "facility": "ASM"}],
+                "guardian_letter": "Sayın Veli [ÖĞRENCİ_ADI] aşısı...",
+                "asm_referral_note": "ASM yönlendirme notu",
+                "pattern_analysis": "Nöbet süresi kısa ve stabil",
+                "teacher_emergency_card": "Öğretmen Acil Kartı [ÖĞRENCİ_ADI]",
+                "guardian_followup_note": "Veli özet notu",
+                "risk_assessment": "Dolap 4.2°C stabil",
+                "immediate_actions": "Rutin kontrol",
+                "official_report_text": "Resmi soğuk zincir tutanağı",
+                "priority_summary": "2 ürün kritik eşikte",
+                "disposal_warning": "SKT geçmiş kalem yok",
+                "procurement_petition": "Okul müdürlüğüne istem yazısı",
+                "class_teacher_notice": "Sınıf hijyen duyurusu",
+                "hygiene_checklist": "1. Havalandır",
+                "risk_summary": "Tansiyon takibi önerilir",
+                "workplace_health_tips": "Ergonomi önerileri",
+                "physician_referral_note": "Aile hekimi kontrolü",
+                "mode": "column_mapping",
+                "explanation": "Sütunlar eşlendi",
+                "column_map": {"class_name": "Sube", "first_name": "Adi", "last_name": "Soyadi", "height_cm": "Boy", "weight_kg": "Kilo"},
+                "height_unit": "m",
+                "weight_unit": "g",
+                "rows": [{"class_name": "3-A", "full_name": "Can Kaya", "height_cm": 130.0, "weight_kg": 28.0}],
+            }
+            if not kwargs.get("expect_json"):
+                return True, "Yönetici Brifingi Özeti", "m"
+            return True, json.dumps(payload, ensure_ascii=False), "m"
+
+        moh_sched = [{"code": "hep_b_1", "vaccine": "Hepatit B", "dose": "1. Doz", "period_label": "0. Ay"}]
+        with mock.patch.object(gemini_assistant, "call_gemini", side_effect=_fake_call_gemini):
+            ok1, d1, _ = gemini_assistant.parse_vaccination_card_with_gemini(
+                api_key="k", model="m", file_bytes=b"Hepatit B 1. doz 2018-01-01", file_name="asi.txt", moh_schedule=moh_sched
+            )
+            self.assertTrue(ok1)
+            self.assertEqual(d1["matched_vaccines"][0]["vaccine_code"], "hep_b_1")
+
+            ok2, d2, _ = gemini_assistant.generate_vaccination_notice_with_gemini(
+                api_key="k", model="m", anon_context="Yaş: 7 yaş", overdue_list=["KKK 2. Doz"], up_to_date_pct=85.0
+            )
+            self.assertTrue(ok2)
+            self.assertIn("guardian_letter", d2)
+
+            ok3, d3, _ = gemini_assistant.analyze_seizures_and_teacher_card_with_gemini(
+                api_key="k", model="m", anon_context="Yaş: 9 yaş", seizure_protocol="5 dk aşarsa 112"
+            )
+            self.assertTrue(ok3)
+            self.assertIn("teacher_emergency_card", d3)
+
+            ok4, d4, _ = gemini_assistant.generate_cold_chain_breach_report_with_gemini(
+                api_key="k", model="m", year_month="2026-11", month_logs_summary=[{"dolap_c": 4.2}], breach_logs=[]
+            )
+            self.assertTrue(ok4)
+            self.assertIn("official_report_text", d4)
+
+            ok5, d5, _ = gemini_assistant.analyze_inventory_and_procurement_with_gemini(
+                api_key="k", model="m", alerts={"critical_stock": [], "expired": [], "expiring_soon": []}, total_items=5
+            )
+            self.assertTrue(ok5)
+            self.assertIn("procurement_petition", d5)
+
+            ok6, d6, _ = gemini_assistant.generate_isolation_communications_with_gemini(
+                api_key="k", model="m", disease_name="Suçiçeği", class_name="2-A", detected_date="2026-11-20",
+                notes_masked="TC 12345678901 Tel 0532 111 22 33 evde takip"
+            )
+            self.assertTrue(ok6)
+            self.assertIn("hygiene_checklist", d6)
+            self.assertNotIn("12345678901", captured_prompts[-1])
+
+            ok7, d7, _ = gemini_assistant.analyze_adult_preventive_health_with_gemini(
+                api_key="k", model="m", anon_context="Yetişkin 38 yaş", vitals_summary=[{"systolic_mmhg": 130}]
+            )
+            self.assertTrue(ok7)
+            self.assertIn("risk_summary", d7)
+
+            ok8, d8, _ = gemini_assistant.map_screening_table_with_gemini(
+                api_key="k", model="m", headers=["Sube", "Adi", "Soyadi", "Boy", "Kilo"],
+                sample_rows=[["2-A", "Ali", "TC 12345678901", "1.35", "32000"]]
+            )
+            self.assertTrue(ok8)
+            self.assertEqual(d8["height_unit"], "m")
+            self.assertNotIn("12345678901", captured_prompts[-1])
+
+            ok9, d9, _ = gemini_assistant.generate_executive_briefing_with_gemini(
+                api_key="k", model="m", briefing_scope="Okul Taraması", stats_or_cohort={"toplam": 100}
+            )
+            self.assertTrue(ok9)
+            self.assertIn("Brifing", d9)
 
 
 if __name__ == "__main__":

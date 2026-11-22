@@ -334,6 +334,22 @@ def build_anonymous_clinical_context(
 # 2. GEMINI REST API İSTEMCİSİ (Metin + JSON + Multimodal PDF/Görsel)
 # ==============================================================================
 
+_TLS_TRUST_INJECTED: bool = False
+
+
+def _ensure_gemini_tls_trust() -> None:
+	"""Paketli Windows/macOS ortamlarda HTTPS sertifika doğrulaması için sistem kök sertifikalarını fail-open enjekte eder."""
+	global _TLS_TRUST_INJECTED
+	if _TLS_TRUST_INJECTED:
+		return
+	try:
+		import truststore
+		truststore.inject_into_ssl()
+		_TLS_TRUST_INJECTED = True
+	except Exception:
+		pass
+
+
 def call_gemini(
 	prompt: str,
 	*,
@@ -349,6 +365,7 @@ def call_gemini(
 	Gemini generateContent çağrısı yapar.
 	Dönüş: (başarılı_mı, yanıt_metni_veya_hata, kullanılan_model)
 	"""
+	_ensure_gemini_tls_trust()
 	clean_key = (api_key or "").strip()
 	if not clean_key:
 		return False, "Gemini API anahtarı tanımlanmamış. Ayarlar > Yapay Zekâ (Gemini API) menüsünden anahtarınızı kaydedin.", ""
@@ -619,15 +636,25 @@ def summarize_document_with_gemini(
 	model: str,
 	file_path: Path,
 	extracted_text: str = "",
+	strict_kvkk_pdf: bool = False,
 ) -> tuple[bool, str, str]:
 	"""Evrak deposundaki PDF, görsel veya metin belgesini okul reviri açısından özetler."""
 	ext = file_path.suffix.lower()
 	inline_files: list[tuple[bytes, str]] = []
-	if ext in (".pdf", ".png", ".jpg", ".jpeg", ".webp") and file_path.stat().st_size <= 15 * 1024 * 1024:
+	safe_txt = anonymize_free_text(extracted_text[:12000]) if extracted_text else ""
+	if strict_kvkk_pdf and ext == ".pdf" and safe_txt and len(re.sub(r"\s+", "", safe_txt)) >= 40:
+		pass  # Katı KVKK modunda metin katmanı anonimleştirilerek gönderilir, ham PDF ikilisi eklenmez
+	elif ext in (".pdf", ".png", ".jpg", ".jpeg", ".webp") and file_path.stat().st_size <= 15 * 1024 * 1024:
 		mime = mimetypes.guess_type(str(file_path))[0] or ("application/pdf" if ext == ".pdf" else "image/png")
-		inline_files.append((file_path.read_bytes(), mime))
+		if strict_kvkk_pdf and ext == ".pdf":
+			pdf_txt_layer = _extract_pdf_text_layer_locally(file_path.read_bytes())
+			if len(re.sub(r"\s+", "", pdf_txt_layer)) >= 40:
+				safe_txt = anonymize_free_text(pdf_txt_layer[:12000])
+			else:
+				inline_files.append((file_path.read_bytes(), mime))
+		else:
+			inline_files.append((file_path.read_bytes(), mime))
 
-	safe_txt = anonymize_free_text(extracted_text[:10000]) if extracted_text else ""
 	txt_block = f"Çıkarılan Metin Özeti:\n{safe_txt}" if safe_txt else ""
 	prompt = f"""Bu belgeyi okul reviri ve öğrenci/personel sağlığı yönetimi açısından Türkçe olarak özetle.
 Belge Adı: {file_path.name}
@@ -990,29 +1017,111 @@ Yalnızca güncellenmiş nihai rapor metnini döndür (giriş cümlesi veya aç�
 
 _DB_SCHEMA_HINT = """
 Tablolar:
+- academic_years(id, name, start_date, end_date, folder_name, is_active, created_at)
 - classes(id, name, teacher_name)
 - students(id, class_id, person_type, student_no, full_name, sex, birth_date, guardian_name, guardian_phone, notes, country, province, district, village, has_disability)
 - health_profiles(student_id, guardian_name, guardian_phone, allergies, chronic_conditions, medical_history, medications, blood_group, emergency_notes, special_needs_codes, medical_devices, dietary_swallowing_notes, seizure_emergency_protocol, wears_glasses, vision_right, vision_left, hair_screening, hearing_right, hearing_left, health_behavior, harmful_habits, psychosocial_status, last_screened_at, disability_rate, disability_profile_json, ai_report_notes, ai_report_include)
+- health_forms(id, student_id, uploaded_at, file_name, extracted_text, review_status)
 - visits(id, student_id, visit_date, visit_time, complaint, symptoms, observation, action, guardian_contacted, referral, follow_up, follow_up_status, follow_up_result, incident_location, witness_teacher)
 - vital_readings(id, student_id, measured_at, systolic_mmhg, diastolic_mmhg, pulse_bpm, temperature_c, spo2_pct, glucose_mg_dl, glucose_context, notes)
 - measurements(id, student_id, measured_on, height_cm, weight_kg, head_circ_cm, age_months, bmi)
-- school_screenings(id, student_id, screening_date, height_cm, weight_kg, head_circ_cm, temperature_c, pulse_bpm, spo2_pct, wears_glasses, vision_right, vision_left, hair_screening, hearing_right, hearing_left, health_behavior, harmful_habits, psychosocial_status, notes)
+- school_screenings(id, student_id, screening_date, height_cm, weight_kg, head_circ_cm, temperature_c, pulse_bpm, spo2_pct, wears_glasses, vision_right, vision_left, hair_screening, hearing_right, hearing_left, health_behavior, harmful_habits, psychosocial_status, notes, screened_by, created_at)
+- student_vaccinations(id, student_id, vaccine_code, vaccine_name, dose_name, period_label, period_months, is_done, administered_date, facility, lot_number, notes, updated_at)
 - student_medications(id, student_id, medication_name, med_type, route, dosage_pattern, dose_amount, dose_unit, meal_relation, remaining_volume, start_date, end_date, expiry_date, status)
 - medication_logs(id, medication_id, student_id, log_date, scheduled_time, given_time, dose_given, dose_unit, status, administered_by, notes)
+- seizure_logs(id, student_id, seizure_date, seizure_time, duration_seconds, seizure_type, triggers, observations, emergency_med_given, ambulance_called, guardian_notified, recorded_by, created_at)
 - care_plans(id, student_id, created_at, reviewed_by, nursing_diagnosis, observed_facts, goals, interventions, monitoring, escalation, status)
-- isolation_records(id, student_id, disease_name, detected_date, expected_return_date, actual_return_date, status, notes)
-- infirmary_inventory(id, item_name, category, quantity, unit, min_threshold, expiry_date, storage_location, notes)
+- isolation_records(id, student_id, disease_name, detected_date, expected_return_date, actual_return_date, doctor_clearance_required, clearance_received, status, notes, created_at)
+- infirmary_inventory(id, item_name, category, quantity, unit, min_threshold, expiry_date, storage_location, notes, updated_at)
+- fridge_temp_logs(id, log_date, log_time, fridge_temp_c, room_temp_c, humidity_pct, checked_by, notes, created_at)
 - lab_reports(id, student_id, report_date, file_name, extracted_text)
 - lab_results(id, report_id, test_name, value, unit, ref_low, ref_high, lab_flag)
 - diabetes_profiles(student_id, is_diabetic, diabetes_type, insulin_brand, basal_insulin, delivery_method, pen_increment, icr_breakfast, icr_lunch, icr_snack, isf, target_bg, correction_threshold, hypo_threshold, hyper_ketone_threshold, insulin_duration_hours, tdd_units, max_single_bolus, cgm_device, glucagon_location, physician_name, emergency_protocol)
 - school_meal_menus(id, year_month, menu_date, meal_type, items_json, total_carbs_g, source_note)
 - insulin_bolus_logs(id, student_id, log_date, log_time, meal_type, bg_mg_dl, ketone_status, menu_carbs_g, menu_consumed_pct, extra_carbs_g, total_carbs_g, activity_level, activity_duration_min, activity_reduction_pct, icr_used, isf_used, iob_units, carb_dose_units, correction_dose_units, calculated_dose_units, applied_dose_units, injection_site, meal_summary, ai_commentary, administered_by, notes)
+- calendar_events(id, event_date, title, category, symbol_type, is_civil_holiday, is_half_day, profession_group, start_time, end_time, description, source, is_completed, created_at)
+- calendar_daily_notes(note_date, quote_text, quote_source, hadith_text, hadith_source, day_significance, profession_override, custom_note, updated_at)
+- tr_locations(id, province, district, village)
+- lms_reference(id, indicator, sex, age_months, l, m, s)
+- wfa_reference(sex, age_days, l, m, s, source)
+- vital_reference(id, indicator, sex, age_min_months, age_max_months, ref_low, ref_high, critical_low, critical_high, unit, source)
 """
 
 _FORBIDDEN_SQL_RE = re.compile(
 	r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|TRUNCATE|ATTACH|DETACH|PRAGMA|VACUUM|REINDEX)\b",
 	re.IGNORECASE,
 )
+
+
+def is_safe_readonly_sql(sql_q: str) -> bool:
+	"""Yalnızca tekil salt-okunur SELECT sorgularına izin verir; mutasyon ve hassas ayar tablolarını engeller."""
+	clean = (sql_q or "").strip().rstrip(";")
+	if not clean or not clean.upper().startswith("SELECT"):
+		return False
+	if _FORBIDDEN_SQL_RE.search(clean) or ";" in clean:
+		return False
+	if re.search(r"\bapp_settings\b|\bgemini_api_key\b", clean, re.IGNORECASE):
+		return False
+	return True
+
+
+def execute_safe_readonly_sql_with_repair(
+	*,
+	api_key: str,
+	model: str,
+	sql_q: str,
+	connection: sqlite3.Connection,
+	question: str = "",
+	allow_repair: bool = True,
+) -> tuple[bool, pd.DataFrame, str, str]:
+	"""
+	Salt-okunur SELECT sorgusunu çalıştırır; SQLite sözdizimi veya sütun hatası olursa
+	Gemini ile TEK ADIMLIK güvenli SELECT öz-onarımı deneyip tekrar doğrular.
+	Dönüş: (başarılı_mı, dataframe, hata_veya_boş, nihai_sql)
+	"""
+	clean_sql = (sql_q or "").strip().rstrip(";")
+	if not is_safe_readonly_sql(clean_sql):
+		return False, pd.DataFrame(), "Güvenlik politikası gereği yalnızca tekil salt-okunur SELECT sorgularına izin verilir.", clean_sql
+
+	try:
+		df = pd.read_sql_query(clean_sql, connection)
+		return True, df, "", clean_sql
+	except Exception as exc:
+		if not allow_repair or not (api_key or "").strip():
+			return False, pd.DataFrame(), f"SQL çalıştırma hatası: {exc}", clean_sql
+
+		repair_prompt = f"""Aşağıdaki SQLite SELECT sorgusu çalıştırılırken hata aldı. Şemaya tam uyumlu tek bir salt-okunur `SELECT` sorgusu olarak düzelt.
+
+[ŞEMA]:
+{_DB_SCHEMA_HINT}
+
+[İLGİLİ SORU / İSTEK]: {question or 'Klinik veritabanı raporu'}
+[HATALI SQL]: {clean_sql}
+[SQLITE HATASI]: {exc}
+
+Kurallar:
+1. YALNIZCA tek bir `SELECT` sorgusu yaz (noktalı virgül ve veri değiştiren komut yasak).
+2. Yalnızca yukarıdaki şemada yer alan tablo ve sütun adlarını kullan.
+3. Sadece şu JSON formatını döndür:
+{{"sql": "SELECT ..."}}"""
+		ok_r, raw_r, _used_r = call_gemini(
+			repair_prompt,
+			api_key=api_key,
+			model=model,
+			expect_json=True,
+			temperature=0.05,
+			timeout=14.0,
+		)
+		if not ok_r:
+			return False, pd.DataFrame(), f"SQL çalıştırma hatası: {exc}", clean_sql
+		repaired_sql = str(_parse_json_response(raw_r).get("sql") or "").strip().rstrip(";")
+		if not is_safe_readonly_sql(repaired_sql):
+			return False, pd.DataFrame(), f"SQL çalıştırma hatası (güvenli onarım üretilemedi): {exc}", clean_sql
+		try:
+			df_rep = pd.read_sql_query(repaired_sql, connection)
+			return True, df_rep, "", repaired_sql
+		except Exception as exc2:
+			return False, pd.DataFrame(), f"SQL çalıştırma hatası: {exc2}", repaired_sql
 
 
 def natural_language_db_query(
@@ -1054,28 +1163,62 @@ Yanıtı yalnızca şu JSON formatında ver:
 	sql_q = str(parsed.get("sql") or "").strip().rstrip(";")
 	explanation = str(parsed.get("explanation") or "Sorgu çalıştırıldı.")
 
-	if not sql_q or not sql_q.upper().startswith("SELECT") or _FORBIDDEN_SQL_RE.search(sql_q) or ";" in sql_q:
-		return False, "Güvenlik politikası gereği yalnızca tekil salt-okunur SELECT sorgularına izin verilir.", pd.DataFrame(), sql_q
+	ok_exec, df, err_msg, final_sql = execute_safe_readonly_sql_with_repair(
+		api_key=api_key,
+		model=model,
+		sql_q=sql_q,
+		connection=connection,
+		question=question,
+		allow_repair=True,
+	)
+	if not ok_exec:
+		return False, err_msg, pd.DataFrame(), final_sql
+	return True, explanation, df, final_sql
 
+
+# ==============================================================================
+# 10. YÜZEN SOHBET BALONU (MULTIMODAL: METİN + DOSYA ANALİZİ)
+# ==============================================================================
+
+def _extract_pdf_text_layer_locally(raw_bytes: bytes) -> str:
+	"""PDF içindeki dijital metin katmanını yalnızca yerel PyMuPDF ile okur (tarama görselleri için OCR tetiklemez)."""
 	try:
-		df = pd.read_sql_query(sql_q, connection)
-		return True, explanation, df, sql_q
-	except Exception as exc:
-		return False, f"SQL çalıştırma hatası: {exc}", pd.DataFrame(), sql_q
+		import pymupdf
+		with pymupdf.open(stream=raw_bytes, filetype="pdf") as doc:
+			chunks: list[str] = []
+			for page in doc:
+				txt = (page.get_text("text") or "").strip()
+				if txt:
+					chunks.append(txt)
+				if sum(len(c) for c in chunks) >= 16000:
+					break
+			return "\n".join(chunks)
+	except Exception:
+		return ""
 
 
-# ==============================================================================
-# 10. YÜZEN SOHBET BALONU (MULTIMODAL: METİN + DOSYA + SESLİ KONUŞMA)
-# ==============================================================================
-
-def _extract_attachment_context(name: str, mime: str, raw_bytes: bytes, sensitive_names: list[str] | None = None) -> tuple[tuple[bytes, str] | None, str]:
+def _extract_attachment_context(
+	name: str,
+	mime: str,
+	raw_bytes: bytes,
+	sensitive_names: list[str] | None = None,
+	strict_kvkk_pdf: bool = False,
+) -> tuple[tuple[bytes, str] | None, str]:
 	"""
 	Dosya ekini Gemini için hazırlar.
-	- PDF, Görsel (PNG/JPG/WEBP) ve Ses (WEBM/WAV/MP3/OGG/MP4) dosyalarını doğrudan inline_data olarak döndürür.
-	- Excel, CSV, Word (.docx) ve Metin dosyalarını yerel olarak okuyup KVKK maskeli metin özetine çevirir.
+	- strict_kvkk_pdf=True iken metin katmanı içeren PDF'lerde ham ikili dosya yerine yerel metin çıkarılıp KVKK maskelenir.
+	- Görsel ve taranmış PDF (veya strict_kvkk_pdf=False) doğrudan inline_data olarak döndürülür.
+	- Excel, CSV, Word (.docx) ve Metin dosyaları yerel okunup KVKK maskeli metin özetine çevrilir.
 	"""
 	low = (name or "").lower()
 	eff_mime = (mime or "").lower() or (mimetypes.guess_type(name)[0] or "application/octet-stream").lower()
+
+	is_pdf = low.endswith(".pdf") or eff_mime == "application/pdf"
+	if strict_kvkk_pdf and is_pdf and raw_bytes:
+		local_pdf_txt = _extract_pdf_text_layer_locally(raw_bytes)
+		if len(re.sub(r"\s+", "", local_pdf_txt)) >= 40:
+			safe_pdf_txt = anonymize_free_text(local_pdf_txt[:14000], sensitive_names)
+			return None, f"[Ekli PDF ({name}) - Katı KVKK Anonim Metin]:\n{safe_pdf_txt}"
 
 	if low.endswith((".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".webm", ".wav", ".mp3", ".ogg", ".m4a", ".mp4")) or eff_mime.startswith(("image/", "audio/", "application/pdf")):
 		if low.endswith(".pdf"):
@@ -1119,6 +1262,7 @@ def chat_with_gemini_assistant(
 	school_context: str = "",
 	sensitive_names: list[str] | None = None,
 	available_classes: list[str] | None = None,
+	strict_kvkk_pdf: bool = False,
 ) -> tuple[bool, str, str, str, dict[str, Any] | None, dict[str, Any] | None]:
 	"""
 	Yüzen sohbet balonundan gelen metin, çoklu dosya eki ve/veya ses kaydını yanıtlar.
@@ -1172,18 +1316,20 @@ def chat_with_gemini_assistant(
 		"  1) Yanıtının metin kısmında YAPACAĞIN İŞLEMİ adım adım açıkça TARİF ET (hangi sınıfların/kişilerin/kayıtların ekleneceğini, güncelleneceğini veya silineceğini madde madde yaz) ve 'Onaylıyor musunuz? Aşağıdaki onay kartından onaylayabilirsiniz.' diye kullanıcıdan onay iste.\n"
 		"  2) Kullanıcı AÇIKÇA 'sil' demedikçe mevcut sınıf/şubeleri veya öğrencileri ASLA silme (`delete_records` kullanma).\n"
 		"  3) Yeni sınıf/şube eklerken mevcut şubeleri koru (`create_profiles` veya `create_classes` kullan).\n\n"
-		"ÖNEMLİ YETENEK — ÖĞRENCİ / KİŞİ DOSYASINA ÖLÇÜM, VİTAL, TAHLİL, İLAÇ, PROFİL VEYA BELGE İŞLEME:\n"
-		"Kullanıcı sohbet üzerinden yazılı/sesli bir ölçüm, vital, alerji, kronik hastalık, ilaç, revir notu söylerse "
-		"VEYA bir belge/tahlil/rapor/reçete/fotoğraf ekleyip 'öğrenciye işle / kaydet / profiline ekle / ölçümünü gir' derse, "
+		"ÖNEMLİ YETENEK — ÖĞRENCİ / KİŞİ DOSYASINA ÖLÇÜM, VİTAL, TAHLİL, İLAÇ, AŞI, TARAMA, PROFİL VEYA BELGE İŞLEME:\n"
+		"Kullanıcı sohbet üzerinden yazılı bir ölçüm, vital, alerji, kronik hastalık, ilaç, aşı veya tarama bulgusu söylerse "
+		"VEYA bir belge/tahlil/aşı kartı/tarama/reçete/fotoğraf ekleyip 'öğrenciye işle / kaydet / profiline ekle / ölçümünü gir' derse, "
 		"önce hemşireye kısa ve net bir Türkçe özet yaz (örn: 'Çıkarılan veriler onay kartında hazırlandı'), ardından yanıtının EN SONUNA tek satırda şu JSON komut etiketini ekle:\n"
 		"[[REVIR_WRITE:{...}]]\n"
 		"Şema (sadece gerçekten geçen/okunan alanları doldur; diğerlerini boş bırak veya ekleme):\n"
-		"{\"person_hint\":\"Kullanıcının söylediği veya belgede okunan ad soyad (yoksa boş)\",\"student_no_hint\":\"\",\"class_hint\":\"\",\"document_type\":\"Ölçüm / Tahlil / Rapor / Profil\",\"document_date\":\"YYYY-MM-DD\",\"clinical_summary\":\"Kısa özet\","
+		"{\"person_hint\":\"Kullanıcının söylediği veya belgede okunan ad soyad (yoksa boş)\",\"student_no_hint\":\"\",\"class_hint\":\"\",\"document_type\":\"Ölçüm / Tahlil / Aşı / Tarama / Rapor / Profil\",\"document_date\":\"YYYY-MM-DD\",\"clinical_summary\":\"Kısa özet\","
 		"\"measurements\":{\"measured_on\":\"YYYY-MM-DD\",\"height_cm\":null,\"weight_kg\":null,\"head_circ_cm\":null},"
 		"\"vitals\":{\"measured_at\":\"YYYY-MM-DD HH:MM\",\"temperature_c\":null,\"pulse_bpm\":null,\"spo2_pct\":null,\"systolic_bp\":null,\"diastolic_bp\":null,\"glucose_mg_dl\":null},"
 		"\"health_profile\":{\"allergies\":\"\",\"chronic_conditions\":\"\",\"blood_group\":\"\",\"regular_medications\":\"\",\"emergency_notes\":\"\"},"
 		"\"lab_results\":[{\"test_name\":\"\",\"value_num\":null,\"value_text\":\"\",\"unit\":\"\",\"ref_range\":\"\",\"flag\":\"Normal\",\"measured_on\":\"YYYY-MM-DD\"}],"
 		"\"medications\":[{\"medication_name\":\"\",\"med_type\":\"Düzenli İlaç\",\"dosage\":\"\",\"schedule_times\":\"\",\"notes\":\"\"}],"
+		"\"vaccinations\":[{\"vaccine_code\":\"\",\"vaccine_name\":\"Hepatit B / KKK / DaBT\",\"dose_name\":\"1. Doz\",\"is_done\":true,\"administered_date\":\"YYYY-MM-DD\",\"facility\":\"ASM\",\"notes\":\"\"}],"
+		"\"school_screenings\":{\"screening_date\":\"YYYY-MM-DD\",\"height_cm\":null,\"weight_kg\":null,\"wears_glasses\":\"\",\"vision_right\":\"\",\"vision_left\":\"\",\"hair_screening\":\"\",\"hearing_right\":\"\",\"hearing_left\":\"\",\"notes\":\"\"},"
 		"\"disability\":{\"has_disability\":false,\"disability_rate\":null,\"categories\":[],\"school_adaptations\":\"\",\"report_summary\":\"\"},"
 		"\"diabetes\":{\"is_diabetic\":false,\"diabetes_type\":\"\",\"icr_breakfast\":null,\"icr_lunch\":null,\"icr_snack\":null,\"isf\":null,\"target_bg\":null,\"insulin_brand\":\"\"},"
 		"\"visit_note_suggestion\":\"\"}\n\n"
@@ -1203,7 +1349,9 @@ def chat_with_gemini_assistant(
 				continue
 			try:
 				fbytes = base64.b64decode(fb64)
-				inline_item, txt_block = _extract_attachment_context(fname, fmime, fbytes, sensitive_names)
+				inline_item, txt_block = _extract_attachment_context(
+					fname, fmime, fbytes, sensitive_names, strict_kvkk_pdf=strict_kvkk_pdf
+				)
 				if inline_item is not None:
 					inline_files.append(inline_item)
 				if txt_block:
@@ -1727,16 +1875,19 @@ def extract_clinical_record_from_document_with_gemini(
 	file_name: str,
 	extracted_text: str = "",
 	extra_instruction: str = "",
+	strict_kvkk_pdf: bool = False,
 ) -> tuple[bool, dict[str, Any], str]:
 	"""
-	Herhangi bir sağlık raporu, tahlil, reçete, ÇÖZGER/engellilik raporu, endokrin/diyabet raporu,
-	ölçüm veya okul sağlık evrakını (PDF, fotoğraf, Word, Excel, TXT) okuyarak hangi öğrenciye ait olduğuna
+	Herhangi bir sağlık raporu, tahlili, reçeteyi, ÇÖZGER/engellilik raporu, endokrin/diyabet raporu,
+	aşı kartı, ölçüm veya okul sağlık evrakını okuyarak hangi öğrenciye ait olduğuna
 	dair eşleştirme ipuçları ve veritabanına işlenebilecek tüm yapılandırılmış klinik alanları çıkarır.
 	"""
 	inline_files: list[tuple[bytes, str]] = []
 	doc_txt = extracted_text or ""
 	if file_bytes and file_name:
-		item, txt_blk = _extract_attachment_context(file_name, "", file_bytes, sensitive_names=None)
+		item, txt_blk = _extract_attachment_context(
+			file_name, "", file_bytes, sensitive_names=None, strict_kvkk_pdf=strict_kvkk_pdf
+		)
 		if item is not None:
 			inline_files.append(item)
 		if txt_blk and not doc_txt:
@@ -1807,6 +1958,9 @@ SADECE aşağıdaki JSON yapısını döndür (bulunmayan alanları boş string,
     "insulin_brand": ""
   }},
   "visit_note_suggestion": "Belge acil başvuru/istirahat/rapor içeriyorsa kısa revir izlem notu (yoksa boş)",
+  "vaccinations": [
+    {{"vaccine_code": "", "vaccine_name": "Hepatit B / KKK / DaBT", "dose_name": "1. Doz", "is_done": true, "administered_date": "YYYY-MM-DD", "facility": "ASM", "notes": ""}}
+  ],
   "inferred_risks_and_actions": [
     "Bu belgeden hemşirenin dikkat etmesi gereken çıkarım veya aksiyon 1"
   ]
@@ -1827,8 +1981,6 @@ SADECE aşağıdaki JSON yapısını döndür (bulunmayan alanları boş string,
 	if not parsed:
 		return False, {"error": "Belge analiz sonucu JSON olarak ayrıştırılamadı."}, used_m
 	return True, parsed, used_m
-
-
 def infer_insights_from_student_reports_with_gemini(
 	*,
 	api_key: str,
@@ -1891,8 +2043,6 @@ SADECE aşağıdaki JSON şemasını döndür (kesin tıbbi tanı koyma, hemşir
 	if not parsed:
 		return False, {"error": "Klinik çıkarım yanıtı JSON olarak ayrıştırılamadı."}, used_m
 	return True, parsed, used_m
-
-
 def scan_pdf_form_fields_with_gemini(
 	*,
 	api_key: str,
@@ -2037,8 +2187,6 @@ SADECE aşağıdaki JSON yapısını döndür (değişmeyecek satır/paragraflar
 	if not parsed:
 		return False, {"error": "Belge yardımcı yanıtı JSON olarak ayrıştırılamadı."}, used_m
 	return True, parsed, used_m
-
-
 def generate_calendar_events_with_ai(
 	*,
 	api_key: str,
@@ -2147,8 +2295,6 @@ SADECE aşağıdaki JSON yapısını döndür:
 	if not parsed or not isinstance(parsed.get("events"), list):
 		return False, {"error": "Gemini takvim yanıtı JSON olarak ayrıştırılamadı."}, used_m
 	return True, parsed, used_m
-
-
 def generate_daily_leaf_content_with_ai(
 	*,
 	api_key: str,
@@ -2203,5 +2349,492 @@ SADECE aşağıdaki JSON yapısını döndür:
 	return True, parsed, used_m
 
 
+# ==============================================================================
+# 13. FAZ 2 & FAZ 3: AŞI, NÖBET, SOĞUK ZİNCİR, STOK, İZOLASYON, YETİŞKİN, TARAMA & BRİFİNG
+# ==============================================================================
+
+def _build_strict_clinical_doc_input(
+	file_bytes: bytes,
+	file_name: str,
+	sensitive_names: list[str] | None = None,
+	strict_kvkk_pdf: bool = False,
+) -> tuple[list[tuple[bytes, str]], str]:
+	"""Belge/görsel girişini Gemini çağrıları için tek yerden KVKK kurallarına uygun hazırlar."""
+	inline_files: list[tuple[bytes, str]] = []
+	doc_txt = ""
+	if file_bytes and file_name:
+		item, txt_blk = _extract_attachment_context(
+			file_name, "", file_bytes, sensitive_names=sensitive_names, strict_kvkk_pdf=strict_kvkk_pdf
+		)
+		if item is not None:
+			inline_files.append(item)
+		if txt_blk:
+			doc_txt = txt_blk[:14000]
+	return inline_files, doc_txt
+
+def parse_vaccination_card_with_gemini(
+	*,
+	api_key: str,
+	model: str,
+	file_bytes: bytes,
+	file_name: str,
+	moh_schedule: list[dict[str, Any]],
+	age_months: int | None = None,
+	anon_context: str = "",
+	strict_kvkk_pdf: bool = False,
+) -> tuple[bool, dict[str, Any], str]:
+	"""
+	e-Nabız / ASM aşı kartı veya aşı listesi belgesini (PDF/Görsel/Word/Excel) okuyup
+	T.C. Sağlık Bakanlığı `MOH_VACCINE_SCHEDULE` kodlarıyla eşleştirilmiş doz listesi çıkarır.
+	"""
+	inline_files, doc_txt = _build_strict_clinical_doc_input(
+		file_bytes, file_name, sensitive_names=None, strict_kvkk_pdf=strict_kvkk_pdf
+	)
+	sched_compact = [
+		{"code": str(v.get("code") or ""), "vaccine": str(v.get("vaccine") or ""), "dose": str(v.get("dose") or ""), "period_label": str(v.get("period_label") or "")}
+		for v in (moh_schedule or [])
+		if isinstance(v, dict) and v.get("code")
+	]
+	prompt = f"""T.C. Sağlık Bakanlığı çocukluk dönemi aşı takvimini esas alarak ekli Aşı Kartı / e-Nabız belgesindeki yapılmış aşıları eksiksiz oku ve aşağıda verilen resmi kodlarla eşleştir.
+
+[RESMİ AŞI KOD LİSTESİ (MOH_VACCINE_SCHEDULE)]:
+{json.dumps(sched_compact, ensure_ascii=False)}
+
+[ANONİM ÖĞRENCİ BAĞLAMI]: {anon_context or 'Belirtilmedi'} (Yaş: {age_months if age_months is not None else 'Bilinmiyor'} ay)
+[DOSYA ADI]: {file_name}
+{('[BELGE METNİ]: ' + doc_txt) if doc_txt else ''}
+
+SADECE aşağıdaki JSON yapısını döndür (kesinlikle listede olmayan veya uydurma kod üretme):
+{{
+  "summary": "Belgeden okunan aşıların 1-2 cümlelik özeti ve tarih durumu",
+  "matched_vaccines": [
+    {{
+      "vaccine_code": "hep_b_1",
+      "is_done": true,
+      "administered_date": "YYYY-MM-DD veya boş",
+      "facility": "Aile Sağlığı Merkezi (ASM) / Hastane / Okul Reviri",
+      "lot_number": "Varsa lot no yoksa boş",
+      "notes": "Belgedeki aşı adı/doz notu"
+    }}
+  ],
+  "unmatched_notes": ["Listede karşılığı bulunmayan ekstra aşı varsa kısa not"]
+}}"""
+
+	ok, raw, used_m = call_gemini(
+		prompt,
+		api_key=api_key,
+		model=model,
+		inline_files=inline_files if inline_files else None,
+		expect_json=True,
+		temperature=0.1,
+		timeout=30.0,
+	)
+	if not ok:
+		return False, {"error": raw}, used_m
+	parsed = _parse_json_response(raw)
+	if not parsed or not isinstance(parsed.get("matched_vaccines"), list):
+		return False, {"error": "Aşı kartı çıktısı JSON olarak ayrıştırılamadı."}, used_m
+	valid_codes = {item["code"] for item in sched_compact}
+	cleaned: list[dict[str, Any]] = []
+	seen_codes: set[str] = set()
+	for rec in parsed.get("matched_vaccines") or []:
+		if not isinstance(rec, dict):
+			continue
+		code = str(rec.get("vaccine_code") or "").strip()
+		if code in valid_codes and code not in seen_codes:
+			seen_codes.add(code)
+			cleaned.append({
+				"vaccine_code": code,
+				"is_done": bool(rec.get("is_done", True)),
+				"administered_date": str(rec.get("administered_date") or "").strip()[:10] or None,
+				"facility": str(rec.get("facility") or "").strip() or "Aile Sağlığı Merkezi (ASM)",
+				"lot_number": str(rec.get("lot_number") or "").strip() or None,
+				"notes": str(rec.get("notes") or "").strip() or None,
+			})
+	return True, {
+		"summary": str(parsed.get("summary") or f"{len(cleaned)} aşı dozu eşleştirildi."),
+		"matched_vaccines": cleaned,
+		"unmatched_notes": parsed.get("unmatched_notes") or [],
+	}, used_m
 
 
+def generate_vaccination_notice_with_gemini(
+	*,
+	api_key: str,
+	model: str,
+	anon_context: str,
+	overdue_list: list[str],
+	up_to_date_pct: float,
+	school_name: str = "Okul Reviri",
+	nurse_name: str = "Okul Revir Sorumlusu",
+) -> tuple[bool, dict[str, str], str]:
+	"""Eksik veya gecikmiş aşılar için KVKK uyumlu Veli ve ASM yönlendirme mektup taslakları üretir."""
+	ov_txt = ", ".join(overdue_list) if overdue_list else "Eksik rutin doz saptanmadı (Genel aşı kartı güncelleme daveti)"
+	prompt = f"""Bir okul sağlığı hemşiresi olarak aşağıdaki anonim öğrenci profili için iki adet resmi, nazik ve anlaşılır Türkçe bilgilendirme taslağı hazırla.
+ÖNEMLİ KVKK KURALI: Öğrencinin adını uydurma; mektuplarda `[ÖĞRENCİ_ADI]` yer tutucusunu kullan (yerel sistem öğrencinin adını otomatik dolduracaktır).
+
+[KURUM]: {school_name} | Sorumlu: {nurse_name}
+[ANONİM ÖĞRENCİ BAĞLAMI]: {anon_context}
+[AŞI TAMAMLANMA ORANI]: %{up_to_date_pct:.1f}
+[EKSİK / GECİKMİŞ AŞI DOZLARI]: {ov_txt}
+
+SADECE şu JSON şemasını döndür:
+{{
+  "guardian_letter": "Sayın Veli, [ÖĞRENCİ_ADI] isimli öğrencimizin ... biçiminde nazik ve net ASM yönlendirme mektubu",
+  "asm_referral_note": "Aile Sağlığı Merkezi Hekimliğine / Hemşiresine yönelik kısa teknik aşı tamamlama/bilgi talep notu"
+}}"""
+	ok, raw, used_m = call_gemini(prompt, api_key=api_key, model=model, expect_json=True, temperature=0.25, timeout=22.0)
+	if not ok:
+		return False, {"error": raw}, used_m
+	parsed = _parse_json_response(raw)
+	if not parsed:
+		return False, {"error": "Aşı bilgilendirme metni JSON olarak ayrıştırılamadı."}, used_m
+	return True, {
+		"guardian_letter": _stringify_ai_field(parsed.get("guardian_letter")),
+		"asm_referral_note": _stringify_ai_field(parsed.get("asm_referral_note")),
+	}, used_m
+
+
+def analyze_seizures_and_teacher_card_with_gemini(
+	*,
+	api_key: str,
+	model: str,
+	anon_context: str,
+	seizure_protocol: str,
+	medical_devices: str = "",
+	logs_summary: list[dict[str, Any]] | None = None,
+	school_name: str = "Okul Reviri",
+	nurse_name: str = "Okul Revir Sorumlusu",
+) -> tuple[bool, dict[str, str], str]:
+	"""Epilepsi nöbet kayıtları ve acil protokolden örüntü analizi + Sınıf Öğretmeni Acil Eylem Kartı üretir (KVKK korumalı)."""
+	safe_logs = []
+	for lg in (logs_summary or [])[:25]:
+		if isinstance(lg, dict):
+			safe_logs.append({
+				"tarih": lg.get("seizure_date"),
+				"saat": lg.get("seizure_time"),
+				"sure_sn": lg.get("duration_seconds"),
+				"tip": lg.get("seizure_type"),
+				"tetikleyici": anonymize_free_text(str(lg.get("triggers") or "")),
+				"gozlem": anonymize_free_text(str(lg.get("observations") or "")),
+				"acil_ilac": anonymize_free_text(str(lg.get("emergency_med_given") or "")),
+				"112": bool(lg.get("ambulance_called")),
+			})
+	prompt = f"""Pediatrik nöroloji ve okul hemşireliği standartlarına göre aşağıdaki anonim epilepsi/nöbet profili ve nöbet günlüğünü değerlendir.
+ÖNEMLİ: Öğrenci adı yazma, `[ÖĞRENCİ_ADI]` yer tutucusu kullan. Sınıf öğretmeninin panik yapmadan uygulayabileceği net ilk yardım basamakları (yan yatırma, başı koruma, ağıza cisim sokmama, süre tutma, ne zaman 112/revir aranır) mutlaka yer alsın.
+
+[KURUM]: {school_name} | Hemşire: {nurse_name}
+[ANONİM PROFİL]: {anon_context}
+[TANIMLI ACİL PROTOKOL]: {anonymize_free_text(seizure_protocol) or 'Belirtilmedi'}
+[TIBBİ CİHAZ]: {anonymize_free_text(medical_devices) or 'Yok'}
+[SON NÖBET KAYITLARI]: {json.dumps(safe_logs, ensure_ascii=False)}
+
+SADECE şu JSON şemasını döndür:
+{{
+  "pattern_analysis": "Hemşire için nöbet sıklığı, ortalama süre eğilimi, olası tetikleyiciler ve acil ilaç / 112 örüntüsü analizi",
+  "teacher_emergency_card": "Sınıf ve Nöbetçi Öğretmen İçin `[ÖĞRENCİ_ADI]` Acil Nöbet Eylem Kartı (1. Yapılacaklar, 2. Kesinlikle Yapılmayacaklar, 3. Ne Zaman 112 ve Revir Aranır)",
+  "guardian_followup_note": "Veli / Çocuk Nörolojisi hekimi ile paylaşılacak özet izlem notu"
+}}"""
+	ok, raw, used_m = call_gemini(prompt, api_key=api_key, model=model, expect_json=True, temperature=0.2, timeout=25.0)
+	if not ok:
+		return False, {"error": raw}, used_m
+	parsed = _parse_json_response(raw)
+	if not parsed:
+		return False, {"error": "Nöbet analiz yanıtı ayrıştırılamadı."}, used_m
+	return True, {
+		"pattern_analysis": _stringify_ai_field(parsed.get("pattern_analysis")),
+		"teacher_emergency_card": _stringify_ai_field(parsed.get("teacher_emergency_card")),
+		"guardian_followup_note": _stringify_ai_field(parsed.get("guardian_followup_note")),
+	}, used_m
+
+
+def generate_cold_chain_breach_report_with_gemini(
+	*,
+	api_key: str,
+	model: str,
+	year_month: str,
+	month_logs_summary: list[dict[str, Any]],
+	breach_logs: list[dict[str, Any]],
+	school_name: str = "Okul Reviri",
+	nurse_name: str = "Okul Revir Sorumlusu",
+) -> tuple[bool, dict[str, str], str]:
+	"""Buzdolabı soğuk zincir (2.0-8.0°C) sıcaklık kayıtlarını yorumlar ve sapma/izlem tutanağı taslağı üretir."""
+	prompt = f"""Okul reviri soğuk zincir yönetimi (aşı, insülin, adrenalin oto-enjektör dolabı: hedef 2.0–8.0 °C, oda: 15.0–25.0 °C) açısından aşağıdaki aylık izlem verilerini değerlendir.
+
+[KURUM]: {school_name} | Sorumlu: {nurse_name} | Ay: {year_month}
+[AYLIK ÖZET ÖLÇÜMLER (ilk 40)]: {json.dumps(month_logs_summary[:40], ensure_ascii=False, default=str)}
+[SAPMA (2.0-8.0°C DIŞI) KAYITLARI]: {json.dumps(breach_logs[:20], ensure_ascii=False, default=str)}
+
+SADECE şu JSON yapısını döndür:
+{{
+  "risk_assessment": "Isı stabilitesi ve ilaç/insülin/aşı güvenliği açısından kısa risk değerlendirmesi",
+  "immediate_actions": "Önerilen teknik ve klinik aksiyon maddeleri (termostat, karekod/SKT/soğuk akü, eczacı/hekim danışması vb.)",
+  "official_report_text": "Okul Müdürlüğüne / İlgili Birime sunulmaya hazır resmi soğuk zincir izlem ve/veya ısı sapma tutanağı taslağı"
+}}"""
+	ok, raw, used_m = call_gemini(prompt, api_key=api_key, model=model, expect_json=True, temperature=0.2, timeout=24.0)
+	if not ok:
+		return False, {"error": raw}, used_m
+	parsed = _parse_json_response(raw)
+	if not parsed:
+		return False, {"error": "Soğuk zincir raporu ayrıştırılamadı."}, used_m
+	return True, {
+		"risk_assessment": _stringify_ai_field(parsed.get("risk_assessment")),
+		"immediate_actions": _stringify_ai_field(parsed.get("immediate_actions")),
+		"official_report_text": _stringify_ai_field(parsed.get("official_report_text")),
+	}, used_m
+
+
+def analyze_inventory_and_procurement_with_gemini(
+	*,
+	api_key: str,
+	model: str,
+	alerts: dict[str, list[dict[str, Any]]],
+	total_items: int,
+	school_name: str = "Okul Reviri",
+	nurse_name: str = "Okul Revir Sorumlusu",
+) -> tuple[bool, dict[str, Any], str]:
+	"""Revir sarf malzeme ve ilk yardım dolabı kritik stok / miad (SKT) verilerinden önceliklendirme ve resmi istem tutanağı üretir."""
+	safe_alerts = {
+		"critical_stock": [
+			{"ad": x.get("item_name"), "miktar": x.get("quantity"), "esik": x.get("min_threshold"), "birim": x.get("unit"), "kat": x.get("category")}
+			for x in (alerts.get("critical_stock") or [])[:30]
+		],
+		"expired": [
+			{"ad": x.get("item_name"), "miktar": x.get("quantity"), "birim": x.get("unit"), "skt": x.get("expiry_date")}
+			for x in (alerts.get("expired") or [])[:30]
+		],
+		"expiring_soon": [
+			{"ad": x.get("item_name"), "miktar": x.get("quantity"), "birim": x.get("unit"), "skt": x.get("expiry_date")}
+			for x in (alerts.get("expiring_soon") or [])[:30]
+		],
+	}
+	prompt = f"""Bir okul revirinin malzeme envanter ve SKT alarmlarını değerlendirerek satın alma önceliği, tıbbi atık/imha uyarısı ve Okul Müdürlüğüne hitaben resmi malzeme istem tutanağı hazırla.
+
+[KURUM]: {school_name} | Revir Sorumlusu: {nurse_name} | Toplam Envanter Kalemi: {total_items}
+[STOK & SKT UYARILARI]: {json.dumps(safe_alerts, ensure_ascii=False)}
+
+SADECE şu JSON yapısını döndür:
+{{
+  "priority_summary": "Acil tedarik gerektiren ilk yardım malzemeleri ile imha/karantina gerektiren SKT kalemlerinin 2-4 cümlelik özeti",
+  "disposal_warning": "Miadı dolmuş veya dolmak üzere olan malzemeler için revir imha ve etiketleme önerisi",
+  "procurement_petition": "Okul Müdürlüğüne / Satın Alma Komisyonuna hitaben resmi istem ve ihtiyaç tutanağı tam metni"
+}}"""
+	ok, raw, used_m = call_gemini(prompt, api_key=api_key, model=model, expect_json=True, temperature=0.22, timeout=24.0)
+	if not ok:
+		return False, {"error": raw}, used_m
+	parsed = _parse_json_response(raw)
+	if not parsed:
+		return False, {"error": "Stok analiz yanıtı ayrıştırılamadı."}, used_m
+	return True, {
+		"priority_summary": _stringify_ai_field(parsed.get("priority_summary")),
+		"disposal_warning": _stringify_ai_field(parsed.get("disposal_warning")),
+		"procurement_petition": _stringify_ai_field(parsed.get("procurement_petition")),
+	}, used_m
+
+
+def generate_isolation_communications_with_gemini(
+	*,
+	api_key: str,
+	model: str,
+	disease_name: str,
+	class_name: str,
+	detected_date: str,
+	expected_return_date: str = "",
+	doctor_clearance_required: bool = True,
+	notes_masked: str = "",
+	outbreaks_summary: list[dict[str, Any]] | None = None,
+	school_name: str = "Okul Reviri",
+	nurse_name: str = "Okul Revir Sorumlusu",
+) -> tuple[bool, dict[str, str], str]:
+	"""Bulaşıcı hastalık izolasyonu için KVKK uyumlu Veli mektubu, Sınıf Öğretmeni duyurusu ve hijyen kontrol listesi üretir."""
+	safe_notes = anonymize_free_text(notes_masked)
+	prompt = f"""Okul enfeksiyon kontrol ve bulaşıcı hastalık protokollerine uygun olarak aşağıdaki anonim izolasyon kaydı için iletişim taslakları oluştur.
+KRİTİK KVKK KURALI: Veli mektubunda `[ÖĞRENCİ_ADI]` yer tutucusunu kullan; Sınıf Öğretmeni/Sınıf Duyurusu içinde ise kesinlikle hiçbir öğrencinin adını/numarasını veya kimliğini ifşa ETME!
+
+[KURUM]: {school_name} | Sorumlu: {nurse_name}
+[HASTALIK / TANI]: {disease_name} | [SINIF]: {class_name}
+[TESPİT TARİHİ]: {detected_date} | [BEKLENEN DÖNÜŞ]: {expected_return_date or 'Hekim değerlendirmesine bağlı'}
+[DOKTOR İYİLEŞME RAPORU]: {'Evet, okula dönüşte hekim raporu/onayı gerekli' if doctor_clearance_required else 'İzlem / Veli beyanı yeterli'}
+[ANONİM NOT]: {safe_notes or 'Yok'}
+[OKUL SALGIN KÜMESİ]: {json.dumps(outbreaks_summary or [], ensure_ascii=False)}
+
+SADECE şu JSON yapısını döndür:
+{{
+  "guardian_letter": "Hasta öğrencinin velisine özel evde izlem, bulaştırıcılık önlemleri ve okula dönüş kriterini anlatan mektup",
+  "class_teacher_notice": "Kimlik ifşa etmeden sınıf öğretmeni ve diğer sınıf velileri için belirti taraması & sınıf hijyeni duyurusu",
+  "hygiene_checklist": "Okul temizlik/hizmetli ve revir personeli için 5-7 maddelik sınıf dezenfeksiyon ve havalandırma listesi"
+}}"""
+	ok, raw, used_m = call_gemini(prompt, api_key=api_key, model=model, expect_json=True, temperature=0.25, timeout=24.0)
+	if not ok:
+		return False, {"error": raw}, used_m
+	parsed = _parse_json_response(raw)
+	if not parsed:
+		return False, {"error": "İzolasyon iletişim metni ayrıştırılamadı."}, used_m
+	return True, {
+		"guardian_letter": _stringify_ai_field(parsed.get("guardian_letter")),
+		"class_teacher_notice": _stringify_ai_field(parsed.get("class_teacher_notice")),
+		"hygiene_checklist": _stringify_ai_field(parsed.get("hygiene_checklist")),
+	}, used_m
+
+
+def analyze_adult_preventive_health_with_gemini(
+	*,
+	api_key: str,
+	model: str,
+	anon_context: str,
+	vitals_summary: list[dict[str, Any]],
+	visit_count: int = 0,
+	role_label: str = "Personel / Öğretmen",
+	school_name: str = "Okul Reviri",
+	nurse_name: str = "Okul Revir Sorumlusu",
+) -> tuple[bool, dict[str, str], str]:
+	"""Öğretmen, personel veya yetişkin profilinin anonim vital ve kronik verilerinden periyodik işyeri sağlık özeti üretir."""
+	prompt = f"""İş sağlığı ve koruyucu hemşirelik yaklaşımıyla aşağıdaki anonim yetişkin/okul personeli profilini değerlendir (tıbbi tanı koyma, izlem ve hekime yönlendirme önerisi sun).
+
+[KURUM]: {school_name} | Sorumlu: {nurse_name} | Görev Türü: {role_label}
+[ANONİM PROFİL]: {anon_context}
+[SON VİTAL ÖLÇÜMLER]: {json.dumps(vitals_summary[:12], ensure_ascii=False, default=str)}
+[TOPLAM REVİR BAŞVURUSU]: {visit_count}
+
+SADECE şu JSON yapısını döndür:
+{{
+  "risk_summary": "Tansiyon, kan şekeri, VKİ ve kronik durumlar açısından 2-3 cümlelik genel değerlendirme",
+  "workplace_health_tips": "Okul/öğretmenlik ortamına uygun ergonomi, ses sağlığı, beslenme ve tansiyon/stres kontrol önerileri",
+  "physician_referral_note": "Gerekiyorsa aile hekimi veya işyeri hekimine periyodik muayene/tetkik yönlendirme notu"
+}}"""
+	ok, raw, used_m = call_gemini(prompt, api_key=api_key, model=model, expect_json=True, temperature=0.22, timeout=22.0)
+	if not ok:
+		return False, {"error": raw}, used_m
+	parsed = _parse_json_response(raw)
+	if not parsed:
+		return False, {"error": "Yetişkin sağlık analizi ayrıştırılamadı."}, used_m
+	return True, {
+		"risk_summary": _stringify_ai_field(parsed.get("risk_summary")),
+		"workplace_health_tips": _stringify_ai_field(parsed.get("workplace_health_tips")),
+		"physician_referral_note": _stringify_ai_field(parsed.get("physician_referral_note")),
+	}, used_m
+
+
+def map_screening_table_with_gemini(
+	*,
+	api_key: str,
+	model: str,
+	headers: list[str] | None = None,
+	sample_rows: list[list[str]] | None = None,
+	raw_text: str = "",
+	file_bytes: bytes | None = None,
+	file_name: str = "",
+	strict_kvkk_pdf: bool = False,
+) -> tuple[bool, dict[str, Any], str]:
+	"""
+	Karmaşık veya farklı kurum formatındaki okul taraması dosyaları için:
+	- Tablo başlıkları mevcutsa yalnızca anonim sütun başlıkları + maskelenmiş ilk birkaç satır örneği üzerinden
+	  `column_map` + birim dönüşümü çıkarır (tam liste yerel Python'da KVKK korumalı işlenir).
+	- Tablo başlığı çıkarılamayan görsel/serbest metin belgelerinde doğrudan yapılandırılmış satır çıkarımı yapar.
+	"""
+	if headers:
+		masked_samples = []
+		for r in (sample_rows or [])[:4]:
+			masked_samples.append([anonymize_free_text(str(cell)) for cell in r])
+		prompt = f"""Bir okul taraması tablosunun sütun başlıklarını analiz et ve standart revir alanlarıyla eşle.
+
+[TABLO SÜTUN BAŞLIKLARI]: {json.dumps(headers, ensure_ascii=False)}
+[ANONİM ÖRNEK SATIRLAR]: {json.dumps(masked_samples, ensure_ascii=False)}
+
+SADECE aşağıdaki JSON yapısını döndür (kullanılmayan sütunlar için boş string "" bırak):
+{{
+  "mode": "column_mapping",
+  "explanation": "Eşlenen sütunların ve birim varsayımının 1 cümlelik açıklaması",
+  "column_map": {{
+    "class_name": "Sınıf / şube sütununun tam adı veya boş",
+    "full_name": "Tam ad soyad sütunu (Ad ve Soyad ayrıysa boş bırak)",
+    "first_name": "Ad ve Soyad ayrı sütunlardaysa Ad sütununun tam adı, yoksa boş",
+    "last_name": "Ad ve Soyad ayrı sütunlardaysa Soyad sütununun tam adı, yoksa boş",
+    "sex": "Cinsiyet sütunu veya boş",
+    "birth_date": "Doğum tarihi sütunu veya boş",
+    "height_cm": "Boy sütunu veya boş",
+    "weight_kg": "Kilo / Ağırlık sütunu veya boş"
+  }},
+  "height_unit": "cm veya m",
+  "weight_unit": "kg veya g"
+}}"""
+		ok, raw, used_m = call_gemini(prompt, api_key=api_key, model=model, expect_json=True, temperature=0.05, timeout=20.0)
+		if not ok:
+			return False, {"error": raw}, used_m
+		parsed = _parse_json_response(raw)
+		if not parsed or not isinstance(parsed.get("column_map"), dict):
+			return False, {"error": "Sütun eşleme JSON yanıtı ayrıştırılamadı."}, used_m
+		return True, parsed, used_m
+
+	inline_files: list[tuple[bytes, str]] = []
+	doc_txt = anonymize_free_text(raw_text[:14000]) if raw_text else ""
+	if file_bytes and file_name and not doc_txt:
+		inline_files, doc_txt = _build_strict_clinical_doc_input(
+			file_bytes, file_name, sensitive_names=None, strict_kvkk_pdf=strict_kvkk_pdf
+		)
+
+	prompt = f"""Aşağıdaki karmaşık okul sağlık taraması belgesinden veya liste görselinden öğrenci sınıf, ad soyad, cinsiyet, doğum tarihi, boy (cm) ve kilo (kg) satırlarını çıkar.
+ÖNEMLİ: Boy metre cinsindense cm'ye çevir (ör. 1.42 -> 142.0). Kilo gram cinsindense kg'ye çevir. Tarihleri YYYY-MM-DD yap. Cinsiyeti 'Erkek' veya 'Kız' olarak standartlaştır.
+
+[DOSYA ADI]: {file_name or 'Belge'}
+{('[BELGE İÇERİĞİ]: ' + doc_txt) if doc_txt else ''}
+
+SADECE şu JSON şemasını döndür:
+{{
+  "mode": "rows",
+  "explanation": "Okunan tarama listesinin kısa açıklaması",
+  "rows": [
+    {{
+      "class_name": "5-A",
+      "full_name": "Ali Demir",
+      "sex": "Erkek veya Kız veya null",
+      "birth_date": "YYYY-MM-DD veya null",
+      "height_cm": 142.5,
+      "weight_kg": 36.4
+    }}
+  ]
+}}"""
+	ok, raw, used_m = call_gemini(
+		prompt,
+		api_key=api_key,
+		model=model,
+		inline_files=inline_files if inline_files else None,
+		expect_json=True,
+		temperature=0.1,
+		timeout=32.0,
+	)
+	if not ok:
+		return False, {"error": raw}, used_m
+	parsed = _parse_json_response(raw)
+	if not parsed or not isinstance(parsed.get("rows"), list):
+		return False, {"error": "Tarama satırları JSON olarak ayrıştırılamadı."}, used_m
+	return True, parsed, used_m
+
+
+def generate_executive_briefing_with_gemini(
+	*,
+	api_key: str,
+	model: str,
+	briefing_scope: str,
+	stats_or_cohort: dict[str, Any],
+	missing_audit: list[str] | None = None,
+	school_name: str = "Okul Reviri",
+	custom_instruction: str = "",
+) -> tuple[bool, str, str]:
+	"""Okul yönetimi / müdürlük toplantıları için KPI, anomali kümesi ve karar maddelerini içeren 1 sayfalık yönetici brifingi üretir."""
+	miss_txt = "\n- ".join(missing_audit or []) if missing_audit else "Eksik veri uyarısı bulunmuyor."
+	inst_txt = f"\n[YÖNETİCİ / HEMŞİRE ÖZEL NOTU]: {custom_instruction.strip()}" if custom_instruction and custom_instruction.strip() else ""
+	prompt = f"""Okul Müdürü ve Kurum İdaresi toplantısında 1 sayfada okunacak netlikte kurumsal Türkçe 'Yönetici Sağlık Brifingi' hazırla.
+
+[KURUM]: {school_name}
+[BRİFİNG KAPSAMI]: {briefing_scope}
+[ANONİM SAYISAL GÖSTERGELER & RİSKLER]: {json.dumps(stats_or_cohort, ensure_ascii=False, default=str)[:6000]}
+[EKSİK KAYIT / TAKİP DENETİMİ]:
+- {miss_txt}{inst_txt}
+
+Doğrudan Word/PDF raporuna konacak temiz, kod bloksuz şu 4 başlıkla oluştur:
+1. **📌 Dönem / Tarama Temel Göstergeleri (KPI Özeti)**
+2. **⚠️ Öne Çıkan Riskler ve Anomali Kümeleri**
+3. **🔍 Eksik Kayıtlar ve Revir İş Yükü Öncelikleri**
+4. **🏛️ Okul İdaresinin Desteğini / Kararını Gerektiren Somut Maddeler**"""
+	return call_gemini(prompt, api_key=api_key, model=model, temperature=0.22, timeout=24.0)
