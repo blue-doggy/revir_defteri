@@ -1644,6 +1644,352 @@ class TestCafeteriaModule(unittest.TestCase):
         self.assertIn("3 Sekmeli Menü Excel", out_m["main_html"])
         self.assertIn("Excel / CSV Şablonundan Menü", out_m["main_html"])
 
+    def test_seven_week_invoice_excel_category_monthly_avg_and_tender_plan(self):
+        # Full 7-date institutional grocery workbook (matching user's pasted structure totaling 200,763 TL)
+        raw_csv = """Tüm Haftaların Toplam Gider Özeti,
+,
+Hafta (Tarih Aralığı),Toplam Harcama
+11.09.2026,41092
+25.09.2026,36701
+08.10.2026,21425
+15.10.2026,22700
+26.10.2026,17815
+30.10.2026,9562
+16.11.2026,51468
+,
+genel toplam,200763
+Tarih,Fiş/Fatura No,Malın Cinsi,Miktar,Birim,Birim Fiyatı,Tutar
+11.09.2026,Fiş-001,Zerdeçal,1,Kg,280,280
+11.09.2026,Fiş-001,Sarımsak tozu,1,Kg,495,495
+11.09.2026,Fiş-001,Susam,1,Kg,210,210
+11.09.2026,Fiş-001,Sumak,1,Kg,585,585
+11.09.2026,Fiş-001,Toz tarhana 500gr,2,Adet,100,200
+11.09.2026,Fiş-001,15'li Vanilin,5,Adet,40,200
+11.09.2026,Fiş-001,5'li Kabartma tozu,5,Adet,25,125
+11.09.2026,Fiş-001,Ayçiçek yağı,8,Adet,560,4480
+11.09.2026,Fiş-001,Zeytinyağı,8,Adet,1450,11600
+11.09.2026,Fiş-001,Kakao 1kg,1,Kg,740,740
+11.09.2026,Fiş-001,Osmancık Pirinç,5,Adet,720,3600
+11.09.2026,Fiş-001,Pilavlık bulgur,5,Adet,285,1425
+11.09.2026,Fiş-001,Penne Makarna 5kg,2,Adet,300,600
+11.09.2026,Fiş-001,Konserve Bezelye,3,Adet,240,720
+11.09.2026,Fiş-001,Konserve Garnitür,3,Adet,295,885
+11.09.2026,Fiş-001,Közlenmiş biber,3,Adet,120,360
+11.09.2026,Fiş-001,Calve Ketçap,5,Adet,135,675
+11.09.2026,Fiş-001,Öncü domates Salçası,6,Adet,580,3480
+11.09.2026,Fiş-001,Öncü biber Salçası,4,Adet,895,3580
+11.09.2026,Fiş-001,Süt İçim 1lt,24,Adet,58,1392
+11.09.2026,Fiş-001,Torku Tereyağ,3,Adet,830,2490
+11.09.2026,Fiş-001,Yoğurt 2kg,10,Adet,160,1600
+11.09.2026,Fiş-001,Toz şeker 5kg,2,Adet,245,490
+11.09.2026,Fiş-001,Donuk Mısır 2.5kg,2,Adet,440,880
+,,,,,HAFTALIK TOPLAM:,41092
+Tarih,Fiş/Fatura No,Malın Cinsi,Miktar,Birim,Birim Fiyatı,Tutar
+25.09.2026,Fiş-001,Tavuk Pirzola / 10'luk Yoğurt,1,Adet,650,650
+25.09.2026,Fiş-001,Kıyma,6.5,Kg,1200,7800
+25.09.2026,Fiş-001,Ispanak,20,Kg,97,1940
+25.09.2026,Fiş-001,Süzme Yoğurt,2,Adet,185,370
+25.09.2026,Fiş-001,Tereyağ,3,Kg,750,2250
+25.09.2026,Fiş-001,Kuşbaşı,3,Kg,1200,3600
+25.09.2026,Fiş-001,Teremyağ,2,Adet,65,130
+25.09.2026,Fiş-001,Burgu Makarna 5kg,2,Adet,300,600
+25.09.2026,Fiş-001,Üzüm Sirkesi,1,Adet,250,250
+25.09.2026,Fiş-001,Soya Sosu,2,Adet,183,366
+25.09.2026,Fiş-001,Yumurta,2,Koli,150,300
+25.09.2026,Fiş-001,Arpa Şehriye,2,Adet,150,300
+25.09.2026,Fiş-001,Limon,1,Kg,80,80
+25.09.2026,Fiş-001,Domates,3,Kg,45,135
+25.09.2026,Fiş-001,Patates,40,Kg,30,1200
+25.09.2026,Fiş-001,Soğan,5,Kg,30,150
+25.09.2026,Fiş-001,Nane,1,Bağ,25,25
+25.09.2026,Fiş-001,Maydanoz,2,Bağ,20,40
+25.09.2026,Fiş-001,Marul,2,Adet,45,90
+25.09.2026,Fiş-001,Kabak,2,Kg,45,90
+25.09.2026,Fiş-001,Patlıcan,3,Kg,60,180
+25.09.2026,Fiş-001,Biber,4,Kg,80,320
+25.09.2026,Fiş-001,Karpuz,2,Adet,50,100
+25.09.2026,Fiş-001,Elma,4,Kg,75,300
+25.09.2026,Fiş-001,Muz,4,Kg,100,400
+25.09.2026,Fiş-001,Havuç,26,Kg,25,650
+25.09.2026,Fiş-001,Fındık,0.3,Kg,1300,390
+25.09.2026,Fiş-002,Limon,1,Kg,85,85
+25.09.2026,Fiş-002,Yumurta,2,Koli,140,280
+25.09.2026,Fiş-002,Baget,8.5,Kg,170,1445
+25.09.2026,Fiş-002,Cebel Süzme,2,Adet,185,370
+25.09.2026,Fiş-002,Sütaş 10kg yoğurt,1,Adet,690,690
+25.09.2026,Fiş-002,Toros Bonfile,8.5,Kg,450,3825
+25.09.2026,Fiş-002,Sütaş 10kg yoğurt,1,Adet,690,690
+25.09.2026,Fiş-002,Sütaş 10kg yoğurt,1,Adet,650,650
+25.09.2026,Fiş-002,Cebel Süzme,2,Adet,185,370
+25.09.2026,Fiş-002,Muz,3,Kg,100,300
+25.09.2026,Fiş-002,Elma,4,Kg,70,280
+25.09.2026,Fiş-002,Armut,5,Kg,90,450
+25.09.2026,Fiş-002,Yeşil biber,3,Kg,70,210
+25.09.2026,Fiş-002,Kapya,2,Kg,60,120
+25.09.2026,Fiş-002,Domates,5,Kg,45,225
+25.09.2026,Fiş-002,Salatalık,2,Kg,35,70
+25.09.2026,Fiş-002,Marul,1,Adet,45,45
+25.09.2026,Fiş-002,Mor Lahana,1,Adet,50,50
+25.09.2026,Fiş-002,Havuç,2,Kg,40,80
+25.09.2026,Fiş-002,Maydanoz,1,Bağ,20,20
+25.09.2026,Fiş-002,Kabak,5,Kg,40,200
+25.09.2026,Fiş-002,Kıyma,3,Kg,1100,3300
+25.09.2026,Fiş-002,Bardak Su,2,Koli,120,240
+25.09.2026,Fiş-002,Browni intense,64,Adet,0,0
+,,,,,HAFTALIK TOPLAM:,36701
+Tarih,Fiş/Fatura No,Malın Cinsi,Miktar,Birim,Birim Fiyatı,Tutar
+08.10.2026,Fiş-001,10kg Yoğurt,2,Adet,700,1400
+08.10.2026,Fiş-001,Süzme Yoğurt,2,Adet,185,370
+08.10.2026,Fiş-001,Makarna,3,Adet,35,105
+08.10.2026,Fiş-001,Tavuk / Fener,5,Kg,265,1325
+08.10.2026,Fiş-001,Yumurta,2,Koli,140,280
+08.10.2026,Fiş-001,Kıyma,2,Kg,1200,2400
+08.10.2026,Fiş-001,Soğan,5,Kg,35,175
+08.10.2026,Fiş-001,Muz,2.2,Kg,125,275
+08.10.2026,Fiş-001,Mandalina,3,Kg,35,105
+08.10.2026,Fiş-001,Portakal,3,Kg,40,120
+08.10.2026,Fiş-001,Kapya,3,Kg,50,150
+08.10.2026,Fiş-001,Biber,4,Kg,85,340
+08.10.2026,Fiş-001,Maydanoz,1,Bağ,20,20
+08.10.2026,Fiş-001,Domates,5,Kg,45,225
+08.10.2026,Fiş-001,Salatalık,2,Kg,40,80
+08.10.2026,Fiş-001,Marul,1,Adet,45,45
+08.10.2026,Fiş-001,Mor Lahana,1,Adet,50,50
+08.10.2026,Fiş-001,Havuç,3,Kg,45,135
+08.10.2026,Fiş-001,Dolma Biber,7,Kg,85,595
+08.10.2026,Fiş-001,10kg Yoğurt,1,Adet,700,700
+08.10.2026,Fiş-001,Baget,7.5,Kg,180,1350
+08.10.2026,Fiş-001,Kuşbaşı,7,Kg,1200,8400
+08.10.2026,Fiş-001,Kıyma,1.5,Kg,1200,1800
+08.10.2026,Fiş-001,Dolma Biber,7,Kg,90,630
+08.10.2026,Fiş-001,Acı Sos / Salça,1,Adet,350,350
+,,,,,HAFTALIK TOPLAM:,21425
+Tarih,Fiş/Fatura No,Malın Cinsi,Miktar,Birim,Birim Fiyatı,Tutar
+15.10.2026,Fiş-001,Kuşbaşı,4,Kg,1200,4800
+15.10.2026,Fiş-001,Süzme Yoğurt,2,Adet,185,370
+15.10.2026,Fiş-001,5kg Kır. Mercimek Duru,8,Adet,350,2800
+15.10.2026,Fiş-001,5kg Pirinç Duru,8,Adet,700,5600
+15.10.2026,Fiş-001,5kg Safir Tuz / Yağ,6,Adet,250,1500
+15.10.2026,Fiş-001,Süt (24'lü),1,Koli,1480,1480
+15.10.2026,Fiş-001,5kg Makarna,4,Adet,320,1280
+15.10.2026,Fiş-001,Üzüm / Un,1,Adet,750,750
+15.10.2026,Fiş-001,Kabak,2,Kg,50,100
+15.10.2026,Fiş-001,Havuç,4,Kg,45,180
+15.10.2026,Fiş-001,Mor Lahana,1,Adet,50,50
+15.10.2026,Fiş-001,Maydanoz,1,Bağ,20,20
+15.10.2026,Fiş-001,Marul,2,Adet,45,90
+15.10.2026,Fiş-001,Domates,2,Kg,50,100
+15.10.2026,Fiş-001,Salatalık,4,Kg,60,240
+15.10.2026,Fiş-001,Patlıcan,6,Kg,50,300
+15.10.2026,Fiş-001,Kapya,3,Kg,50,150
+15.10.2026,Fiş-001,Biber,4,Kg,85,340
+15.10.2026,Fiş-001,Muz,2.2,Kg,125,275
+15.10.2026,Fiş-001,Mandalina,3,Kg,35,105
+15.10.2026,Fiş-001,Elma,3.5,Kg,50,175
+15.10.2026,Fiş-001,Soğan,10,Kg,35,350
+15.10.2026,Fiş-001,Sarımsak,1,Kg,175,175
+15.10.2026,Fiş-001,Patates (42kg),42,Kg,35,1470
+,,,,,HAFTALIK TOPLAM:,22700
+Tarih,Fiş/Fatura No,Malın Cinsi,Miktar,Birim,Birim Fiyatı,Tutar
+26.10.2026,Fiş-001,Yoğurt,2,Adet,750,1500
+26.10.2026,Fiş-001,Tavuk Sote,6,Kg,260,1560
+26.10.2026,Fiş-001,Et,2,Kg,1200,2400
+26.10.2026,Fiş-001,Yeşil Biber,1,Kg,95,95
+26.10.2026,Fiş-001,Havuç,1,Kg,40,40
+26.10.2026,Fiş-001,Et,2,Kg,1200,2400
+26.10.2026,Fiş-001,Kapya,2,Kg,50,100
+26.10.2026,Fiş-001,Yeşil Biber,3,Kg,95,285
+26.10.2026,Fiş-001,Havuç,2,Kg,40,80
+26.10.2026,Fiş-001,Limon,2,Kg,45,90
+26.10.2026,Fiş-001,Lahana,1,Adet,50,50
+26.10.2026,Fiş-001,Marul,2,Adet,50,100
+26.10.2026,Fiş-001,Salatalık,2,Kg,45,90
+26.10.2026,Fiş-001,Maydanoz,1,Bağ,20,20
+26.10.2026,Fiş-001,Muz,3,Kg,130,390
+26.10.2026,Fiş-001,Mandalina,4,Kg,50,200
+26.10.2026,Fiş-001,Yeşillik / Nane,3,Bağ,30,90
+26.10.2026,Fiş-001,Süzme Yoğurt,2,Adet,185,370
+26.10.2026,Fiş-001,Tereyağ / Peynir,3,Kg,850,2550
+26.10.2026,Fiş-001,Kıyma / Et,2,Kg,1200,2400
+26.10.2026,Fiş-001,Yoğurt,1,Adet,750,750
+26.10.2026,Fiş-001,Tavuk,6.5,Kg,260,1690
+26.10.2026,Fiş-001,Karnabahar,8.5,Kg,50,425
+26.10.2026,Fiş-001,Yumurta,1,Koli,140,140
+,,,,,HAFTALIK TOPLAM:,17815
+Tarih,Fiş/Fatura No,Malın Cinsi,Miktar,Birim,Birim Fiyatı,Tutar
+30.10.2026,Fiş-001,Meyve Suyu (Nektar 200ml),81,Adet,17,1377
+30.10.2026,Fiş-001,Yumurta,1,Koli,150,150
+30.10.2026,Fiş-001,10kg Yoğurt,2,Adet,700,1400
+30.10.2026,Fiş-001,Kırmızı Et,4,Kg,1200,4800
+30.10.2026,Fiş-001,Kapya,3,Kg,55,165
+30.10.2026,Fiş-001,Biber,4,Kg,95,380
+30.10.2026,Fiş-001,Kabak,1.5,Kg,60,90
+30.10.2026,Fiş-001,Patlıcan,3,Kg,55,165
+30.10.2026,Fiş-001,Havuç,2,Kg,40,80
+30.10.2026,Fiş-001,Mor Lahana,1,Adet,55,55
+30.10.2026,Fiş-001,Marul,2,Adet,50,100
+30.10.2026,Fiş-001,Salatalık,2,Kg,45,90
+30.10.2026,Fiş-001,Maydanoz,2,Bağ,20,40
+30.10.2026,Fiş-001,Muz,3,Kg,130,390
+30.10.2026,Fiş-001,Elma,4,Kg,40,160
+30.10.2026,Fiş-001,Mandalina,4,Kg,30,120
+,,,,,HAFTALIK TOPLAM:,9562
+Tarih,Fiş/Fatura No,Malın Cinsi,Miktar,Birim,Birim Fiyatı,Tutar
+16.11.2026,Fiş-001,Kırmızı Et,2,Kg,1200,2400
+16.11.2026,Fiş-001,10kg Yoğurt,2,Adet,750,1500
+16.11.2026,Fiş-001,Sıvı Yağ (5 Lt),8,Adet,575,4600
+16.11.2026,Fiş-001,Donuk Patates (Koli),3,Koli,1250,3750
+16.11.2026,Fiş-001,Yufka,2,Paket,130,260
+16.11.2026,Fiş-001,Kırmızı Et,3,Kg,1200,3600
+16.11.2026,Fiş-001,Tavuk But / Pirzola,5,Kg,270,1350
+16.11.2026,Fiş-001,Tereyağ (1kg),1,Kg,750,750
+16.11.2026,Fiş-001,10kg Yoğurt,1,Adet,750,750
+16.11.2026,Fiş-001,Süzme Yoğurt,2,Adet,185,370
+16.11.2026,Fiş-001,Kırmızı Et,2,Kg,1200,2400
+16.11.2026,Fiş-001,Kapya,3,Kg,125,375
+16.11.2026,Fiş-001,Biber,3,Kg,95,285
+16.11.2026,Fiş-001,Patlıcan,8,Kg,60,480
+16.11.2026,Fiş-001,Kabak,2,Kg,60,120
+16.11.2026,Fiş-001,Marul,1,Adet,30,30
+16.11.2026,Fiş-001,Mor Lahana / Havuç,2,Adet,50,100
+16.11.2026,Fiş-001,Salatalık,2,Kg,50,100
+16.11.2026,Fiş-001,Maydanoz,2,Bağ,20,40
+16.11.2026,Fiş-001,Soğan (15kg),15,Kg,25,375
+16.11.2026,Fiş-001,Rende Kaşar,3,Kg,550,1650
+16.11.2026,Fiş-001,Sucuk Torku,3,Kg,320,960
+16.11.2026,Fiş-002,10kg Yoğurt,2,Adet,650,1300
+16.11.2026,Fiş-002,Süzme Yoğurt,2,Adet,185,370
+16.11.2026,Fiş-002,Yumurta,2,Koli,150,300
+16.11.2026,Fiş-002,Donuk Patates,25,Kg,110,2750
+16.11.2026,Fiş-002,Kıyma,2,Kg,1100,2200
+16.11.2026,Fiş-002,Yeşil Biber,4,Kg,105,420
+16.11.2026,Fiş-002,Kapya,3.06,Kg,50,153
+16.11.2026,Fiş-002,Domates,2,Kg,45,90
+16.11.2026,Fiş-002,Salatalık,2,Kg,40,80
+16.11.2026,Fiş-002,Marul,1,Adet,45,45
+16.11.2026,Fiş-002,Mor Lahana,1,Adet,50,50
+16.11.2026,Fiş-002,Havuç,2,Kg,40,80
+16.11.2026,Fiş-002,Krema,8,Adet,75,600
+16.11.2026,Fiş-002,Dilimli Kaşar,6,Adet,165,990
+16.11.2026,Fiş-002,Tereyağ / Peynir,3,Kg,420,1260
+16.11.2026,Fiş-002,Köftelik / Sucuk,4,Kg,475,1900
+16.11.2026,Fiş-002,Lor Peyniri,3,Kg,100,300
+16.11.2026,Fiş-002,Küp Şeker / Konserve,1,Koli,300,300
+16.11.2026,Fiş-002,Un (10kg),4,Adet,125,500
+16.11.2026,Fiş-002,10kg Yoğurt,2,Adet,650,1300
+16.11.2026,Fiş-002,Tavuk Göğüs / Külbastı,6,Kg,250,1500
+16.11.2026,Fiş-002,Kuşbaşı,2,Kg,1200,2400
+16.11.2026,Fiş-002,Sotelik Tavuk,7.5,Kg,250,1875
+16.11.2026,Fiş-002,Süzme Yoğurt,2,Adet,185,370
+16.11.2026,Fiş-002,Nar Ekşisi,1,Adet,190,190
+16.11.2026,Fiş-002,Ekmek,1,Toplu,3900,3900
+,,,,,HAFTALIK TOPLAM:,51468
+""".encode("utf-8")
+
+        # 1. Verify date-grouped parsing: exact 7 date-named invoices totaling 200,763.00 TL
+        parsed_by_date = caf.parse_purchase_invoices_from_excel_or_csv(raw_csv, "giderler.csv", group_mode="date")
+        self.assertEqual(len(parsed_by_date), 7)
+        self.assertEqual([inv["invoice_name"] for inv in parsed_by_date], [
+            "11.09.2026", "25.09.2026", "08.10.2026", "15.10.2026", "26.10.2026", "30.10.2026", "16.11.2026"
+        ])
+        for inv in parsed_by_date:
+            caf.upsert_purchase_invoice(
+                self.connect,
+                invoice_date=inv["invoice_date"],
+                invoice_name=inv["invoice_name"],
+                invoice_no=inv["invoice_no"],
+                supplier_name=inv["supplier_name"],
+                category=inv["category"],
+                items=inv["items"],
+                payment_status=inv["payment_status"],
+            )
+
+        all_invs, all_items = caf.get_purchases_and_items(self.connect, year_month="Tümü")
+        self.assertEqual(len(all_invs), 7)
+        by_name_tot = {inv["invoice_name"]: inv["total_amount"] for inv in all_invs}
+        self.assertAlmostEqual(by_name_tot["11.09.2026"], 41092.0, places=2)
+        self.assertAlmostEqual(by_name_tot["25.09.2026"], 36701.0, places=2)
+        self.assertAlmostEqual(by_name_tot["08.10.2026"], 21425.0, places=2)
+        self.assertAlmostEqual(by_name_tot["15.10.2026"], 22700.0, places=2)
+        self.assertAlmostEqual(by_name_tot["26.10.2026"], 17815.0, places=2)
+        self.assertAlmostEqual(by_name_tot["30.10.2026"], 9562.0, places=2)
+        self.assertAlmostEqual(by_name_tot["16.11.2026"], 51468.0, places=2)
+        self.assertAlmostEqual(sum(inv["total_amount"] for inv in all_invs), 200763.0, places=2)
+
+        # Verify unit 'toplu' normalized on Ekmek, pack conversion on Sıvı Yağ (5 Lt) -> 40 litre & Yoğurt
+        ekmek_it = next(it for it in all_items if it["item_name"] == "Ekmek")
+        self.assertEqual(ekmek_it["unit_type"], "toplu")
+        self.assertEqual(ekmek_it["category"], "Unlu Mamul & Ekmek")
+        sivi_yag_it = next(it for it in all_items if it["item_name"] == "Sıvı Yağ (5 Lt)")
+        self.assertAlmostEqual(sivi_yag_it["net_qty"], 40.0, places=2)
+        self.assertEqual(sivi_yag_it["net_unit"], "litre")
+        self.assertAlmostEqual(sivi_yag_it["net_unit_cost"], 115.0, places=2)
+
+        # Verify Sebze & Meyve item-level filtering returns produce items across mixed invoices
+        _, veg_items = caf.get_purchases_and_items(self.connect, year_month="2026-10", category="Sebze & Meyve")
+        self.assertGreater(len(veg_items), 15)
+        self.assertTrue(all(it["category"] == "Sebze & Meyve" for it in veg_items))
+
+        # 2. Verify analytics: 3 active months, canonical monthly average + tender planning (.xlsx & .docx)
+        an = caf.compute_purchase_analytics(self.connect, year_month="Tümü")
+        self.assertEqual(an["summary"]["active_months"], 3)
+        self.assertAlmostEqual(an["summary"]["total_spend_tl"], 200763.0, places=2)
+        self.assertEqual(len(an["month_category_matrix"]), 3)
+        canon_by_k = {(c["Ana Gıda / İhale Kalemi"], c["Net Birim"]): c for c in an["canonical_summary"]}
+        self.assertIn(("Kırmızı Et (Kıyma / Kuşbaşı)", "kg"), canon_by_k)
+        red_meat = canon_by_k[("Kırmızı Et (Kıyma / Kuşbaşı)", "kg")]
+        # Red meat total = 12.5 + 10.5 + 4.0 + 6.0 + 4.0 + 11.0 = 48.0 kg over 3 months -> 16.0 kg/ay
+        self.assertAlmostEqual(red_meat["Toplam Net Miktar"], 48.0, places=2)
+        self.assertAlmostEqual(red_meat["Aylık Ort. Miktar"], 16.0, places=2)
+
+        # Verify receipt-split mode yields 9 separate receipt invoices with exact same 200,763 TL sum
+        parsed_by_rec = caf.parse_purchase_invoices_from_excel_or_csv(raw_csv, "giderler.csv", group_mode="receipt")
+        self.assertEqual(len(parsed_by_rec), 9)
+        self.assertTrue(any("· Fiş-002" in inv["invoice_name"] for inv in parsed_by_rec))
+
+        plan_12m = caf.build_procurement_and_tender_plan(an, period_months=12.0, qty_margin_pct=10.0)
+        self.assertGreater(plan_12m["summary"]["total_budget_tl"], 700000.0)
+        meat_plan = next(r for r in plan_12m["rows"] if r["Gıda Kalemi / Ürün"] == "Kırmızı Et (Kıyma / Kuşbaşı)")
+        self.assertGreater(meat_plan["12 Aylık Yıllık (Marjlı)"], 200.0)
+
+        xl_plan = caf.build_tender_and_order_plan_excel(plan_12m, "12 Aylık Tam Yıl İhale")
+        wb_tp = openpyxl.load_workbook(io.BytesIO(xl_plan))
+        self.assertEqual(wb_tp.sheetnames, ["Siparis_ve_Ihale_Cetveli", "Kategori_Butce_Ozeti"])
+        docx_plan = caf.build_tender_summary_docx(plan_12m, "12 Aylık Tam Yıl İhale")
+        self.assertIn("Kırmızı Et", _extract_docx_all_text(docx_plan))
+
+        # 3. Verify manual entry UI: date becomes Fatura Adı, entering Qty + Bizden Alınan Tutar calculates Birim Fiyat
+        revir_ui.reset_session()
+        ctx_api = {
+            "connect_db": self.connect,
+            "get_app_settings": persantil.get_app_settings,
+            "save_app_settings": persantil.save_app_settings,
+            "_get_active_gemini_config": persantil._get_active_gemini_config,
+            "mask_kvkk_value": persantil.mask_kvkk_value,
+            "clear_all_data_caches": persantil.clear_all_data_caches,
+            "is_section_visible": persantil.is_section_visible,
+        }
+        purch_tab = lambda: caf._render_tab_purchases_and_expenses(ctx_api, "2026-11", {})
+        out_tab = revir_ui.run_action_headless(purch_tab, {"action": "render"})
+        self.assertNotIn("Çalışma Zamanı Hatası", out_tab["main_html"])
+        self.assertIn("Sipariş Planlayıcı &amp; Yıllık İhale", out_tab["main_html"])
+        self.assertIn("Aylık Ortalama Kullanım", out_tab["main_html"])
+
+        # Enter 3 kg Et with total 3600 TL without touching Birim Fiyat -> auto calculates 1200 TL/kg
+        for mut in (
+            {"op": "cell", "row_kind": "base", "row_id": 0, "col": "Ürün Adı", "val": "Kırmızı Et"},
+            {"op": "cell", "row_kind": "base", "row_id": 0, "col": "Miktar", "val": 3.0},
+            {"op": "cell", "row_kind": "base", "row_id": 0, "col": "Miktar Çeşidi", "val": "kg"},
+            {"op": "cell", "row_kind": "base", "row_id": 0, "col": "Toplam Tutar (₺)", "val": 3600.0},
+        ):
+            revir_ui.run_action_headless(purch_tab, {"action": "data_editor", "key": "caf_inv_items_editor", "value": mut})
+        revir_ui.run_action_headless(purch_tab, {"action": "click", "key": "caf_inv_btn_save_inv"})
+        all_after, _ = caf.get_purchases_and_items(self.connect, year_month="Tümü")
+        newest = all_after[0]
+        self.assertAlmostEqual(newest["total_amount"], 3600.0, places=2)
+        self.assertAlmostEqual(newest["items"][0]["unit_price"], 1200.0, places=2)
+        self.assertEqual(newest["items"][0]["category"], "Et / Tavuk / Balık")
+
 
 if __name__ == "__main__":
     unittest.main()

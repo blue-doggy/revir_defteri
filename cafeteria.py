@@ -80,8 +80,189 @@ PURCHASE_CATEGORIES: list[str] = [
 ]
 
 PURCHASE_UNITS: list[str] = [
-	"kg", "g", "litre", "ml", "adet", "koli", "paket", "bağ", "teneke", "çuval",
+	"kg", "g", "litre", "ml", "adet", "koli", "paket", "bağ", "teneke", "çuval", "toplu",
 ]
+
+_PURCHASE_UNIT_MAP: dict[str, str] = {
+	"kg": "kg",
+	"kilo": "kg",
+	"kilogram": "kg",
+	"g": "g",
+	"gr": "g",
+	"gram": "g",
+	"l": "litre",
+	"lt": "litre",
+	"litre": "litre",
+	"ml": "ml",
+	"adet": "adet",
+	"ad": "adet",
+	"koli": "koli",
+	"paket": "paket",
+	"pkt": "paket",
+	"bag": "bağ",
+	"bağ": "bağ",
+	"demet": "bağ",
+	"teneke": "teneke",
+	"cuval": "çuval",
+	"çuval": "çuval",
+	"toplu": "toplu",
+}
+
+
+def _normalize_purchase_unit(raw_u: Any) -> str:
+	u_s = _tr_fold(str(raw_u or "").strip())
+	return _PURCHASE_UNIT_MAP.get(u_s, str(raw_u or "").strip().lower() or "kg")
+
+
+def infer_purchase_category(item_name: str, fallback: str = "Diğer") -> str:
+	"""Ürün/malzeme adından Türkçe kategori grubunu (Sebze & Meyve, Et/Tavuk, Yağ & Baharat vb.) otomatik tahmin eder."""
+	nf = _tr_fold(item_name)
+	if not nf:
+		return fallback if fallback in PURCHASE_CATEGORIES else "Diğer"
+
+	# Bileşik ve istisnai ifadeler önce kontrol edilir (ör. 'sarımsak tozu', 'domates salçası', 'meyve suyu')
+	compound_rules: list[tuple[tuple[str, ...], str]] = [
+		(("meyve suyu", "nektar", "bardak su", "madensuyu", "maden suyu", "icme suyu", "gazoz", "icecek"), "İçecek"),
+		(("salca", "salca", "ketcap", "mayonez", "sirke", "soya sos", "nar eksi", "aci sos", "sarimsak tozu", "zerdecal", "sumak", "susam", "baharat", "kimyon", "karabiber", "pul biber", "kekik", "nane kurusu", "zeytinyag", "aycicek yag", "sivi yag", "tuz"), "Yağ & Baharat"),
+		(("tavuk", "baget", "bonfile", "pirzola", "gogus", "kulbasti", "sotelik", "kiyma", "kusbasi", "kirmizi et", "dana", "kuzu", "sucuk", "koftelik", "kavurma", "salam", "sosis", "balik", "hamsi", "alabalik"), "Et / Tavuk / Balık"),
+		(("suzme yogurt", "cebel suzme", "yogurt", "sut", "tereyag", "teremyag", "kasar", "peynir", "lor", "krema", "kaymak", "yumurta", "zeytin", "recel", "bal", "tahin", "pekmez"), "Süt & Kahvaltılık"),
+		(("tarhana", "vanilin", "kabartma", "kakao", "pirinc", "bulgur", "makarna", "sehriye", "mercimek", "nohut", "fasulye", "barbunya", "konserve", "garnitur", "donuk misir", "kozlenmis", "seker", "findik", "ceviz", "badem", "kuru uzum", "un "), "Bakliyat & Kuru Gıda"),
+		(("ekmek", "yufka", "simit", "pogaca", "borek", "lavas", "galeta"), "Unlu Mamul & Ekmek"),
+		(("deterjan", "camasir", "bulasik", "pecete", "havlu kagit", "cop poset", "strech", "folyo", "eldiven", "sabun", "temizlik"), "Temizlik & Mutfak Sarf"),
+		(("patates", "donuk patates", "sogan", "sarimsak", "domates", "salatalik", "biber", "kapya", "patlican", "kabak", "havuc", "ispanak", "marul", "lahana", "karnabahar", "brokoli", "maydanoz", "nane", "yesillik", "roka", "dereotu", "limon", "elma", "muz", "armut", "mandalina", "portakal", "karpuz", "kavun", "cilek", "kiraz", "erik", "uzum", "ayva", "nar", "bezelye"), "Sebze & Meyve"),
+	]
+	padded = f" {nf} "
+	for keys, cat in compound_rules:
+		for kw in keys:
+			if kw == "un ":
+				if padded.startswith(" un ") or " un " in padded or nf == "un" or nf.endswith(" un") or "(un" in nf or "/un" in nf or "/ un" in nf:
+					return cat
+			elif kw in nf:
+				return cat
+	# Tekil 'et' kelimesi (sadece tam kelime olarak)
+	if re.search(r"\bet\b", nf):
+		return "Et / Tavuk / Balık"
+	if nf in {"un", "un (10kg)"} or nf.startswith("un ("):
+		return "Bakliyat & Kuru Gıda"
+	return fallback if fallback in PURCHASE_CATEGORIES else "Diğer"
+
+
+def infer_canonical_product_and_pack(
+	item_name: str,
+	quantity: float,
+	unit_type: str,
+) -> tuple[str, float, str]:
+	"""
+	Ürün adını standart ana gıda/ihale grubuna eşler ve adındaki ambalaj ölçüsünden (5 Lt, 10kg, 500gr vb.)
+	net tüketim miktarı + birimi hesaplar.
+	"""
+	raw_nm = str(item_name or "").strip()
+	nf = _tr_fold(raw_nm)
+	qty_v = max(0.0, _safe_float(quantity, 0.0))
+	u_norm = _normalize_purchase_unit(unit_type)
+
+	# 1. Standart Ana Gıda / İhale Kalemi Eşleştirmesi
+	canonical = ""
+	canon_rules: list[tuple[tuple[str, ...], str]] = [
+		(("kirmizi et", "kusbasi", "kiyma", "dana", "kuzu"), "Kırmızı Et (Kıyma / Kuşbaşı)"),
+		(("toros bonfile", "tavuk", "baget", "kulbasti", "sotelik", "pirzola", "gogus"), "Beyaz Et (Tavuk)"),
+		(("sucuk", "koftelik"), "Şarküteri / Sucuk"),
+		(("aycicek", "sivi yag"), "Sıvı Yağ (Ayçiçek)"),
+		(("zeytinyag",), "Zeytinyağı"),
+		(("tereyag",), "Tereyağı"),
+		(("teremyag",), "Margarin (Teremyağ)"),
+		(("yogurt", "cebel suzme", "suzme"), "Yoğurt & Süzme Yoğurt"),
+		(("sut",), "Süt"),
+		(("kasar", "peynir", "lor"), "Peynir & Kaşar"),
+		(("yumurta",), "Yumurta"),
+		(("pirinc",), "Pirinç"),
+		(("bulgur",), "Bulgur"),
+		(("makarna", "sehriye"), "Makarna & Şehriye"),
+		(("mercimek",), "Kırmızı Mercimek"),
+		(("salca",), "Domates & Biber Salçası"),
+		(("seker",), "Şeker"),
+		(("ekmek",), "Ekmek"),
+		(("yufka",), "Yufka"),
+		(("donuk patates",), "Donuk Patates"),
+		(("patates",), "Patates (Taze)"),
+		(("sogan",), "Soğan"),
+		(("domates",), "Domates"),
+		(("kapya", "dolma biber", "yesil biber"), "Biber Çeşitleri"),
+		(("salatalik",), "Salatalık"),
+		(("havuc",), "Havuç"),
+		(("patlican",), "Patlıcan"),
+		(("kabak",), "Kabak"),
+		(("marul",), "Marul"),
+		(("mor lahana", "lahana"), "Lahana / Mor Lahana"),
+		(("maydanoz",), "Maydanoz"),
+		(("limon",), "Limon"),
+		(("muz",), "Muz"),
+		(("elma",), "Elma"),
+		(("mandalina",), "Mandalina"),
+		(("portakal",), "Portakal"),
+		(("armut",), "Armut"),
+		(("karpuz",), "Karpuz"),
+		(("bardak su",), "Bardak Su"),
+		(("meyve suyu",), "Meyve Suyu"),
+	]
+	# "Süt Mısır" / "Közlenmiş Biber" istisnalarını önden ayır
+	if "donuk misir" in nf:
+		canonical = "Donuk Mısır"
+	elif "kozlenmis" in nf:
+		canonical = "Közlenmiş Biber"
+	elif "sarimsak tozu" in nf:
+		canonical = "Sarımsak Tozu"
+	elif "biber" in nf and "salca" not in nf and "kozlenmis" not in nf:
+		canonical = "Biber Çeşitleri"
+	else:
+		for keys, label in canon_rules:
+			if any(k in nf for k in keys):
+				canonical = label
+				break
+	if not canonical:
+		if re.search(r"\bet\b", nf):
+			canonical = "Kırmızı Et (Kıyma / Kuşbaşı)"
+		elif re.search(r"\bun\b", nf):
+			canonical = "Un"
+		else:
+			# Ambalaj bilgisini temizleyerek sade ürün adı üret
+			cleaned = re.sub(r"\(\s*\d+(?:[.,]\d+)?\s*(?:kg|gr|g|lt|litre|l|ml|'lü|'lu|'li)\s*\)", "", raw_nm, flags=re.I)
+			cleaned = re.sub(r"\b\d+(?:[.,]\d+)?\s*(?:kg|gr|g|lt|litre|l|ml)\b", "", cleaned, flags=re.I)
+			canonical = re.sub(r"\s+", " ", cleaned).strip(" /-,") or raw_nm
+
+	# 2. Ambalaj / Net Ölçü Çıkarımı
+	if u_norm == "kg":
+		return canonical, round(qty_v, 3), "kg"
+	if u_norm == "g":
+		return canonical, round(qty_v / 1000.0, 3), "kg"
+	if u_norm == "litre":
+		return canonical, round(qty_v, 3), "litre"
+	if u_norm == "ml":
+		return canonical, round(qty_v / 1000.0, 3), "litre"
+
+	# Adet/Koli/Paket içinde açık ağırlık veya hacim varsa (örn. '5 Lt', '10kg', '500gr', '1lt', '2.5kg', '200ml')
+	m_pack = re.search(r"(\d+(?:[.,]\d+)?)\s*(kg|kilo|gr|g|litre|lt|ml|l)\b", nf)
+	if m_pack:
+		val = _safe_float(m_pack.group(1), 0.0)
+		pu = m_pack.group(2)
+		if val > 0:
+			if pu in ("kg", "kilo"):
+				return canonical, round(qty_v * val, 3), "kg"
+			if pu in ("gr", "g"):
+				return canonical, round((qty_v * val) / 1000.0, 3), "kg"
+			if pu in ("litre", "lt", "l"):
+				return canonical, round(qty_v * val, 3), "litre"
+			if pu == "ml":
+				return canonical, round((qty_v * val) / 1000.0, 3), "litre"
+
+	# Çoklu koli/paket sayısı (ör. "Süt (24'lü)", "15'li Vanilin")
+	m_multi = re.search(r"(\d+)\s*['’]?\s*(?:li|lu|lü)\b", nf)
+	if m_multi and u_norm in ("koli", "paket", "adet"):
+		cnt_p = int(m_multi.group(1))
+		if cnt_p > 1 and "sut" in nf and u_norm == "koli":
+			return canonical, round(qty_v * cnt_p, 3), "adet"
+
+	return canonical, round(qty_v, 3), u_norm
 
 DINER_ROLE_TYPES: list[str] = [
 	"Öğrenci",
@@ -440,6 +621,16 @@ def ensure_cafeteria_tables(connection: sqlite3.Connection) -> None:
 	fee_cols = {row["name"] for row in connection.execute("PRAGMA table_info(cafeteria_monthly_fees)")}
 	if "carry_forward_debt" not in fee_cols:
 		connection.execute("ALTER TABLE cafeteria_monthly_fees ADD COLUMN carry_forward_debt REAL NOT NULL DEFAULT 0.0")
+	purch_cols = {row["name"] for row in connection.execute("PRAGMA table_info(cafeteria_purchases)")}
+	if "invoice_name" not in purch_cols:
+		connection.execute("ALTER TABLE cafeteria_purchases ADD COLUMN invoice_name TEXT DEFAULT ''")
+	pitem_cols = {row["name"] for row in connection.execute("PRAGMA table_info(cafeteria_purchase_items)")}
+	if "canonical_name" not in pitem_cols:
+		connection.execute("ALTER TABLE cafeteria_purchase_items ADD COLUMN canonical_name TEXT DEFAULT ''")
+	if "net_qty" not in pitem_cols:
+		connection.execute("ALTER TABLE cafeteria_purchase_items ADD COLUMN net_qty REAL NOT NULL DEFAULT 0.0")
+	if "net_unit" not in pitem_cols:
+		connection.execute("ALTER TABLE cafeteria_purchase_items ADD COLUMN net_unit TEXT DEFAULT ''")
 
 
 # ==============================================================================
@@ -2256,11 +2447,19 @@ def build_menu_a4_docx(
 # 5. BÖLÜM 3: GELEN ÜRÜN, FATURA & GİDER MUHASEBESİ
 # ==============================================================================
 
+def _format_tr_date(iso_s: Any) -> str:
+	s = str(iso_s or "").strip()[:10]
+	if re.match(r"^\d{4}-\d{2}-\d{2}$", s):
+		return f"{s[8:10]}.{s[5:7]}.{s[:4]}"
+	return s
+
+
 def upsert_purchase_invoice(
 	connect_db_fn: Callable[[], sqlite3.Connection],
 	*,
 	purchase_id: int | None = None,
 	invoice_date: str,
+	invoice_name: str = "",
 	invoice_no: str = "",
 	supplier_name: str = "",
 	category: str = "Diğer",
@@ -2269,8 +2468,9 @@ def upsert_purchase_invoice(
 	document_name: str = "",
 	notes: str = "",
 ) -> int:
-	"""Fatura başlığını ve alt ürün kalemlerini kaydeder; aylık/toplam gider hesaplamalarını tutarlı kılar."""
+	"""Fatura başlığını (fatura adı = tarih veya özel ad) ve alt ürün kalemlerini kaydeder; aylık/toplam gider hesaplamalarını tutarlı kılar."""
 	inv_dt = str(invoice_date or date.today().isoformat()).strip()[:10]
+	inv_nm = str(invoice_name or "").strip() or _format_tr_date(inv_dt)
 	ym = inv_dt[:7]
 	clean_items: list[dict[str, Any]] = []
 	subtotal = 0.0
@@ -2278,25 +2478,33 @@ def upsert_purchase_invoice(
 	for it in (items or []):
 		if not isinstance(it, dict):
 			continue
-		nm = str(it.get("item_name") or it.get("Ürün Adı") or "").strip()
+		nm = str(it.get("item_name") or it.get("Malın Cinsi") or it.get("Ürün Adı") or "").strip()
 		if not nm:
 			continue
 		qty = max(0.0, _safe_float(it.get("quantity", it.get("Miktar")), 1.0))
-		unit = str(it.get("unit_type") or it.get("Birim") or it.get("Miktar Çeşidi") or it.get("Miktar Cinsi") or "kg").strip() or "kg"
-		u_price = max(0.0, _safe_float(it.get("unit_price", it.get("Birim Fiyat (₺)")), 0.0))
+		unit = _normalize_purchase_unit(
+			it.get("unit_type") or it.get("Birim") or it.get("Miktar Çeşidi") or it.get("Miktar Cinsi") or "kg"
+		)
+		u_price = max(0.0, _safe_float(it.get("unit_price", it.get("Birim Fiyat (₺)", it.get("Birim Fiyatı"))), 0.0))
 		v_rate = max(0.0, _safe_float(it.get("vat_rate", it.get("KDV (%)")), 0.0))
 		explicit_line = _safe_float(
-			it.get("line_total", it.get("Tutar (₺)", it.get("Toplam Tutar (₺)", -1.0))),
+			it.get("line_total", it.get("Tutar", it.get("Tutar (₺)", it.get("Toplam Tutar (₺)", -1.0)))),
 			-1.0,
 		)
 		base_line = qty * u_price
-		if explicit_line > 0 and u_price <= 0:
-			line_t = round(explicit_line, 2)
-			base_est = line_t / (1.0 + v_rate / 100.0) if v_rate > 0 else line_t
-			if qty > 0:
-				u_price = base_est / qty
-			subtotal += base_est
-			vat_tot += max(0.0, line_t - base_est)
+		if explicit_line >= 0 and (u_price <= 0 or (v_rate == 0 and abs(explicit_line - base_line) > 0.01) or explicit_line > 0):
+			if u_price <= 0 or abs(explicit_line - base_line) > 0.05:
+				line_t = round(explicit_line, 2)
+				base_est = line_t / (1.0 + v_rate / 100.0) if v_rate > 0 else line_t
+				if qty > 0 and u_price <= 0:
+					u_price = base_est / qty
+				subtotal += base_est
+				vat_tot += max(0.0, line_t - base_est)
+			else:
+				v_amt = base_line * (v_rate / 100.0)
+				line_t = round(base_line + v_amt, 2)
+				subtotal += base_line
+				vat_tot += v_amt
 		elif base_line > 0:
 			v_amt = base_line * (v_rate / 100.0)
 			line_t = round(base_line + v_amt, 2)
@@ -2311,9 +2519,24 @@ def upsert_purchase_invoice(
 			vat_tot += max(0.0, line_t - base_est)
 		else:
 			line_t = 0.0
+
+		raw_cat = str(it.get("category") or it.get("Kategori") or "").strip()
+		if raw_cat in PURCHASE_CATEGORIES and raw_cat != "Diğer":
+			item_cat = raw_cat
+		else:
+			item_cat = infer_purchase_category(nm, fallback=raw_cat or category or "Diğer")
+
+		canon_explicit = str(it.get("canonical_name") or "").strip()
+		auto_canon, auto_nq, auto_nu = infer_canonical_product_and_pack(nm, qty, unit)
+		canon_nm = canon_explicit or auto_canon
+		net_q = _safe_float(it.get("net_qty"), 0.0)
+		net_u = str(it.get("net_unit") or "").strip()
+		if net_q <= 0 or not net_u:
+			net_q, net_u = auto_nq, auto_nu
+
 		clean_items.append({
 			"item_name": nm,
-			"category": str(it.get("category") or it.get("Kategori") or category or "Diğer").strip(),
+			"category": item_cat,
 			"quantity": round(qty, 3),
 			"unit_type": unit,
 			"unit_price": round(u_price, 2),
@@ -2321,7 +2544,21 @@ def upsert_purchase_invoice(
 			"line_total": line_t,
 			"expiry_date": str(it.get("expiry_date") or it.get("SKT") or it.get("SKT (Ops.)") or "").strip()[:10],
 			"notes": str(it.get("notes") or it.get("Not") or "").strip(),
+			"canonical_name": canon_nm,
+			"net_qty": round(net_q, 3),
+			"net_unit": net_u,
 		})
+
+	# Fatura kategorisi 'Diğer' veya 'Otomatik' ise kalem harcamalarına göre akıllı ata
+	hdr_cat = str(category or "").strip()
+	if (not hdr_cat or hdr_cat in ("Diğer", "Otomatik")) and clean_items:
+		cat_totals: dict[str, float] = {}
+		for ci in clean_items:
+			cat_totals[ci["category"]] = cat_totals.get(ci["category"], 0.0) + max(ci["line_total"], 0.01)
+		if cat_totals:
+			hdr_cat = max(cat_totals.items(), key=lambda kv: kv[1])[0]
+	if hdr_cat not in PURCHASE_CATEGORIES:
+		hdr_cat = "Diğer"
 
 	tot_amt = round(subtotal + vat_tot, 2)
 	subtotal = round(subtotal, 2)
@@ -2334,34 +2571,39 @@ def upsert_purchase_invoice(
 			pid = int(purchase_id)
 			conn.execute(
 				"""UPDATE cafeteria_purchases
-				   SET invoice_date=?, year_month=?, invoice_no=?, supplier_name=?, category=?,
+				   SET invoice_date=?, year_month=?, invoice_name=?, invoice_no=?, supplier_name=?, category=?,
 				       subtotal_amount=?, vat_amount=?, total_amount=?, payment_status=?, document_name=?, notes=?
 				   WHERE id=?""",
-				(inv_dt, ym, invoice_no.strip(), supplier_name.strip(), category, subtotal, vat_tot, tot_amt, payment_status, document_name, notes.strip(), pid),
+				(inv_dt, ym, inv_nm, invoice_no.strip(), supplier_name.strip(), hdr_cat, subtotal, vat_tot, tot_amt, payment_status, document_name, notes.strip(), pid),
 			)
 			conn.execute("DELETE FROM cafeteria_purchase_items WHERE purchase_id=?", (pid,))
 		else:
 			cur = conn.execute(
 				"""INSERT INTO cafeteria_purchases(
-					invoice_date, year_month, invoice_no, supplier_name, category,
+					invoice_date, year_month, invoice_name, invoice_no, supplier_name, category,
 					subtotal_amount, vat_amount, total_amount, payment_status, document_name, notes, created_at
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-				(inv_dt, ym, invoice_no.strip(), supplier_name.strip(), category, subtotal, vat_tot, tot_amt, payment_status, document_name, notes.strip(), now_iso),
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+				(inv_dt, ym, inv_nm, invoice_no.strip(), supplier_name.strip(), hdr_cat, subtotal, vat_tot, tot_amt, payment_status, document_name, notes.strip(), now_iso),
 			)
 			pid = int(cur.lastrowid)
 
 		for ci in clean_items:
 			conn.execute(
 				"""INSERT INTO cafeteria_purchase_items(
-					purchase_id, item_name, category, quantity, unit_type, unit_price, vat_rate, line_total, expiry_date, notes
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-				(pid, ci["item_name"], ci["category"], ci["quantity"], ci["unit_type"], ci["unit_price"], ci["vat_rate"], ci["line_total"], ci["expiry_date"], ci["notes"]),
+					purchase_id, item_name, category, quantity, unit_type, unit_price, vat_rate, line_total, expiry_date, notes,
+					canonical_name, net_qty, net_unit
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+				(
+					pid, ci["item_name"], ci["category"], ci["quantity"], ci["unit_type"], ci["unit_price"],
+					ci["vat_rate"], ci["line_total"], ci["expiry_date"], ci["notes"],
+					ci["canonical_name"], ci["net_qty"], ci["net_unit"],
+				),
 			)
 	return pid
 
 
 def _enrich_purchase_item_unit_cost(it: dict[str, Any]) -> dict[str, Any]:
-	"""Fatura kalemine KDV dahil birim maliyet (₺/birim) bilgisini ekler."""
+	"""Fatura kalemine KDV dahil birim maliyet, ana gıda grubu ve net tüketim ölçüsünü ekler."""
 	q_v = max(0.0, _safe_float(it.get("quantity"), 0.0))
 	up_v = max(0.0, _safe_float(it.get("unit_price"), 0.0))
 	vr_v = max(0.0, _safe_float(it.get("vat_rate"), 0.0))
@@ -2371,6 +2613,16 @@ def _enrich_purchase_item_unit_cost(it: dict[str, Any]) -> dict[str, Any]:
 		it["line_total"] = lt_v
 	u_cost = round(lt_v / q_v, 2) if q_v > 0 else round(up_v * (1.0 + vr_v / 100.0), 2)
 	it["unit_cost"] = u_cost
+	if not str(it.get("canonical_name") or "").strip() or _safe_float(it.get("net_qty"), 0.0) <= 0 or not str(it.get("net_unit") or "").strip():
+		c_nm, n_q, n_u = infer_canonical_product_and_pack(str(it.get("item_name") or ""), q_v, str(it.get("unit_type") or "kg"))
+		if not str(it.get("canonical_name") or "").strip():
+			it["canonical_name"] = c_nm
+		if _safe_float(it.get("net_qty"), 0.0) <= 0:
+			it["net_qty"] = n_q
+		if not str(it.get("net_unit") or "").strip():
+			it["net_unit"] = n_u
+	nq_val = _safe_float(it.get("net_qty"), 0.0)
+	it["net_unit_cost"] = round(lt_v / nq_val, 2) if nq_val > 0 else u_cost
 	return it
 
 
@@ -2384,7 +2636,7 @@ def get_purchases_and_items(
 	payment_status: str | None = None,
 	query_text: str = "",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-	"""Fatura tarihine göre sıralı faturalar ve alt kalem listesini (birim maliyet dahil) döndürür."""
+	"""Fatura tarihine göre sıralı faturalar ve alt kalem listesini (birim maliyet & fatura adı dahil) döndürür."""
 	where_bits = ["1=1"]
 	params: list[Any] = []
 	if year_month and year_month != "Tümü":
@@ -2396,28 +2648,36 @@ def get_purchases_and_items(
 	if end_date:
 		where_bits.append("p.invoice_date <= ?")
 		params.append(str(end_date)[:10])
-	if category and category != "Tümü":
-		where_bits.append("p.category = ?")
-		params.append(category)
 	if payment_status and payment_status != "Tümü":
 		where_bits.append("p.payment_status = ?")
 		params.append(payment_status)
 
 	w_sql = " AND ".join(where_bits)
+	has_cat_flt = bool(category and category != "Tümü")
 	with connect_db_fn() as conn:
 		ensure_cafeteria_tables(conn)
 		p_rows = conn.execute(
 			f"SELECT * FROM cafeteria_purchases p WHERE {w_sql} ORDER BY p.invoice_date DESC, p.id DESC",
 			params,
 		).fetchall()
-		i_rows = conn.execute(
-			f"""SELECT pi.*, p.invoice_date, p.invoice_no, p.supplier_name
-				FROM cafeteria_purchase_items pi
-				JOIN cafeteria_purchases p ON p.id = pi.purchase_id
-				WHERE {w_sql}
-				ORDER BY p.invoice_date DESC, pi.id DESC""",
-			params,
-		).fetchall()
+		if has_cat_flt:
+			i_rows = conn.execute(
+				f"""SELECT pi.*, p.invoice_date, p.invoice_name, p.invoice_no, p.supplier_name
+					FROM cafeteria_purchase_items pi
+					JOIN cafeteria_purchases p ON p.id = pi.purchase_id
+					WHERE {w_sql} AND pi.category = ?
+					ORDER BY p.invoice_date DESC, pi.id DESC""",
+				[*params, category],
+			).fetchall()
+		else:
+			i_rows = conn.execute(
+				f"""SELECT pi.*, p.invoice_date, p.invoice_name, p.invoice_no, p.supplier_name
+					FROM cafeteria_purchase_items pi
+					JOIN cafeteria_purchases p ON p.id = pi.purchase_id
+					WHERE {w_sql}
+					ORDER BY p.invoice_date DESC, pi.id DESC""",
+				params,
+			).fetchall()
 
 	purchases = [dict(r) for r in p_rows]
 	items = [_enrich_purchase_item_unit_cost(dict(r)) for r in i_rows]
@@ -2425,20 +2685,32 @@ def get_purchases_and_items(
 	for it in items:
 		all_items_by_pid.setdefault(int(it["purchase_id"]), []).append(it)
 
+	if has_cat_flt:
+		cat_pids = set(all_items_by_pid.keys())
+		purchases = [pr for pr in purchases if pr["id"] in cat_pids or pr.get("category") == category]
+
 	qf = _tr_fold(query_text)
 	if qf:
 		items = [
 			it for it in items
-			if qf in _tr_fold(it.get("item_name")) or qf in _tr_fold(it.get("supplier_name")) or qf in _tr_fold(it.get("invoice_no"))
+			if qf in _tr_fold(it.get("item_name"))
+			or qf in _tr_fold(it.get("canonical_name"))
+			or qf in _tr_fold(it.get("supplier_name"))
+			or qf in _tr_fold(it.get("invoice_no"))
+			or qf in _tr_fold(it.get("invoice_name"))
 		]
 		matching_pids = {it["purchase_id"] for it in items}
 		purchases = [
 			pr for pr in purchases
-			if pr["id"] in matching_pids or qf in _tr_fold(pr.get("supplier_name")) or qf in _tr_fold(pr.get("invoice_no"))
+			if pr["id"] in matching_pids
+			or qf in _tr_fold(pr.get("supplier_name"))
+			or qf in _tr_fold(pr.get("invoice_no"))
+			or qf in _tr_fold(pr.get("invoice_name"))
 		]
 
 	for pr in purchases:
 		pid_i = int(pr["id"])
+		pr["invoice_name"] = str(pr.get("invoice_name") or "").strip() or _format_tr_date(pr.get("invoice_date"))
 		pr_items = sorted(all_items_by_pid.get(pid_i, []), key=lambda x: int(x.get("id") or 0))
 		pr["items"] = pr_items
 		pr["item_count"] = len(pr_items)
@@ -2508,6 +2780,7 @@ def get_purchase_by_id(connect_db_fn: Callable[[], sqlite3.Connection], purchase
 		if not p:
 			return None
 		d = dict(p)
+		d["invoice_name"] = str(d.get("invoice_name") or "").strip() or _format_tr_date(d.get("invoice_date"))
 		d["items"] = [
 			_enrich_purchase_item_unit_cost(dict(r))
 			for r in conn.execute("SELECT * FROM cafeteria_purchase_items WHERE purchase_id=? ORDER BY id ASC", (int(purchase_id),)).fetchall()
@@ -2787,6 +3060,8 @@ PURCHASE_STAT_VIEWS: list[str] = [
 	"📅 Aylık Harcama & Gider Trendi",
 	"📈 Ürün Birim Fiyat Değişimi (Enflasyon)",
 	"🔎 Seçili Ürün Alım & Fiyat Geçmişi",
+	"📆 Aylık Ortalama Kullanım & Ana Gıda İstatistiği",
+	"📋 Sipariş Planlayıcı & Yıllık İhale Miktar Tahmini",
 ]
 
 
@@ -2800,7 +3075,7 @@ def compute_purchase_analytics(
 	query_text: str = "",
 	product_name: str = "",
 ) -> dict[str, Any]:
-	"""Fatura ve kalem verilerinden seçilebilir ürün, kategori, tedarikçi, aylık trend ve birim fiyat istatistiklerini hesaplar."""
+	"""Fatura ve kalem verilerinden seçilebilir ürün, kategori, ana gıda grubu, aylık ortalama tüketim ve fiyat istatistiklerini hesaplar."""
 	purchases, items = get_purchases_and_items(
 		connect_db_fn,
 		year_month=year_month,
@@ -2818,9 +3093,19 @@ def compute_purchase_analytics(
 	inv_cnt = len(purchases)
 	avg_inv_tl = round(total_spend / inv_cnt, 2) if inv_cnt > 0 else 0.0
 
-	# 1. Ürün Bazlı Gruplama
+	active_months_set = {
+		str(pr.get("year_month") or str(pr.get("invoice_date") or "")[:7])[:7]
+		for pr in purchases
+		if str(pr.get("year_month") or pr.get("invoice_date") or "").strip()
+	}
+	active_months_n = max(1, len(active_months_set))
+	inv_dates = sorted(str(pr.get("invoice_date") or "")[:10] for pr in purchases if pr.get("invoice_date"))
+
+	# 1. Ürün Bazlı + Ana Gıda Grubu (İhale/Tüketim) + Ay×Kategori Matrisi Gruplama
 	prod_groups: dict[tuple[str, str], dict[str, Any]] = {}
+	canon_groups: dict[tuple[str, str], dict[str, Any]] = {}
 	cat_groups: dict[str, dict[str, Any]] = {}
+	month_cat_spend: dict[str, dict[str, float]] = {}
 	sup_groups: dict[str, dict[str, Any]] = {}
 	month_groups: dict[str, dict[str, Any]] = {}
 	inf_groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -2830,14 +3115,23 @@ def compute_purchase_analytics(
 		nm = str(it.get("item_name") or "").strip()
 		if not nm:
 			continue
-		u_tp = str(it.get("unit_type") or "kg").strip() or "kg"
-		cat_s = str(it.get("category") or "Diğer").strip() or "Diğer"
+		u_tp = _normalize_purchase_unit(it.get("unit_type") or "kg")
+		cat_s = str(it.get("category") or "").strip()
+		if cat_s not in PURCHASE_CATEGORIES or cat_s == "Diğer":
+			cat_s = infer_purchase_category(nm, fallback=cat_s or "Diğer")
 		qty = _safe_float(it.get("quantity"), 0.0)
 		u_pr = _safe_float(it.get("unit_price"), 0.0)
 		l_tot = _safe_float(it.get("line_total"), 0.0)
 		u_cost = _safe_float(it.get("unit_cost"), round(l_tot / qty, 2) if qty > 0 else u_pr)
+		c_nm = str(it.get("canonical_name") or "").strip()
+		n_qty = _safe_float(it.get("net_qty"), 0.0)
+		n_unit = str(it.get("net_unit") or "").strip()
+		if not c_nm or n_qty <= 0 or not n_unit:
+			c_nm, n_qty, n_unit = infer_canonical_product_and_pack(nm, qty, u_tp)
+		n_u_cost = round(l_tot / n_qty, 2) if (n_qty > 0 and l_tot > 0) else u_cost
 		pid = int(it.get("purchase_id") or 0)
 		inv_dt = str(it.get("invoice_date") or "")[:10]
+		ym_it = inv_dt[:7]
 		total_items_spend += l_tot
 
 		pk = (_tr_fold(nm), _tr_fold(u_tp))
@@ -2873,11 +3167,41 @@ def compute_purchase_analytics(
 			if u_cost > 0:
 				pg["latest_cost"] = u_cost
 
+		ck = (_tr_fold(c_nm), _tr_fold(n_unit))
+		if ck not in canon_groups:
+			canon_groups[ck] = {
+				"canonical_name": c_nm,
+				"cat_spend": {},
+				"net_unit": n_unit,
+				"pids": set(),
+				"months": set(),
+				"total_net_qty": 0.0,
+				"total_spend": 0.0,
+				"latest_date": inv_dt,
+				"latest_net_cost": n_u_cost,
+				"raw_names": set(),
+			}
+		cg = canon_groups[ck]
+		cg["pids"].add(pid)
+		if ym_it:
+			cg["months"].add(ym_it)
+		cg["total_net_qty"] += n_qty
+		cg["total_spend"] += l_tot
+		cg["cat_spend"][cat_s] = cg["cat_spend"].get(cat_s, 0.0) + max(l_tot, 0.01)
+		cg["raw_names"].add(nm)
+		if inv_dt >= cg["latest_date"] and n_u_cost > 0:
+			cg["latest_date"] = inv_dt
+			cg["latest_net_cost"] = n_u_cost
+
 		if cat_s not in cat_groups:
 			cat_groups[cat_s] = {"count": 0, "products": set(), "spend": 0.0}
 		cat_groups[cat_s]["count"] += 1
 		cat_groups[cat_s]["products"].add(_tr_fold(nm))
 		cat_groups[cat_s]["spend"] += l_tot
+
+		if ym_it:
+			month_cat_spend.setdefault(ym_it, {})
+			month_cat_spend[ym_it][cat_s] = month_cat_spend[ym_it].get(cat_s, 0.0) + l_tot
 
 	product_summary: list[dict[str, Any]] = []
 	for pg in prod_groups.values():
@@ -2893,6 +3217,7 @@ def compute_purchase_analytics(
 			"Birim": pg["unit_type"],
 			"Alım Sayısı": len(pg["pids"]),
 			"Toplam Miktar": round(tq, 2),
+			"Aylık Ort. Miktar": round(tq / active_months_n, 2),
 			"Ort. Birim Fiyat (₺)": avg_p,
 			"Ort. Birim Maliyet (₺)": avg_cost,
 			"Son Birim Maliyet (₺)": round(pg["latest_cost"], 2),
@@ -2904,17 +3229,58 @@ def compute_purchase_analytics(
 		})
 	product_summary.sort(key=lambda x: (-x["Toplam Harcama (₺)"], -x["Alım Sayısı"], x["Ürün Adı"]))
 
+	canonical_summary: list[dict[str, Any]] = []
+	for cg in canon_groups.values():
+		tq_n = cg["total_net_qty"]
+		ts_n = round(cg["total_spend"], 2)
+		m_avg_qty = round(tq_n / active_months_n, 2)
+		w_avg_qty = round(m_avg_qty / 4.33, 2)
+		avg_nc = round(ts_n / tq_n, 2) if (tq_n > 0 and ts_n > 0) else round(cg["latest_net_cost"], 2)
+		top_cat_c = max(cg["cat_spend"].items(), key=lambda kv: kv[1])[0] if cg["cat_spend"] else "Diğer"
+		raw_preview = ", ".join(sorted(cg["raw_names"])[:4]) + ("…" if len(cg["raw_names"]) > 4 else "")
+		canonical_summary.append({
+			"Ana Gıda / İhale Kalemi": cg["canonical_name"],
+			"Kategori": top_cat_c,
+			"Net Birim": cg["net_unit"],
+			"Alım Sayısı": len(cg["pids"]),
+			"Alım Ayı": len(cg["months"]),
+			"Toplam Net Miktar": round(tq_n, 2),
+			"Aylık Ort. Miktar": m_avg_qty,
+			"Haftalık Ort. Miktar": w_avg_qty,
+			"Ort. Birim Maliyet (₺)": avg_nc,
+			"Son Birim Maliyet (₺)": round(cg["latest_net_cost"] or avg_nc, 2),
+			"Aylık Ort. Harcama (₺)": round(ts_n / active_months_n, 2),
+			"Toplam Harcama (₺)": ts_n,
+			"Pay (%)": round((ts_n / total_items_spend) * 100.0, 1) if total_items_spend > 0 else 0.0,
+			"İçerdiği Kalemler": raw_preview,
+		})
+	canonical_summary.sort(key=lambda x: (-x["Toplam Harcama (₺)"], x["Ana Gıda / İhale Kalemi"]))
+
 	category_summary = [
 		{
 			"Kategori": c_nm,
 			"Kalem Sayısı": cd["count"],
 			"Farklı Ürün": len(cd["products"]),
 			"Toplam Harcama (₺)": round(cd["spend"], 2),
+			"Aylık Ort. (₺)": round(cd["spend"] / active_months_n, 2),
 			"Pay (%)": round((cd["spend"] / total_items_spend) * 100.0, 1) if total_items_spend > 0 else 0.0,
 		}
 		for c_nm, cd in cat_groups.items()
 	]
 	category_summary.sort(key=lambda x: (-x["Toplam Harcama (₺)"], x["Kategori"]))
+
+	used_cats_sorted = [c["Kategori"] for c in category_summary]
+	month_category_matrix: list[dict[str, Any]] = []
+	for ym_k in sorted(month_cat_spend.keys()):
+		cd_m = month_cat_spend[ym_k]
+		row_m: dict[str, Any] = {"Ay": ym_k, "Dönem": _fmt_ym(ym_k)}
+		tot_m = 0.0
+		for cat_k in used_cats_sorted:
+			v_mc = round(cd_m.get(cat_k, 0.0), 2)
+			row_m[cat_k] = v_mc
+			tot_m += v_mc
+		row_m["Toplam (₺)"] = round(tot_m, 2)
+		month_category_matrix.append(row_m)
 
 	for pr in purchases:
 		sup_nm = str(pr.get("supplier_name") or "").strip() or "Tedarikçi Belirtilmemiş"
@@ -2998,6 +3364,7 @@ def compute_purchase_analytics(
 	product_history = [
 		{
 			"Tarih": it.get("invoice_date") or "",
+			"Fatura Adı": str(it.get("invoice_name") or "").strip() or _format_tr_date(it.get("invoice_date")),
 			"Fatura No": it.get("invoice_no") or "—",
 			"Tedarikçi": it.get("supplier_name") or "—",
 			"Miktar": it.get("quantity") or 0.0,
@@ -3016,7 +3383,9 @@ def compute_purchase_analytics(
 			"invoice_count": inv_cnt,
 			"item_row_count": len(items),
 			"distinct_products": len({r["Ürün Adı"] for r in product_summary}),
+			"distinct_canonical": len(canonical_summary),
 			"distinct_suppliers": len(supplier_summary),
+			"active_months": active_months_n,
 			"subtotal_tl": subtotal_tl,
 			"vat_tl": vat_tl,
 			"total_spend_tl": total_spend,
@@ -3027,9 +3396,18 @@ def compute_purchase_analytics(
 			"top_product_spend": product_summary[0]["Toplam Harcama (₺)"] if product_summary else 0.0,
 			"top_supplier_name": supplier_summary[0]["Tedarikçi / Firma"] if supplier_summary else "—",
 			"top_supplier_spend": supplier_summary[0]["Toplam Harcama (₺)"] if supplier_summary else 0.0,
+			"category_totals": {r["Kategori"]: r["Toplam Harcama (₺)"] for r in category_summary},
+		},
+		"period_meta": {
+			"active_months": active_months_n,
+			"months": sorted(active_months_set),
+			"min_date": inv_dates[0] if inv_dates else "",
+			"max_date": inv_dates[-1] if inv_dates else "",
 		},
 		"product_summary": product_summary,
+		"canonical_summary": canonical_summary,
 		"category_summary": category_summary,
+		"month_category_matrix": month_category_matrix,
 		"supplier_summary": supplier_summary,
 		"monthly_trend": monthly_trend,
 		"price_changes": price_changes,
@@ -3037,6 +3415,218 @@ def compute_purchase_analytics(
 		"selected_product": chosen_prod,
 		"product_history": product_history,
 	}
+
+
+def build_procurement_and_tender_plan(
+	analytics: dict[str, Any],
+	*,
+	period_months: float = 12.0,
+	qty_margin_pct: float = 10.0,
+	price_inflation_pct: float = 0.0,
+	category_filter: str = "Tümü",
+	use_canonical: bool = True,
+) -> dict[str, Any]:
+	"""
+	Geçmiş fatura tüketim ortalamalarına göre haftalık/aylık sipariş planı veya
+	9 / 12 aylık yıllık ihale teknik miktar & yaklaşık maliyet cetveli oluşturur.
+	"""
+	pm_val = max(0.1, float(period_months or 12.0))
+	qm = float(qty_margin_pct or 0.0)
+	pi = float(price_inflation_pct or 0.0)
+	src_rows = analytics.get("canonical_summary" if use_canonical else "product_summary") or []
+	active_months_n = int((analytics.get("summary") or {}).get("active_months") or 1)
+
+	plan_rows: list[dict[str, Any]] = []
+	cat_budgets: dict[str, float] = {}
+	tot_budget = 0.0
+
+	for r in src_rows:
+		cat_r = str(r.get("Kategori") or "Diğer")
+		if category_filter and category_filter != "Tümü" and cat_r != category_filter:
+			continue
+		name_r = str(r.get("Ana Gıda / İhale Kalemi") or r.get("Ürün Adı") or "").strip()
+		unit_r = str(r.get("Net Birim") or r.get("Birim") or "kg").strip()
+		m_avg = _safe_float(r.get("Aylık Ort. Miktar"), 0.0)
+		w_avg = round(m_avg / 4.33, 2)
+		latest_cost = _safe_float(r.get("Son Birim Maliyet (₺)"), _safe_float(r.get("Ort. Birim Maliyet (₺)"), 0.0))
+
+		base_need = round(m_avg * pm_val, 2)
+		target_qty = round(base_need * (1.0 + qm / 100.0), 2)
+		target_up = round(latest_cost * (1.0 + pi / 100.0), 2)
+		est_budget = round(target_qty * target_up, 2)
+		qty_9m = round(m_avg * 9.0 * (1.0 + qm / 100.0), 2)
+		qty_12m = round(m_avg * 12.0 * (1.0 + qm / 100.0), 2)
+
+		tot_budget += est_budget
+		cat_budgets[cat_r] = round(cat_budgets.get(cat_r, 0.0) + est_budget, 2)
+		plan_rows.append({
+			"Gıda Kalemi / Ürün": name_r,
+			"Kategori": cat_r,
+			"Birim": unit_r,
+			"Aylık Ort. Tüketim": m_avg,
+			"Haftalık Ort.": w_avg,
+			"Dönem Baz İhtiyacı": base_need,
+			f"Sipariş / İhale (+%{qm:g})": target_qty,
+			"9 Aylık Eğitim (Marjlı)": qty_9m,
+			"12 Aylık Yıllık (Marjlı)": qty_12m,
+			"Hedef Birim Fiyat (₺)": target_up,
+			"Tahmini Tutar (₺)": est_budget,
+		})
+
+	by_cat = [
+		{"Kategori": k, "Tahmini Bütçe (₺)": v, "Pay (%)": round((v / tot_budget) * 100.0, 1) if tot_budget > 0 else 0.0}
+		for k, v in sorted(cat_budgets.items(), key=lambda kv: -kv[1])
+	]
+	headline_lines = [
+		f"**{pr['Gıda Kalemi / Ürün']}**: Aylık ort. `{pr['Aylık Ort. Tüketim']:g} {pr['Birim']}` · "
+		f"9 Aylık Eğitim: `{pr['9 Aylık Eğitim (Marjlı)']:g} {pr['Birim']}` · "
+		f"12 Aylık İhale: `{pr['12 Aylık Yıllık (Marjlı)']:g} {pr['Birim']}` (~{pr['Tahmini Tutar (₺)']:,.0f} ₺)"
+		for pr in plan_rows[:8]
+	]
+	return {
+		"rows": plan_rows,
+		"by_category": by_cat,
+		"headline_lines": headline_lines,
+		"summary": {
+			"active_months": active_months_n,
+			"period_months": pm_val,
+			"qty_margin_pct": qm,
+			"price_inflation_pct": pi,
+			"item_count": len(plan_rows),
+			"total_budget_tl": round(tot_budget, 2),
+		},
+	}
+
+
+def build_tender_and_order_plan_excel(
+	plan_data: dict[str, Any],
+	period_label: str = "",
+	school_meta: dict[str, str] | None = None,
+) -> bytes:
+	"""Sipariş planı ve yıllık ihale miktar/yaklaşık maliyet cetvelini kurumsal 2 sekmeli Excel (.xlsx) olarak üretir."""
+	import openpyxl
+	from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+	from openpyxl.utils import get_column_letter
+
+	wb = openpyxl.Workbook()
+	ws1 = wb.active
+	ws1.title = "Siparis_ve_Ihale_Cetveli"
+	school_up = _tr_upper(str((school_meta or {}).get("school_name") or "OKUL / KURUM YEMEKHANESİ").strip())
+	rows = plan_data.get("rows") or []
+	headers = list(rows[0].keys()) if rows else [
+		"Gıda Kalemi / Ürün", "Kategori", "Birim", "Aylık Ort. Tüketim",
+		"Dönem Baz İhtiyacı", "Sipariş / İhale", "9 Aylık Eğitim (Marjlı)", "12 Aylık Yıllık (Marjlı)",
+		"Hedef Birim Fiyat (₺)", "Tahmini Tutar (₺)",
+	]
+	_apply_school_sheet_banner(ws1, school_up, f"SİPARİŞ PLANI VE YILLIK İHALE MİKTAR CETVELİ — {_tr_upper(period_label or '12 AYLIK')}", len(headers))
+	hdr_fill = PatternFill("solid", fgColor="0F766E")
+	hdr_font = Font(color="FFFFFF", bold=True, size=9.5)
+	thin = Side(style="thin", color="94A3B8")
+	brd = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+	for ci, hl in enumerate(headers, start=1):
+		c = ws1.cell(row=4, column=ci, value=hl)
+		c.fill = hdr_fill
+		c.font = hdr_font
+		c.border = brd
+		c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+	r_idx = 5
+	for r in rows:
+		for ci, k in enumerate(headers, start=1):
+			cc = ws1.cell(row=r_idx, column=ci, value=r.get(k))
+			cc.border = brd
+			if ci >= 4:
+				cc.number_format = "#,##0.00"
+		r_idx += 1
+
+	sm = plan_data.get("summary") or {}
+	ws1.cell(row=r_idx, column=1, value="TOPLAM YAKLAŞIK MALİYET (₺)").font = Font(bold=True)
+	tot_c = ws1.cell(row=r_idx, column=len(headers), value=float(sm.get("total_budget_tl") or 0.0))
+	tot_c.font = Font(bold=True, color="0F766E")
+	tot_c.number_format = "#,##0.00"
+	for ci in range(1, len(headers) + 1):
+		ws1.column_dimensions[get_column_letter(ci)].width = 26 if ci <= 2 else 17
+
+	ws2 = wb.create_sheet("Kategori_Butce_Ozeti")
+	_apply_school_sheet_banner(ws2, school_up, "KATEGORİ BAZLI İHALE / SİPARİŞ BÜTÇE ÖZETİ", 3)
+	for ci, hl in enumerate(["Kategori", "Tahmini Bütçe (₺)", "Pay (%)"], start=1):
+		c = ws2.cell(row=4, column=ci, value=hl)
+		c.fill = hdr_fill
+		c.font = hdr_font
+		c.border = brd
+	for ri2, cr in enumerate(plan_data.get("by_category") or [], start=5):
+		ws2.cell(row=ri2, column=1, value=cr["Kategori"]).border = brd
+		c2 = ws2.cell(row=ri2, column=2, value=cr["Tahmini Bütçe (₺)"])
+		c2.border = brd
+		c2.number_format = "#,##0.00"
+		ws2.cell(row=ri2, column=3, value=cr["Pay (%)"]).border = brd
+	ws2.column_dimensions["A"].width = 28
+	ws2.column_dimensions["B"].width = 20
+	ws2.column_dimensions["C"].width = 14
+
+	buf = io.BytesIO()
+	wb.save(buf)
+	return buf.getvalue()
+
+
+def build_tender_summary_docx(
+	plan_data: dict[str, Any],
+	period_label: str = "",
+	school_meta: dict[str, str] | None = None,
+) -> bytes:
+	"""İhale veya dönemsel satın alma planı için resmi A4 Word (.docx) yaklaşık miktar & bütçe raporu üretir."""
+	import docx
+	from docx.enum.text import WD_ALIGN_PARAGRAPH
+	from docx.shared import Cm, Pt, RGBColor
+
+	doc = docx.Document()
+	sec = doc.sections[0]
+	sec.top_margin, sec.bottom_margin = Cm(1.4), Cm(1.4)
+	sec.left_margin, sec.right_margin = Cm(1.5), Cm(1.5)
+
+	meta = dict(school_meta or {})
+	school_up = _tr_upper(str(meta.get("school_name") or "OKUL / KURUM YEMEKHANESİ").strip())
+	p_hd = doc.add_paragraph()
+	p_hd.alignment = WD_ALIGN_PARAGRAPH.CENTER
+	r1 = p_hd.add_run(f"{school_up}\n")
+	r1.bold = True
+	r1.font.size = Pt(13)
+	r1.font.color.rgb = RGBColor(15, 118, 110)
+	r2 = p_hd.add_run(f"SİPARİŞ PLANI VE YILLIK İHALE İHTİYAÇ MİKTARI CETVELİ ({_tr_upper(period_label or '12 AYLIK')})")
+	r2.bold = True
+	r2.font.size = Pt(10.5)
+
+	sm = plan_data.get("summary") or {}
+	doc.add_paragraph(
+		f"Baz Alınan Geçmiş Ay Sayısı: {sm.get('active_months', 1)} ay · "
+		f"Planlama Süresi: {sm.get('period_months', 12):g} ay · "
+		f"Güvenlik Payı: +%{sm.get('qty_margin_pct', 0):g} · "
+		f"Fiyat Artış Payı: +%{sm.get('price_inflation_pct', 0):g} · "
+		f"Toplam Yaklaşık Maliyet: {float(sm.get('total_budget_tl') or 0.0):,.2f} ₺"
+	).runs[0].font.size = Pt(9.5)
+
+	rows = plan_data.get("rows") or []
+	if rows:
+		cols = list(rows[0].keys())
+		show_cols = [c for c in cols if c not in ("Dönem Baz İhtiyacı",)]
+		tbl = doc.add_table(rows=1, cols=len(show_cols))
+		tbl.style = "Table Grid"
+		for idx, c_lbl in enumerate(show_cols):
+			run = tbl.rows[0].cells[idx].paragraphs[0].add_run(c_lbl)
+			run.bold = True
+			run.font.size = Pt(8)
+		for row_d in rows:
+			cells = tbl.add_row().cells
+			for idx, c_lbl in enumerate(show_cols):
+				val = row_d.get(c_lbl, "")
+				txt = f"{val:,.2f}" if isinstance(val, (int, float)) and "Tutar" in c_lbl else str(val)
+				run = cells[idx].paragraphs[0].add_run(txt)
+				run.font.size = Pt(8)
+
+	buf = io.BytesIO()
+	doc.save(buf)
+	return buf.getvalue()
 
 
 def build_purchase_analytics_excel(analytics: dict[str, Any], period_label: str = "") -> bytes:
@@ -3047,13 +3637,17 @@ def build_purchase_analytics_excel(analytics: dict[str, Any], period_label: str 
 		{"Gösterge": "Toplam Fatura Sayısı", "Değer": sm.get("invoice_count", 0)},
 		{"Gösterge": "Toplam Ürün Kalemi Satırı", "Değer": sm.get("item_row_count", 0)},
 		{"Gösterge": "Farklı Ürün Çeşidi", "Değer": sm.get("distinct_products", 0)},
+		{"Gösterge": "Ana Gıda / İhale Grubu Sayısı", "Değer": sm.get("distinct_canonical", 0)},
+		{"Gösterge": "Aktif Alım Ayı", "Değer": sm.get("active_months", 1)},
 		{"Gösterge": "Tedarikçi Sayısı", "Değer": sm.get("distinct_suppliers", 0)},
 		{"Gösterge": "Toplam Harcama (₺)", "Değer": sm.get("total_spend_tl", 0.0)},
 		{"Gösterge": "Ortalama Fatura Tutarı (₺)", "Değer": sm.get("avg_invoice_tl", 0.0)},
 		{"Gösterge": "En Çok Harcanan Ürün", "Değer": f"{sm.get('top_product_name', '—')} ({sm.get('top_product_spend', 0.0):,.2f} ₺)"},
 	])
 	df_prod = pd.DataFrame(analytics.get("product_summary") or [{"Bilgi": "Ürün verisi yok"}])
+	df_canon = pd.DataFrame(analytics.get("canonical_summary") or [{"Bilgi": "Ana gıda grubu verisi yok"}])
 	df_cat = pd.DataFrame(analytics.get("category_summary") or [{"Bilgi": "Kategori verisi yok"}])
+	df_mc = pd.DataFrame(analytics.get("month_category_matrix") or [{"Bilgi": "Aylık kategori matrisi yok"}])
 	df_sup = pd.DataFrame(analytics.get("supplier_summary") or [{"Bilgi": "Tedarikçi verisi yok"}])
 	df_mon = pd.DataFrame(analytics.get("monthly_trend") or [{"Bilgi": "Aylık trend verisi yok"}])
 	df_inf = pd.DataFrame(analytics.get("price_changes") or [{"Bilgi": "Fiyat değişimi verisi yok"}])
@@ -3093,8 +3687,8 @@ def _parse_flexible_date_iso(raw_val: Any) -> str:
 	return ""
 
 
-def _read_tabular_sheets_from_bytes(file_bytes: bytes, file_name: str = "") -> list[list[list[str]]]:
-	"""Excel (.xlsx) çalışma kitabının sayfalarını veya CSV metnini satır listeleri olarak okur."""
+def _read_tabular_sheets_with_names(file_bytes: bytes, file_name: str = "") -> list[tuple[str, list[list[str]]]]:
+	"""Excel (.xlsx) sekmelerini sekme adıyla birlikte veya CSV metnini satır listeleri olarak okur."""
 	fn = str(file_name or "").lower()
 	is_csv = fn.endswith(".csv") or (not fn.endswith(".xlsx") and not file_bytes[:2] == b"PK")
 	if not is_csv:
@@ -3102,14 +3696,14 @@ def _read_tabular_sheets_from_bytes(file_bytes: bytes, file_name: str = "") -> l
 			import openpyxl
 			wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
 			try:
-				sheets: list[list[list[str]]] = []
+				sheets: list[tuple[str, list[list[str]]]] = []
 				for ws in wb.worksheets:
 					rows_s = [
 						["" if v is None else (v.strftime("%d.%m.%Y") if isinstance(v, (date, datetime)) else str(v).strip()) for v in row]
 						for row in ws.iter_rows(values_only=True)
 					]
 					if rows_s:
-						sheets.append(rows_s)
+						sheets.append((str(ws.title or "").strip(), rows_s))
 				if sheets:
 					return sheets
 			finally:
@@ -3137,7 +3731,12 @@ def _read_tabular_sheets_from_bytes(file_bytes: bytes, file_name: str = "") -> l
 		elif semi_n >= comma_n and semi_n > 0:
 			delim = ";"
 	rows_c = [[str(c or "").strip() for c in r] for r in csv.reader(io.StringIO(txt), delimiter=delim)]
-	return [rows_c] if rows_c else []
+	return [("", rows_c)] if rows_c else []
+
+
+def _read_tabular_sheets_from_bytes(file_bytes: bytes, file_name: str = "") -> list[list[list[str]]]:
+	"""Excel (.xlsx) çalışma kitabının sayfalarını veya CSV metnini satır listeleri olarak okur."""
+	return [rows for _, rows in _read_tabular_sheets_with_names(file_bytes, file_name)]
 
 
 def _apply_school_sheet_banner(ws: Any, school_title: str, subtitle: str, col_count: int) -> None:
@@ -3720,7 +4319,7 @@ def build_purchase_invoice_template_excel(
 		ws2.column_dimensions[get_column_letter(ci)].width = 22 if ci <= 2 else 17
 
 	ws3 = wb.create_sheet("Fatura_Ozeti_ve_Analiz")
-	_apply_school_sheet_banner(ws3, "FATURA VE ÜRÜN HARCAMA ANALİZİ", school_up, 4)
+	_apply_school_sheet_banner(ws3, "FATURA VE ÜRÜN HARCAMA ANALİZİ", school_up, 5)
 	ws3.cell(row=4, column=1, value="Genel Fatura & Maliyet Özeti").font = Font(bold=True, size=10.5)
 	sm = (an or {}).get("summary") or {}
 	for ri3, (sk, sv) in enumerate([
@@ -3733,83 +4332,173 @@ def build_purchase_invoice_template_excel(
 	], start=5):
 		ws3.cell(row=ri3, column=1, value=sk).border = brd
 		ws3.cell(row=ri3, column=2, value=sv).border = brd
-	ws3.column_dimensions["A"].width = 30
-	ws3.column_dimensions["B"].width = 24
+	# Kurumsal haftalık / fatura bazlı toplam gider özeti tablosu
+	if callable(connect_db_fn):
+		p_sum_list, _ = get_purchases_and_items(connect_db_fn, year_month=year_month or "Tümü")
+		if p_sum_list:
+			ws3.cell(row=12, column=1, value="Tüm Faturaların / Tarihlerin Gider Özeti").font = Font(bold=True, size=10.5)
+			for ci, hl in enumerate(["Fatura Adı / Tarihi", "Tarih", "Fiş / Fatura No", "Kalem Sayısı", "Toplam Harcama (₺)"], start=1):
+				ch = ws3.cell(row=13, column=ci, value=hl)
+				ch.fill = hdr_fill
+				ch.font = hdr_font
+				ch.border = brd
+			ri_s = 14
+			for ps_r in reversed(p_sum_list):
+				ws3.cell(row=ri_s, column=1, value=ps_r.get("invoice_name") or _format_tr_date(ps_r.get("invoice_date"))).border = brd
+				ws3.cell(row=ri_s, column=2, value=_format_tr_date(ps_r.get("invoice_date"))).border = brd
+				ws3.cell(row=ri_s, column=3, value=ps_r.get("invoice_no") or "—").border = brd
+				ws3.cell(row=ri_s, column=4, value=int(ps_r.get("item_count") or 0)).border = brd
+				c_tot = ws3.cell(row=ri_s, column=5, value=round(_safe_float(ps_r.get("total_amount"), 0.0), 2))
+				c_tot.border = brd
+				c_tot.number_format = "#,##0.00"
+				ri_s += 1
+			ws3.cell(row=ri_s, column=1, value="GENEL TOPLAM").font = Font(bold=True)
+			c_gt = ws3.cell(row=ri_s, column=5, value=f"=SUM(E14:E{ri_s - 1})")
+			c_gt.font = Font(bold=True, color="0F766E")
+			c_gt.number_format = "#,##0.00"
+	for ci, w in enumerate((30, 22, 18, 16, 22), start=1):
+		ws3.column_dimensions[get_column_letter(ci)].width = w
 
 	buf = io.BytesIO()
 	wb.save(buf)
 	return buf.getvalue()
 
 
-def parse_purchase_invoices_from_excel_or_csv(file_bytes: bytes, file_name: str = "") -> list[dict[str, Any]]:
-	"""Excel (.xlsx) veya CSV fatura dosyasını okuyup fatura başlığı ve kalem listelerine dönüştürür."""
-	sheets = _read_tabular_sheets_from_bytes(file_bytes, file_name)
-	grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+def _is_purchase_header_row(folded: list[str]) -> bool:
+	has_item_col = any(
+		c in {"urun adi", "urun", "malin cinsi", "urun / malin cinsi"} or "malzeme" in c or "malin cinsi" in c
+		for c in folded
+	)
+	has_qty_or_price = any("miktar" in c or "fiyat" in c or "tutar" in c for c in folded)
+	return bool(has_item_col and has_qty_or_price)
 
-	for sheet_rows in sheets:
-		for ri, row in enumerate(sheet_rows):
+
+def parse_purchase_invoices_from_excel_or_csv(
+	file_bytes: bytes,
+	file_name: str = "",
+	*,
+	group_mode: str = "date",
+) -> list[dict[str, Any]]:
+	"""
+	Excel (.xlsx) sekmelerini (sekme adı = tarih / fatura adı) veya çok bloklu CSV fatura tablolarını okuyarak
+	fatura başlığı, otomatik kategori, net miktar ve kalem listelerine dönüştürür.
+	group_mode='date' -> aynı tarih/sekmedeki tüm fişleri tek faturada toplar (ör. '16.11.2026').
+	group_mode='receipt' -> '16.11.2026 · Fiş-001' biçiminde fiş bazlı ayırır.
+	"""
+	named_sheets = _read_tabular_sheets_with_names(file_bytes, file_name)
+	grouped: dict[tuple[str, ...], dict[str, Any]] = {}
+	generic_sheet_names = {
+		"", "sheet1", "sheet2", "sheet3", "sayfa1", "sayfa2",
+		"fatura_giris_sablonu", "urun_birim_maliyet_referans", "fatura_ozeti_ve_analiz",
+	}
+
+	for sheet_title, sheet_rows in named_sheets:
+		sheet_dt_iso = _parse_flexible_date_iso(sheet_title)
+		sheet_title_clean = str(sheet_title or "").strip()
+		use_sheet_name = bool(sheet_title_clean and _tr_fold(sheet_title_clean) not in generic_sheet_names)
+
+		ri = 0
+		while ri < len(sheet_rows):
+			row = sheet_rows[ri]
 			folded = [_tr_fold(c) for c in row]
-			has_item_col = any(c == "urun adi" or c == "urun" or "malzeme" in c for c in folded)
-			has_qty_or_price = any("miktar" in c or "fiyat" in c or "tutar" in c for c in folded)
-			if not (has_item_col and has_qty_or_price):
+			if not _is_purchase_header_row(folded):
+				ri += 1
 				continue
 
 			base_folded = [re.sub(r"\s*\([^)]*\)", "", c).strip() for c in folded]
 			c_dt = next((i for i, k in enumerate(base_folded) if "fatura tarihi" in k or k == "tarih"), -1)
-			c_no = next((i for i, k in enumerate(base_folded) if "fatura no" in k or "fis no" in k), -1)
+			c_nm_inv = next((i for i, k in enumerate(base_folded) if "fatura adi" in k), -1)
+			c_no = next((i for i, k in enumerate(base_folded) if "fatura no" in k or "fis/fatura" in k or "fis no" in k or k == "fis"), -1)
 			c_sup = next((i for i, k in enumerate(base_folded) if "tedarikci" in k or "firma" in k), -1)
 			c_st = next((i for i, k in enumerate(base_folded) if "odeme" in k or k == "durum"), -1)
-			c_nm = next((i for i, k in enumerate(base_folded) if k == "urun adi" or k == "urun" or "malzeme" in k), -1)
+			c_nm = next((i for i, k in enumerate(base_folded) if k in {"urun adi", "urun", "malin cinsi"} or "malin cinsi" in k or "malzeme" in k), -1)
 			c_cat = next((i for i, k in enumerate(base_folded) if "kategori" in k), -1)
 			c_qty = next((i for i, k in enumerate(base_folded) if k == "miktar"), -1)
 			c_unit = next((i for i, k in enumerate(base_folded) if "miktar cins" in k or "miktar cesid" in k or k == "birim"), -1)
 			c_up = next((i for i, k in enumerate(base_folded) if "birim fiyat" in k), -1)
 			c_vat = next((i for i, k in enumerate(base_folded) if k == "kdv" or "kdv oran" in k or k.startswith("kdv ")), -1)
-			c_tot = next((i for i, k in enumerate(base_folded) if "toplam tutar" in k or "satir toplam" in k or k.startswith("tutar")), -1)
+			c_tot = next((i for i, k in enumerate(base_folded) if "toplam tutar" in k or "satir toplam" in k or k.startswith("tutar") or "bizden alinan" in k), -1)
 			c_ucost = next((i for i, k in enumerate(base_folded) if "birim maliyet" in k), -1)
 			c_skt = next((i for i, k in enumerate(base_folded) if k.startswith("skt")), -1)
 			c_note = next((i for i, k in enumerate(base_folded) if k == "not"), -1)
 
-			for r_sub in sheet_rows[ri + 1:]:
+			sub_idx = ri + 1
+			while sub_idx < len(sheet_rows):
+				r_sub = sheet_rows[sub_idx]
 				rf = [_tr_fold(x) for x in r_sub]
 				if not any(rf):
+					sub_idx += 1
 					continue
-				if any("genel toplami" in x for x in rf):
+				# Bir başka tablo başlığına gelindiyse mevcut bloğu kapatıp dış döngünün o satırı almasını sağla
+				if _is_purchase_header_row(rf):
 					break
+				if any(
+					"genel toplami" in x or x == "genel toplam" or "haftalik toplam" in x
+					or "fatura / liste genel toplami" in x
+					for x in rf
+				):
+					sub_idx += 1
+					break
+
 				nm_s = str(r_sub[c_nm] if 0 <= c_nm < len(r_sub) else "").strip()
-				if not nm_s or _tr_fold(nm_s) in {"urun adi", "genel toplami"}:
+				if not nm_s or _tr_fold(nm_s) in {"urun adi", "malin cinsi", "genel toplami", "genel toplam"}:
+					sub_idx += 1
 					continue
-				dt_iso = _parse_flexible_date_iso(r_sub[c_dt] if 0 <= c_dt < len(r_sub) else "") or date.today().isoformat()
+
+				dt_iso = _parse_flexible_date_iso(r_sub[c_dt] if 0 <= c_dt < len(r_sub) else "") or sheet_dt_iso or date.today().isoformat()
 				inv_no_s = str(r_sub[c_no] if 0 <= c_no < len(r_sub) else "").strip()
 				sup_s = str(r_sub[c_sup] if 0 <= c_sup < len(r_sub) else "").strip()
+				explicit_inv_nm = str(r_sub[c_nm_inv] if 0 <= c_nm_inv < len(r_sub) else "").strip()
 				st_raw = str(r_sub[c_st] if 0 <= c_st < len(r_sub) else "").strip()
 				st_s = "Vadeli / Bekliyor" if "vadeli" in _tr_fold(st_raw) or "bekliyor" in _tr_fold(st_raw) else "Ödendi"
+
 				cat_raw = str(r_sub[c_cat] if 0 <= c_cat < len(r_sub) else "").strip()
-				cat_s = cat_raw if cat_raw in PURCHASE_CATEGORIES else "Diğer"
+				cat_s = cat_raw if (cat_raw in PURCHASE_CATEGORIES and cat_raw != "Diğer") else infer_purchase_category(nm_s, fallback=cat_raw or "Diğer")
+
 				qty_v = max(0.0, _safe_float(r_sub[c_qty] if 0 <= c_qty < len(r_sub) else 1.0, 1.0))
-				unit_s = str(r_sub[c_unit] if 0 <= c_unit < len(r_sub) else "").strip() or "kg"
+				unit_s = _normalize_purchase_unit(r_sub[c_unit] if 0 <= c_unit < len(r_sub) else "kg")
 				up_raw = str(r_sub[c_up] if 0 <= c_up < len(r_sub) else "").strip()
 				tot_raw = str(r_sub[c_tot] if 0 <= c_tot < len(r_sub) else "").strip()
 				uc_raw = str(r_sub[c_ucost] if 0 <= c_ucost < len(r_sub) else "").strip()
 				up_v = max(0.0, _safe_float(up_raw, 0.0)) if not up_raw.startswith("=") else 0.0
 				tot_v = max(0.0, _safe_float(tot_raw, -1.0)) if (tot_raw and not tot_raw.startswith("=")) else -1.0
 				uc_v = max(0.0, _safe_float(uc_raw, 0.0)) if (uc_raw and not uc_raw.startswith("=")) else 0.0
-				vat_v = max(0.0, _safe_float(r_sub[c_vat] if 0 <= c_vat < len(r_sub) else 1.0, 1.0))
+				# KDV sütunu Excel'de yoksa varsayılan 0% kabul edilir (tutarlar birebir korunur)
+				vat_v = max(0.0, _safe_float(r_sub[c_vat] if 0 <= c_vat < len(r_sub) else 0.0, 0.0))
 				if up_v <= 0 and tot_v < 0 and uc_v > 0 and qty_v > 0:
 					tot_v = round(uc_v * qty_v, 2)
+				if tot_v < 0 and up_v >= 0 and qty_v >= 0 and c_tot >= 0:
+					# Tutar kolonu var ama boş bırakıldıysa up*qty kullan
+					tot_v = round(qty_v * up_v * (1.0 + vat_v / 100.0), 2)
 				skt_iso = _parse_flexible_date_iso(r_sub[c_skt] if 0 <= c_skt < len(r_sub) else "")
 				note_s = str(r_sub[c_note] if 0 <= c_note < len(r_sub) else "").strip()
 
-				gk = (dt_iso, inv_no_s, sup_s)
+				base_inv_name = explicit_inv_nm or (sheet_title_clean if use_sheet_name else _format_tr_date(dt_iso))
+				if group_mode == "receipt":
+					final_inv_name = f"{base_inv_name} · {inv_no_s}" if (inv_no_s and inv_no_s not in base_inv_name) else base_inv_name
+					gk = (dt_iso, inv_no_s, sup_s, final_inv_name)
+				else:
+					final_inv_name = base_inv_name
+					gk = (dt_iso, sup_s, final_inv_name)
+
 				if gk not in grouped:
 					grouped[gk] = {
 						"invoice_date": dt_iso,
+						"invoice_name": final_inv_name,
 						"invoice_no": inv_no_s,
+						"_receipt_nos": [],
 						"supplier_name": sup_s,
 						"category": cat_s,
 						"payment_status": st_s,
 						"items": [],
 					}
+				if inv_no_s and inv_no_s not in grouped[gk]["_receipt_nos"]:
+					grouped[gk]["_receipt_nos"].append(inv_no_s)
+				item_note = note_s
+				if group_mode == "date" and inv_no_s and inv_no_s not in item_note:
+					item_note = f"{inv_no_s} · {note_s}" if note_s else inv_no_s
+
+				canon_nm, n_q, n_u = infer_canonical_product_and_pack(nm_s, qty_v, unit_s)
 				item_d: dict[str, Any] = {
 					"item_name": nm_s,
 					"category": cat_s,
@@ -3818,13 +4507,32 @@ def parse_purchase_invoices_from_excel_or_csv(file_bytes: bytes, file_name: str 
 					"unit_price": up_v,
 					"vat_rate": vat_v,
 					"expiry_date": skt_iso,
-					"notes": note_s,
+					"notes": item_note,
+					"canonical_name": canon_nm,
+					"net_qty": n_q,
+					"net_unit": n_u,
 				}
 				if tot_v >= 0:
 					item_d["line_total"] = tot_v
 				grouped[gk]["items"].append(item_d)
-			break
-	return list(grouped.values())
+				sub_idx += 1
+
+			ri = sub_idx
+
+	out_list: list[dict[str, Any]] = []
+	for g_rec in grouped.values():
+		r_nos = g_rec.pop("_receipt_nos", [])
+		if r_nos and group_mode == "date":
+			g_rec["invoice_no"] = ", ".join(r_nos)
+		# Fatura üst kategorisini kalem harcama ağırlığına göre belirle
+		cat_w: dict[str, float] = {}
+		for it in g_rec["items"]:
+			amt_i = _safe_float(it.get("line_total"), _safe_float(it.get("quantity"), 0.0) * _safe_float(it.get("unit_price"), 0.0))
+			cat_w[it["category"]] = cat_w.get(it["category"], 0.0) + max(amt_i, 0.01)
+		if cat_w:
+			g_rec["category"] = max(cat_w.items(), key=lambda kv: kv[1])[0]
+		out_list.append(g_rec)
+	return out_list
 
 
 # ==============================================================================
@@ -5563,41 +6271,95 @@ def _render_tab_menu_planner(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict
 def _calc_live_invoice_details(
 	rows_in: list[dict[str, Any]],
 	*,
-	price_mode: str = "unit",
+	price_mode: str = "auto",
+	editor_state: dict[str, Any] | None = None,
+	base_len: int = 0,
 ) -> tuple[list[dict[str, Any]], float, float, float, int]:
-	"""Fatura satırlarından ara toplam, KDV, genel toplam ve kalem bazlı Birim Maliyet (KDV dahil) hesaplar."""
+	"""Fatura satırlarından ara toplam, KDV, genel toplam, birim fiyat ve birim maliyet (KDV dahil) hesaplar."""
+	ed_st = editor_state if isinstance(editor_state, dict) else {}
+	edited_map = ed_st.get("edited_rows") or {}
+	deleted_set = {int(d) for d in (ed_st.get("deleted_rows") or []) if str(d).isdigit()}
+	added_list = list(ed_st.get("added_rows") or [])
+	kept_base = [i for i in range(max(base_len, len(rows_in))) if i not in deleted_set]
+
 	detail_rows: list[dict[str, Any]] = []
 	sub_v, vat_v, tot_sum, valid_n = 0.0, 0.0, 0.0, 0
-	for x in rows_in:
+	for vis_idx, x in enumerate(rows_in):
 		nm_x = str(x.get("Ürün Adı") or "").strip()
 		if not nm_x:
 			continue
 		q_x = max(0.0, _safe_float(x.get("Miktar"), 0.0))
-		unit_x = str(x.get("Miktar Çeşidi") or x.get("Miktar Cinsi") or "kg").strip() or "kg"
+		unit_x = _normalize_purchase_unit(x.get("Miktar Çeşidi") or x.get("Miktar Cinsi") or "kg")
 		vr_x = max(0.0, _safe_float(x.get("KDV (%)"), 0.0))
+		p_raw = max(0.0, _safe_float(x.get("Birim Fiyat (₺)"), 0.0))
+		tot_raw = max(0.0, _safe_float(x.get("Toplam Tutar (₺)"), 0.0))
+
 		if price_mode == "total":
-			tot_line = max(0.0, _safe_float(x.get("Toplam Tutar (₺)"), 0.0))
-			b_x = tot_line / (1.0 + vr_x / 100.0)
+			use_total = True
+		elif price_mode == "unit":
+			use_total = False
+		else:
+			if vis_idx < len(kept_base) and base_len > 0:
+				b_pos = kept_base[vis_idx]
+				r_edits = edited_map.get(b_pos) or edited_map.get(str(b_pos)) or {}
+				if "Toplam Tutar (₺)" in r_edits and "Birim Fiyat (₺)" not in r_edits:
+					use_total = True
+				elif "Birim Fiyat (₺)" in r_edits and "Toplam Tutar (₺)" not in r_edits:
+					use_total = False
+				elif "Miktar" in r_edits and p_raw > 0:
+					use_total = False
+				else:
+					use_total = bool(tot_raw > 0 and p_raw <= 0) or (tot_raw >= 0 and abs(tot_raw - q_x * p_raw * (1.0 + vr_x / 100.0)) > 0.05)
+			else:
+				a_idx = max(0, vis_idx - len(kept_base)) if base_len > 0 else vis_idx
+				a_ed = added_list[a_idx] if a_idx < len(added_list) and isinstance(added_list[a_idx], dict) else {}
+				use_total = bool(_safe_float(a_ed.get("Toplam Tutar (₺)"), 0.0) > 0 and _safe_float(a_ed.get("Birim Fiyat (₺)"), 0.0) <= 0) or (tot_raw > 0 and p_raw <= 0)
+
+		if use_total:
+			tot_line = tot_raw
+			b_x = tot_line / (1.0 + vr_x / 100.0) if vr_x > 0 else tot_line
 			vat_line = max(0.0, tot_line - b_x)
 			p_x = (b_x / q_x) if q_x > 0 else 0.0
 		else:
-			p_x = max(0.0, _safe_float(x.get("Birim Fiyat (₺)"), 0.0))
+			p_x = p_raw
 			b_x = q_x * p_x
 			vat_line = b_x * (vr_x / 100.0)
 			tot_line = b_x + vat_line
-		unit_cost = (tot_line / q_x) if q_x > 0 else 0.0
+
+		unit_cost = (tot_line / q_x) if q_x > 0 else (p_x * (1.0 + vr_x / 100.0))
+		raw_cat_x = str(x.get("Kategori") or "").strip()
+		cat_x = raw_cat_x if (raw_cat_x in PURCHASE_CATEGORIES and raw_cat_x != "Diğer") else infer_purchase_category(nm_x, fallback=raw_cat_x or "Diğer")
+		canon_x, net_q_x, net_u_x = infer_canonical_product_and_pack(nm_x, q_x, unit_x)
+
 		sub_v += b_x
 		vat_v += vat_line
 		tot_sum += tot_line
 		valid_n += 1
 		detail_rows.append({
-			"Ürün Adı": nm_x,
+			"Malın Cinsi": nm_x,
+			"Ana Gıda Grubu": canon_x,
+			"Kategori": cat_x,
 			"Miktar": round(q_x, 3),
 			"Miktar Cinsi": unit_x,
+			"Bizden Alınan Tutar (₺)": round(tot_line, 2),
 			"Birim Fiyat (KDV Hariç ₺)": round(p_x, 2),
 			"KDV (%)": round(vr_x, 1),
 			"Birim Maliyet (KDV Dahil ₺)": round(unit_cost, 2),
-			"Satır Toplamı (₺)": round(tot_line, 2),
+			"Net Eşdeğer": f"{net_q_x:g} {net_u_x}",
+			"_save_item": {
+				"item_name": nm_x,
+				"category": cat_x,
+				"quantity": round(q_x, 3),
+				"unit_type": unit_x,
+				"unit_price": round(p_x, 2),
+				"vat_rate": round(vr_x, 1),
+				"line_total": round(tot_line, 2),
+				"expiry_date": str(x.get("SKT (Ops.)") or "").strip()[:10],
+				"notes": str(x.get("Not") or "").strip(),
+				"canonical_name": canon_x,
+				"net_qty": net_q_x,
+				"net_unit": net_u_x,
+			},
 		})
 	return detail_rows, round(sub_v, 2), round(vat_v, 2), round(tot_sum, 2), valid_n
 
@@ -5614,13 +6376,14 @@ def _render_invoice_editor_body(
 	key_prefix: str,
 	in_dialog: bool,
 ) -> None:
-	"""Fatura başlığını ve içindeki ürün/fiyat kalemlerini görüntüleme, birim maliyet hesaplama ve düzenleme formu."""
+	"""Fatura adını (varsayılan tarih), kalemlerini, bizden alınan tutarı ve hesaplanan birim fiyatını düzenleme formu."""
 	connect_db_fn = ctx_api["connect_db"]
 	editing_pid = int(editing_purchase["id"]) if editing_purchase else None
 	p_sig = f"pid:{editing_pid}" if editing_pid else "new"
 	sig_key = f"{key_prefix}_loaded_sig"
 	pm_key = f"{key_prefix}_price_mode"
 	prev_pm_key = f"{key_prefix}_prev_price_mode"
+	last_auto_nm_key = f"{key_prefix}_last_auto_inv_name"
 
 	if ui.session_state.get(sig_key) != p_sig:
 		ui.session_state[sig_key] = p_sig
@@ -5628,9 +6391,13 @@ def _render_invoice_editor_body(
 		ui.session_state[prev_pm_key] = None
 		if editing_purchase:
 			try:
-				ui.session_state[f"{key_prefix}_date"] = date.fromisoformat(str(editing_purchase["invoice_date"])[:10])
+				dt_init = date.fromisoformat(str(editing_purchase["invoice_date"])[:10])
 			except Exception:
-				ui.session_state[f"{key_prefix}_date"] = date.today()
+				dt_init = date.today()
+			ui.session_state[f"{key_prefix}_date"] = dt_init
+			inv_nm_loaded = str(editing_purchase.get("invoice_name") or "").strip() or _format_tr_date(dt_init.isoformat())
+			ui.session_state[f"{key_prefix}_name"] = inv_nm_loaded
+			ui.session_state[last_auto_nm_key] = _format_tr_date(dt_init.isoformat())
 			ui.session_state[f"{key_prefix}_no"] = str(editing_purchase.get("invoice_no") or "")
 			ui.session_state[f"{key_prefix}_sup"] = str(editing_purchase.get("supplier_name") or "")
 			if editing_purchase.get("category") in PURCHASE_CATEGORIES:
@@ -5643,32 +6410,55 @@ def _render_invoice_editor_body(
 			ui.session_state[f"{key_prefix}_notes"] = str(editing_purchase.get("notes") or "")
 			ui.session_state[f"{key_prefix}_items_draft"] = [dict(r) for r in (editing_purchase.get("items") or [])]
 		else:
+			dt_def = ui.session_state.get(f"{key_prefix}_date") or date.today()
+			dt_tr_def = _format_tr_date(dt_def.isoformat() if isinstance(dt_def, date) else str(dt_def))
+			ui.session_state[f"{key_prefix}_name"] = ui.session_state.get(f"{key_prefix}_name") or dt_tr_def
+			ui.session_state[last_auto_nm_key] = dt_tr_def
 			ui.session_state[f"{key_prefix}_no"] = ""
 			ui.session_state[f"{key_prefix}_sup"] = ""
 			ui.session_state[f"{key_prefix}_notes"] = ""
 			ui.session_state[f"{key_prefix}_st"] = "Ödendi"
 			ui.session_state.pop(f"{key_prefix}_items_draft", None)
 
-	fc1, fc2, fc3, fc4, fc5 = ui.columns([1.1, 1.0, 1.4, 1.3, 1.0])
+	fc0, fc1, fc2, fc3, fc4, fc5 = ui.columns([1.15, 0.95, 0.9, 1.15, 1.05, 0.9])
 	inv_dt = fc1.date_input("Fatura Tarihi", value=date.today(), key=f"{key_prefix}_date")
-	inv_no = fc2.text_input("Fatura / Fiş No", key=f"{key_prefix}_no", placeholder="Örn: FTR-2026-041")
-	inv_sup = fc3.text_input("Tedarikçi / Firma", key=f"{key_prefix}_sup", placeholder="Örn: Merkez Hal / Kasap")
-	inv_cat = fc4.selectbox("Fatura Kategorisi", PURCHASE_CATEGORIES, key=f"{key_prefix}_cat")
+	dt_tr_cur = _format_tr_date(inv_dt.isoformat())
+	prev_auto = ui.session_state.get(last_auto_nm_key) or ""
+	cur_nm_state = str(ui.session_state.get(f"{key_prefix}_name") or "").strip()
+	if not cur_nm_state or cur_nm_state == prev_auto:
+		ui.session_state[f"{key_prefix}_name"] = dt_tr_cur
+	ui.session_state[last_auto_nm_key] = dt_tr_cur
+
+	inv_name = fc0.text_input("Fatura Adı (Tarih)", key=f"{key_prefix}_name", placeholder="Örn: 16.11.2026")
+	inv_no = fc2.text_input("Fiş / Fatura No", key=f"{key_prefix}_no", placeholder="Örn: Fiş-001")
+	inv_sup = fc3.text_input("Tedarikçi (Opsiyonel)", key=f"{key_prefix}_sup", placeholder="Örn: Hal / Kasap / Market")
+	inv_cat = fc4.selectbox("Fatura Kategorisi", ["Otomatik"] + PURCHASE_CATEGORIES, key=f"{key_prefix}_cat")
 	inv_st = fc5.selectbox("Ödeme Durumu", ["Ödendi", "Vadeli / Bekliyor"], key=f"{key_prefix}_st")
 
 	pm_lbl = ui.radio(
-		"Fiyat Giriş Yöntemi",
-		["Birim Fiyattan Hesapla", "Toplam Tutardan Birim Maliyet Hesapla"],
+		"Fiyat Hesaplama Yöntemi",
+		[
+			"Otomatik (Bizden Alınan Tutar veya Birim Fiyat Gir)",
+			"Toplam Tutardan Birim Maliyet Hesapla",
+			"Birim Fiyattan Toplam Tutar Hesapla",
+		],
 		horizontal=True,
 		key=pm_key,
 	)
-	pm_code = "total" if "Toplam Tutardan" in str(pm_lbl or "") else "unit"
+	if "Toplam Tutardan" in str(pm_lbl or ""):
+		pm_code = "total"
+	elif "Birim Fiyattan" in str(pm_lbl or ""):
+		pm_code = "unit"
+	else:
+		pm_code = "auto"
+
 	if ui.session_state.get(prev_pm_key) not in (None, pm_code):
 		ui.session_state.pop(f"{key_prefix}_items_editor", None)
 	ui.session_state[prev_pm_key] = pm_code
 
+	cat_opts_ed = ["Otomatik"] + PURCHASE_CATEGORIES
 	draft_pi = ui.session_state.get(f"{key_prefix}_items_draft") or [
-		{"item_name": "", "category": inv_cat, "quantity": 1.0, "unit_type": "kg", "unit_price": 0.0, "line_total": 0.0, "vat_rate": 1.0, "expiry_date": ""}
+		{"item_name": "", "category": "Otomatik", "quantity": 1.0, "unit_type": "kg", "unit_price": 0.0, "line_total": 0.0, "vat_rate": 0.0, "expiry_date": "", "notes": ""}
 	]
 
 	def _draft_row_line_total(r: dict[str, Any]) -> float:
@@ -5677,55 +6467,98 @@ def _render_invoice_editor_body(
 			return round(lt_e, 2)
 		q_e = max(0.0, _safe_float(r.get("quantity"), 1.0))
 		u_e = max(0.0, _safe_float(r.get("unit_price"), 0.0))
-		v_e = max(0.0, _safe_float(r.get("vat_rate"), 1.0))
+		v_e = max(0.0, _safe_float(r.get("vat_rate"), 0.0))
 		return round(q_e * u_e * (1.0 + v_e / 100.0), 2)
+
+	def _draft_unit(r: dict[str, Any]) -> str:
+		u_n = _normalize_purchase_unit(r.get("unit_type") or "kg")
+		return u_n if u_n in PURCHASE_UNITS else "kg"
+
+	def _draft_cat(r: dict[str, Any]) -> str:
+		rc = str(r.get("category") or "").strip()
+		if rc in PURCHASE_CATEGORIES and rc != "Diğer":
+			return rc
+		nm_r = str(r.get("item_name") or "").strip()
+		if nm_r:
+			return infer_purchase_category(nm_r, fallback=inv_cat if inv_cat in PURCHASE_CATEGORIES else "Diğer")
+		return "Otomatik"
 
 	if pm_code == "total":
 		df_pi = pd.DataFrame([
 			{
 				"Ürün Adı": str(r.get("item_name") or ""),
-				"Kategori": r.get("category") if r.get("category") in PURCHASE_CATEGORIES else inv_cat,
+				"Kategori": _draft_cat(r),
 				"Miktar": _safe_float(r.get("quantity"), 1.0),
-				"Miktar Çeşidi": r.get("unit_type") if r.get("unit_type") in PURCHASE_UNITS else "kg",
+				"Miktar Çeşidi": _draft_unit(r),
 				"Toplam Tutar (₺)": _draft_row_line_total(r),
-				"KDV (%)": _safe_float(r.get("vat_rate"), 1.0),
+				"KDV (%)": _safe_float(r.get("vat_rate"), 0.0),
 				"SKT (Ops.)": str(r.get("expiry_date") or ""),
+				"Not": str(r.get("notes") or ""),
 			}
 			for r in draft_pi
 		])
 		col_cfg = {
-			"Ürün Adı": ui.column_config.TextColumn("Ürün Adı", required=True),
-			"Kategori": ui.column_config.SelectboxColumn("Kategori", options=PURCHASE_CATEGORIES),
+			"Ürün Adı": ui.column_config.TextColumn("Malın Cinsi", required=True),
+			"Kategori": ui.column_config.SelectboxColumn("Kategori", options=cat_opts_ed),
 			"Miktar": ui.column_config.NumberColumn("Miktar", min_value=0.0, step=1.0),
-			"Miktar Çeşidi": ui.column_config.SelectboxColumn("Miktar Cinsi", options=PURCHASE_UNITS),
-			"Toplam Tutar (₺)": ui.column_config.NumberColumn("Toplam Tutar (KDV Dahil ₺)", min_value=0.0, step=10.0),
+			"Miktar Çeşidi": ui.column_config.SelectboxColumn("Birim", options=PURCHASE_UNITS),
+			"Toplam Tutar (₺)": ui.column_config.NumberColumn("Bizden Alınan Tutar (₺)", min_value=0.0, step=10.0),
 			"KDV (%)": ui.column_config.NumberColumn("KDV (%)", min_value=0.0, step=1.0),
-			"SKT (Ops.)": ui.column_config.TextColumn("SKT (YYYY-AA-GG)"),
+			"SKT (Ops.)": ui.column_config.TextColumn("SKT"),
+			"Not": ui.column_config.TextColumn("Fiş / Not"),
+		}
+	elif pm_code == "unit":
+		df_pi = pd.DataFrame([
+			{
+				"Ürün Adı": str(r.get("item_name") or ""),
+				"Kategori": _draft_cat(r),
+				"Miktar": _safe_float(r.get("quantity"), 1.0),
+				"Miktar Çeşidi": _draft_unit(r),
+				"Birim Fiyat (₺)": _safe_float(r.get("unit_price"), 0.0),
+				"KDV (%)": _safe_float(r.get("vat_rate"), 0.0),
+				"SKT (Ops.)": str(r.get("expiry_date") or ""),
+				"Not": str(r.get("notes") or ""),
+			}
+			for r in draft_pi
+		])
+		col_cfg = {
+			"Ürün Adı": ui.column_config.TextColumn("Malın Cinsi", required=True),
+			"Kategori": ui.column_config.SelectboxColumn("Kategori", options=cat_opts_ed),
+			"Miktar": ui.column_config.NumberColumn("Miktar", min_value=0.0, step=1.0),
+			"Miktar Çeşidi": ui.column_config.SelectboxColumn("Birim", options=PURCHASE_UNITS),
+			"Birim Fiyat (₺)": ui.column_config.NumberColumn("Birim Fiyat (₺)", min_value=0.0, step=1.0),
+			"KDV (%)": ui.column_config.NumberColumn("KDV (%)", min_value=0.0, step=1.0),
+			"SKT (Ops.)": ui.column_config.TextColumn("SKT"),
+			"Not": ui.column_config.TextColumn("Fiş / Not"),
 		}
 	else:
 		df_pi = pd.DataFrame([
 			{
 				"Ürün Adı": str(r.get("item_name") or ""),
-				"Kategori": r.get("category") if r.get("category") in PURCHASE_CATEGORIES else inv_cat,
+				"Kategori": _draft_cat(r),
 				"Miktar": _safe_float(r.get("quantity"), 1.0),
-				"Miktar Çeşidi": r.get("unit_type") if r.get("unit_type") in PURCHASE_UNITS else "kg",
+				"Miktar Çeşidi": _draft_unit(r),
 				"Birim Fiyat (₺)": _safe_float(r.get("unit_price"), 0.0),
-				"KDV (%)": _safe_float(r.get("vat_rate"), 1.0),
+				"Toplam Tutar (₺)": _draft_row_line_total(r),
+				"KDV (%)": _safe_float(r.get("vat_rate"), 0.0),
 				"SKT (Ops.)": str(r.get("expiry_date") or ""),
+				"Not": str(r.get("notes") or ""),
 			}
 			for r in draft_pi
 		])
 		col_cfg = {
-			"Ürün Adı": ui.column_config.TextColumn("Ürün Adı", required=True),
-			"Kategori": ui.column_config.SelectboxColumn("Kategori", options=PURCHASE_CATEGORIES),
+			"Ürün Adı": ui.column_config.TextColumn("Malın Cinsi", required=True),
+			"Kategori": ui.column_config.SelectboxColumn("Kategori", options=cat_opts_ed),
 			"Miktar": ui.column_config.NumberColumn("Miktar", min_value=0.0, step=1.0),
-			"Miktar Çeşidi": ui.column_config.SelectboxColumn("Miktar Cinsi", options=PURCHASE_UNITS),
-			"Birim Fiyat (₺)": ui.column_config.NumberColumn("Birim Fiyat (KDV Hariç ₺)", min_value=0.0, step=1.0),
+			"Miktar Çeşidi": ui.column_config.SelectboxColumn("Birim", options=PURCHASE_UNITS),
+			"Birim Fiyat (₺)": ui.column_config.NumberColumn("Birim Fiyatı (₺)", min_value=0.0, step=1.0),
+			"Toplam Tutar (₺)": ui.column_config.NumberColumn("Bizden Alınan Tutar (₺)", min_value=0.0, step=10.0),
 			"KDV (%)": ui.column_config.NumberColumn("KDV (%)", min_value=0.0, step=1.0),
-			"SKT (Ops.)": ui.column_config.TextColumn("SKT (YYYY-AA-GG)"),
+			"SKT (Ops.)": ui.column_config.TextColumn("SKT"),
+			"Not": ui.column_config.TextColumn("Fiş / Not"),
 		}
 
-	ui.caption("💡 Ürün adı, miktar, miktar cinsi, fiyat veya KDV hücrelerini tıklayarak düzeltebilir; tablo altından (`+`) veya **➕ Yeni Ürün Satırı Ekle** ile yeni kalem ekleyip satır silebilirsiniz. Birim maliyet aşağıda anlık hesaplanır.")
+	ui.caption("💡 Örnek: **Malın Cinsi:** `Et`, **Miktar:** `3`, **Birim:** `kg` yazıp karşısına **Bizden Alınan Tutar:** `3600` girerseniz program altta **Birim Fiyat: 1.200 ₺/kg** hesaplar; birim fiyat girerseniz toplam tutarı hesaplar.")
 	ed_pi = ui.data_editor(
 		df_pi,
 		num_rows="dynamic",
@@ -5737,7 +6570,13 @@ def _render_invoice_editor_body(
 	inv_notes = ui.text_input("Fatura Notu (Opsiyonel)", key=f"{key_prefix}_notes")
 
 	live_rows = ed_pi.to_dict("records")
-	detail_rows, sub_v, vat_v, tot_v, cnt_v = _calc_live_invoice_details(live_rows, price_mode=pm_code)
+	ed_state_live = ui.session_state.get(f"{key_prefix}_items_editor")
+	detail_rows, sub_v, vat_v, tot_v, cnt_v = _calc_live_invoice_details(
+		live_rows,
+		price_mode=pm_code,
+		editor_state=ed_state_live,
+		base_len=len(df_pi),
+	)
 	m1, m2, m3, m4 = ui.columns(4)
 	m1.metric("Geçerli Kalem", f"{cnt_v} ürün")
 	m2.metric("Ara Toplam (KDV Hariç)", f"{sub_v:,.2f} ₺")
@@ -5745,38 +6584,15 @@ def _render_invoice_editor_body(
 	m4.metric("Fatura Genel Toplamı", f"{tot_v:,.2f} ₺")
 
 	if detail_rows:
-		ui.markdown("###### 📊 Kalem Bazlı Birim Maliyet & Fiyat Özeti (Girilen Verilere Göre)")
-		ui.dataframe(pd.DataFrame(detail_rows), hide_index=True, use_container_width=True)
-
-	def _live_to_draft_items() -> list[dict[str, Any]]:
-		out_d: list[dict[str, Any]] = []
-		for x in live_rows:
-			q_v = max(0.0, _safe_float(x.get("Miktar"), 1.0))
-			vr_v = max(0.0, _safe_float(x.get("KDV (%)"), 1.0))
-			if pm_code == "total":
-				tot_v_row = max(0.0, _safe_float(x.get("Toplam Tutar (₺)"), 0.0))
-				base_v = tot_v_row / (1.0 + vr_v / 100.0)
-				up_v = round((base_v / q_v) if q_v > 0 else 0.0, 4)
-			else:
-				up_v = max(0.0, _safe_float(x.get("Birim Fiyat (₺)"), 0.0))
-				tot_v_row = round(q_v * up_v * (1.0 + vr_v / 100.0), 2)
-			out_d.append({
-				"item_name": str(x.get("Ürün Adı") or ""),
-				"category": x.get("Kategori") or inv_cat,
-				"quantity": q_v,
-				"unit_type": x.get("Miktar Çeşidi") or "kg",
-				"unit_price": up_v,
-				"line_total": tot_v_row,
-				"vat_rate": vr_v,
-				"expiry_date": str(x.get("SKT (Ops.)") or ""),
-			})
-		return out_d
+		ui.markdown("###### 📊 Kalem Bazlı Birim Maliyet & Fiyat Özeti (Program Hesaplaması)")
+		df_preview = pd.DataFrame([{k: v for k, v in dr.items() if not k.startswith("_")} for dr in detail_rows])
+		ui.dataframe(df_preview, hide_index=True, use_container_width=True)
 
 	ab1, ab2 = ui.columns([1.1, 2.2], vertical_alignment="center")
 	with ab1:
 		if ui.button("➕ Yeni Ürün Satırı Ekle", key=f"{key_prefix}_btn_add_row", use_container_width=True):
-			cur_draft = _live_to_draft_items()
-			cur_draft.append({"item_name": "", "category": inv_cat, "quantity": 1.0, "unit_type": "kg", "unit_price": 0.0, "line_total": 0.0, "vat_rate": 1.0, "expiry_date": ""})
+			cur_draft = [dr["_save_item"] for dr in detail_rows]
+			cur_draft.append({"item_name": "", "category": "Otomatik", "quantity": 1.0, "unit_type": "kg", "unit_price": 0.0, "line_total": 0.0, "vat_rate": 0.0, "expiry_date": "", "notes": ""})
 			ui.session_state[f"{key_prefix}_items_draft"] = cur_draft
 			ui.session_state.pop(f"{key_prefix}_items_editor", None)
 			ui.rerun(scope="fragment" if in_dialog else "app")
@@ -5784,34 +6600,19 @@ def _render_invoice_editor_body(
 	with ab2:
 		btn_lbl_p = "💾 Fatura Değişikliklerini Güncelle" if editing_pid else "💾 Faturayı ve Ürün Kalemlerini Kaydet"
 		if ui.button(btn_lbl_p, type="primary", use_container_width=True, key=f"{key_prefix}_btn_save_inv"):
-			valid_raw = [x for x in live_rows if str(x.get("Ürün Adı") or "").strip()]
-			if not valid_raw:
+			save_items = [dr["_save_item"] for dr in detail_rows]
+			if not save_items:
 				ui.warning("Lütfen tabloya en az 1 ürün satırı girin.")
 			else:
-				if pm_code == "total":
-					valid_items = [
-						{
-							"item_name": str(x.get("Ürün Adı") or "").strip(),
-							"category": x.get("Kategori") or inv_cat,
-							"quantity": max(0.0, _safe_float(x.get("Miktar"), 1.0)),
-							"unit_type": x.get("Miktar Çeşidi") or "kg",
-							"unit_price": 0.0,
-							"vat_rate": max(0.0, _safe_float(x.get("KDV (%)"), 1.0)),
-							"line_total": max(0.0, _safe_float(x.get("Toplam Tutar (₺)"), 0.0)),
-							"expiry_date": str(x.get("SKT (Ops.)") or ""),
-						}
-						for x in valid_raw
-					]
-				else:
-					valid_items = valid_raw
 				pid = upsert_purchase_invoice(
 					connect_db_fn,
 					purchase_id=editing_pid,
 					invoice_date=inv_dt.isoformat(),
+					invoice_name=inv_name,
 					invoice_no=inv_no,
 					supplier_name=inv_sup,
 					category=inv_cat,
-					items=valid_items,
+					items=save_items,
 					payment_status=inv_st,
 					notes=inv_notes,
 				)
@@ -5820,7 +6621,7 @@ def _render_invoice_editor_body(
 				ui.session_state[sig_key] = None
 				ui.session_state[prev_pm_key] = None
 				ui.session_state["caf_inv_loaded_sig"] = None
-				ui.session_state["caf_inv_toast"] = f"✅ Fatura (#{pid}) ve {len(valid_items)} ürün kalemi güncellendi."
+				ui.session_state["caf_inv_toast"] = f"✅ '{inv_name or _format_tr_date(inv_dt.isoformat())}' faturası (#{pid}) ve {len(save_items)} ürün kalemi kaydedildi."
 				if in_dialog:
 					ui.close_dialog(all_dialogs=True)
 				ui.rerun()
@@ -5845,7 +6646,7 @@ def _render_invoice_editor_body(
 			ui.download_button(
 				"📥 Faturayı Excel İndir (.xlsx)",
 				data=lambda: build_purchase_invoice_template_excel(connect_db_fn, purchase_id=editing_pid),
-				file_name=f"Fatura_{editing_pid}_{(inv_no or 'Detay').replace('/', '-')}.xlsx",
+				file_name=f"Fatura_{editing_pid}_{(inv_name or inv_no or 'Detay').replace('/', '-')}.xlsx",
 				mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 				key=f"{key_prefix}_btn_dl_xlsx",
 				use_container_width=True,
@@ -5865,7 +6666,7 @@ def _render_invoice_editor_body(
 
 @ui.dialog("🧾 Fatura Detayı, Ürünler, Miktar & Birim Maliyet Düzenleyici", width="large")
 def open_invoice_editor_dialog(ctx_api: dict[str, Any], purchase_id: int) -> None:
-	"""Tablodan tıklanan faturanın içindeki ürün, miktar cinsi, fiyat ve birim maliyetini görüntüleme/düzenleme penceresi."""
+	"""Tablodan tıklanan faturanın içindeki ürün, miktar cinsi, tutar ve hesaplanan birim fiyatını görüntüleme/düzenleme penceresi."""
 	target = get_purchase_by_id(ctx_api["connect_db"], int(purchase_id))
 	if not target:
 		ui.warning("Seçilen fatura bulunamadı.")
@@ -5875,19 +6676,24 @@ def open_invoice_editor_dialog(ctx_api: dict[str, Any], purchase_id: int) -> Non
 	it_cnt = len(target.get("items") or [])
 	tot_tl = float(target.get("total_amount") or 0)
 	st_lbl = target.get("payment_status") or "Ödendi"
+	inv_nm_s = target.get("invoice_name") or _format_tr_date(target.get("invoice_date"))
 	ui.caption(
-		f"Fatura #{int(target['id'])} · Tarih: {target.get('invoice_date') or '—'} · "
-		f"Fatura No: {target.get('invoice_no') or '—'} · Tedarikçi: {target.get('supplier_name') or '—'} · "
-		f"Durum: {st_lbl} · Kayıtlı Kalem: {it_cnt} · Kayıtlı Tutar: {tot_tl:,.2f} ₺"
+		f"Fatura Adı: **{inv_nm_s}** (#{int(target['id'])}) · Tarih: {target.get('invoice_date') or '—'} · "
+		f"Fiş/No: {target.get('invoice_no') or '—'} · Tedarikçi: {target.get('supplier_name') or '—'} · "
+		f"Durum: {st_lbl} · Kayıtlı Kalem: {it_cnt} · Toplam Tutar: {tot_tl:,.2f} ₺"
 	)
 	_render_invoice_editor_body(ctx_api, editing_purchase=target, key_prefix="caf_dlg_i", in_dialog=True)
 
 
-def _render_purchase_statistics_section(connect_db_fn: Callable[[], sqlite3.Connection], sel_ym: str) -> None:
-	"""Fatura ve alınan ürün verilerinden kullanıcı tarafından seçilebilen istatistik görünümlerini çizer."""
+def _render_purchase_statistics_section(
+	connect_db_fn: Callable[[], sqlite3.Connection],
+	sel_ym: str,
+	school_meta: dict[str, str] | None = None,
+) -> None:
+	"""Fatura verilerinden kategori kırılımı, aylık ortalama tüketim, sipariş planı ve yıllık ihale projeksiyonu çizer."""
 	ui.markdown("---")
-	ui.markdown("#### 📊 Fatura ve Alınan Ürün İstatistikleri (Seçilebilir Analizler)")
-	ui.caption("Aşağıdan dönem/filtre belirleyip görüntülemek istediğiniz istatistik başlıklarını seçebilirsiniz.")
+	ui.markdown("#### 📊 Fatura, Aylık Tüketim İstatistikleri, Sipariş & Yıllık İhale Planlayıcı")
+	ui.caption("Dönem/kategori seçip bu ayın sebze-meyve/et/yağ harcamalarını, aylık ortalama gıda tüketimini ve yıllık ihale ihtiyaç cetvelini inceleyebilirsiniz.")
 
 	sc1, sc2, sc3 = ui.columns([1.15, 1.15, 1.3])
 	stat_scope = sc1.selectbox(
@@ -5912,7 +6718,13 @@ def _render_purchase_statistics_section(connect_db_fn: Callable[[], sqlite3.Conn
 	selected_views = ui.multiselect(
 		"Görüntülenecek İstatistikler",
 		PURCHASE_STAT_VIEWS,
-		default=PURCHASE_STAT_VIEWS[:4],
+		default=[
+			PURCHASE_STAT_VIEWS[0],
+			PURCHASE_STAT_VIEWS[1],
+			PURCHASE_STAT_VIEWS[3],
+			PURCHASE_STAT_VIEWS[6],
+			PURCHASE_STAT_VIEWS[7],
+		],
 		key="caf_stat_views",
 	)
 	sel_prod_name = str(ui.session_state.get("caf_stat_prod_pick") or "")
@@ -5931,11 +6743,26 @@ def _render_purchase_statistics_section(connect_db_fn: Callable[[], sqlite3.Conn
 		return
 
 	sk1, sk2, sk3, sk4, sk5 = ui.columns(5)
-	sk1.metric("Fatura Sayısı", f"{sm['invoice_count']}")
-	sk2.metric("Toplam Kalem", f"{sm['item_row_count']}")
+	sk1.metric("Fatura Sayısı", f"{sm['invoice_count']}", delta=f"{sm.get('active_months', 1)} aktif ay")
+	sk2.metric("Toplam Kalem", f"{sm['item_row_count']}", delta=f"{sm.get('distinct_canonical', sm['distinct_products'])} ana kalem")
 	sk3.metric("Farklı Ürün Çeşidi", f"{sm['distinct_products']}")
 	sk4.metric("Toplam Harcama", f"{sm['total_spend_tl']:,.2f} ₺")
 	sk5.metric("Ortalama Fatura", f"{sm['avg_invoice_tl']:,.2f} ₺")
+
+	# Hızlı Gıda Grubu Özeti (Bu dönem Sebze-Meyve, Et, Süt, Bakliyat/Yağ ne tuttu?)
+	ct_map = sm.get("category_totals") or {}
+	tot_sp_safe = max(1.0, float(sm.get("total_spend_tl") or 0.0))
+	if ct_map:
+		cg1, cg2, cg3, cg4 = ui.columns(4)
+		veg_v = float(ct_map.get("Sebze & Meyve", 0.0))
+		meat_v = float(ct_map.get("Et / Tavuk / Balık", 0.0))
+		dairy_v = float(ct_map.get("Süt & Kahvaltılık", 0.0))
+		dry_oil_v = float(ct_map.get("Bakliyat & Kuru Gıda", 0.0)) + float(ct_map.get("Yağ & Baharat", 0.0))
+		cg1.metric("🥦 Sebze & Meyve", f"{veg_v:,.2f} ₺", delta=f"Pay: %{(veg_v / tot_sp_safe) * 100:.1f}")
+		cg2.metric("🥩 Et / Tavuk / Balık", f"{meat_v:,.2f} ₺", delta=f"Pay: %{(meat_v / tot_sp_safe) * 100:.1f}")
+		cg3.metric("🥛 Süt & Kahvaltılık", f"{dairy_v:,.2f} ₺", delta=f"Pay: %{(dairy_v / tot_sp_safe) * 100:.1f}")
+		cg4.metric("🌾 Bakliyat & Yağ/Baharat", f"{dry_oil_v:,.2f} ₺", delta=f"Pay: %{(dry_oil_v / tot_sp_safe) * 100:.1f}")
+
 	ui.caption(
 		f"🏆 **En Yüksek Harcamalı Ürün:** `{sm['top_product_name']}` ({sm['top_product_spend']:,.2f} ₺)  ·  "
 		f"🏪 **En Çok Çalışılan Tedarikçi:** `{sm['top_supplier_name']}` ({sm['top_supplier_spend']:,.2f} ₺)"
@@ -5961,6 +6788,9 @@ def _render_purchase_statistics_section(connect_db_fn: Callable[[], sqlite3.Conn
 			cat_chart = {r["Kategori"]: r["Toplam Harcama (₺)"] for r in analytics["category_summary"]}
 			if cat_chart:
 				ui.bar_chart(cat_chart, height=220, color="#ea580c")
+		if analytics.get("month_category_matrix"):
+			ui.caption("📅 **Ay × Gıda Grubu Harcama Dağılımı (Hangi ay hangi gıda grubu ne tuttu?)**")
+			ui.dataframe(pd.DataFrame(analytics["month_category_matrix"]), hide_index=True, use_container_width=True)
 
 	if PURCHASE_STAT_VIEWS[2] in selected_views and analytics["supplier_summary"]:
 		ui.markdown(f"##### {PURCHASE_STAT_VIEWS[2]}")
@@ -6012,8 +6842,90 @@ def _render_purchase_statistics_section(connect_db_fn: Callable[[], sqlite3.Conn
 		hist_rows = analytics["product_history"]
 		if hist_rows:
 			ui.dataframe(pd.DataFrame(hist_rows), hide_index=True, use_container_width=True)
-			hist_chart = {f"{r['Tarih']} ({r['Fatura No']})": r["Birim Fiyat (₺)"] for r in hist_rows}
+			hist_chart = {f"{r['Tarih']} ({r['Fatura Adı']})": r["Birim Fiyat (₺)"] for r in hist_rows}
 			ui.bar_chart(hist_chart, height=200, color="#ca8a04")
+
+	if len(PURCHASE_STAT_VIEWS) > 6 and PURCHASE_STAT_VIEWS[6] in selected_views and analytics.get("canonical_summary"):
+		ui.markdown(f"##### {PURCHASE_STAT_VIEWS[6]}")
+		cm_opt = ui.radio(
+			"Gruplama Düzeyi",
+			["Ana Gıda / İhale Grubu (Kırmızı Et, Sıvı Yağ, Pirinç, Yoğurt vb.)", "Tekil Ürün Adına Göre"],
+			horizontal=True,
+			key="caf_stat_canon_mode",
+		)
+		use_c = "Ana Gıda" in str(cm_opt or "")
+		rows_avg = analytics["canonical_summary"] if use_c else analytics["product_summary"]
+		ui.caption(
+			f"📌 Geçmiş **{sm.get('active_months', 1)} aktif ay** verisi esas alınarak net birim (ambalaj açılımlı `kg` / `litre` / `adet`) "
+			f"cinsinden **Aylık ve Haftalık Ortalama Tüketim** hesaplanmıştır."
+		)
+		ui.dataframe(pd.DataFrame(rows_avg), hide_index=True, use_container_width=True)
+		top_m_chart = {
+			f"{r.get('Ana Gıda / İhale Kalemi') or r.get('Ürün Adı')} ({r.get('Net Birim') or r.get('Birim')})": r.get("Aylık Ort. Harcama (₺)", r.get("Toplam Harcama (₺)", 0.0))
+			for r in rows_avg[:10]
+		}
+		if top_m_chart:
+			ui.bar_chart(top_m_chart, height=220, color="#0d9488")
+
+	if len(PURCHASE_STAT_VIEWS) > 7 and PURCHASE_STAT_VIEWS[7] in selected_views and analytics.get("canonical_summary"):
+		ui.markdown(f"##### {PURCHASE_STAT_VIEWS[7]}")
+		tp1, tp2, tp3, tp4 = ui.columns([1.3, 1.0, 1.0, 1.1])
+		t_per_lbl = tp1.selectbox(
+			"Sipariş / İhale Dönemi",
+			["12 Aylık (Tam Yıl İhale)", "9 Aylık (Eğitim Öğretim Yılı)", "1 Aylık Sipariş Planı", "1 Haftalık Sipariş Planı"],
+			key="caf_tender_period",
+		)
+		t_margin = tp2.number_input("Miktar Güvenlik Payı (%)", min_value=0.0, max_value=100.0, step=5.0, value=10.0, key="caf_tender_margin")
+		t_inf = tp3.number_input("Tahmini Fiyat Artışı (%)", min_value=0.0, max_value=200.0, step=5.0, value=0.0, key="caf_tender_inf")
+		t_cat = tp4.selectbox("İhale Grup Filtresi", ["Tümü"] + PURCHASE_CATEGORIES, key="caf_tender_cat")
+
+		if "9 Aylık" in t_per_lbl:
+			pm_f = 9.0
+		elif "1 Aylık" in t_per_lbl:
+			pm_f = 1.0
+		elif "1 Haftalık" in t_per_lbl:
+			pm_f = 0.25
+		else:
+			pm_f = 12.0
+
+		plan_res = build_procurement_and_tender_plan(
+			analytics,
+			period_months=pm_f,
+			qty_margin_pct=float(t_margin or 0.0),
+			price_inflation_pct=float(t_inf or 0.0),
+			category_filter=t_cat,
+			use_canonical=True,
+		)
+		psm = plan_res["summary"]
+		tm1, tm2, tm3 = ui.columns(3)
+		tm1.metric("Planlanan Gıda Kalemi", f"{psm['item_count']} kalem")
+		tm2.metric("Dönem Toplam Tahmini Maliyet", f"{psm['total_budget_tl']:,.2f} ₺", delta=f"+%{psm['qty_margin_pct']:g} miktar paylı")
+		tm3.metric("Baz Alınan Geçmiş Veri", f"{psm['active_months']} aktif ay")
+		if plan_res["headline_lines"]:
+			with ui.expander("📝 Özet İhale & Sipariş İhtiyaç Özeti (İlk 8 Temel Gıda Kalemi)", expanded=True):
+				for hl in plan_res["headline_lines"]:
+					ui.markdown(f"- {hl}")
+		if plan_res["rows"]:
+			ui.dataframe(pd.DataFrame(plan_res["rows"]), hide_index=True, use_container_width=True)
+			td1, td2 = ui.columns(2)
+			with td1:
+				ui.download_button(
+					"📥 Sipariş & Yıllık İhale Cetveli İndir (.xlsx)",
+					data=lambda: build_tender_and_order_plan_excel(plan_res, t_per_lbl, school_meta=school_meta),
+					file_name=f"Yemekhane_Ihale_Siparis_Cetveli_{sel_ym}.xlsx",
+					mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+					key="caf_dl_tender_xlsx",
+					use_container_width=True,
+				)
+			with td2:
+				ui.download_button(
+					"📝 Resmi İhale Miktar & Maliyet Özeti İndir (.docx)",
+					data=lambda: build_tender_summary_docx(plan_res, t_per_lbl, school_meta=school_meta),
+					file_name=f"Yemekhane_Ihale_Ozeti_{sel_ym}.docx",
+					mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+					key="caf_dl_tender_docx",
+					use_container_width=True,
+				)
 
 	ui.download_button(
 		"📥 Seçili Dönem Fatura & Ürün İstatistiklerini İndir (.xlsx)",
@@ -6092,14 +7004,25 @@ def _render_tab_purchases_and_expenses(ctx_api: dict[str, Any], sel_ym: str, app
 					"Doldurduğunuz `.xlsx` veya `.csv` dosyasını aşağıdan yükleyin:"
 				)
 			up_inv_xl = ui.file_uploader(
-				"Doldurulmuş Fatura Excel (.xlsx) veya CSV (.csv) Dosyası",
+				"Doldurulmuş Fatura Excel (.xlsx) veya CSV (.csv) Dosyası (Sekme adı = Fatura Adı/Tarihi)",
 				type=["xlsx", "csv"],
 				key="caf_inv_excel_up",
 			)
+			xl_grp_lbl = ui.radio(
+				"Aynı Tarihteki Fişleri Gruplama",
+				["Tarih / Sekme Adına Göre Tek Fatura (Örn: 16.11.2026)", "Tarih + Fiş No Bazlı Ayır (Örn: 16.11.2026 · Fiş-001)"],
+				horizontal=True,
+				key="caf_xl_group_mode",
+			)
+			xl_grp_mode = "receipt" if "Fiş No" in str(xl_grp_lbl or "") else "date"
 			if up_inv_xl is not None:
-				parsed_xl_invs = parse_purchase_invoices_from_excel_or_csv(up_inv_xl.getvalue(), up_inv_xl.name)
+				parsed_xl_invs = parse_purchase_invoices_from_excel_or_csv(
+					up_inv_xl.getvalue(),
+					up_inv_xl.name,
+					group_mode=xl_grp_mode,
+				)
 				if not parsed_xl_invs:
-					ui.warning("Dosyada fatura kalemi bulunamadı. Tabloda en azından 'Ürün Adı' ile 'Miktar' veya 'Birim Fiyat / Toplam Tutar' sütunları yer almalıdır.")
+					ui.warning("Dosyada fatura kalemi bulunamadı. Tabloda en azından 'Malın Cinsi' / 'Ürün Adı' ile 'Miktar' veya 'Birim Fiyatı / Tutar' sütunları yer almalıdır.")
 				else:
 					prev_rows: list[dict[str, Any]] = []
 					for p_inv in parsed_xl_invs:
@@ -6115,19 +7038,20 @@ def _render_tab_purchases_and_expenses(ctx_api: dict[str, Any], sel_ym: str, app
 								up_v = round((tot_v / (1.0 + vr_v / 100.0)) / q_v, 2)
 							uc_v = round((tot_v / q_v) if q_v > 0 else 0.0, 2)
 							prev_rows.append({
+								"Fatura Adı": p_inv.get("invoice_name") or _format_tr_date(p_inv["invoice_date"]),
 								"Fatura Tarihi": p_inv["invoice_date"],
-								"Fatura No": p_inv.get("invoice_no") or "—",
-								"Tedarikçi": p_inv.get("supplier_name") or "—",
-								"Ödeme": p_inv.get("payment_status") or "Ödendi",
-								"Ürün Adı": it.get("item_name") or "",
+								"Fiş / No": p_inv.get("invoice_no") or "—",
+								"Kategori (Oto.)": it.get("category") or "Diğer",
+								"Malın Cinsi": it.get("item_name") or "",
 								"Miktar": q_v,
-								"Miktar Cinsi": it.get("unit_type") or "kg",
-								"Birim Fiyat (₺)": up_v,
-								"KDV (%)": vr_v,
-								"Birim Maliyet (KDV Dahil ₺)": uc_v,
-								"Satır Toplamı (₺)": tot_v,
+								"Birim": it.get("unit_type") or "kg",
+								"Birim Fiyatı (₺)": up_v,
+								"Bizden Alınan Tutar (₺)": tot_v,
+								"Hesaplanan Birim Maliyet (₺)": uc_v,
+								"Net Ölçü": f"{_safe_float(it.get('net_qty'), q_v):g} {it.get('net_unit') or it.get('unit_type') or 'kg'}",
 							})
-					ui.success(f"📄 {len(parsed_xl_invs)} fatura, toplam {len(prev_rows)} ürün kalemi algılandı.")
+					tot_xl_sum = round(sum(float(r["Bizden Alınan Tutar (₺)"] or 0.0) for r in prev_rows), 2)
+					ui.success(f"📄 **{len(parsed_xl_invs)} fatura**, toplam **{len(prev_rows)} ürün kalemi** algılandı · Genel Toplam: **{tot_xl_sum:,.2f} ₺**.")
 					if prev_rows:
 						ui.dataframe(pd.DataFrame(prev_rows), hide_index=True, use_container_width=True)
 					xb_cols = ui.columns(2 if len(parsed_xl_invs) == 1 else 1)
@@ -6146,6 +7070,7 @@ def _render_tab_purchases_and_expenses(ctx_api: dict[str, Any], sel_ym: str, app
 								pid_xl = upsert_purchase_invoice(
 									connect_db_fn,
 									invoice_date=p_inv["invoice_date"],
+									invoice_name=p_inv.get("invoice_name") or "",
 									invoice_no=p_inv.get("invoice_no") or "",
 									supplier_name=p_inv.get("supplier_name") or "",
 									category=p_inv.get("category") or "Diğer",
@@ -6154,7 +7079,7 @@ def _render_tab_purchases_and_expenses(ctx_api: dict[str, Any], sel_ym: str, app
 								)
 								saved_pids.append(pid_xl)
 							ui.session_state["caf_inv_loaded_sig"] = None
-							ui.session_state["caf_inv_toast"] = f"✅ Excel/CSV'den {len(saved_pids)} fatura ({len(prev_rows)} ürün kalemi) kaydedildi."
+							ui.session_state["caf_inv_toast"] = f"✅ Excel/CSV'den {len(saved_pids)} fatura ({len(prev_rows)} kalem · {tot_xl_sum:,.2f} ₺) kaydedildi."
 							ui.rerun()
 					if len(parsed_xl_invs) == 1:
 						with xb_cols[1]:
@@ -6172,6 +7097,7 @@ def _render_tab_purchases_and_expenses(ctx_api: dict[str, Any], sel_ym: str, app
 									ui.session_state["caf_inv_date"] = date.fromisoformat(str(p0["invoice_date"])[:10])
 								except Exception:
 									ui.session_state["caf_inv_date"] = date.today()
+								ui.session_state["caf_inv_name"] = str(p0.get("invoice_name") or _format_tr_date(p0["invoice_date"]))
 								ui.session_state["caf_inv_no"] = str(p0.get("invoice_no") or "")
 								ui.session_state["caf_inv_sup"] = str(p0.get("supplier_name") or "")
 								if p0.get("category") in PURCHASE_CATEGORIES:
@@ -6234,6 +7160,7 @@ def _render_tab_purchases_and_expenses(ctx_api: dict[str, Any], sel_ym: str, app
 		df_show_invs = pd.DataFrame([
 			{
 				"id": int(pr["id"]),
+				"Fatura Adı": pr.get("invoice_name") or _format_tr_date(pr["invoice_date"]),
 				"Fatura Tarihi": pr["invoice_date"],
 				"Fatura No": pr.get("invoice_no") or "—",
 				"Tedarikçi": pr.get("supplier_name") or "—",
@@ -6286,18 +7213,19 @@ def _render_tab_purchases_and_expenses(ctx_api: dict[str, Any], sel_ym: str, app
 		with ui.expander(f"📋 Kalem Bazlı Tüm Ürün Hareketleri & Birim Maliyetler ({len(items)} kalem · Filtrelenmiş Toplam: {tot_flt_tl:,.2f} ₺)", expanded=False):
 			df_show_items = pd.DataFrame([
 				{
+					"Fatura Adı": str(it.get("invoice_name") or "").strip() or _format_tr_date(it["invoice_date"]),
 					"Fatura Tarihi": it["invoice_date"],
-					"Fatura No": it.get("invoice_no") or "—",
-					"Tedarikçi": it.get("supplier_name") or "—",
-					"Ürün Adı": it["item_name"],
+					"Fiş / Fatura No": it.get("invoice_no") or "—",
+					"Malın Cinsi": it["item_name"],
+					"Ana Gıda Grubu": it.get("canonical_name") or it["item_name"],
 					"Kategori": it["category"],
 					"Miktar": it["quantity"],
-					"Miktar Cinsi": it["unit_type"],
-					"Birim Fiyat (KDV Hariç ₺)": it["unit_price"],
+					"Birim": it["unit_type"],
+					"Net Ölçü": f"{_safe_float(it.get('net_qty'), it['quantity']):g} {it.get('net_unit') or it['unit_type']}",
+					"Birim Fiyatı (KDV Hariç ₺)": it["unit_price"],
 					"KDV (%)": it["vat_rate"],
 					"Birim Maliyet (KDV Dahil ₺)": round(_safe_float(it.get("unit_cost"), 0.0), 2),
-					"SKT": it.get("expiry_date") or "—",
-					"Toplam Tutar (₺)": it["line_total"],
+					"Bizden Alınan Tutar (₺)": it["line_total"],
 				}
 				for it in items
 			])
@@ -6315,7 +7243,7 @@ def _render_tab_purchases_and_expenses(ctx_api: dict[str, Any], sel_ym: str, app
 		ui.info("Seçilen filtrede gelen ürün / fatura kalemi bulunamadı.")
 
 	# Seçilebilir Fatura ve Alınan Ürün İstatistikleri Bölümü
-	_render_purchase_statistics_section(connect_db_fn, sel_ym)
+	_render_purchase_statistics_section(connect_db_fn, sel_ym, school_meta=app_cfg)
 
 	# Menüye Göre Satın Alma İhtiyaç Listesi
 	ui.markdown("---")
