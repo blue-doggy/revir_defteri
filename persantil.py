@@ -27,6 +27,7 @@ import revir_ui as ui
 import gemini_assistant as gai
 import insulin_diabetes as idm
 import document_studio as dstudio
+import cafeteria as caf
 
 # Ağır kütüphaneler (altair, openpyxl, python-docx) açılışta değil, ilk kullanıldıklarında tembel yüklenir.
 docx = None
@@ -124,7 +125,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.16.17"
+_DEFAULT_APP_VERSION = "1.18.1"
 
 
 def _load_app_version() -> str:
@@ -167,6 +168,7 @@ PAGES = [
 	"📋 Sağlık Profili ve Bakım Planı",
 	"📏 Ölçüm ve Gelişim",
 	"📅 Takvim & Planlama",
+	"🍽️ Yemekhane Yönetimi",
 	"🖨️ Raporlar",
 	"📁 Evraklar",
 	"⚙️ Ayarlar",
@@ -299,6 +301,14 @@ DEFAULT_APP_SETTINGS: dict[str, str] = {
 	"calendar_show_prayer_times": "1",
 	"calendar_auto_load_holidays": "1",
 	"graduation_grade_level": "4",
+	"cafeteria_default_meal_price": "75",
+	"cafeteria_default_staff_price": "90",
+	"cafeteria_sig1_role": "Hazırlayan (Revir / Diyetisyen)",
+	"cafeteria_sig1_name": "",
+	"cafeteria_sig2_role": "Yemekhane Sorumlusu",
+	"cafeteria_sig2_name": "",
+	"cafeteria_sig3_role": "Okul Müdürü (Onay)",
+	"cafeteria_sig3_name": "",
 }
 
 INCIDENT_LOCATIONS = [
@@ -1505,6 +1515,9 @@ def initialize_db() -> None:
 		# Pediatrik Diyabet & İnsülin Yönetimi tabloları
 		idm.ensure_diabetes_tables(connection)
 
+		# Yemekhane Yönetimi tabloları
+		caf.ensure_cafeteria_tables(connection)
+
 		# Resilient person_type normalization
 		connection.execute("UPDATE students SET person_type='Öğrenci' WHERE person_type LIKE '%renci%'")
 		connection.execute(
@@ -1897,7 +1910,10 @@ def perform_factory_reset() -> tuple[bool, str]:
 			"school_screenings", "care_plans", "health_forms", "health_profiles",
 			"lab_results", "lab_reports", "vital_readings", "vital_reference",
 			"measurements", "visits", "students", "classes",
-			"calendar_events", "calendar_daily_notes"
+			"calendar_events", "calendar_daily_notes",
+			"cafeteria_dish_ingredients", "cafeteria_dishes", "cafeteria_menu_plans",
+			"cafeteria_purchase_items", "cafeteria_purchases", "cafeteria_monthly_fees",
+			"cafeteria_cash_ledger", "cafeteria_diners",
 		]
 
 		for db_file in target_dbs:
@@ -3660,6 +3676,15 @@ PAGE_SECTIONS_REGISTRY: dict[str, dict[str, Any]] = {
 			"name": "Gemini AI Pediatrik Diyabet Yorumu",
 			"desc": "Yaş, boy, kilo, WHO persantil ve menüye göre yapay zeka klinik denetimi",
 			"icon": "🤖",
+			"default": True,
+			"essential": True,
+		},
+	},
+	"🍽️ Yemekhane Yönetimi": {
+		"cafeteria_main": {
+			"name": "Yemekler, Aylık Menü, Gider ve Kasa Yönetimi",
+			"desc": "Menü planlayıcı, AI malzeme/kalori/alerjen analizi, fatura giderleri ve aidat/kasa muhasebesi",
+			"icon": "🍽️",
 			"default": True,
 			"essential": True,
 		},
@@ -12516,6 +12541,154 @@ def _execute_gemini_chat_export(export_spec: dict[str, Any], active_pid: int | N
 				tok_x = ui.register_download(b_x, fn_x, xlsx_mime)
 				downloads.append({"token": tok_x, "file_name": fn_x, "label": "📊 Excel Tablosu İndir (.xlsx)", "kind": "xlsx"})
 			return downloads, extra_note
+
+		if action == "cafeteria_export":
+			ym_caf = str(export_spec.get("year_month") or date.today().strftime("%Y-%m"))[:7]
+			cfg_caf = get_app_settings()
+			if fmt in ("docx", "word", "both"):
+				signers_caf = [
+					(cfg_caf.get("cafeteria_sig1_role", "Hazırlayan"), cfg_caf.get("cafeteria_sig1_name") or cfg_caf.get("nurse_name", "")),
+					(cfg_caf.get("cafeteria_sig2_role", "Yemekhane Sorumlusu"), cfg_caf.get("cafeteria_sig2_name", "")),
+					(cfg_caf.get("cafeteria_sig3_role", "Okul Müdürü"), cfg_caf.get("cafeteria_sig3_name") or cfg_caf.get("principal_name", "")),
+				]
+				b_d = caf.build_menu_a4_docx(connect_db, year_month=ym_caf, scope="monthly", signers=signers_caf, school_meta=cfg_caf)
+				fn_d = f"Yemekhane_Menu_{ym_caf}.docx"
+				downloads.append({"token": ui.register_download(b_d, fn_d, docx_mime), "file_name": fn_d, "label": f"📄 {ym_caf} A4 Yemek Menüsü (.docx)", "kind": "docx"})
+			if fmt in ("xlsx", "excel", "both"):
+				b_x = caf.build_cafeteria_full_workbook_excel(connect_db, ym_caf)
+				fn_x = f"Yemekhane_Tam_Rapor_{ym_caf}.xlsx"
+				downloads.append({"token": ui.register_download(b_x, fn_x, xlsx_mime), "file_name": fn_x, "label": f"📊 {ym_caf} Yemekhane Excel Kitabı (.xlsx)", "kind": "xlsx"})
+			return downloads, extra_note
+
+		if action == "cafeteria_upsert_dishes":
+			dishes_in = export_spec.get("dishes") if isinstance(export_spec.get("dishes"), list) else []
+			saved_d = 0
+			for d_it in dishes_in[:60]:
+				if not isinstance(d_it, dict) or not str(d_it.get("name") or "").strip():
+					continue
+				caf.upsert_dish_with_ingredients(
+					connect_db,
+					name=str(d_it["name"]),
+					category=str(d_it.get("category") or "Ana Yemek"),
+					portion_g=caf._safe_float(d_it.get("portion_g"), 250.0),
+					ingredients=d_it.get("ingredients") if isinstance(d_it.get("ingredients"), list) else [],
+					recipe_notes=str(d_it.get("recipe_notes") or ""),
+					source="ai",
+				)
+				saved_d += 1
+			clear_all_data_caches()
+			return [], f"\n\n✅ **Yemekler Bankasına {saved_d} yemek** (malzeme, kalori ve alerjenleriyle) kaydedildi."
+
+		if action == "cafeteria_plan_menu":
+			plans_in = export_spec.get("plans") if isinstance(export_spec.get("plans"), list) else []
+			all_d_map = {caf._tr_fold(d["name"]): int(d["id"]) for d in caf.get_all_dishes(connect_db)}
+			saved_p = 0
+			for p_it in plans_in[:60]:
+				if not isinstance(p_it, dict) or not str(p_it.get("plan_date") or "").strip():
+					continue
+				d_ids_m: list[int] = []
+				cust_m: list[dict[str, Any]] = []
+				for d_raw in (p_it.get("dishes") or []):
+					if isinstance(d_raw, dict):
+						nm_s = str(d_raw.get("name") or "").strip()
+						kv, cv, av = caf._safe_float(d_raw.get("kcal"), 0.0), caf._safe_float(d_raw.get("carbs_g"), 0.0), str(d_raw.get("allergen") or "")
+					else:
+						nm_s = str(d_raw or "").strip()
+						kv, cv, av = 0.0, 0.0, ""
+					if not nm_s:
+						continue
+					fid = all_d_map.get(caf._tr_fold(nm_s))
+					if fid:
+						d_ids_m.append(fid)
+					else:
+						cust_m.append({"name": nm_s, "kcal": kv, "carbs_g": cv, "allergen": av})
+				if d_ids_m or cust_m:
+					caf.upsert_menu_plan_slot(
+						connect_db,
+						plan_date=str(p_it["plan_date"])[:10],
+						meal_slot=str(p_it.get("meal_slot") or "Öğle Yemeği"),
+						dish_ids=d_ids_m,
+						custom_items=cust_m,
+						sync_to_diabetes=True,
+					)
+					saved_p += 1
+			clear_all_data_caches()
+			return [], f"\n\n✅ **{saved_p} öğünlük yemekhane menüsü** kaydedildi ve diyabet modülüyle eşitlendi."
+
+		if action == "cafeteria_record_purchase":
+			items_in = export_spec.get("items") if isinstance(export_spec.get("items"), list) else []
+			pid_new = caf.upsert_purchase_invoice(
+				connect_db,
+				invoice_date=str(export_spec.get("invoice_date") or date.today().isoformat())[:10],
+				invoice_no=str(export_spec.get("invoice_no") or ""),
+				supplier_name=str(export_spec.get("supplier_name") or ""),
+				category=str(export_spec.get("category") or "Diğer"),
+				items=items_in,
+				payment_status=str(export_spec.get("payment_status") or "Ödendi"),
+				notes=str(export_spec.get("notes") or ""),
+			)
+			clear_all_data_caches()
+			return [], f"\n\n✅ **Fatura (#{pid_new}) ve {len(items_in)} ürün kalemi** yemekhane giderlerine işlendi."
+
+		if action == "cafeteria_record_cash":
+			txs_in = export_spec.get("transactions") if isinstance(export_spec.get("transactions"), list) else []
+			diners_map = {caf._tr_fold(d["full_name"]): int(d["id"]) for d in caf.get_diners(connect_db, active_only=False)}
+			cnt_tx = 0
+			for tx in txs_in[:50]:
+				if not isinstance(tx, dict):
+					continue
+				amt_v = caf._safe_float(tx.get("amount"), 0.0)
+				if amt_v <= 0:
+					continue
+				fn_p = str(tx.get("for_person_name") or "").strip()
+				caf.record_cash_transaction(
+					connect_db,
+					tx_date=str(tx.get("tx_date") or date.today().isoformat())[:10],
+					tx_type=str(tx.get("tx_type") or "IN_PAYMENT"),
+					amount=amt_v,
+					diner_id=diners_map.get(caf._tr_fold(fn_p)),
+					for_person_name=fn_p,
+					delivered_by_name=str(tx.get("delivered_by_name") or ""),
+					received_by_name=str(tx.get("received_by_name") or ""),
+					payment_method=str(tx.get("payment_method") or "Nakit"),
+					notes=str(tx.get("notes") or ""),
+				)
+				cnt_tx += 1
+			clear_all_data_caches()
+			return [], f"\n\n✅ **{cnt_tx} yemekhane kasa/tahsilat işlemi** kaydedildi."
+
+		if action == "cafeteria_delete_records":
+			del_cnts = {"dish": 0, "menu": 0, "purch": 0, "diner": 0, "cash": 0}
+			with connect_db() as conn_cd:
+				caf.ensure_cafeteria_tables(conn_cd)
+				for dn_nm in (export_spec.get("dish_names") or []):
+					cur_d = conn_cd.execute("DELETE FROM cafeteria_dishes WHERE lower(trim(name))=lower(trim(?))", (str(dn_nm),))
+					del_cnts["dish"] += int(cur_d.rowcount or 0)
+				for mp in (export_spec.get("plan_dates") or []):
+					if isinstance(mp, dict) and mp.get("plan_date"):
+						p_dt = str(mp["plan_date"])[:10]
+						sl_m = str(mp.get("meal_slot") or "").strip()
+						if sl_m:
+							cur_m = conn_cd.execute("DELETE FROM cafeteria_menu_plans WHERE plan_date=? AND meal_slot=?", (p_dt, sl_m))
+						else:
+							cur_m = conn_cd.execute("DELETE FROM cafeteria_menu_plans WHERE plan_date=?", (p_dt,))
+						del_cnts["menu"] += int(cur_m.rowcount or 0)
+				for p_id in (export_spec.get("purchase_ids") or []):
+					if str(p_id).isdigit():
+						cur_p = conn_cd.execute("DELETE FROM cafeteria_purchases WHERE id=?", (int(p_id),))
+						del_cnts["purch"] += int(cur_p.rowcount or 0)
+				for dr_nm in (export_spec.get("diner_names") or []):
+					cur_dn = conn_cd.execute("DELETE FROM cafeteria_diners WHERE lower(trim(full_name))=lower(trim(?))", (str(dr_nm),))
+					del_cnts["diner"] += int(cur_dn.rowcount or 0)
+				for tx_id in (export_spec.get("cash_tx_ids") or []):
+					if str(tx_id).isdigit():
+						cur_t = conn_cd.execute("DELETE FROM cafeteria_cash_ledger WHERE id=?", (int(tx_id),))
+						del_cnts["cash"] += int(cur_t.rowcount or 0)
+			clear_all_data_caches()
+			tot_removed = sum(del_cnts.values())
+			if tot_removed:
+				return [], f"\n\n🗑️ **Yemekhane silme işlemi uygulandı:** {del_cnts['dish']} yemek, {del_cnts['menu']} menü öğünü, {del_cnts['purch']} fatura, {del_cnts['diner']} abone, {del_cnts['cash']} kasa kaydı silindi."
+			return [], "\n\nℹ️ *Silinecek eşleşen yemekhane kaydı bulunamadı.*"
 	except Exception as exc:
 		extra_note = f"\n\n⚠️ *Dosya oluşturulurken hata oluştu: {exc}*"
 	return downloads, extra_note
@@ -12661,7 +12834,18 @@ def _summarize_write_spec_items(ws: dict[str, Any]) -> list[str]:
 	return items
 
 
-_MUTATING_CHAT_EXPORT_ACTIONS = {"create_classes", "create_profiles", "rename_classes", "add_calendar_events", "delete_records"}
+_MUTATING_CHAT_EXPORT_ACTIONS = {
+	"create_classes",
+	"create_profiles",
+	"rename_classes",
+	"add_calendar_events",
+	"delete_records",
+	"cafeteria_upsert_dishes",
+	"cafeteria_plan_menu",
+	"cafeteria_record_purchase",
+	"cafeteria_record_cash",
+	"cafeteria_delete_records",
+}
 
 
 def _resolve_rename_classes_pairs(export_spec: dict[str, Any]) -> list[tuple[str, str]]:
@@ -12729,7 +12913,7 @@ def _build_export_write_proposal(export_spec: dict[str, Any]) -> dict[str, Any]:
 	"""Veri yazma veya silme içeren Gemini komutları için kullanıcı onay kartı özeti üretir."""
 	act = str(export_spec.get("action") or "").strip().lower()
 	items: list[str] = []
-	is_destructive = (act == "delete_records")
+	is_destructive = act in ("delete_records", "cafeteria_delete_records")
 	title = "Veritabanına İşlenecek Değişiklikler (Onay Gerekli)"
 	confirm_label = "✅ Onayla ve İşlemi Uygula"
 
@@ -12810,6 +12994,49 @@ def _build_export_write_proposal(export_spec: dict[str, Any]) -> dict[str, Any]:
 		if cal_items:
 			c_lbls = [str(c.get("title") or c) if isinstance(c, dict) else str(c) for c in cal_items[:12]]
 			items.append(f"⚠️ Silinecek takvim kayıtları ({len(cal_items)}): {', '.join(c_lbls)}")
+	elif act == "cafeteria_upsert_dishes":
+		title = "Yemekhane Yemek & Malzeme İşlemleri (Onay Gerekli)"
+		d_list = export_spec.get("dishes") if isinstance(export_spec.get("dishes"), list) else []
+		for d_it in d_list[:10]:
+			if isinstance(d_it, dict) and d_it.get("name"):
+				ing_c = len(d_it.get("ingredients") or []) if isinstance(d_it.get("ingredients"), list) else 0
+				items.append(f"🍲 {d_it['name']} ({d_it.get('category', 'Ana Yemek')}, {ing_c} malzeme)")
+	elif act == "cafeteria_plan_menu":
+		title = "Yemekhane Menü Planlama (Onay Gerekli)"
+		p_list = export_spec.get("plans") if isinstance(export_spec.get("plans"), list) else []
+		for p_it in p_list[:10]:
+			if isinstance(p_it, dict) and p_it.get("plan_date"):
+				d_nms = ", ".join(str(x.get("name") if isinstance(x, dict) else x) for x in (p_it.get("dishes") or [])[:4])
+				items.append(f"🗓️ {str(p_it['plan_date'])[:10]} ({p_it.get('meal_slot', 'Öğle Yemeği')}): {d_nms}")
+	elif act == "cafeteria_record_purchase":
+		title = "Yemekhane Gelen Ürün & Fatura Kaydı (Onay Gerekli)"
+		it_list = export_spec.get("items") if isinstance(export_spec.get("items"), list) else []
+		items.append(f"🚚 Fatura: {str(export_spec.get('invoice_date') or '')[:10]} · {export_spec.get('supplier_name') or 'Tedarikçi'} ({len(it_list)} ürün kalemi)")
+		for it in it_list[:8]:
+			if isinstance(it, dict) and it.get("item_name"):
+				items.append(f"📦 {it['item_name']}: {it.get('quantity', 1)} {it.get('unit_type', 'kg')} × {it.get('unit_price', 0)} ₺")
+	elif act == "cafeteria_record_cash":
+		title = "Yemekhane Kasa & Tahsilat İşlemleri (Onay Gerekli)"
+		tx_list = export_spec.get("transactions") if isinstance(export_spec.get("transactions"), list) else []
+		for tx in tx_list[:10]:
+			if isinstance(tx, dict):
+				kind_lbl = "Okula Teslim (-)" if tx.get("tx_type") == "OUT_SCHOOL_HANDOVER" else "Tahsilat (+)"
+				who_lbl = f"Getiren: {tx.get('delivered_by_name')}" if tx.get("delivered_by_name") else f"Alan: {tx.get('received_by_name') or '—'}"
+				items.append(f"💵 {kind_lbl}: {tx.get('for_person_name') or '—'} · {tx.get('amount', 0)} ₺ ({who_lbl})")
+	elif act == "cafeteria_delete_records":
+		title = "Yemekhane Kayıt Silme İşlemi (Dikkat — Onay Gerekli)"
+		confirm_label = "🗑️ Onayla ve Yemekhane Kayıtlarını Sil"
+		for d_nm in (export_spec.get("dish_names") or [])[:8]:
+			items.append(f"⚠️ Silinecek yemek: {d_nm}")
+		for mp in (export_spec.get("plan_dates") or [])[:8]:
+			if isinstance(mp, dict):
+				items.append(f"⚠️ Silinecek menü: {mp.get('plan_date')} ({mp.get('meal_slot') or 'Tüm öğünler'})")
+		for p_id in (export_spec.get("purchase_ids") or [])[:8]:
+			items.append(f"⚠️ Silinecek fatura ID: #{p_id}")
+		for dr_nm in (export_spec.get("diner_names") or [])[:8]:
+			items.append(f"⚠️ Çıkarılacak yemek abonesi: {dr_nm}")
+		for tx_id in (export_spec.get("cash_tx_ids") or [])[:8]:
+			items.append(f"⚠️ Silinecek kasa hareketi ID: #{tx_id}")
 
 	if not items:
 		items.append(f"⚙️ Uygulanacak komut: {act}")
@@ -13160,6 +13387,13 @@ def _build_context_chat_chips(cur_page: str) -> list[dict[str, str]]:
 			{"label": "🏫 Aylık Revir Tarama Planı", "prompt": "Önümüzdeki ay için boy-kilo, görme ve aşı tarama takvimi etkinlikleri planla."},
 			{"label": "📊 Yaklaşan Etkinlik Listesi (Excel)", "prompt": "Takvimdeki yaklaşan revir etkinliklerini Excel (.xlsx) listesi olarak çıkar."},
 			{"label": "📎 Duyuru/Yazı Ekle", "action": "upload"},
+		]
+	if p_clean == "Yemekhane Yönetimi":
+		return [
+			{"label": "🍲 Yemek & Malzeme Ekle (Onaylı)", "prompt": "Mercimek Çorbası ve Orman Kebabı için 1 porsiyon malzeme, kalori ve alerjen çıkarıp yemekler bankasına onaylı olarak kaydet."},
+			{"label": "💵 Ödeme / Kasa İşlemi (Onaylı)", "prompt": "Yemekhane tahsilatı veya okula kasa teslimi kaydetmem için detayları sor ve onay kartı hazırla."},
+			{"label": "🧾 Aylık Gider Özeti (Excel)", "prompt": "Bu ayki yemekhane gelen ürün faturalarını ve kategori bazlı toplam giderleri Excel (.xlsx) olarak çıkar."},
+			{"label": "📎 Fiş / Fatura / Menü Ekle", "action": "upload"},
 		]
 	if p_clean == "Raporlar":
 		return [
@@ -32747,6 +32981,7 @@ def _handle_cmd_search(query: str) -> list[dict[str, Any]]:
 	quick_cmds = [
 		{"group": "⚡ Hızlı İşlemler", "kind": "page", "value": "🩺 Revir Kaydı", "icon": "🩺", "title": "Yeni Revir Kaydı Aç", "subtitle": "Öğrenci veya yetişkin revir başvurusu kaydet (Alt+V)", "tag": "Sayfa"},
 		{"group": "⚡ Hızlı İşlemler", "kind": "page", "value": "💉 İnsülin & Diyabet Yönetimi", "icon": "💉", "title": "İnsülin Dozu Hesapla & Yemek Menüsü", "subtitle": "Bolus hesaplayıcı ve aylık okul yemek menüsü yönetimi", "tag": "Diyabet"},
+		{"group": "⚡ Hızlı İşlemler", "kind": "page", "value": "🍽️ Yemekhane Yönetimi", "icon": "🍽️", "title": "Yemekhane Yönetimi (Menü, Gider & Kasa)", "subtitle": "Yemekler bankası, iş günü menü planı, A4 çıktı, fatura/gider ve kasa takibi", "tag": "Yemekhane"},
 		{"group": "⚡ Hızlı İşlemler", "kind": "new_student", "value": "Öğrenci", "icon": "➕", "title": "Yeni Öğrenci Profili Ekle", "subtitle": "Sağlık profili ve ilk ölçüm formu", "tag": "Çekmece"},
 		{"group": "⚡ Hızlı İşlemler", "kind": "new_student", "value": "Sivil / diğer kişi", "icon": "🧑‍💼", "title": "Yeni Yetişkin / Personel Ekle", "subtitle": "Öğretmen, personel veya veli kaydı oluştur", "tag": "Çekmece"},
 		{"group": "⚡ Hızlı İşlemler", "kind": "class_mgr", "value": "", "icon": "🏫", "title": "Okul Sınıfları & Şube Yönetimi", "subtitle": "Sınıf ekle, çıkar veya öğrenci ata", "tag": "Pencere"},
@@ -32954,6 +33189,20 @@ def render_insulin_diabetes() -> None:
 	)
 
 
+def render_cafeteria_page() -> None:
+	caf.render_cafeteria_management_page(
+		{
+			"connect_db": connect_db,
+			"get_app_settings": get_app_settings,
+			"save_app_settings": save_app_settings,
+			"_get_active_gemini_config": _get_active_gemini_config,
+			"mask_kvkk_value": mask_kvkk_value,
+			"clear_all_data_caches": clear_all_data_caches,
+			"is_section_visible": is_section_visible,
+		}
+	)
+
+
 def main() -> None:
 	fav_icon = get_app_icon()
 	ui.set_page_config(page_title="Revir Defteri", page_icon=fav_icon, layout="wide", initial_sidebar_state="expanded")
@@ -33044,6 +33293,7 @@ def main() -> None:
 			{"value": "📋 Sağlık Profili ve Bakım Planı", "icon": "📋", "label": "Sağlık Profili & Plan"},
 			{"value": "📏 Ölçüm ve Gelişim", "icon": "📏", "label": "Ölçüm & Gelişim"},
 			{"value": "📅 Takvim & Planlama", "icon": "📅", "label": "Takvim & Planlama"},
+			{"value": "🍽️ Yemekhane Yönetimi", "icon": "🍽️", "label": "Yemekhane Yönetimi"},
 		]),
 		("BELGE & SİSTEM", [
 			{"value": "🖨️ Raporlar", "icon": "🖨️", "label": "Raporlar"},
@@ -33126,6 +33376,8 @@ def main() -> None:
 			get_tr_provinces_fn=get_tr_provinces,
 			is_section_visible_fn=is_section_visible,
 		)
+	elif page_clean == "Yemekhane Yönetimi":
+		render_cafeteria_page()
 	elif page_clean == "Raporlar":
 		render_reports()
 	elif page_clean == "Evraklar":
