@@ -1046,8 +1046,8 @@ Tablolar:
 - cafeteria_menu_plans(id, year_month, plan_date, meal_slot, dish_ids_json, custom_items_json, total_kcal, total_carbs_g, allergens_json, notes)
 - cafeteria_purchases(id, invoice_date, year_month, invoice_no, supplier_name, category, subtotal_amount, vat_amount, total_amount, payment_status, notes)
 - cafeteria_purchase_items(id, purchase_id, item_name, category, quantity, unit_type, unit_price, vat_rate, line_total, expiry_date, notes)
-- cafeteria_diners(id, student_id, full_name, role_type, class_or_dept, daily_meals_count, fee_exempt, allergies_override, is_active)
-- cafeteria_monthly_fees(id, year_month, diner_id, workdays_in_month, planned_days, meals_per_day, unit_meal_price, discount_or_adjustment, expected_amount)
+- cafeteria_diners(id, student_id, full_name, role_type, class_or_dept, daily_meals_count, fee_exempt, allergies_override, is_active, end_date)
+- cafeteria_monthly_fees(id, year_month, diner_id, workdays_in_month, planned_days, meals_per_day, unit_meal_price, discount_or_adjustment, carry_forward_debt, expected_amount)
 - cafeteria_cash_ledger(id, tx_date, year_month, tx_type, diner_id, for_person_name, delivered_by_name, received_by_name, amount, payment_method, receipt_no, notes)
 - tr_locations(id, province, district, village)
 - lms_reference(id, indicator, sex, age_months, l, m, s)
@@ -1321,8 +1321,8 @@ def chat_with_gemini_assistant(
 		"   Not: Toplu önek/metin temizleme için `replace_from` ve `replace_to` kullanabilir veya tek tek `renames` listesi verebilirsin.\n"
 		"17) Yemekhane Yemekler Bankasına yemek ve malzeme/kalori/alerjen ekleme veya güncelleme (onay kartı zorunlu):\n"
 		"   {\"action\":\"cafeteria_upsert_dishes\",\"dishes\":[{\"name\":\"Mercimek Çorbası\",\"category\":\"Çorba\",\"portion_g\":250,\"ingredients\":[{\"ingredient_name\":\"Kırmızı Mercimek\",\"amount\":50,\"unit\":\"g\",\"kcal_portion\":170,\"carbs_portion_g\":30,\"allergen_tag\":\"\"}],\"recipe_notes\":\"\"}]}\n"
-		"18) Yemekhane menü planına tarih ve öğüne göre yemek yazma/güncelleme (onay kartı zorunlu):\n"
-		"   {\"action\":\"cafeteria_plan_menu\",\"plans\":[{\"plan_date\":\"YYYY-MM-DD\",\"meal_slot\":\"Öğle Yemeği\",\"dishes\":[{\"name\":\"Mercimek Çorbası\",\"kcal\":170,\"carbs_g\":30,\"allergen\":\"\"}]}]}\n"
+		"18) Yemekhane menü planına tarih ve öğüne göre yemek yazma/güncelleme (onay kartı zorunlu; bankada olmayan yeni yemeklerin kaydedilmesi için save_to_bank:true eklenebilir):\n"
+		"   {\"action\":\"cafeteria_plan_menu\",\"save_to_bank\":true,\"plans\":[{\"plan_date\":\"YYYY-MM-DD\",\"meal_slot\":\"Öğle Yemeği\",\"dishes\":[{\"name\":\"Mercimek Çorbası\",\"kcal\":170,\"carbs_g\":30,\"allergen\":\"\"}]}]}\n"
 		"19) Yemekhane gelen ürün & fatura/gider kaydı oluşturma (onay kartı zorunlu):\n"
 		"   {\"action\":\"cafeteria_record_purchase\",\"invoice_date\":\"YYYY-MM-DD\",\"invoice_no\":\"\",\"supplier_name\":\"Tedarikçi\",\"category\":\"Sebze & Meyve\",\"items\":[{\"item_name\":\"Domates\",\"category\":\"Sebze & Meyve\",\"quantity\":10,\"unit_type\":\"kg\",\"unit_price\":35.0,\"vat_rate\":1}]}\n"
 		"20) Yemekhane tahsilatı (getiren isim, öğrenci, tutar) veya okula kasa teslimi işleme (onay kartı zorunlu):\n"
@@ -3109,4 +3109,118 @@ SADECE şu JSON şemasını döndür:
 	if not parsed:
 		return False, {"error": "Yemekhane belgesi JSON olarak ayrıştırılamadı."}, used_m
 	return True, parsed, used_m
+
+
+def audit_cafeteria_menu_with_gemini(
+	*,
+	api_key: str,
+	model: str,
+	year_month: str,
+	planned_menu_summary: list[dict[str, Any]],
+	clinical_risk_summary: dict[str, Any],
+	available_dishes: list[dict[str, Any]],
+) -> tuple[bool, dict[str, Any], str]:
+	"""Planlanmış yemekhane menüsünü okulun alerjik, çölyaklı ve diyabetik öğrenci profiliyle güvenlik/beslenme açısından denetler."""
+	prompt = f"""Bir okul diyetisyeni ve revir güvenlik danışmanı olarak aşağıdaki aylık yemek menüsünü, okulun anonim klinik beslenme gereksinimleriyle (alerji, çölyak, Tip 1 diyabet, yutma/diyet notları) çapraz denetle.
+
+[DÖNEM]: {year_month}
+[ANONİM KLİNİK RİSK ÖZETİ]: {json.dumps(clinical_risk_summary, ensure_ascii=False, default=str)}
+[PLANLANMIŞ MENÜ]: {json.dumps(planned_menu_summary[:45], ensure_ascii=False, default=str)}
+[BANKADAKİ ALTERNATİF YEMEKLER]: {json.dumps(available_dishes[:40], ensure_ascii=False, default=str)}
+
+SADECE aşağıdaki JSON şemasını döndür:
+{{
+  "balance_score": 85,
+  "overall_summary": "Genel beslenme çeşitliliği, kalori ve okul reviri uyumluluk değerlendirmesi",
+  "risk_findings": [
+    {{
+      "plan_date": "YYYY-MM-DD",
+      "meal_slot": "Öğle Yemeği",
+      "risk_level": "Yüksek | Orta | Bilgi",
+      "issue": "Örn: Gluten + yüksek karbonhidrat veya üst üste hamur işi",
+      "affected_groups": "Örn: Çölyak / Gluten alerjisi, Tip 1 Diyabet",
+      "recommended_alternative": "Bankadan veya okul mutfağından alternatif sunum / yemek önerisi"
+    }}
+  ],
+  "weekly_nutrition_notes": ["Haftalık dengeli protein/lif dağılımı önerisi"]
+}}"""
+	ok, raw, used_m = call_gemini(prompt, api_key=api_key, model=model, expect_json=True, temperature=0.2, timeout=30.0)
+	if not ok:
+		return False, {"error": raw}, used_m
+	parsed = _parse_json_response(raw)
+	if not parsed or "overall_summary" not in parsed:
+		return False, {"error": "Menü güvenlik denetim yanıtı JSON olarak ayrıştırılamadı."}, used_m
+	return True, parsed, used_m
+
+
+def batch_enrich_dishes_with_gemini(
+	*,
+	api_key: str,
+	model: str,
+	dishes_to_enrich: list[dict[str, Any]],
+) -> tuple[bool, dict[str, Any], str]:
+	"""Malzeme/kalori/alerjen bilgisi eksik kayıtlı yemek listesi için toplu besin ve malzeme tahmini üretir."""
+	prompt = f"""Türk okul yemekhanesi porsiyon standartlarına göre aşağıdaki yemeklerin her biri için 1 öğrenci porsiyonu malzeme listesini, kalorisini (`kcal_portion`), karbonhidratını (`carbs_portion_g`) ve Türk Gıda Kodeksi 14 alerjen etiketini oluştur.
+
+[ZENGİNLEŞTİRİLECEK YEMEKLER]: {json.dumps(dishes_to_enrich[:15], ensure_ascii=False)}
+
+Geçerli `allergen_tag` değerleri (yoksa ""): "Gluten (Buğday/Arpa)", "Süt ve Süt Ürünleri (Laktoz)", "Yumurta", "Yer Fıstığı", "Sert Kabuklu Yemişler", "Soya", "Balık", "Kabuklular", "Yumuşakçalar", "Susam", "Hardal", "Kereviz", "Acı Bakla", "Sülfit"
+
+SADECE aşağıdaki JSON şemasını döndür:
+{{
+  "enriched_dishes": [
+    {{
+      "id": 1,
+      "name": "Mercimek Çorbası",
+      "category": "Çorba",
+      "portion_g": 250,
+      "recipe_notes": "Okul porsiyonu",
+      "ingredients": [
+        {{"ingredient_name": "Kırmızı Mercimek", "amount": 50, "unit": "g", "kcal_portion": 170, "carbs_portion_g": 30, "allergen_tag": ""}}
+      ]
+    }}
+  ]
+}}"""
+	ok, raw, used_m = call_gemini(prompt, api_key=api_key, model=model, expect_json=True, temperature=0.2, timeout=36.0)
+	if not ok:
+		return False, {"error": raw}, used_m
+	parsed = _parse_json_response(raw)
+	if not parsed or not isinstance(parsed.get("enriched_dishes"), list):
+		return False, {"error": "Toplu yemek besin çözümlemesi JSON olarak ayrıştırılamadı."}, used_m
+	return True, parsed, used_m
+
+
+def analyze_cafeteria_finances_and_inflation_with_gemini(
+	*,
+	api_key: str,
+	model: str,
+	year_month: str,
+	budget_summary: dict[str, Any],
+	price_changes: list[dict[str, Any]],
+	unpaid_summary: list[dict[str, Any]],
+) -> tuple[bool, dict[str, Any], str]:
+	"""Yemekhane gelir-gider dengesi, ürün birim fiyat değişimleri ve aidat tahsilat durumu için yönetici özeti ile KVKK-uyumlu hatırlatma taslakları üretir."""
+	prompt = f"""Bir okul yemekhanesi bütçe ve satın alma danışmanı olarak aşağıdaki verileri incele.
+Kişi isimlerini açıkça ifşa etmeden KVKK-uyumlu kibar veli/personel aidat hatırlatma mesaj şablonu ve gider optimizasyonu önerileri hazırla.
+
+[DÖNEM]: {year_month}
+[BÜTÇE & KASA ÖZETİ]: {json.dumps(budget_summary, ensure_ascii=False, default=str)}
+[BİRİM FİYAT DEĞİŞİMLERİ]: {json.dumps(price_changes[:25], ensure_ascii=False, default=str)}
+[ÖDEME BEKLEYEN ÖZETİ]: {json.dumps(unpaid_summary[:25], ensure_ascii=False, default=str)}
+
+SADECE aşağıdaki JSON şemasını döndür:
+{{
+  "executive_summary": "Aylık bütçe denkliği, tahsilat oranı ve kasa/gider özeti",
+  "inflation_alerts": ["Fiyatı artan kritik kalemler ve satın alma tavsiyesi"],
+  "cost_saving_actions": ["Menü ve tedarik maliyet optimizasyonu adımları"],
+  "parent_reminder_template": "Sayın Velimiz, ... şeklinde KVKK-uyumlu nazik aidat hatırlatma metni şablonu"
+}}"""
+	ok, raw, used_m = call_gemini(prompt, api_key=api_key, model=model, expect_json=True, temperature=0.25, timeout=28.0)
+	if not ok:
+		return False, {"error": raw}, used_m
+	parsed = _parse_json_response(raw)
+	if not parsed or "executive_summary" not in parsed:
+		return False, {"error": "Mali analiz JSON çıktısı ayrıştırılamadı."}, used_m
+	return True, parsed, used_m
+
 

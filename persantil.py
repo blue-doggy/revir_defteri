@@ -125,7 +125,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.18.1"
+_DEFAULT_APP_VERSION = "1.19.0"
 
 
 def _load_app_version() -> str:
@@ -309,6 +309,8 @@ DEFAULT_APP_SETTINGS: dict[str, str] = {
 	"cafeteria_sig2_name": "",
 	"cafeteria_sig3_role": "Okul Müdürü (Onay)",
 	"cafeteria_sig3_name": "",
+	"cafeteria_board_note": "",
+	"cafeteria_school_logo_b64": "",
 }
 
 INCIDENT_LOCATIONS = [
@@ -12581,6 +12583,7 @@ def _execute_gemini_chat_export(export_spec: dict[str, Any], active_pid: int | N
 
 		if action == "cafeteria_plan_menu":
 			plans_in = export_spec.get("plans") if isinstance(export_spec.get("plans"), list) else []
+			save_bank = bool(export_spec.get("save_to_bank", True))
 			all_d_map = {caf._tr_fold(d["name"]): int(d["id"]) for d in caf.get_all_dishes(connect_db)}
 			saved_p = 0
 			for p_it in plans_in[:60]:
@@ -12600,6 +12603,13 @@ def _execute_gemini_chat_export(export_spec: dict[str, Any], active_pid: int | N
 					fid = all_d_map.get(caf._tr_fold(nm_s))
 					if fid:
 						d_ids_m.append(fid)
+					elif save_bank:
+						nid = caf.upsert_quick_dish_from_plan_item(
+							connect_db, {"name": nm_s, "kcal": kv, "carbs_g": cv, "allergen": av}
+						)
+						if nid:
+							all_d_map[caf._tr_fold(nm_s)] = nid
+							d_ids_m.append(nid)
 					else:
 						cust_m.append({"name": nm_s, "kcal": kv, "carbs_g": cv, "allergen": av})
 				if d_ids_m or cust_m:
@@ -33083,6 +33093,38 @@ def _handle_cmd_search(query: str) -> list[dict[str, Any]]:
 				"subtitle": sg["desc"],
 				"tag": "Ayar",
 			})
+
+	# 5. Yemekhane Yemekleri ve Tedarikçileri Araması
+	if q:
+		try:
+			with connect_db() as conn:
+				caf.ensure_cafeteria_tables(conn)
+				d_rows = conn.execute("SELECT id, name, category, total_kcal FROM cafeteria_dishes ORDER BY name ASC LIMIT 40").fetchall()
+				for dr in d_rows:
+					if q in _tr_fold(dr["name"]) or q in _tr_fold(dr["category"]):
+						results.append({
+							"group": "🍽️ Yemekhane",
+							"kind": "page",
+							"value": "🍽️ Yemekhane Yönetimi",
+							"icon": "🍲",
+							"title": str(dr["name"]),
+							"subtitle": f"{dr['category']} · {float(dr['total_kcal'] or 0):g} kcal",
+							"tag": "Yemek",
+						})
+				p_rows = conn.execute("SELECT DISTINCT supplier_name FROM cafeteria_purchases WHERE TRIM(COALESCE(supplier_name,''))!='' LIMIT 25").fetchall()
+				for pr in p_rows:
+					if q in _tr_fold(pr["supplier_name"]):
+						results.append({
+							"group": "🍽️ Yemekhane",
+							"kind": "page",
+							"value": "🍽️ Yemekhane Yönetimi",
+							"icon": "🚚",
+							"title": str(pr["supplier_name"]),
+							"subtitle": "Yemekhane tedarikçi / fatura kaydı",
+							"tag": "Tedarikçi",
+						})
+		except Exception:
+			pass
 
 	return results[:24]
 

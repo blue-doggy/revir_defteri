@@ -640,6 +640,245 @@ class TestCafeteriaModule(unittest.TestCase):
             self.assertIsInstance(out_tab, dict)
             self.assertNotIn("Traceback", json.dumps(out_tab, ensure_ascii=False))
 
+    def test_recalculate_menu_on_dish_edit_diabetes_cleanup_copy_and_archive_months(self):
+        d_id = caf.upsert_dish_with_ingredients(
+            self.connect,
+            name="Tarhana",
+            category="Çorba",
+            ingredients=[{"ingredient_name": "Tarhana Tozu", "amount": 30, "unit": "g", "kcal_portion": 110, "carbs_portion_g": 20, "allergen_tag": "Gluten"}],
+        )
+        caf.upsert_menu_plan_slot(
+            self.connect,
+            plan_date="2024-02-05",
+            meal_slot="Öğle Yemeği",
+            dish_ids=[d_id],
+            sync_to_diabetes=True,
+        )
+        # Update dish nutrition -> menu plan MUST recalculate automatically
+        caf.upsert_dish_with_ingredients(
+            self.connect,
+            dish_id=d_id,
+            name="Tarhana",
+            category="Çorba",
+            ingredients=[{"ingredient_name": "Tarhana Tozu", "amount": 60, "unit": "g", "kcal_portion": 220, "carbs_portion_g": 40, "allergen_tag": "Gluten"}],
+        )
+        plans = caf.get_menu_plans_for_month(self.connect, "2024-02")
+        self.assertAlmostEqual(plans[("2024-02-05", "Öğle Yemeği")]["total_kcal"], 220.0, places=1)
+        self.assertAlmostEqual(plans[("2024-02-05", "Öğle Yemeği")]["total_carbs_g"], 40.0, places=1)
+
+        # Historical month outside -4..+7 MUST appear in _month_options
+        ym_opts, _ = caf._month_options(self.connect)
+        self.assertIn("2024-02", ym_opts)
+
+        # Copy menu slot to another date
+        copied = caf.copy_menu_plans(
+            self.connect,
+            date_pairs=[("2024-02-05", "2024-02-12")],
+            meal_slots=["Öğle Yemeği"],
+            sync_to_diabetes=True,
+        )
+        self.assertEqual(copied, 1)
+        plans_after = caf.get_menu_plans_for_month(self.connect, "2024-02")
+        self.assertIn(("2024-02-12", "Öğle Yemeği"), plans_after)
+
+        # Clearing slot deletes both menu plan and synced diabetes row
+        caf.upsert_menu_plan_slot(self.connect, plan_date="2024-02-05", meal_slot="Öğle Yemeği", dish_ids=[], custom_items=[], sync_to_diabetes=True)
+        diab = idm.get_school_menus_for_month(self.connect, "2024-02")
+        self.assertFalse(any(m["menu_date"] == "2024-02-05" for m in diab))
+        self.assertTrue(any(m["menu_date"] == "2024-02-12" for m in diab))
+
+        # Bracket custom dish parser
+        parsed_c = caf.parse_custom_dish_entries("Tam Buğday Ekmek [130 kcal, 24g karb, gluten], Mevsim Salata")
+        self.assertEqual(len(parsed_c), 2)
+        self.assertEqual(parsed_c[0]["kcal"], 130.0)
+        self.assertEqual(parsed_c[0]["carbs_g"], 24.0)
+        self.assertEqual(parsed_c[0]["allergen"], "Gluten (Buğday/Arpa)")
+
+    def test_clinical_celiac_matching_and_compact_weekly_grid_a4_with_logo(self):
+        import base64
+        with self.connect() as c:
+            cls_id = int(c.execute("SELECT id FROM classes WHERE name='4-A'").fetchone()["id"])
+            c.execute("INSERT INTO students(full_name, sex, class_id, person_type) VALUES ('Ece Çölyak', 'K', ?, 'Öğrenci')", (cls_id,))
+            eid = int(c.execute("SELECT id FROM students WHERE full_name='Ece Çölyak'").fetchone()["id"])
+            c.execute(
+                "INSERT INTO health_profiles(student_id, chronic_conditions, dietary_swallowing_notes, updated_at) VALUES (?, 'Çölyak hastalığı', 'Glütensiz diyet gerekir', '2026-10-01')",
+                (eid,),
+            )
+            c.commit()
+        hits = caf.match_allergens_against_school(self.connect, ["Gluten (Buğday/Arpa)"])
+        self.assertIn("Ece Çölyak", {h["full_name"] for h in hits})
+
+        d_id = caf.upsert_dish_with_ingredients(
+            self.connect,
+            name="Kıymalı Börek",
+            category="Pilav / Makarna / Börek",
+            ingredients=[{"ingredient_name": "Yufka", "amount": 80, "unit": "g", "kcal_portion": 290, "carbs_portion_g": 45, "allergen_tag": "Gluten"}],
+        )
+        caf.upsert_menu_plan_slot(self.connect, plan_date="2026-10-05", meal_slot="Öğle Yemeği", dish_ids=[d_id])
+        # Tiny valid 1x1 PNG base64
+        tiny_png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        meta = {
+            "school_name": "Atatürk Ortaokulu",
+            "cafeteria_school_logo_b64": tiny_png,
+            "cafeteria_board_note": "* Özel alerji notu: Revire başvurun.",
+        }
+        for lm in ("compact_one_page", "weekly_grid"):
+            html_out = caf.build_menu_a4_html(self.connect, year_month="2026-10", layout_mode=lm, school_meta=meta)
+            self.assertIn("Kıymalı Börek", html_out)
+            self.assertIn("data:image/png;base64", html_out)
+            self.assertIn("Özel alerji notu", html_out)
+            d_bytes = caf.build_menu_a4_docx(self.connect, year_month="2026-10", layout_mode=lm, school_meta=meta)
+            txt = _extract_docx_all_text(d_bytes)
+            self.assertIn("Kıymalı Börek", txt)
+            self.assertIn("Özel alerji notu", txt)
+        _ = base64  # ensure import used cleanly
+
+    def test_invoice_edit_skt_inflation_portion_cost_and_shopping_list(self):
+        from datetime import date, timedelta
+        soon = (date.today() + timedelta(days=5)).isoformat()
+        pid = caf.upsert_purchase_invoice(
+            self.connect,
+            invoice_date="2026-09-01",
+            supplier_name="Tedarik A",
+            category="Bakliyat & Kuru Gıda",
+            payment_status="Vadeli / Bekliyor",
+            items=[{"item_name": "Kırmızı Mercimek", "quantity": 10.0, "unit_type": "kg", "unit_price": 50.0, "vat_rate": 0.0, "expiry_date": soon}],
+        )
+        stats_p = caf.get_expense_summary_stats(self.connect, "2026-09")
+        self.assertAlmostEqual(stats_p["month_pending_total"], 500.0, places=2)
+
+        caf.update_purchase_payment_status(self.connect, pid, "Ödendi")
+        loaded = caf.get_purchase_by_id(self.connect, pid)
+        self.assertEqual(loaded["payment_status"], "Ödendi")
+
+        # Second invoice with higher price -> inflation + cost estimate
+        caf.upsert_purchase_invoice(
+            self.connect,
+            invoice_date="2026-10-01",
+            supplier_name="Tedarik B",
+            category="Bakliyat & Kuru Gıda",
+            items=[{"item_name": "Kırmızı Mercimek", "quantity": 10.0, "unit_type": "kg", "unit_price": 75.0, "vat_rate": 0.0}],
+        )
+        inf = caf.get_ingredient_price_inflation(self.connect)
+        self.assertTrue(any(x["item_name"] == "Kırmızı Mercimek" and x["pct_change"] == 50.0 for x in inf))
+
+        exp_items = caf.get_expiring_purchase_items(self.connect, within_days=30)
+        self.assertTrue(any(e["item_name"] == "Kırmızı Mercimek" for e in exp_items))
+
+        d_id = caf.upsert_dish_with_ingredients(
+            self.connect,
+            name="Mercimek Yemeği",
+            ingredients=[{"ingredient_name": "Kırmızı Mercimek", "amount": 100.0, "unit": "g", "kcal_portion": 340.0, "carbs_portion_g": 60.0}],
+        )
+        cost_r = caf.estimate_dish_portion_cost(self.connect, d_id)
+        # 100g = 0.1kg * 75 TL/kg = 7.50 TL
+        self.assertAlmostEqual(cost_r["estimated_cost_tl"], 7.5, places=2)
+
+        caf.upsert_menu_plan_slot(self.connect, plan_date="2026-10-05", meal_slot="Öğle Yemeği", dish_ids=[d_id])
+        shop = caf.build_menu_shopping_list(self.connect, "2026-10", diner_count=50)
+        # 50 * 100g = 5 kg -> 5 * 75 = 375 TL
+        self.assertAlmostEqual(shop["estimated_total_tl"], 375.0, places=2)
+        xl_bytes = caf.build_shopping_list_excel(shop, "2026-10")
+        self.assertGreater(len(xl_bytes), 2000)
+
+    def test_diner_deactivate_carry_forward_bulk_sibling_receipt_and_budget(self):
+        caf.import_school_people_as_diners(self.connect, [self.stu_id, self.teacher_id])
+        caf.generate_or_refresh_monthly_fees(self.connect, "2026-10", student_meal_price=100.0, staff_meal_price=120.0, workdays_override=10)
+        diners = {d["full_name"]: int(d["id"]) for d in caf.get_diners(self.connect)}
+        stu_did, tch_did = diners["Ali Kaya"], diners["Zeynep Öğretmen"]
+
+        # Ali expected = 1000 TL; pays 400 -> 600 remaining
+        tx_ids = caf.record_bulk_sibling_payments(
+            self.connect,
+            tx_date="2026-10-10",
+            delivered_by_name="Veli Kaya",
+            allocations=[
+                {"diner_id": stu_did, "amount": 400.0},
+                {"diner_id": tch_did, "amount": 1200.0},
+            ],
+            receipt_no="MKB-BULK-1",
+            year_month="2026-10",
+        )
+        self.assertEqual(len(tx_ids), 2)
+
+        # Receipt docx
+        rcpt_bytes = caf.build_payment_receipt_docx(self.connect, tx_id=tx_ids[0], school_meta={"school_name": "Test Okulu"})
+        rcpt_txt = _extract_docx_all_text(rcpt_bytes)
+        self.assertIn("Ali Kaya", rcpt_txt)
+        self.assertIn("Veli Kaya", rcpt_txt)
+        self.assertIn("600.00", rcpt_txt.replace(",", ""))
+
+        # Deleting diner with fees MUST raise; deactivate MUST preserve fees
+        with self.assertRaises(ValueError):
+            caf.delete_diner_by_id(self.connect, stu_did, force=False)
+
+        # Generate November fees & carry forward unpaid 600 TL from October
+        caf.generate_or_refresh_monthly_fees(self.connect, "2026-11", student_meal_price=100.0, staff_meal_price=120.0, workdays_override=10)
+        cf_n = caf.carry_forward_unpaid_balances(self.connect, "2026-10", "2026-11")
+        self.assertGreaterEqual(cf_n, 1)
+        cash_nov = caf.get_cash_summary_and_diner_balances(self.connect, "2026-11")
+        ali_nov = next(b for b in cash_nov["balances"] if b["full_name"] == "Ali Kaya")
+        self.assertAlmostEqual(ali_nov["carry_forward_debt"], 600.0, places=2)
+        self.assertAlmostEqual(ali_nov["expected_amount"], 1600.0, places=2)
+
+        caf.deactivate_diner_by_id(self.connect, tch_did, end_date="2026-10-31")
+        self.assertEqual(len(caf.get_diners(self.connect, active_only=True)), 1)
+        caf.reactivate_diner_by_id(self.connect, tch_did)
+        self.assertEqual(len(caf.get_diners(self.connect, active_only=True)), 2)
+
+        # Budget P&L check
+        caf.upsert_purchase_invoice(
+            self.connect,
+            invoice_date="2026-10-11",
+            supplier_name="Tedarik",
+            items=[{"item_name": "Et", "quantity": 5, "unit_type": "kg", "unit_price": 200.0, "vat_rate": 0.0}],
+        )
+        pnl = caf.get_budget_and_pnl_summary(self.connect, "2026-10")
+        self.assertAlmostEqual(pnl["month_collected"], 1600.0, places=2)
+        self.assertAlmostEqual(pnl["month_expenses"], 1000.0, places=2)
+        self.assertAlmostEqual(pnl["month_net_cash_vs_exp"], 600.0, places=2)
+
+    def test_new_gemini_wrappers_and_cmd_search(self):
+        audit_j = json.dumps({
+            "balance_score": 90,
+            "overall_summary": "Dengeli menü",
+            "risk_findings": [{"plan_date": "2026-10-05", "meal_slot": "Öğle Yemeği", "risk_level": "Orta", "issue": "Gluten", "affected_groups": "Çölyak", "recommended_alternative": "Glütensiz çorba"}],
+            "weekly_nutrition_notes": ["Baklagil dengesi iyi"],
+        }, ensure_ascii=False)
+        with mock.patch.object(gemini_assistant, "call_gemini", return_value=(True, audit_j, "gemini-3-flash-preview")):
+            ok1, r1, _ = gemini_assistant.audit_cafeteria_menu_with_gemini(
+                api_key="k", model="gemini-3-flash-preview", year_month="2026-10",
+                planned_menu_summary=[], clinical_risk_summary={}, available_dishes=[],
+            )
+        self.assertTrue(ok1)
+        self.assertEqual(r1["balance_score"], 90)
+
+        batch_j = json.dumps({
+            "enriched_dishes": [{"id": 1, "name": "Yayla Çorbası", "category": "Çorba", "portion_g": 250, "recipe_notes": "", "ingredients": []}]
+        }, ensure_ascii=False)
+        with mock.patch.object(gemini_assistant, "call_gemini", return_value=(True, batch_j, "gemini-3-flash-preview")):
+            ok2, r2, _ = gemini_assistant.batch_enrich_dishes_with_gemini(api_key="k", model="gemini-3-flash-preview", dishes_to_enrich=[{"id": 1, "name": "Yayla Çorbası"}])
+        self.assertTrue(ok2)
+        self.assertEqual(len(r2["enriched_dishes"]), 1)
+
+        fin_j = json.dumps({
+            "executive_summary": "Gelir-gider dengeli",
+            "inflation_alerts": ["Yağ +%15"],
+            "cost_saving_actions": ["Mevsim sebzesi"],
+            "parent_reminder_template": "Sayın Velimiz...",
+        }, ensure_ascii=False)
+        with mock.patch.object(gemini_assistant, "call_gemini", return_value=(True, fin_j, "gemini-3-flash-preview")):
+            ok3, r3, _ = gemini_assistant.analyze_cafeteria_finances_and_inflation_with_gemini(
+                api_key="k", model="gemini-3-flash-preview", year_month="2026-10",
+                budget_summary={}, price_changes=[], unpaid_summary=[],
+            )
+        self.assertTrue(ok3)
+        self.assertIn("Sayın Velimiz", r3["parent_reminder_template"])
+
+        caf.upsert_dish_with_ingredients(self.connect, name="Hünkar Beğendi", ingredients=[])
+        cmd_hits = persantil._handle_cmd_search("Hünkar")
+        self.assertTrue(any(h.get("title") == "Hünkar Beğendi" and h.get("value") == "🍽️ Yemekhane Yönetimi" for h in cmd_hits))
+
 
 if __name__ == "__main__":
     unittest.main()
