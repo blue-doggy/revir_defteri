@@ -1342,13 +1342,24 @@ def _build_weekly_grid_rows(days_list: list[dict[str, Any]], include_weekends: b
 	return rows
 
 
-_MENU_WEEK_PALETTES: list[dict[str, str]] = [
-	{"name": "1. Hafta · Sarı", "short": "Sarı", "light": "#FEF9C3", "dark": "#FDE68A", "accent": "#CA8A04", "date_fg": "#713F12"},
-	{"name": "2. Hafta · Turuncu", "short": "Turuncu", "light": "#FFF3E0", "dark": "#FED7AA", "accent": "#EA580C", "date_fg": "#9A3412"},
-	{"name": "3. Hafta · Yeşil", "short": "Yeşil", "light": "#ECFDF5", "dark": "#BBF7D0", "accent": "#16A34A", "date_fg": "#14532D"},
-	{"name": "4. Hafta · Mavi", "short": "Mavi", "light": "#EFF6FF", "dark": "#BFDBFE", "accent": "#2563EB", "date_fg": "#1E3A8A"},
-	{"name": "5. Hafta · Mor", "short": "Mor", "light": "#F5F3FF", "dark": "#DDD6FE", "accent": "#7C3AED", "date_fg": "#4C1D95"},
-	{"name": "6. Hafta · Gül", "short": "Gül", "light": "#FFF1F2", "dark": "#FECDD3", "accent": "#E11D48", "date_fg": "#881337"},
+DEFAULT_MENU_COLOR_TONE: str = "Çok Açık Pastel (Varsayılan)"
+
+MENU_COLOR_TONE_PRESETS: dict[str, tuple[float, float]] = {
+	"Beyaz / Renksiz": (0.0, 0.04),
+	"Ultra Açık Pastel": (0.03, 0.10),
+	"Çok Açık Pastel (Varsayılan)": (0.05, 0.16),
+	"Yumuşak Pastel": (0.09, 0.24),
+	"Orta Ton Pastel": (0.14, 0.34),
+	"Belirgin Ton": (0.20, 0.45),
+}
+
+_MENU_WEEK_BASE_COLORS: list[dict[str, str]] = [
+	{"short": "Sarı", "base": "#FACC15", "accent": "#CA8A04", "date_fg": "#713F12"},
+	{"short": "Turuncu", "base": "#FB923C", "accent": "#EA580C", "date_fg": "#9A3412"},
+	{"short": "Yeşil", "base": "#4ADE80", "accent": "#16A34A", "date_fg": "#14532D"},
+	{"short": "Mavi", "base": "#60A5FA", "accent": "#2563EB", "date_fg": "#1E3A8A"},
+	{"short": "Mor", "base": "#A78BFA", "accent": "#7C3AED", "date_fg": "#4C1D95"},
+	{"short": "Gül", "base": "#FB7185", "accent": "#E11D48", "date_fg": "#881337"},
 ]
 
 
@@ -1362,12 +1373,47 @@ def _hex_to_rgb_tuple(hex_color: str) -> tuple[int, int, int]:
 		return (15, 23, 42)
 
 
+def _blend_hex_with_white(base_hex: str, ratio: float) -> str:
+	r_clamped = max(0.0, min(1.0, float(ratio)))
+	br, bg, bb = _hex_to_rgb_tuple(base_hex)
+	nr = int(round(255.0 * (1.0 - r_clamped) + br * r_clamped))
+	ng = int(round(255.0 * (1.0 - r_clamped) + bg * r_clamped))
+	nb = int(round(255.0 * (1.0 - r_clamped) + bb * r_clamped))
+	return f"#{nr:02X}{ng:02X}{nb:02X}"
+
+
+def get_week_palette_pair(week_idx: int, color_tone: str | None = None) -> dict[str, str]:
+	"""Verilen hafta sırası ve renk tonu ayarına göre açık/koyu arka plan + vurgu renklerini üretir."""
+	tone_name = str(color_tone or DEFAULT_MENU_COLOR_TONE).strip()
+	light_r, dark_r = MENU_COLOR_TONE_PRESETS.get(tone_name, MENU_COLOR_TONE_PRESETS[DEFAULT_MENU_COLOR_TONE])
+	base_cfg = _MENU_WEEK_BASE_COLORS[max(0, int(week_idx)) % len(_MENU_WEEK_BASE_COLORS)]
+	is_monochrome = (tone_name == "Beyaz / Renksiz")
+	if is_monochrome:
+		light_hex = "#FFFFFF"
+		dark_hex = "#F8FAFC"
+		accent_hex = "#94A3B8"
+		date_fg_hex = "#0F766E"
+	else:
+		light_hex = _blend_hex_with_white(base_cfg["base"], light_r)
+		dark_hex = _blend_hex_with_white(base_cfg["base"], dark_r)
+		accent_hex = base_cfg["accent"]
+		date_fg_hex = base_cfg["date_fg"]
+	return {
+		"short": base_cfg["short"],
+		"light": light_hex,
+		"dark": dark_hex,
+		"accent": accent_hex,
+		"date_fg": date_fg_hex,
+	}
+
+
 def _build_week_day_style_map(
 	days_list: list[dict[str, Any]],
 	*,
 	start_week_idx: int = 0,
+	color_tone: str | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
-	"""Her hafta için ayrı renk paleti (Sarı, Turuncu, Yeşil, Mavi, Mor, Gül) ve ardışık günlerde açık/koyu ton üretir."""
+	"""Her hafta için ayrı renk tonu ve ardışık günlerde açık/koyu ton üretir."""
 	style_by_iso: dict[str, dict[str, Any]] = {}
 	legend_weeks: list[dict[str, Any]] = []
 	seen_weeks: set[int] = set()
@@ -1393,7 +1439,7 @@ def _build_week_day_style_map(
 			day_seq_in_week += 1
 
 		eff_wk_idx = max(0, int(start_week_idx) + cur_wk_pos)
-		pal = _MENU_WEEK_PALETTES[eff_wk_idx % len(_MENU_WEEK_PALETTES)]
+		pal = get_week_palette_pair(eff_wk_idx, color_tone=color_tone)
 		is_dark = (day_seq_in_week % 2 == 1)
 		bg_hex = pal["dark"] if is_dark else pal["light"]
 		week_num = eff_wk_idx + 1
@@ -1421,6 +1467,49 @@ def _build_week_day_style_map(
 				"date_fg": pal["date_fg"],
 			})
 	return style_by_iso, legend_weeks
+
+
+def resolve_menu_signer_slots(app_cfg: dict[str, str] | None = None) -> list[tuple[str, str]]:
+	"""Yemekhane ayarlarındaki 3 imza yuvasını (Sol, Orta, Sağ) döndürür; kullanıcı özelleştirdikten sonra silinen slotu hemşire/müdür adıyla ezmez."""
+	cfg = app_cfg or {}
+	s1_r = str(cfg["cafeteria_sig1_role"] if "cafeteria_sig1_role" in cfg else "Hazırlayan (Revir / Diyetisyen)").strip()
+	s2_r = str(cfg["cafeteria_sig2_role"] if "cafeteria_sig2_role" in cfg else "Yemekhane Sorumlusu").strip()
+	s3_r = str(cfg["cafeteria_sig3_role"] if "cafeteria_sig3_role" in cfg else "Okul Müdürü (Onay)").strip()
+	s1_raw = str(cfg.get("cafeteria_sig1_name") or "").strip()
+	s2_raw = str(cfg.get("cafeteria_sig2_name") or "").strip()
+	s3_raw = str(cfg.get("cafeteria_sig3_name") or "").strip()
+	is_custom = (
+		str(cfg.get("cafeteria_sigs_customized") or "0").strip() == "1"
+		or bool(s1_raw or s2_raw or s3_raw)
+	)
+	if not is_custom:
+		s1_raw = str(cfg.get("nurse_name") or "").strip()
+		s3_raw = str(cfg.get("principal_name") or "").strip()
+	return [(s1_r, s1_raw), (s2_r, s2_raw), (s3_r, s3_raw)]
+
+
+def _normalize_signers_for_render(
+	signers: list[tuple[str, str]] | None,
+	meta: dict[str, str] | None,
+) -> tuple[list[tuple[str, str]], bool]:
+	"""İmzacı listesini ve varsa yalnızca en sağdaki imzacının sağa yaslanma bilgisini döndürür."""
+	raw_slots = list(signers) if signers is not None else resolve_menu_signer_slots(meta)
+	indexed = [(idx, str(r or "").strip(), str(p or "").strip()) for idx, (r, p) in enumerate(raw_slots) if (str(r or "").strip() or str(p or "").strip())]
+	if not indexed:
+		m = meta or {}
+		if str(m.get("cafeteria_sigs_customized") or "0").strip() == "1":
+			return [], False
+		return [
+			("Hazırlayan", str(m.get("nurse_name") or "").strip() or "........................"),
+			("Onay / Okul Müdürü", str(m.get("principal_name") or "").strip() or "........................"),
+		], False
+	right_only = (len(raw_slots) >= 3 and len(indexed) == 1 and indexed[0][0] == len(raw_slots) - 1)
+	return [(r, p) for _, r, p in indexed], right_only
+
+
+def resolve_menu_signers_for_print(app_cfg: dict[str, str] | None = None) -> list[tuple[str, str]]:
+	"""A4 HTML/Word baskısı için konumunu koruyarak 3 imzacı yuvasını döndürür."""
+	return resolve_menu_signer_slots(app_cfg)
 
 
 def _extract_meal_display_parts(
@@ -1457,8 +1546,9 @@ def _prepare_a4_menu_context(
 	include_weekends: bool,
 	skip_empty_days: bool,
 	school_meta: dict[str, str] | None,
+	color_tone: str | None = None,
 ) -> dict[str, Any]:
-	"""A4 HTML ve Word çıktıları için gün filtresi (boş günleri otomatik çıkarma), hizmet düzeni ve yemek saatlerini hazırlar."""
+	"""A4 HTML ve Word çıktıları için gün filtresi (boş günleri otomatik çıkarma), hizmet düzeni, renk tonu ve yemek saatlerini hazırlar."""
 	ym = str(year_month or date.today().strftime("%Y-%m"))[:7]
 	yy, mm = [int(x) for x in ym.split("-")]
 	month_title = f"{TR_MONTH_NAMES.get(mm, mm)} {yy}"
@@ -1495,10 +1585,14 @@ def _prepare_a4_menu_context(
 	else:
 		target_days = raw_days
 
+	planned_meal_count = sum(
+		1 for d in target_days for sl in slots
+		if plans.get((d["date_iso"], sl)) and plans[(d["date_iso"], sl)].get("dish_names")
+	)
 	if scope == "weekly" and weeks:
-		scope_label = f"{safe_idx + 1}. Hafta Yemek Menüsü ({range_txt} · {len(target_days)} Menü Günü)"
+		scope_label = f"{safe_idx + 1}. Hafta Yemek Menüsü ({range_txt} · {planned_meal_count} Öğün)"
 	else:
-		scope_label = f"{month_title} Aylık Yemek Menüsü ({len(target_days)} Menü Günü)"
+		scope_label = f"{month_title} Aylık Yemek Menüsü ({planned_meal_count} Öğün)"
 
 	days_names_s = ", ".join(nm[:3] for nm in sched["weekday_names"])
 	slot_times_parts = [f"{sl}: {meal_times.get(sl, '')}" if meal_times.get(sl) else sl for sl in slots]
@@ -1508,9 +1602,11 @@ def _prepare_a4_menu_context(
 		ramazan_times = get_ramazan_times_for_dates(connect_db_fn, sched["ramazan_province"], [d["date_iso"] for d in target_days])
 		schedule_line += f" · 🌙 Ramazan Modu ({sched['ramazan_province']} İftar & Sahur Saatleri)"
 	eff_wknds = include_weekends or any(wd >= 5 for wd in sched["weekdays_set"])
-	day_styles, week_legend = _build_week_day_style_map(
+	eff_tone = str(color_tone or meta.get("cafeteria_menu_color_tone") or DEFAULT_MENU_COLOR_TONE).strip()
+	day_styles, _ = _build_week_day_style_map(
 		target_days,
 		start_week_idx=safe_idx if (scope == "weekly" and weeks) else 0,
+		color_tone=eff_tone,
 	)
 
 	return {
@@ -1529,7 +1625,6 @@ def _prepare_a4_menu_context(
 		"ramazan_province": sched["ramazan_province"],
 		"ramazan_times": ramazan_times,
 		"day_styles": day_styles,
-		"week_legend": week_legend,
 	}
 
 
@@ -1574,6 +1669,7 @@ def build_menu_a4_html(
 	skip_empty_days: bool = True,
 	signers: list[tuple[str, str]] | None = None,
 	school_meta: dict[str, str] | None = None,
+	color_tone: str | None = None,
 ) -> str:
 	"""Aylık veya haftalık menüyü standart, tek A4 kompakt veya haftalık ızgara düzeninde haftalık renk tonlu imzalı HTML olarak oluşturur."""
 	ctx_p = _prepare_a4_menu_context(
@@ -1585,6 +1681,7 @@ def build_menu_a4_html(
 		include_weekends=include_weekends,
 		skip_empty_days=skip_empty_days,
 		school_meta=school_meta,
+		color_tone=color_tone,
 	)
 	yy, mm = ctx_p["yy"], ctx_p["mm"]
 	slots = ctx_p["slots"]
@@ -1598,7 +1695,6 @@ def build_menu_a4_html(
 	ramazan_mode = bool(ctx_p.get("ramazan_mode"))
 	ramazan_times = ctx_p.get("ramazan_times") or {}
 	day_styles = ctx_p.get("day_styles") or {}
-	week_legend = ctx_p.get("week_legend") or []
 
 	inst_top = html.escape(meta.get("institution_top_header") or "T.C. MİLLÎ EĞİTİM BAKANLIĞI")
 	school_nm = html.escape(meta.get("school_name") or "Okul / Kurum Yemekhanesi")
@@ -1614,26 +1710,10 @@ def build_menu_a4_html(
 		mime_l = "image/png" if logo_bytes[:4] == b"\x89PNG" else "image/jpeg"
 		logo_img_html = f"<img src='data:{mime_l};base64,{b64_s}' style='height:46px;max-width:90px;object-fit:contain;margin-bottom:3px;' alt='Okul Logosu'><br>"
 
-	sig_list = [s for s in (signers or []) if (s[0] or s[1])]
-	if not sig_list:
-		sig_list = [
-			("Hazırlayan", meta.get("nurse_name") or "........................"),
-			("Onay / Okul Müdürü", meta.get("principal_name") or "........................"),
-		]
+	sig_list, sig_right_only = _normalize_signers_for_render(signers, meta)
 
 	is_compact = (layout_mode == "compact_one_page")
 	is_grid = (layout_mode == "weekly_grid")
-
-	legend_html = ""
-	if week_legend:
-		chips = "".join(
-			f"<span class='wk-leg-chip' style='border-color:{w['accent']};color:{w['date_fg']};'>"
-			f"<span class='wk-sw' style='background:{w['light']};border-color:{w['accent']};'></span>"
-			f"<span class='wk-sw' style='background:{w['dark']};border-color:{w['accent']};'></span>"
-			f"<span>{html.escape(w['label'])}</span></span>"
-			for w in week_legend
-		)
-		legend_html = f"<div class='wk-legend'><span class='wk-leg-title'>Hafta Renkleri (Günler açık/koyu):</span>{chips}</div>"
 
 	if is_grid:
 		wd_cols = sorted({int(d["weekday"]) for d in target_days}) or [0, 1, 2, 3, 4]
@@ -1723,8 +1803,9 @@ def build_menu_a4_html(
 		if (show_kcal or show_carbs) and len(slots) > 1:
 			hdr_cols.append("<th>Günlük Toplam</th>")
 
+	sig_box_style = "margin-left:auto;flex:0 0 34%;max-width:34%;" if sig_right_only else ""
 	sig_html = "".join(
-		f"<div class='sig-box'><div class='sig-role'>{html.escape(str(role))}</div>"
+		f"<div class='sig-box' style='{sig_box_style}'><div class='sig-role'>{html.escape(str(role))}</div>"
 		f"<div class='sig-name'>{html.escape(str(person or '................................'))}</div>"
 		f"<div class='sig-line'>İmza / Tarih</div></div>"
 		for role, person in sig_list
@@ -1748,15 +1829,11 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Aria
 .topbar {{ max-width: {page_w}; margin: 0 auto 10px auto; display: flex; justify-content: space-between; align-items: center; }}
 .btn-print {{ padding: 8px 16px; background: #0f766e; color: #fff; border: none; border-radius: 7px; font-weight: 700; cursor: pointer; }}
 .a4-sheet {{ width: min(100%, {page_w}); margin: 0 auto; padding: {'6mm 8mm' if is_compact else '11mm 13mm'}; background: #fff; border: 1px solid #94a3b8; box-shadow: 0 8px 24px rgba(15,23,42,.18); }}
-.antet {{ text-align: center; border-bottom: 2px solid #0f766e; padding-bottom: 6px; margin-bottom: 6px; }}
+.antet {{ text-align: center; border-bottom: 2px solid #0f766e; padding-bottom: 6px; margin-bottom: 8px; }}
 .antet-top {{ font-size: 10.5px; color: #64748b; letter-spacing: .5px; }}
 .antet-school {{ font-size: 15px; font-weight: 800; color: #0f766e; margin-top: 2px; }}
 .antet-title {{ font-size: 12.5px; font-weight: 700; color: #1e293b; margin-top: 2px; }}
 .antet-sched {{ font-size: 10px; color: #475569; margin-top: 3px; }}
-.wk-legend {{ display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 {'5px' if is_compact else '7px'} 0; font-size: {'8.5px' if is_compact else '9.5px'}; color: #334155; }}
-.wk-leg-title {{ font-weight: 700; color: #1e293b; }}
-.wk-leg-chip {{ display: inline-flex; align-items: center; gap: 3px; background: #fff; border: 1px solid #cbd5e1; border-radius: 5px; padding: 1px 5px; font-weight: 700; }}
-.wk-sw {{ display: inline-block; width: 10px; height: 10px; border-radius: 2px; border: 1px solid rgba(15,23,42,0.25); }}
 .wk-tag {{ display: inline-block; font-size: {'8px' if is_compact else '8.5px'}; font-weight: 700; background: rgba(255,255,255,0.82); border: 1px solid #94a3b8; border-radius: 4px; padding: 0 3px; margin-left: 3px; vertical-align: middle; }}
 table {{ width: 100%; border-collapse: collapse; font-size: {tbl_font}; table-layout: {'fixed' if is_grid else 'auto'}; }}
 th, td {{ border: 1px solid #94a3b8; padding: {cell_pad}; vertical-align: top; text-align: left; color: #0f172a; }}
@@ -1799,7 +1876,6 @@ th {{ background: #0f766e; color: #fff; font-weight: 700; text-align: center; }}
     <div class='antet-title'>{html.escape(scope_label)}</div>
     <div class='antet-sched'>{html.escape(schedule_line)}</div>
   </div>
-  {legend_html}
   <table>
     <thead><tr>{''.join(hdr_cols)}</tr></thead>
     <tbody>{''.join(rows_html) if rows_html else f'<tr><td colspan="{max(2, len(hdr_cols))}" class="empty-cell">Bu dönem için öğün girilmiş gün bulunamadı.</td></tr>'}</tbody>
@@ -1877,6 +1953,7 @@ def build_menu_a4_docx(
 	skip_empty_days: bool = True,
 	signers: list[tuple[str, str]] | None = None,
 	school_meta: dict[str, str] | None = None,
+	color_tone: str | None = None,
 ) -> bytes:
 	"""Aylık veya haftalık yemek menüsünü standart, tek A4 kompakt veya haftalık ızgara düzeninde haftalık renk tonlu Word (.docx) belgesi olarak üretir."""
 	dx = _ensure_docx_mod()
@@ -1892,6 +1969,7 @@ def build_menu_a4_docx(
 		include_weekends=include_weekends,
 		skip_empty_days=skip_empty_days,
 		school_meta=school_meta,
+		color_tone=color_tone,
 	)
 	yy, mm = ctx_p["yy"], ctx_p["mm"]
 	slots = ctx_p["slots"]
@@ -1905,7 +1983,6 @@ def build_menu_a4_docx(
 	ramazan_mode = bool(ctx_p.get("ramazan_mode"))
 	ramazan_times = ctx_p.get("ramazan_times") or {}
 	day_styles = ctx_p.get("day_styles") or {}
-	week_legend = ctx_p.get("week_legend") or []
 
 	inst_top = meta.get("institution_top_header") or "T.C. MİLLÎ EĞİTİM BAKANLIĞI"
 	school_nm = meta.get("school_name") or "Okul / Kurum Yemekhanesi"
@@ -1951,27 +2028,6 @@ def build_menu_a4_docx(
 		r.font.size = Pt(fsz)
 		r.bold = bold_f
 		r.font.color.rgb = rgb_c
-
-	if week_legend:
-		p_leg = doc.add_paragraph()
-		p_leg.alignment = dx["WD_ALIGN_PARAGRAPH"].CENTER
-		p_leg.paragraph_format.space_before = Pt(0)
-		p_leg.paragraph_format.space_after = Pt(2 if is_compact else 4)
-		rl0 = p_leg.add_run("Hafta Renkleri (Ardışık günlerde açık / koyu): ")
-		rl0.font.name = "Calibri"
-		rl0.font.size = Pt(7.2 if is_compact else 8.0)
-		rl0.bold = True
-		rl0.font.color.rgb = RGBColor(51, 65, 85)
-		for idx_w, w in enumerate(week_legend):
-			if idx_w > 0:
-				rsep = p_leg.add_run("  ·  ")
-				rsep.font.name = "Calibri"
-				rsep.font.size = Pt(7.2 if is_compact else 8.0)
-			rl_sw = p_leg.add_run(f"■ {w['label']}")
-			rl_sw.font.name = "Calibri"
-			rl_sw.font.size = Pt(7.2 if is_compact else 8.0)
-			rl_sw.bold = True
-			rl_sw.font.color.rgb = RGBColor(*_hex_to_rgb_tuple(w["date_fg"]))
 
 	borders = dx["parse_xml"](
 		f'<w:tblBorders {dx["nsdecls"]("w")}>'
@@ -2167,29 +2223,28 @@ def build_menu_a4_docx(
 		rn.font.size = Pt(7.5 if is_compact else 8.5)
 		rn.font.color.rgb = RGBColor(71, 85, 105)
 
-	sig_list = [s for s in (signers or []) if (s[0] or s[1])]
-	if not sig_list:
-		sig_list = [
-			("Hazırlayan", meta.get("nurse_name") or "........................"),
-			("Okul Müdürü (Onay)", meta.get("principal_name") or "........................"),
-		]
-	p_sp = doc.add_paragraph()
-	p_sp.paragraph_format.space_before = Pt(6 if is_compact else 12)
-	p_sp.paragraph_format.keep_with_next = True
-	sig_tbl = doc.add_table(rows=1, cols=len(sig_list))
-	sig_tbl.alignment = dx["WD_TABLE_ALIGNMENT"].CENTER
-	for idx, (role_lbl, p_name) in enumerate(sig_list):
-		sc = sig_tbl.cell(0, idx)
-		sp = sc.paragraphs[0]
-		sp.alignment = dx["WD_ALIGN_PARAGRAPH"].CENTER
-		sr1 = sp.add_run(f"{role_lbl}\n")
-		sr1.font.name = "Calibri"
-		sr1.font.size = Pt(8.5 if is_compact else 9.5)
-		sr1.bold = True
-		sr2 = sp.add_run(f"{p_name or '........................'}\n\nİmza / Tarih")
-		sr2.font.name = "Calibri"
-		sr2.font.size = Pt(8.0 if is_compact else 8.5)
-		sr2.font.color.rgb = RGBColor(71, 85, 105)
+	sig_list, sig_right_only = _normalize_signers_for_render(signers, meta)
+	if sig_list:
+		p_sp = doc.add_paragraph()
+		p_sp.paragraph_format.space_before = Pt(6 if is_compact else 12)
+		p_sp.paragraph_format.keep_with_next = True
+		sig_tbl = doc.add_table(rows=1, cols=2 if sig_right_only else len(sig_list))
+		sig_tbl.alignment = dx["WD_TABLE_ALIGNMENT"].CENTER
+		render_pairs = [("", ""), sig_list[0]] if sig_right_only else sig_list
+		for idx, (role_lbl, p_name) in enumerate(render_pairs):
+			if not (role_lbl or p_name):
+				continue
+			sc = sig_tbl.cell(0, idx)
+			sp = sc.paragraphs[0]
+			sp.alignment = dx["WD_ALIGN_PARAGRAPH"].CENTER
+			sr1 = sp.add_run(f"{role_lbl}\n")
+			sr1.font.name = "Calibri"
+			sr1.font.size = Pt(8.5 if is_compact else 9.5)
+			sr1.bold = True
+			sr2 = sp.add_run(f"{p_name or '........................'}\n\nİmza / Tarih")
+			sr2.font.name = "Calibri"
+			sr2.font.size = Pt(8.0 if is_compact else 8.5)
+			sr2.font.color.rgb = RGBColor(71, 85, 105)
 
 	buf = io.BytesIO()
 	doc.save(buf)
@@ -3774,7 +3829,10 @@ def build_cafeteria_full_workbook_excel(connect_db_fn: Callable[[], sqlite3.Conn
 				from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 				ws_m = writer.sheets["Aylik_Menu"]
 				unique_dates = [{"date_iso": d_i} for d_i in sorted({str(r["plan_date"])[:10] for r in plans.values()})]
-				xl_styles, _ = _build_week_day_style_map(unique_dates)
+				xl_styles, _ = _build_week_day_style_map(
+					unique_dates,
+					color_tone=app_cfg_xl.get("cafeteria_menu_color_tone"),
+				)
 				hdr_fill = PatternFill("solid", fgColor="0F766E")
 				hdr_font = Font(color="FFFFFF", bold=True)
 				thin_side = Side(style="thin", color="94A3B8")
@@ -4606,11 +4664,7 @@ def _render_tab_menu_planner(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict
 	scope_code = "weekly" if "Hafta" in pr_scope else "monthly"
 	layout_code = "compact_one_page" if "Kompakt" in pr_layout_lbl else ("weekly_grid" if "Izgarası" in pr_layout_lbl else "standard")
 
-	signers = [
-		(app_cfg.get("cafeteria_sig1_role", "Hazırlayan (Revir / Diyetisyen)"), app_cfg.get("cafeteria_sig1_name") or app_cfg.get("nurse_name", "")),
-		(app_cfg.get("cafeteria_sig2_role", "Yemekhane Sorumlusu"), app_cfg.get("cafeteria_sig2_name", "")),
-		(app_cfg.get("cafeteria_sig3_role", "Okul Müdürü (Onay)"), app_cfg.get("cafeteria_sig3_name") or app_cfg.get("principal_name", "")),
-	]
+	signers = resolve_menu_signers_for_print(app_cfg)
 	a4_html = build_menu_a4_html(
 		connect_db_fn,
 		year_month=sel_ym,
@@ -5735,17 +5789,47 @@ def _render_tab_settings_and_exports(ctx_api: dict[str, Any], sel_ym: str, app_c
 					ui.info(f"🌙 **{sched['ramazan_province']} Bugünkü Vakitler ({date.today().isoformat()}):** Sahur (İmsak): **{today_rt.get('sahur')}** · İftar (Akşam): **{today_rt.get('iftar')}** _({today_rt.get('source')})_")
 
 			ui.markdown("---")
-			sc1, sc2 = ui.columns(2)
-			def_stu_p = sc1.number_input("Varsayılan Öğrenci Öğün Ücreti (₺)", min_value=0.0, step=5.0, value=_safe_float(app_cfg.get("cafeteria_default_meal_price"), 75.0))
-			def_stf_p = sc2.number_input("Varsayılan Öğretmen/Personel Öğün Ücreti (₺)", min_value=0.0, step=5.0, value=_safe_float(app_cfg.get("cafeteria_default_staff_price"), 90.0))
+			(s1_def_r, s1_def_n), (s2_def_r, s2_def_n), (s3_def_r, s3_def_n) = resolve_menu_signer_slots(app_cfg)
+			tone_choices = list(MENU_COLOR_TONE_PRESETS.keys())
+			cur_tone = str(app_cfg.get("cafeteria_menu_color_tone") or DEFAULT_MENU_COLOR_TONE).strip()
+			if cur_tone not in MENU_COLOR_TONE_PRESETS:
+				cur_tone = DEFAULT_MENU_COLOR_TONE
+
+			cfg_fp = json.dumps([s1_def_r, s1_def_n, s2_def_r, s2_def_n, s3_def_r, s3_def_n, cur_tone], ensure_ascii=False)
+			if ui.session_state.get("caf_cfg_form_fp") != cfg_fp:
+				ui.session_state["caf_cfg_form_fp"] = cfg_fp
+				ui.session_state["caf_cfg_s1_r"] = s1_def_r
+				ui.session_state["caf_cfg_s1_n"] = s1_def_n
+				ui.session_state["caf_cfg_s2_r"] = s2_def_r
+				ui.session_state["caf_cfg_s2_n"] = s2_def_n
+				ui.session_state["caf_cfg_s3_r"] = s3_def_r
+				ui.session_state["caf_cfg_s3_n"] = s3_def_n
+				ui.session_state["caf_cfg_menu_tone"] = cur_tone
+
+			ct1, ct2, ct3 = ui.columns([1.2, 0.9, 0.9], vertical_alignment="center")
+			tone_in = ct1.selectbox("🎨 Menü Çıktısı Renk Tonu", tone_choices, index=tone_choices.index(cur_tone), key="caf_cfg_menu_tone")
+			def_stu_p = ct2.number_input("Varsayılan Öğrenci Öğün Ücreti (₺)", min_value=0.0, step=5.0, value=_safe_float(app_cfg.get("cafeteria_default_meal_price"), 75.0))
+			def_stf_p = ct3.number_input("Varsayılan Öğretmen/Personel Öğün Ücreti (₺)", min_value=0.0, step=5.0, value=_safe_float(app_cfg.get("cafeteria_default_staff_price"), 90.0))
+
+			# Seçili renk tonunun canlı mini önizlemesi
+			sw_items = []
+			for wk_i in range(4):
+				pal_w = get_week_palette_pair(wk_i, color_tone=tone_in)
+				sw_items.append(
+					f"<span style='display:inline-flex;align-items:center;gap:3px;font-size:11px;padding:2px 6px;border:1px solid #cbd5e1;border-radius:5px;'>"
+					f"<span style='width:12px;height:12px;border-radius:2px;background:{pal_w['light']};border:1px solid #94a3b8;'></span>"
+					f"<span style='width:12px;height:12px;border-radius:2px;background:{pal_w['dark']};border:1px solid #94a3b8;'></span>"
+					f"{wk_i + 1}. Hft</span>"
+				)
+			ui.markdown(f"<div style='display:flex;flex-wrap:wrap;gap:6px;margin:-4px 0 6px 0;'>{''.join(sw_items)}</div>", unsafe_allow_html=True)
 
 			sg1, sg2, sg3 = ui.columns(3)
-			s1_r = sg1.text_input("1. İmzacı Ünvan", value=app_cfg.get("cafeteria_sig1_role", "Hazırlayan (Revir / Diyetisyen)"))
-			s1_n = sg1.text_input("1. İmzacı Ad Soyad", value=app_cfg.get("cafeteria_sig1_name") or app_cfg.get("nurse_name", ""))
-			s2_r = sg2.text_input("2. İmzacı Ünvan (Boş bırakılırsa 2 imza olur)", value=app_cfg.get("cafeteria_sig2_role", "Yemekhane Sorumlusu"))
-			s2_n = sg2.text_input("2. İmzacı Ad Soyad", value=app_cfg.get("cafeteria_sig2_name", ""))
-			s3_r = sg3.text_input("3. İmzacı Ünvan", value=app_cfg.get("cafeteria_sig3_role", "Okul Müdürü (Onay)"))
-			s3_n = sg3.text_input("3. İmzacı Ad Soyad", value=app_cfg.get("cafeteria_sig3_name") or app_cfg.get("principal_name", ""))
+			s1_r = sg1.text_input("1. İmzacı Ünvan (Sol)", value=s1_def_r, key="caf_cfg_s1_r")
+			s1_n = sg1.text_input("1. İmzacı Ad Soyad (Sol)", value=s1_def_n, key="caf_cfg_s1_n")
+			s2_r = sg2.text_input("2. İmzacı Ünvan (Orta — boş bırakılırsa 2 imza)", value=s2_def_r, key="caf_cfg_s2_r")
+			s2_n = sg2.text_input("2. İmzacı Ad Soyad (Orta)", value=s2_def_n, key="caf_cfg_s2_n")
+			s3_r = sg3.text_input("3. İmzacı Ünvan (Sağ)", value=s3_def_r, key="caf_cfg_s3_r")
+			s3_n = sg3.text_input("3. İmzacı Ad Soyad (Sağ)", value=s3_def_n, key="caf_cfg_s3_n")
 			b_note_in = ui.text_input(
 				"A4 Menü Alt Bilgi Notu (Opsiyonel — boş bırakılırsa standart alerji/revir uyarısı yazılır)",
 				value=app_cfg.get("cafeteria_board_note", ""),
@@ -5786,6 +5870,7 @@ def _render_tab_settings_and_exports(ctx_api: dict[str, Any], sel_ym: str, app_c
 					"cafeteria_time_snack": t_snk_in.strip() or "15:00 - 15:30",
 					"cafeteria_ramazan_mode": "1" if ram_on_in else "0",
 					"cafeteria_ramazan_province": prov_to_save,
+					"cafeteria_menu_color_tone": tone_in,
 					"cafeteria_default_meal_price": str(def_stu_p),
 					"cafeteria_default_staff_price": str(def_stf_p),
 					"cafeteria_sig1_role": s1_r.strip(),
@@ -5794,12 +5879,14 @@ def _render_tab_settings_and_exports(ctx_api: dict[str, Any], sel_ym: str, app_c
 					"cafeteria_sig2_name": s2_n.strip(),
 					"cafeteria_sig3_role": s3_r.strip(),
 					"cafeteria_sig3_name": s3_n.strip(),
+					"cafeteria_sigs_customized": "1",
 					"cafeteria_board_note": b_note_in.strip(),
 				})
 				ui.session_state.pop("caf_menu_active_slots", None)
+				ui.session_state.pop("caf_cfg_form_fp", None)
 				if callable(ctx_api.get("clear_all_data_caches")):
 					ctx_api["clear_all_data_caches"]()
-				ui.success("✅ Yemekhane çalışma düzeni, Ramazan modu, yemek saatleri, tarife ve imza ayarları kaydedildi.")
+				ui.success("✅ Yemekhane çalışma düzeni, Ramazan modu, renk tonu, yemek saatleri ve imza ayarları kaydedildi.")
 				ui.rerun()
 
 	with ui.expander("🏫 A4 Menü İçin Resmi Okul Logosu / Mühür Yükle (PNG/JPG)", expanded=False):

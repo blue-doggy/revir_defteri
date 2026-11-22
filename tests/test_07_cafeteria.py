@@ -1109,38 +1109,44 @@ class TestCafeteriaModule(unittest.TestCase):
             caf.upsert_menu_plan_slot(self.connect, plan_date=dt_iso, meal_slot="Öğle Yemeği", dish_ids=[d1, d2])
         caf.upsert_menu_plan_slot(self.connect, plan_date="2026-10-12", meal_slot="Öğle Yemeği", dish_ids=[d3])
 
-        # 1. Style map checks week palettes + consecutive day light/dark alternation
-        styles, legend = caf._build_week_day_style_map([
+        # 1. Style map uses much lighter default pastel tones + consecutive day light/dark alternation
+        p_w1 = caf.get_week_palette_pair(0)
+        p_w2 = caf.get_week_palette_pair(1)
+        p_w3 = caf.get_week_palette_pair(2)
+        styles, _ = caf._build_week_day_style_map([
             {"date_iso": "2026-10-01"},
             {"date_iso": "2026-10-02"},
             {"date_iso": "2026-10-05"},
             {"date_iso": "2026-10-06"},
             {"date_iso": "2026-10-12"},
         ])
-        self.assertEqual(styles["2026-10-01"]["bg_hex"], "#FEF9C3")  # Week 1 Light Yellow
-        self.assertEqual(styles["2026-10-02"]["bg_hex"], "#FDE68A")  # Week 1 Dark Yellow
-        self.assertEqual(styles["2026-10-05"]["bg_hex"], "#FFF3E0")  # Week 2 Light Orange
-        self.assertEqual(styles["2026-10-06"]["bg_hex"], "#FED7AA")  # Week 2 Dark Orange
-        self.assertEqual(styles["2026-10-12"]["bg_hex"], "#ECFDF5")  # Week 3 Light Green
-        self.assertEqual([w["label"] for w in legend], ["1. Hafta (Sarı)", "2. Hafta (Turuncu)", "3. Hafta (Yeşil)"])
+        self.assertEqual(styles["2026-10-01"]["bg_hex"], p_w1["light"])  # Week 1 Light Yellow
+        self.assertEqual(styles["2026-10-02"]["bg_hex"], p_w1["dark"])   # Week 1 Dark Yellow
+        self.assertEqual(styles["2026-10-05"]["bg_hex"], p_w2["light"])  # Week 2 Light Orange
+        self.assertEqual(styles["2026-10-06"]["bg_hex"], p_w2["dark"])   # Week 2 Dark Orange
+        self.assertEqual(styles["2026-10-12"]["bg_hex"], p_w3["light"])  # Week 3 Light Green
 
-        # 2. HTML outputs across all 3 layout modes: side-by-side dishes + kcal/carb/allergen next line + colors
+        # 2. HTML outputs: no week-color legend, "Öğün" instead of "Menü Günü", inline dishes + carbs + lighter colors
         for lm in ("standard", "compact_one_page", "weekly_grid"):
             html_out = caf.build_menu_a4_html(self.connect, year_month="2026-10", layout_mode=lm)
             self.assertIn("print-color-adjust: exact", html_out)
-            self.assertIn("1. Hafta (Sarı)", html_out)
-            self.assertIn("2. Hafta (Turuncu)", html_out)
+            self.assertNotIn("Hafta Renkleri", html_out)
+            self.assertNotIn("Menü Günü", html_out)
+            self.assertIn("5 Öğün", html_out)
             self.assertIn("Tarhana Çorbası · Yoğurtlu Semizotu", html_out)
             self.assertIn("245 kcal", html_out)
             self.assertIn("30 g Karb.", html_out)
             self.assertIn("Alerjen: Yok", html_out)
-            for hex_c in ("#FEF9C3", "#FDE68A", "#FFF3E0", "#FED7AA", "#ECFDF5"):
+            for hex_c in (p_w1["light"], p_w1["dark"], p_w2["light"], p_w2["dark"], p_w3["light"]):
                 self.assertIn(hex_c, html_out)
 
-        # 3. Word (.docx) outputs across all 3 layout modes: inline dishes + newline nutrition + XML cell shading
+        # 3. Word (.docx) outputs: no week-color legend, "Öğün" instead of "Menü Günü", inline dishes + XML shading
         for lm in ("standard", "compact_one_page", "weekly_grid"):
             raw_doc = caf.build_menu_a4_docx(self.connect, year_month="2026-10", layout_mode=lm)
             txt = _extract_docx_all_text(raw_doc)
+            self.assertNotIn("Hafta Renkleri", txt)
+            self.assertNotIn("Menü Günü", txt)
+            self.assertIn("5 Öğün", txt)
             self.assertIn("Tarhana Çorbası · Yoğurtlu Semizotu", txt)
             self.assertIn("Tarhana Çorbası · Yoğurtlu Semizotu\nKalori: 245 kcal  |  Karb.: 30 g  |  Alerjen:", txt)
             self.assertIn("Izgara Tavuk\nKalori: 220 kcal  |  Karb.: 0 g  |  Alerjen: Yok", txt)
@@ -1152,8 +1158,8 @@ class TestCafeteriaModule(unittest.TestCase):
                 for cell in row.cells
                 for el in cell._tc.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}shd")
             }
-            for w_hex in ("FEF9C3", "FDE68A", "FFF3E0", "FED7AA", "ECFDF5"):
-                self.assertIn(w_hex, shd_fills)
+            for w_hex in (p_w1["light"], p_w1["dark"], p_w2["light"], p_w2["dark"], p_w3["light"]):
+                self.assertIn(w_hex.lstrip("#").upper(), shd_fills)
 
         # 4. Excel Aylik_Menu rows colored per week & alternating days + inline dishes
         wb_b = caf.build_cafeteria_full_workbook_excel(self.connect, "2026-10")
@@ -1166,11 +1172,11 @@ class TestCafeteriaModule(unittest.TestCase):
                 dt_v = str(row[0].value or "")[:10]
                 fills_by_date[dt_v] = str(row[0].fill.fgColor.rgb or "")[-6:]
                 dishes_by_date[dt_v] = str(row[2].value or "")
-            self.assertEqual(fills_by_date["2026-10-01"], "FEF9C3")
-            self.assertEqual(fills_by_date["2026-10-02"], "FDE68A")
-            self.assertEqual(fills_by_date["2026-10-05"], "FFF3E0")
-            self.assertEqual(fills_by_date["2026-10-06"], "FED7AA")
-            self.assertEqual(fills_by_date["2026-10-12"], "ECFDF5")
+            self.assertEqual(fills_by_date["2026-10-01"], p_w1["light"].lstrip("#").upper())
+            self.assertEqual(fills_by_date["2026-10-02"], p_w1["dark"].lstrip("#").upper())
+            self.assertEqual(fills_by_date["2026-10-05"], p_w2["light"].lstrip("#").upper())
+            self.assertEqual(fills_by_date["2026-10-06"], p_w2["dark"].lstrip("#").upper())
+            self.assertEqual(fills_by_date["2026-10-12"], p_w3["light"].lstrip("#").upper())
             self.assertEqual(dishes_by_date["2026-10-01"], "Tarhana Çorbası · Yoğurtlu Semizotu")
         finally:
             wb.close()
@@ -1381,6 +1387,100 @@ class TestCafeteriaModule(unittest.TestCase):
         self.assertIn("Osmancık Pirinç", st_html)
         self.assertNotIn(f"<h5 class='revir-h5'>{_html_m.escape(caf.PURCHASE_STAT_VIEWS[0])}</h5>", st_html)
         self.assertNotIn(f"<h5 class='revir-h5'>{_html_m.escape(caf.PURCHASE_STAT_VIEWS[2])}</h5>", st_html)
+
+    def test_color_tone_setting_and_right_signature_persistence_bugfix(self):
+        # 1. Color tone preset configures background lightness across HTML, Word & Excel
+        d_id = caf.upsert_dish_with_ingredients(
+            self.connect,
+            name="Ezogelin Çorbası",
+            category="Çorba",
+            ingredients=[{"ingredient_name": "Mercimek", "amount": 50, "unit": "g", "kcal_portion": 180, "carbs_portion_g": 28}],
+        )
+        caf.upsert_menu_plan_slot(self.connect, plan_date="2026-10-05", meal_slot="Öğle Yemeği", dish_ids=[d_id])
+        caf.upsert_menu_plan_slot(self.connect, plan_date="2026-10-06", meal_slot="Öğle Yemeği", dish_ids=[d_id])
+
+        pal_ultra = caf.get_week_palette_pair(0, color_tone="Ultra Açık Pastel")
+        pal_bold = caf.get_week_palette_pair(0, color_tone="Orta Ton Pastel")
+        self.assertNotEqual(pal_ultra["dark"], pal_bold["dark"])
+
+        persantil.save_app_settings({"cafeteria_menu_color_tone": "Ultra Açık Pastel"})
+        cfg_ultra = persantil.get_app_settings()
+        h_ultra = caf.build_menu_a4_html(self.connect, year_month="2026-10", school_meta=cfg_ultra)
+        self.assertIn(pal_ultra["light"], h_ultra)
+        self.assertIn(pal_ultra["dark"], h_ultra)
+        self.assertIn("2 Öğün", h_ultra)
+        self.assertNotIn("Menü Günü", h_ultra)
+        self.assertNotIn("Hafta Renkleri", h_ultra)
+
+        # 2. Monochrome preset renders white / crisp light gray alternating cells
+        persantil.save_app_settings({"cafeteria_menu_color_tone": "Beyaz / Renksiz"})
+        h_mono = caf.build_menu_a4_html(self.connect, year_month="2026-10", school_meta=persantil.get_app_settings())
+        self.assertIn("background:#FFFFFF", h_mono)
+        self.assertIn("background:#F8FAFC", h_mono)
+
+        # 3. Signature regression bugfix:
+        # Nurse clears own name from Slot 1 (left) and moves own name to Slot 3 (right).
+        # Must NOT re-inject nurse_name into Slot 1 on settings display or A4 HTML/Word export!
+        persantil.save_app_settings({
+            "nurse_name": "Hemşire Elif Kaya",
+            "principal_name": "Müdür Kemal Arslan",
+            "cafeteria_sig1_role": "Okul Müdürü",
+            "cafeteria_sig1_name": "",
+            "cafeteria_sig2_role": "",
+            "cafeteria_sig2_name": "",
+            "cafeteria_sig3_role": "Revir Hemşiresi",
+            "cafeteria_sig3_name": "Hemşire Elif Kaya",
+            "cafeteria_sigs_customized": "1",
+        })
+        cfg_sig = persantil.get_app_settings()
+        slots = caf.resolve_menu_signer_slots(cfg_sig)
+        self.assertEqual(slots[0], ("Okul Müdürü", ""))
+        self.assertEqual(slots[1], ("", ""))
+        self.assertEqual(slots[2], ("Revir Hemşiresi", "Hemşire Elif Kaya"))
+
+        signers_p = caf.resolve_menu_signers_for_print(cfg_sig)
+        h_sig = caf.build_menu_a4_html(self.connect, year_month="2026-10", signers=signers_p, school_meta=cfg_sig)
+        sig_boxes = h_sig.split("class='sig-box'")[1:]
+        self.assertEqual(len(sig_boxes), 2)
+        self.assertNotIn("Hemşire Elif Kaya", sig_boxes[0])  # Left slot MUST NOT contain nurse's name!
+        self.assertIn("Hemşire Elif Kaya", sig_boxes[1])     # Right slot MUST contain nurse's name!
+
+        d_sig = _extract_docx_all_text(
+            caf.build_menu_a4_docx(self.connect, year_month="2026-10", signers=signers_p, school_meta=cfg_sig)
+        )
+        self.assertEqual(d_sig.count("Hemşire Elif Kaya"), 1)
+        self.assertLess(d_sig.find("Okul Müdürü"), d_sig.find("Hemşire Elif Kaya"))
+
+        # Even when Slot 1 Role is ALSO cleared (only Slot 3 active), right-aligned styling is applied
+        signers_right_only = [("", ""), ("", ""), ("Revir Hemşiresi", "Hemşire Elif Kaya")]
+        h_r_only = caf.build_menu_a4_html(self.connect, year_month="2026-10", signers=signers_right_only, school_meta=cfg_sig)
+        self.assertIn("margin-left:auto", h_r_only)
+        d_r_only_bytes = caf.build_menu_a4_docx(self.connect, year_month="2026-10", signers=signers_right_only, school_meta=cfg_sig)
+        d_r_doc = docx.Document(io.BytesIO(d_r_only_bytes))
+        sig_tbl = d_r_doc.tables[-1]
+        self.assertEqual(len(sig_tbl.columns), 2)
+        self.assertEqual(sig_tbl.cell(0, 0).text.strip(), "")
+        self.assertIn("Hemşire Elif Kaya", sig_tbl.cell(0, 1).text)
+
+        # Settings UI displays empty Slot 1 name & nurse name in Slot 3 + color tone selector
+        revir_ui.reset_session()
+        ctx_api = {
+            "connect_db": self.connect,
+            "get_app_settings": persantil.get_app_settings,
+            "save_app_settings": persantil.save_app_settings,
+            "_get_active_gemini_config": persantil._get_active_gemini_config,
+            "mask_kvkk_value": persantil.mask_kvkk_value,
+            "clear_all_data_caches": persantil.clear_all_data_caches,
+            "is_section_visible": persantil.is_section_visible,
+        }
+        out_cfg = revir_ui.run_action_headless(
+            lambda: caf._render_tab_settings_and_exports(ctx_api, "2026-10", cfg_sig),
+            {"action": "render"},
+        )
+        self.assertNotIn("Çalışma Zamanı Hatası", out_cfg["main_html"])
+        self.assertIn("Menü Çıktısı Renk Tonu", out_cfg["main_html"])
+        self.assertEqual(revir_ui.session_state.get("caf_cfg_s1_n"), "")
+        self.assertEqual(revir_ui.session_state.get("caf_cfg_s3_n"), "Hemşire Elif Kaya")
 
 
 if __name__ == "__main__":

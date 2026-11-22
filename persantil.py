@@ -125,7 +125,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.22.0"
+_DEFAULT_APP_VERSION = "1.22.1"
 
 
 def _load_app_version() -> str:
@@ -309,6 +309,8 @@ DEFAULT_APP_SETTINGS: dict[str, str] = {
 	"cafeteria_sig2_name": "",
 	"cafeteria_sig3_role": "Okul Müdürü (Onay)",
 	"cafeteria_sig3_name": "",
+	"cafeteria_sigs_customized": "0",
+	"cafeteria_menu_color_tone": "Çok Açık Pastel (Varsayılan)",
 	"cafeteria_board_note": "",
 	"cafeteria_school_logo_b64": "",
 	"cafeteria_service_days_per_week": "5",
@@ -12557,11 +12559,7 @@ def _execute_gemini_chat_export(export_spec: dict[str, Any], active_pid: int | N
 			ym_caf = str(export_spec.get("year_month") or date.today().strftime("%Y-%m"))[:7]
 			cfg_caf = get_app_settings()
 			if fmt in ("docx", "word", "both"):
-				signers_caf = [
-					(cfg_caf.get("cafeteria_sig1_role", "Hazırlayan"), cfg_caf.get("cafeteria_sig1_name") or cfg_caf.get("nurse_name", "")),
-					(cfg_caf.get("cafeteria_sig2_role", "Yemekhane Sorumlusu"), cfg_caf.get("cafeteria_sig2_name", "")),
-					(cfg_caf.get("cafeteria_sig3_role", "Okul Müdürü"), cfg_caf.get("cafeteria_sig3_name") or cfg_caf.get("principal_name", "")),
-				]
+				signers_caf = caf.resolve_menu_signers_for_print(cfg_caf)
 				b_d = caf.build_menu_a4_docx(connect_db, year_month=ym_caf, scope="monthly", signers=signers_caf, school_meta=cfg_caf)
 				fn_d = f"Yemekhane_Menu_{ym_caf}.docx"
 				downloads.append({"token": ui.register_download(b_d, fn_d, docx_mime), "file_name": fn_d, "label": f"📄 {ym_caf} A4 Yemek Menüsü (.docx)", "kind": "docx"})
