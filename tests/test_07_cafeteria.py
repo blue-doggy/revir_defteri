@@ -1482,6 +1482,168 @@ class TestCafeteriaModule(unittest.TestCase):
         self.assertEqual(revir_ui.session_state.get("caf_cfg_s1_n"), "")
         self.assertEqual(revir_ui.session_state.get("caf_cfg_s3_n"), "Hemşire Elif Kaya")
 
+    def test_institutional_excel_templates_imports_and_invoice_unit_cost_revision(self):
+        # 1. Menu CSV (Karaman Özel Eğitim Anaokulu 3-table format) -> import + 3-sheet xlsx round-trip
+        menu_csv = (
+            "KARAMAN ÖZEL EĞİTİM ANAOKULU;;;;;;;\n"
+            "KASIM 2026 YEMEK LİSTESİ;;;;;;;\n"
+            "Hafta;Tarih;Gün;1. Çeşit;2. Çeşit;3. Çeşit;Tahmini Enerji (kcal);Günlük Alerjen Notu\n"
+            "1. Hafta;02.11.2026;Pazartesi;Kıymalı Ispanak;Makarna;Yoğurt;500;Gluten, Süt Ürünü\n"
+            "1. Hafta;03.11.2026;Salı;Mercimek Çorbası;Pirinç Pilavı;Meyve;480;Gluten, Süt Ürünü\n"
+            ";;;;;;;\n"
+            "YEMEK KALORİ VE ALERJEN BİLGİ TABLOSU;;;;;;;\n"
+            "Kategori;Yemek / Ürün Adı;Ort. Kalori (kcal);Kalori Notu;Alerjen Detayı;Gluten;Süt Ürünü;Yumurta\n"
+            "Çorbalar;Mercimek Çorbası;150;~150 kcal;Gluten, Süt;Var;Var;Yok\n"
+            "Ana Yemekler;Kıymalı Ispanak;180;~180 kcal;Yok;Yok;Yok;Yok\n"
+            "Pilav & Makarna;Makarna;200;~200 kcal;Gluten;Var;Yok;Yok\n"
+            "Pilav & Makarna;Pirinç Pilavı;260;~260 kcal;Süt Ürünü;Yok;Var;Yok\n"
+            "Yan Ürün;Yoğurt;120;~120 kcal;Süt Ürünü;Yok;Var;Yok\n"
+            "Yan Ürün;Meyve;70;~70 kcal;Yok;Yok;Yok;Yok\n"
+        ).encode("utf-8")
+
+        res_menu_imp = caf.import_school_menu_from_excel_or_csv(
+            self.connect,
+            menu_csv,
+            "karaman_kasim_2026.csv",
+            default_slot="Öğle Yemeği",
+            sync_to_diabetes=True,
+        )
+        self.assertGreaterEqual(res_menu_imp["plans_saved"], 2)
+        self.assertGreaterEqual(res_menu_imp["dishes_upserted"], 6)
+
+        plans_nov = caf.get_menu_plans_for_month(self.connect, "2026-11")
+        self.assertIn(("2026-11-02", "Öğle Yemeği"), plans_nov)
+        self.assertEqual(plans_nov[("2026-11-02", "Öğle Yemeği")]["dish_names"], ["Kıymalı Ispanak", "Makarna", "Yoğurt"])
+        self.assertAlmostEqual(plans_nov[("2026-11-02", "Öğle Yemeği")]["total_kcal"], 500.0, places=1)
+
+        school_meta = {"school_name": "Karaman Özel Eğitim Anaokulu", "cafeteria_sig1_role": "Hazırlayan", "cafeteria_sig1_name": "Muhammet DOĞANÇAY"}
+        wb_menu_bytes = caf.build_school_menu_workbook_excel(self.connect, "2026-11", school_meta=school_meta)
+        wb_menu = openpyxl.load_workbook(io.BytesIO(wb_menu_bytes), data_only=False)
+        self.assertEqual(wb_menu.sheetnames, ["Yemek_Listesi", "Kalori_ve_Alerjen_Tablosu", "Menu_Ozeti_ve_Analiz"])
+        ws_ml = wb_menu["Yemek_Listesi"]
+        self.assertIn("KARAMAN ÖZEL EĞİTİM ANAOKULU", str(ws_ml["A1"].value))
+        hdr_ml = [ws_ml.cell(4, c).value for c in range(1, 9)]
+        self.assertIn("1. Çeşit", hdr_ml)
+        self.assertIn("2. Çeşit", hdr_ml)
+        self.assertIn("3. Çeşit", hdr_ml)
+
+        # 2. Invoice institutional Excel template + CSV/Excel import + unit_cost computation
+        tmpl_bytes = caf.build_purchase_invoice_template_excel(self.connect, year_month="2026-11", school_meta=school_meta)
+        wb_inv_t = openpyxl.load_workbook(io.BytesIO(tmpl_bytes), data_only=False)
+        self.assertEqual(wb_inv_t.sheetnames, ["Fatura_Giris_Sablonu", "Urun_Birim_Maliyet_Referans", "Fatura_Ozeti_ve_Analiz"])
+        ws_fg = wb_inv_t["Fatura_Giris_Sablonu"]
+        hdr_fg = [ws_fg.cell(4, c).value for c in range(1, 14)]
+        self.assertIn("Miktar Cinsi", hdr_fg)
+        self.assertIn("Birim Maliyet (KDV Dahil ₺)", hdr_fg)
+        self.assertTrue(str(ws_fg["K5"].value).startswith("=ROUND("))
+        self.assertTrue(str(ws_fg["L5"].value).startswith("=IF("))
+
+        inv_csv = (
+            "Fatura Tarihi;Fatura No;Tedarikçi / Firma;Ödeme Durumu;Ürün Adı;Kategori;Miktar;Miktar Cinsi;Birim Fiyat (KDV Hariç ₺);KDV (%);Toplam Tutar (KDV Dahil ₺);SKT (Ops.)\n"
+            "2026-11-12;FTR-2026-77;Özkan Toptan;Vadeli / Bekliyor;Mercimek;Bakliyat & Kuru Gıda;25;kg;50;0;;\n"
+            "2026-11-12;FTR-2026-77;Özkan Toptan;Vadeli / Bekliyor;Salça;Bakliyat & Kuru Gıda;5;teneke;0;0;600;\n"
+        ).encode("utf-8")
+        parsed_invs = caf.parse_purchase_invoices_from_excel_or_csv(inv_csv, "faturalar.csv")
+        self.assertEqual(len(parsed_invs), 1)
+        self.assertEqual(parsed_invs[0]["payment_status"], "Vadeli / Bekliyor")
+        self.assertEqual(len(parsed_invs[0]["items"]), 2)
+
+        pid_xl = caf.upsert_purchase_invoice(
+            self.connect,
+            invoice_date=parsed_invs[0]["invoice_date"],
+            invoice_no=parsed_invs[0]["invoice_no"],
+            supplier_name=parsed_invs[0]["supplier_name"],
+            category=parsed_invs[0]["category"],
+            items=parsed_invs[0]["items"],
+            payment_status=parsed_invs[0]["payment_status"],
+        )
+        loaded_p = caf.get_purchase_by_id(self.connect, pid_xl)
+        self.assertIsNotNone(loaded_p)
+        by_nm = {it["item_name"]: it for it in loaded_p["items"]}
+        self.assertAlmostEqual(by_nm["Mercimek"]["unit_cost"], 50.0, places=2)
+        # 5 teneke total 600 TL -> back-calculated unit_price 120.0 & unit_cost 120.0
+        self.assertAlmostEqual(by_nm["Salça"]["unit_price"], 120.0, places=2)
+        self.assertAlmostEqual(by_nm["Salça"]["unit_cost"], 120.0, places=2)
+        self.assertAlmostEqual(loaded_p["total_amount"], 1850.0, places=2)
+
+        # Also check exporting an existing invoice populates its sheets cleanly
+        ex_p_xlsx = caf.build_purchase_invoice_template_excel(self.connect, purchase_id=pid_xl, school_meta=school_meta)
+        wb_ex_p = openpyxl.load_workbook(io.BytesIO(ex_p_xlsx), data_only=False)
+        self.assertEqual(wb_ex_p["Fatura_Giris_Sablonu"].cell(5, 5).value, "Mercimek")
+
+        # Analytics exposes Ort. Birim Maliyet (₺), Son Birim Maliyet (₺) and Birim Maliyet (₺)
+        an_res = caf.compute_purchase_analytics(self.connect, year_month="2026-11", product_name="Salça")
+        self.assertTrue(any(p["Ürün Adı"] == "Salça" and abs(p["Ort. Birim Maliyet (₺)"] - 120.0) < 0.01 for p in an_res["product_summary"]))
+        self.assertAlmostEqual(an_res["product_history"][0]["Birim Maliyet (₺)"], 120.0, places=2)
+
+        # 3. Headless UI verification of revised Invoice tab, Dialog Unit Cost breakdown, total-price mode & payment filter
+        revir_ui.reset_session()
+        ctx_api = {
+            "connect_db": self.connect,
+            "get_app_settings": persantil.get_app_settings,
+            "save_app_settings": persantil.save_app_settings,
+            "_get_active_gemini_config": persantil._get_active_gemini_config,
+            "mask_kvkk_value": persantil.mask_kvkk_value,
+            "clear_all_data_caches": persantil.clear_all_data_caches,
+            "is_section_visible": persantil.is_section_visible,
+        }
+        purch_tab = lambda: caf._render_tab_purchases_and_expenses(ctx_api, "2026-11", school_meta)
+        out_p = revir_ui.run_action_headless(purch_tab, {"action": "render"})
+        self.assertNotIn("Çalışma Zamanı Hatası", out_p["main_html"])
+        self.assertIn("Resmi Fatura Excel Şablonu İndir", out_p["main_html"])
+        self.assertIn("FTR-2026-77", out_p["main_html"])
+        self.assertIn("Birim:", out_p["main_html"])
+
+        # Payment status filter ("Vadeli / Bekliyor" -> idx 2) keeps FTR-2026-77; ("Ödendi" -> idx 1) excludes it
+        out_flt_paid = revir_ui.run_action_headless(
+            purch_tab, {"action": "change", "key": "caf_purch_st_flt", "value": 1}
+        )
+        self.assertNotIn("FTR-2026-77", out_flt_paid["main_html"])
+
+        revir_ui.run_action_headless(
+            purch_tab, {"action": "change", "key": "caf_purch_st_flt", "value": 2}
+        )
+        out_dlg = revir_ui.run_action_headless(
+            purch_tab,
+            {"action": "df_select", "key": "caf_invoices_list_tbl", "value": {"rows": [0], "cells": [[0, "Fatura No"]]}},
+        )
+        dlg_html = str(out_dlg.get("dialog_html") or "")
+        self.assertIn("Birim Maliyet (KDV Dahil ₺)", dlg_html)
+        self.assertIn("Kalem Bazlı Birim Maliyet", dlg_html)
+        self.assertIn("caf_dlg_i_btn_mark_paid", dlg_html)
+
+        # Switch to Total Price entry mode (idx 1) in dialog & update Salça total -> 750 TL (5 teneke => 150 TL/teneke)
+        revir_ui.run_action_headless(
+            purch_tab,
+            {"action": "change", "key": "caf_dlg_i_price_mode", "value": 1},
+        )
+        revir_ui.run_action_headless(
+            purch_tab,
+            {"action": "data_editor", "key": "caf_dlg_i_items_editor", "value": {"op": "cell", "row_kind": "base", "row_id": 1, "col": "Toplam Tutar (₺)", "val": 750.0}},
+        )
+        revir_ui.run_action_headless(purch_tab, {"action": "click", "key": "caf_dlg_i_btn_save_inv"})
+        reloaded_p = caf.get_purchase_by_id(self.connect, pid_xl)
+        reloaded_by_nm = {it["item_name"]: it for it in reloaded_p["items"]}
+        self.assertAlmostEqual(reloaded_by_nm["Salça"]["unit_cost"], 150.0, places=2)
+        self.assertAlmostEqual(reloaded_by_nm["Salça"]["line_total"], 750.0, places=2)
+
+        # Re-open and click "Ödendi İşaretle" in dialog
+        revir_ui.run_action_headless(
+            purch_tab,
+            {"action": "df_select", "key": "caf_invoices_list_tbl", "value": {"rows": [0], "cells": [[0, "Fatura No"]]}},
+        )
+        revir_ui.run_action_headless(purch_tab, {"action": "click", "key": "caf_dlg_i_btn_mark_paid"})
+        self.assertEqual(caf.get_purchase_by_id(self.connect, pid_xl)["payment_status"], "Ödendi")
+
+        # 4. Headless UI check for Menu Planner 3-sheet Excel download + importer controls
+        out_m = revir_ui.run_action_headless(
+            lambda: caf._render_tab_menu_planner(ctx_api, "2026-11", school_meta),
+            {"action": "render"},
+        )
+        self.assertNotIn("Çalışma Zamanı Hatası", out_m["main_html"])
+        self.assertIn("3 Sekmeli Menü Excel", out_m["main_html"])
+        self.assertIn("Excel / CSV Şablonundan Menü", out_m["main_html"])
+
 
 if __name__ == "__main__":
     unittest.main()

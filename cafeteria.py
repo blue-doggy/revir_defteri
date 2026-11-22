@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import calendar
+import csv
 import html
 import io
 import json
@@ -2281,12 +2282,22 @@ def upsert_purchase_invoice(
 		if not nm:
 			continue
 		qty = max(0.0, _safe_float(it.get("quantity", it.get("Miktar")), 1.0))
-		unit = str(it.get("unit_type") or it.get("Birim") or it.get("Miktar Çeşidi") or "kg").strip() or "kg"
+		unit = str(it.get("unit_type") or it.get("Birim") or it.get("Miktar Çeşidi") or it.get("Miktar Cinsi") or "kg").strip() or "kg"
 		u_price = max(0.0, _safe_float(it.get("unit_price", it.get("Birim Fiyat (₺)")), 0.0))
 		v_rate = max(0.0, _safe_float(it.get("vat_rate", it.get("KDV (%)")), 0.0))
+		explicit_line = _safe_float(
+			it.get("line_total", it.get("Tutar (₺)", it.get("Toplam Tutar (₺)", -1.0))),
+			-1.0,
+		)
 		base_line = qty * u_price
-		explicit_line = _safe_float(it.get("line_total", it.get("Tutar (₺)")), -1.0)
-		if base_line > 0:
+		if explicit_line > 0 and u_price <= 0:
+			line_t = round(explicit_line, 2)
+			base_est = line_t / (1.0 + v_rate / 100.0) if v_rate > 0 else line_t
+			if qty > 0:
+				u_price = base_est / qty
+			subtotal += base_est
+			vat_tot += max(0.0, line_t - base_est)
+		elif base_line > 0:
 			v_amt = base_line * (v_rate / 100.0)
 			line_t = round(base_line + v_amt, 2)
 			subtotal += base_line
@@ -2294,6 +2305,8 @@ def upsert_purchase_invoice(
 		elif explicit_line >= 0:
 			line_t = round(explicit_line, 2)
 			base_est = line_t / (1.0 + v_rate / 100.0) if v_rate > 0 else line_t
+			if qty > 0 and base_est > 0 and u_price <= 0:
+				u_price = base_est / qty
 			subtotal += base_est
 			vat_tot += max(0.0, line_t - base_est)
 		else:
@@ -2306,7 +2319,7 @@ def upsert_purchase_invoice(
 			"unit_price": round(u_price, 2),
 			"vat_rate": round(v_rate, 1),
 			"line_total": line_t,
-			"expiry_date": str(it.get("expiry_date") or it.get("SKT") or "").strip()[:10],
+			"expiry_date": str(it.get("expiry_date") or it.get("SKT") or it.get("SKT (Ops.)") or "").strip()[:10],
 			"notes": str(it.get("notes") or it.get("Not") or "").strip(),
 		})
 
@@ -2347,6 +2360,20 @@ def upsert_purchase_invoice(
 	return pid
 
 
+def _enrich_purchase_item_unit_cost(it: dict[str, Any]) -> dict[str, Any]:
+	"""Fatura kalemine KDV dahil birim maliyet (₺/birim) bilgisini ekler."""
+	q_v = max(0.0, _safe_float(it.get("quantity"), 0.0))
+	up_v = max(0.0, _safe_float(it.get("unit_price"), 0.0))
+	vr_v = max(0.0, _safe_float(it.get("vat_rate"), 0.0))
+	lt_v = max(0.0, _safe_float(it.get("line_total"), 0.0))
+	if lt_v <= 0 and q_v > 0 and up_v > 0:
+		lt_v = round(q_v * up_v * (1.0 + vr_v / 100.0), 2)
+		it["line_total"] = lt_v
+	u_cost = round(lt_v / q_v, 2) if q_v > 0 else round(up_v * (1.0 + vr_v / 100.0), 2)
+	it["unit_cost"] = u_cost
+	return it
+
+
 def get_purchases_and_items(
 	connect_db_fn: Callable[[], sqlite3.Connection],
 	*,
@@ -2354,9 +2381,10 @@ def get_purchases_and_items(
 	start_date: str | None = None,
 	end_date: str | None = None,
 	category: str | None = None,
+	payment_status: str | None = None,
 	query_text: str = "",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-	"""Fatura tarihine göre sıralı faturalar ve alt kalem listesini döndürür."""
+	"""Fatura tarihine göre sıralı faturalar ve alt kalem listesini (birim maliyet dahil) döndürür."""
 	where_bits = ["1=1"]
 	params: list[Any] = []
 	if year_month and year_month != "Tümü":
@@ -2371,6 +2399,9 @@ def get_purchases_and_items(
 	if category and category != "Tümü":
 		where_bits.append("p.category = ?")
 		params.append(category)
+	if payment_status and payment_status != "Tümü":
+		where_bits.append("p.payment_status = ?")
+		params.append(payment_status)
 
 	w_sql = " AND ".join(where_bits)
 	with connect_db_fn() as conn:
@@ -2389,7 +2420,7 @@ def get_purchases_and_items(
 		).fetchall()
 
 	purchases = [dict(r) for r in p_rows]
-	items = [dict(r) for r in i_rows]
+	items = [_enrich_purchase_item_unit_cost(dict(r)) for r in i_rows]
 	all_items_by_pid: dict[int, list[dict[str, Any]]] = {}
 	for it in items:
 		all_items_by_pid.setdefault(int(it["purchase_id"]), []).append(it)
@@ -2415,8 +2446,9 @@ def get_purchases_and_items(
 		for pit in pr_items[:4]:
 			q_v = _safe_float(pit.get("quantity"), 0.0)
 			u_v = str(pit.get("unit_type") or "")
-			up_v = _safe_float(pit.get("unit_price"), 0.0)
-			parts_s.append(f"{pit['item_name']} ({q_v:g} {u_v} × {up_v:g} ₺)")
+			uc_v = _safe_float(pit.get("unit_cost"), _safe_float(pit.get("unit_price"), 0.0))
+			lt_v = _safe_float(pit.get("line_total"), 0.0)
+			parts_s.append(f"{pit['item_name']} ({q_v:g} {u_v} · {lt_v:g} ₺ · Birim: {uc_v:g} ₺/{u_v})")
 		if len(pr_items) > 4:
 			parts_s.append(f"+{len(pr_items) - 4} kalem")
 		pr["items_summary"] = ", ".join(parts_s) if parts_s else "—"
@@ -2477,7 +2509,7 @@ def get_purchase_by_id(connect_db_fn: Callable[[], sqlite3.Connection], purchase
 			return None
 		d = dict(p)
 		d["items"] = [
-			dict(r)
+			_enrich_purchase_item_unit_cost(dict(r))
 			for r in conn.execute("SELECT * FROM cafeteria_purchase_items WHERE purchase_id=? ORDER BY id ASC", (int(purchase_id),)).fetchall()
 		]
 		return d
@@ -2803,6 +2835,7 @@ def compute_purchase_analytics(
 		qty = _safe_float(it.get("quantity"), 0.0)
 		u_pr = _safe_float(it.get("unit_price"), 0.0)
 		l_tot = _safe_float(it.get("line_total"), 0.0)
+		u_cost = _safe_float(it.get("unit_cost"), round(l_tot / qty, 2) if qty > 0 else u_pr)
 		pid = int(it.get("purchase_id") or 0)
 		inv_dt = str(it.get("invoice_date") or "")[:10]
 		total_items_spend += l_tot
@@ -2818,8 +2851,10 @@ def compute_purchase_analytics(
 				"total_spend": 0.0,
 				"weighted_num": 0.0,
 				"unit_prices": [],
+				"unit_costs": [],
 				"latest_date": inv_dt,
 				"latest_price": u_pr,
+				"latest_cost": u_cost,
 			}
 		pg = prod_groups[pk]
 		pg["pids"].add(pid)
@@ -2829,9 +2864,14 @@ def compute_purchase_analytics(
 			pg["weighted_num"] += qty * u_pr
 			pg["unit_prices"].append(u_pr)
 			inf_groups.setdefault(pk, []).append(it)
-		if (inv_dt >= pg["latest_date"]) and u_pr > 0:
+		if u_cost > 0:
+			pg["unit_costs"].append(u_cost)
+		if (inv_dt >= pg["latest_date"]) and (u_pr > 0 or u_cost > 0):
 			pg["latest_date"] = inv_dt
-			pg["latest_price"] = u_pr
+			if u_pr > 0:
+				pg["latest_price"] = u_pr
+			if u_cost > 0:
+				pg["latest_cost"] = u_cost
 
 		if cat_s not in cat_groups:
 			cat_groups[cat_s] = {"count": 0, "products": set(), "spend": 0.0}
@@ -2842,9 +2882,11 @@ def compute_purchase_analytics(
 	product_summary: list[dict[str, Any]] = []
 	for pg in prod_groups.values():
 		up_list = pg["unit_prices"]
+		uc_list = pg["unit_costs"]
 		tq = pg["total_qty"]
 		avg_p = round(pg["weighted_num"] / tq, 2) if (tq > 0 and pg["weighted_num"] > 0) else (round(sum(up_list) / len(up_list), 2) if up_list else 0.0)
 		ts = round(pg["total_spend"], 2)
+		avg_cost = round(ts / tq, 2) if (tq > 0 and ts > 0) else (round(sum(uc_list) / len(uc_list), 2) if uc_list else avg_p)
 		product_summary.append({
 			"Ürün Adı": pg["item_name"],
 			"Kategori": pg["category"],
@@ -2852,6 +2894,8 @@ def compute_purchase_analytics(
 			"Alım Sayısı": len(pg["pids"]),
 			"Toplam Miktar": round(tq, 2),
 			"Ort. Birim Fiyat (₺)": avg_p,
+			"Ort. Birim Maliyet (₺)": avg_cost,
+			"Son Birim Maliyet (₺)": round(pg["latest_cost"], 2),
 			"Min Fiyat (₺)": round(min(up_list), 2) if up_list else 0.0,
 			"Max Fiyat (₺)": round(max(up_list), 2) if up_list else 0.0,
 			"Son Birim Fiyat (₺)": round(pg["latest_price"], 2),
@@ -2960,6 +3004,7 @@ def compute_purchase_analytics(
 			"Birim": it.get("unit_type") or "",
 			"Birim Fiyat (₺)": it.get("unit_price") or 0.0,
 			"KDV (%)": it.get("vat_rate") or 0.0,
+			"Birim Maliyet (₺)": it.get("unit_cost") or 0.0,
 			"Toplam (₺)": it.get("line_total") or 0.0,
 		}
 		for it in sorted(items, key=lambda x: (str(x.get("invoice_date") or ""), int(x.get("id") or 0)))
@@ -3022,6 +3067,764 @@ def build_purchase_analytics_excel(analytics: dict[str, Any], period_label: str 
 		df_mon.to_excel(writer, sheet_name="Aylik_Trend", index=False)
 		df_inf.to_excel(writer, sheet_name="Fiyat_Degisimi", index=False)
 	return buf.getvalue()
+
+
+def _parse_flexible_date_iso(raw_val: Any) -> str:
+	"""DD.MM.YYYY, YYYY-MM-DD, datetime veya Excel seri tarihini YYYY-AA-GG stringine çevirir."""
+	if raw_val is None:
+		return ""
+	if isinstance(raw_val, datetime):
+		return raw_val.date().isoformat()
+	if isinstance(raw_val, date):
+		return raw_val.isoformat()
+	s = str(raw_val).strip()
+	if not s or s.lower() in {"nan", "none", "nat", "-"}:
+		return ""
+	s10 = s[:10]
+	if re.match(r"^\d{4}-\d{2}-\d{2}$", s10):
+		return s10
+	m_tr = re.match(r"^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$", s.split()[0])
+	if m_tr:
+		try:
+			dd, mm, yy = int(m_tr.group(1)), int(m_tr.group(2)), int(m_tr.group(3))
+			return date(yy, mm, dd).isoformat()
+		except Exception:
+			return ""
+	return ""
+
+
+def _read_tabular_sheets_from_bytes(file_bytes: bytes, file_name: str = "") -> list[list[list[str]]]:
+	"""Excel (.xlsx) çalışma kitabının sayfalarını veya CSV metnini satır listeleri olarak okur."""
+	fn = str(file_name or "").lower()
+	is_csv = fn.endswith(".csv") or (not fn.endswith(".xlsx") and not file_bytes[:2] == b"PK")
+	if not is_csv:
+		try:
+			import openpyxl
+			wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+			try:
+				sheets: list[list[list[str]]] = []
+				for ws in wb.worksheets:
+					rows_s = [
+						["" if v is None else (v.strftime("%d.%m.%Y") if isinstance(v, (date, datetime)) else str(v).strip()) for v in row]
+						for row in ws.iter_rows(values_only=True)
+					]
+					if rows_s:
+						sheets.append(rows_s)
+				if sheets:
+					return sheets
+			finally:
+				wb.close()
+		except Exception:
+			pass
+	# CSV / metin geri dönüşümü
+	for enc in ("utf-8-sig", "utf-8", "cp1254", "latin-1"):
+		try:
+			txt = file_bytes.decode(enc)
+			break
+		except Exception:
+			txt = ""
+	if not txt:
+		return []
+	sample_lines = [ln for ln in txt.splitlines()[:15] if ln.strip()]
+	delim = ","
+	if sample_lines:
+		first_chunk = "\n".join(sample_lines)
+		semi_n = first_chunk.count(";")
+		tab_n = first_chunk.count("\t")
+		comma_n = first_chunk.count(",")
+		if tab_n > semi_n and tab_n > comma_n:
+			delim = "\t"
+		elif semi_n >= comma_n and semi_n > 0:
+			delim = ";"
+	rows_c = [[str(c or "").strip() for c in r] for r in csv.reader(io.StringIO(txt), delimiter=delim)]
+	return [rows_c] if rows_c else []
+
+
+def _apply_school_sheet_banner(ws: Any, school_title: str, subtitle: str, col_count: int) -> None:
+	"""Verilen OpenPyXL çalışma sayfasının ilk 3 satırına kurumsal başlık antetini yazar."""
+	from openpyxl.styles import Alignment, Font, PatternFill
+	max_c = max(2, col_count)
+	ws.cell(row=1, column=1, value=school_title)
+	ws.cell(row=2, column=1, value=subtitle)
+	ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max_c)
+	ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=max_c)
+	b_fill = PatternFill("solid", fgColor="0F766E")
+	s_fill = PatternFill("solid", fgColor="F0FDFA")
+	ws.cell(row=1, column=1).font = Font(color="FFFFFF", bold=True, size=12)
+	ws.cell(row=1, column=1).fill = b_fill
+	ws.cell(row=1, column=1).alignment = Alignment(horizontal="center", vertical="center")
+	ws.cell(row=2, column=1).font = Font(color="0F766E", bold=True, size=10.5)
+	ws.cell(row=2, column=1).fill = s_fill
+	ws.cell(row=2, column=1).alignment = Alignment(horizontal="center", vertical="center")
+
+
+def _write_school_signers_to_ws(ws: Any, start_row: int, target_col: int, signers: list[tuple[str, str]]) -> None:
+	"""Kurumsal Excel sayfalarının altına isim ve ünvan imza bloklarını yazar."""
+	from openpyxl.styles import Alignment, Font
+	active = [(r, p) for r, p in signers if (r or p)]
+	if not active:
+		return
+	if len(active) == 1:
+		col_positions = [max(1, target_col)]
+	else:
+		step = max(1, (max(len(active), target_col) - 1) // max(1, len(active) - 1))
+		col_positions = [1 + idx * step for idx in range(len(active))]
+	for (r_lbl, p_nm), c_idx in zip(active, col_positions):
+		c1 = ws.cell(row=start_row, column=c_idx, value=p_nm or "........................")
+		c2 = ws.cell(row=start_row + 1, column=c_idx, value=r_lbl)
+		c1.font = Font(bold=True, size=10, color="0F172A")
+		c2.font = Font(italic=True, size=9.5, color="475569")
+		c1.alignment = Alignment(horizontal="center")
+		c2.alignment = Alignment(horizontal="center")
+
+
+def _tr_upper(txt: Any) -> str:
+	return str(txt or "").replace("i", "İ").replace("ı", "I").upper()
+
+
+def build_school_menu_workbook_excel(
+	connect_db_fn: Callable[[], sqlite3.Connection],
+	year_month: str,
+	*,
+	school_meta: dict[str, str] | None = None,
+) -> bytes:
+	"""Resmi kurum başlığı, 1./2./3.+ çeşit sütunları, Kalori/Alerjen Bilgi Tablosu ve Menü Analizi içeren 3 sekmeli Excel (.xlsx) üretir."""
+	import openpyxl
+	from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+	from openpyxl.utils import get_column_letter
+
+	ym = str(year_month or date.today().strftime("%Y-%m"))[:7]
+	yy, mm = [int(x) for x in ym.split("-")]
+	month_up = _tr_upper(TR_MONTH_NAMES.get(mm, str(mm)))
+
+	meta = dict(school_meta or {})
+	if not meta:
+		try:
+			with connect_db_fn() as conn:
+				for sr in conn.execute("SELECT key, value FROM app_settings").fetchall():
+					meta[str(sr["key"])] = str(sr["value"])
+		except Exception:
+			pass
+
+	school_up = _tr_upper(str(meta.get("school_name") or "OKUL / KURUM YEMEKHANESİ").strip())
+	sched = parse_service_schedule_from_cfg(meta)
+	slots = sched["active_meal_slots"] or ["Öğle Yemeği"]
+	plans = get_menu_plans_for_month(connect_db_fn, ym)
+	days_info = get_month_workdays_info(connect_db_fn, ym, include_weekends=any(wd >= 5 for wd in sched["weekdays_set"]))
+	dishes = get_all_dishes(connect_db_fn)
+
+	planned_entries: list[tuple[dict[str, Any], str, dict[str, Any]]] = []
+	for d in days_info:
+		for sl in slots:
+			rec = plans.get((d["date_iso"], sl))
+			if rec and rec.get("dish_names"):
+				planned_entries.append((d, sl, rec))
+
+	wb = openpyxl.Workbook()
+	ws1 = wb.active
+	ws1.title = "Yemek_Listesi"
+
+	max_dishes = max([3] + [len(r.get("dish_names") or []) for _, _, r in planned_entries])
+	multi_slot = len(slots) > 1
+	headers1 = (
+		["Hafta", "Tarih", "Gün"]
+		+ (["Öğün"] if multi_slot else [])
+		+ [f"{i}. Çeşit" for i in range(1, max_dishes + 1)]
+		+ ["Tahmini Enerji (kcal)", "Karbonhidrat (g)", "Günlük Alerjen Notu"]
+	)
+	_apply_school_sheet_banner(ws1, school_up, f"{month_up} {yy} YEMEK LİSTESİ", len(headers1))
+
+	hdr_fill = PatternFill("solid", fgColor="0F766E")
+	hdr_font = Font(color="FFFFFF", bold=True, size=10)
+	thin = Side(style="thin", color="94A3B8")
+	brd = Border(left=thin, right=thin, top=thin, bottom=thin)
+	for ci, h_lbl in enumerate(headers1, start=1):
+		hc = ws1.cell(row=4, column=ci, value=h_lbl)
+		hc.fill = hdr_fill
+		hc.font = hdr_font
+		hc.border = brd
+		hc.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+	# Hafta aralığı etiketleri (ör: "1. Hafta (2-6 Kasım)")
+	week_bounds: dict[int, list[int]] = {}
+	for d, _, _ in planned_entries:
+		week_bounds.setdefault(int(d["iso_week"]), []).append(int(d["day_num"]))
+	ordered_wks = list(dict.fromkeys(int(d["iso_week"]) for d, _, _ in planned_entries))
+	wk_label_map: dict[int, str] = {}
+	for wi, iwk in enumerate(ordered_wks, start=1):
+		nums = week_bounds[iwk]
+		d_rng = f"{min(nums)}-{max(nums)} {TR_MONTH_NAMES[mm]}" if min(nums) != max(nums) else f"{min(nums)} {TR_MONTH_NAMES[mm]}"
+		wk_label_map[iwk] = f"{wi}. Hafta ({d_rng})"
+
+	day_styles, _ = _build_week_day_style_map(
+		[d for d, _, _ in planned_entries],
+		color_tone=meta.get("cafeteria_menu_color_tone"),
+	)
+
+	def _short_allergen_list(als: list[str]) -> str:
+		out_a = []
+		for a in als:
+			if "Gluten" in a:
+				out_a.append("Gluten")
+			elif "Süt" in a:
+				out_a.append("Süt Ürünü")
+			else:
+				out_a.append(a)
+		return ", ".join(dict.fromkeys(out_a))
+
+	cur_row = 5
+	wk_energy_totals: dict[str, list[float]] = {}
+	kcal_vals: list[float] = []
+	for d, sl, rec in planned_entries:
+		wk_txt = wk_label_map.get(int(d["iso_week"]), "1. Hafta")
+		kv = round(_safe_float(rec.get("total_kcal"), 0.0), 1)
+		cv = round(_safe_float(rec.get("total_carbs_g"), 0.0), 1)
+		if kv > 0:
+			kcal_vals.append(kv)
+			wk_energy_totals.setdefault(wk_txt, []).append(kv)
+		else:
+			wk_energy_totals.setdefault(wk_txt, [])
+		d_names = list(rec.get("dish_names") or [])
+		d_padded = [d_names[i] if i < len(d_names) else "" for i in range(max_dishes)]
+		row_vals = (
+			[wk_txt, f"{d['day_num']:02d}.{mm:02d}.{yy}", d["weekday_name"]]
+			+ ([sl] if multi_slot else [])
+			+ d_padded
+			+ [kv if kv > 0 else "", cv if cv > 0 else "", _short_allergen_list(rec.get("allergens") or [])]
+		)
+		st = day_styles.get(d["date_iso"], {})
+		r_fill = PatternFill("solid", fgColor=st.get("bg_word", "FFFFFF"))
+		for ci, rv in enumerate(row_vals, start=1):
+			cc = ws1.cell(row=cur_row, column=ci, value=rv)
+			cc.fill = r_fill
+			cc.border = brd
+			cc.font = Font(color=st.get("date_fg_hex", "0F172A").lstrip("#"), bold=(ci <= 2), size=10)
+			cc.alignment = Alignment(horizontal="center" if ci in (2, len(headers1) - 2, len(headers1) - 1) else "left", vertical="center")
+		cur_row += 1
+
+	avg_kcal = round(sum(kcal_vals) / len(kcal_vals), 1) if kcal_vals else 0.0
+	ws1.cell(row=cur_row, column=1, value="Aylık Ortalama Günlük Enerji (Ekmek Hariç)").font = Font(bold=True, size=10)
+	e_col_idx = len(headers1) - 2
+	ws1.cell(row=cur_row, column=e_col_idx, value=avg_kcal).font = Font(bold=True, color="0F766E")
+	ws1.cell(row=cur_row, column=len(headers1), value=str(meta.get("cafeteria_board_note") or "Standart 1 dilim ekmek: +70-80 kcal")).font = Font(italic=True, size=9, color="475569")
+	_write_school_signers_to_ws(ws1, cur_row + 2, max(2, len(headers1) - 2), resolve_menu_signers_for_print(meta))
+
+	for ci in range(1, len(headers1) + 1):
+		ws1.column_dimensions[get_column_letter(ci)].width = 22 if ci in (1, len(headers1)) else 18
+
+	# Sheet 2: YEMEK KALORİ VE ALERJEN BİLGİ TABLOSU
+	ws2 = wb.create_sheet("Kalori_ve_Alerjen_Tablosu")
+	headers2 = ["Kategori", "Yemek / Ürün Adı", "Ort. Kalori (kcal)", "Karbonhidrat (g)", "Kalori / Porsiyon Notu", "Alerjen Detayı", "Gluten", "Süt Ürünü", "Yumurta"]
+	_apply_school_sheet_banner(ws2, "YEMEK KALORİ VE ALERJEN BİLGİ TABLOSU", f"{meta.get('school_name') or 'Kurum Yemekhanesi'} — {TR_MONTH_NAMES.get(mm, mm)} {yy} Referans Değerleri", len(headers2))
+	for ci, h2 in enumerate(headers2, start=1):
+		hc = ws2.cell(row=4, column=ci, value=h2)
+		hc.fill = hdr_fill
+		hc.font = hdr_font
+		hc.border = brd
+	for ri2, dish in enumerate(dishes, start=5):
+		als = dish.get("allergens") or []
+		al_f = " ".join(_tr_fold(a) for a in als)
+		row2 = [
+			dish.get("category") or "Ana Yemek",
+			dish.get("name") or "",
+			round(_safe_float(dish.get("total_kcal"), 0.0), 1),
+			round(_safe_float(dish.get("carbs_g"), 0.0), 1),
+			f"~{round(_safe_float(dish.get('total_kcal'), 0.0)):g} kcal",
+			", ".join(als) if als else "Yok",
+			"Var" if "gluten" in al_f else "Yok",
+			"Var" if ("sut" in al_f or "laktoz" in al_f) else "Yok",
+			"Var" if "yumurta" in al_f else "Yok",
+		]
+		for ci, rv in enumerate(row2, start=1):
+			c2 = ws2.cell(row=ri2, column=ci, value=rv)
+			c2.border = brd
+	for ci in range(1, len(headers2) + 1):
+		ws2.column_dimensions[get_column_letter(ci)].width = 26 if ci in (2, 6) else 16
+
+	# Sheet 3: MENÜ ÖZETİ VE KALORİ ANALİZİ
+	ws3 = wb.create_sheet("Menu_Ozeti_ve_Analiz")
+	_apply_school_sheet_banner(ws3, f"{month_up} {yy} MENÜ ÖZETİ VE KALORİ ANALİZİ", school_up, 4)
+	ws3.cell(row=4, column=1, value="Haftalık Enerji Özeti (Ekmek Hariç)").font = Font(bold=True, size=10.5)
+	for ci, h3 in enumerate(["Hafta", "Gün Sayısı", "Ortalama (kcal)", "Toplam (kcal)"], start=1):
+		hc = ws3.cell(row=5, column=ci, value=h3)
+		hc.fill = hdr_fill
+		hc.font = hdr_font
+		hc.border = brd
+	r3 = 6
+	for wk_l, klist in wk_energy_totals.items():
+		ws3.cell(row=r3, column=1, value=wk_l).border = brd
+		ws3.cell(row=r3, column=2, value=len(klist)).border = brd
+		ws3.cell(row=r3, column=3, value=round(sum(klist) / len(klist), 1) if klist else 0.0).border = brd
+		ws3.cell(row=r3, column=4, value=round(sum(klist), 1)).border = brd
+		r3 += 1
+
+	r3 += 1
+	ws3.cell(row=r3, column=1, value="Genel İstatistikler").font = Font(bold=True, size=10.5)
+	r3 += 1
+	glu_cnt = sum(1 for d in dishes if any("gluten" in _tr_fold(a) for a in (d.get("allergens") or [])))
+	mlk_cnt = sum(1 for d in dishes if any("sut" in _tr_fold(a) or "laktoz" in _tr_fold(a) for a in (d.get("allergens") or [])))
+	egg_cnt = sum(1 for d in dishes if any("yumurta" in _tr_fold(a) for a in (d.get("allergens") or [])))
+	for st_k, st_v in [
+		("Toplam Yemek Günü", len({d["date_iso"] for d, _, _ in planned_entries})),
+		("Günlük Ortalama Enerji (kcal)", avg_kcal),
+		("En Yüksek Günlük Enerji (kcal)", max(kcal_vals) if kcal_vals else 0.0),
+		("En Düşük Günlük Enerji (kcal)", min(kcal_vals) if kcal_vals else 0.0),
+		("Gluten İçeren Yemek Sayısı (Tablo)", glu_cnt),
+		("Süt Ürünü İçeren Yemek Sayısı (Tablo)", mlk_cnt),
+		("Yumurta İçeren Yemek Sayısı (Tablo)", egg_cnt),
+	]:
+		ws3.cell(row=r3, column=1, value=st_k).border = brd
+		ws3.cell(row=r3, column=2, value=st_v).border = brd
+		r3 += 1
+	for ci in range(1, 5):
+		ws3.column_dimensions[get_column_letter(ci)].width = 34 if ci == 1 else 18
+
+	buf = io.BytesIO()
+	wb.save(buf)
+	return buf.getvalue()
+
+
+def _map_excel_dish_category(raw_cat: str, dish_name: str = "") -> str:
+	cf = _tr_fold(raw_cat)
+	nf = _tr_fold(dish_name)
+	if "corba" in cf or "corbasi" in nf:
+		return "Çorba"
+	if any(w in cf for w in ("ana yemek", "etli", "sebze")):
+		return "Ana Yemek"
+	if any(w in nf for w in ("makarna", "pilav", "borek")):
+		return "Pilav / Makarna / Börek"
+	if any(w in nf for w in ("ayran", "yogurt", "komposto", "cacik")):
+		return "İçecek / Komposto"
+	if any(w in nf for w in ("salata", "kisir")):
+		return "Salata / Meze"
+	if any(w in nf for w in ("meyve", "tatli", "elma", "mandalina")):
+		return "Meyve / Tatlı"
+	if "yardimci" in cf or "ekmek" in cf:
+		return "Pilav / Makarna / Börek"
+	return "Ana Yemek"
+
+
+def import_school_menu_from_excel_or_csv(
+	connect_db_fn: Callable[[], sqlite3.Connection],
+	file_bytes: bytes,
+	file_name: str = "",
+	*,
+	default_slot: str = "Öğle Yemeği",
+	sync_to_diabetes: bool = True,
+) -> dict[str, Any]:
+	"""Karaman Okulu 3 tablolu Yemek Listesi (.xlsx / .csv) şablonunu okuyarak yemekleri ve aylık planı veritabanına aktarır."""
+	sheets = _read_tabular_sheets_from_bytes(file_bytes, file_name)
+	if not sheets:
+		return {"dishes_upserted": 0, "plans_saved": 0, "error": "Dosya okunamadı veya boş."}
+
+	ref_dishes: dict[str, dict[str, Any]] = {}
+	menu_rows_parsed: list[dict[str, Any]] = []
+
+	for sheet_rows in sheets:
+		ri = 0
+		while ri < len(sheet_rows):
+			row = sheet_rows[ri]
+			folded = [_tr_fold(c) for c in row]
+			# 1. Yemek Kalori & Alerjen Referans Tablosu başlığı algılama
+			if any("yemek / urun" in c or c == "yemek adi" or "urun adi" in c for c in folded) and any("kalori" in c for c in folded):
+				col_idx = {c: idx for idx, c in enumerate(folded)}
+				c_cat = next((i for k, i in col_idx.items() if "kategori" in k), -1)
+				c_nm = next((i for k, i in col_idx.items() if "yemek" in k or "urun adi" in k), -1)
+				c_kcal = next((i for k, i in col_idx.items() if "ort. kalori" in k or k.startswith("kalori")), -1)
+				c_carb = next((i for k, i in col_idx.items() if "karbonhidrat" in k or "karb" in k), -1)
+				c_al_det = next((i for k, i in col_idx.items() if "alerjen detay" in k), -1)
+				c_glu = next((i for k, i in col_idx.items() if k == "gluten"), -1)
+				c_mlk = next((i for k, i in col_idx.items() if "sut" in k), -1)
+				c_egg = next((i for k, i in col_idx.items() if "yumurta" in k), -1)
+				ri += 1
+				while ri < len(sheet_rows):
+					rr = sheet_rows[ri]
+					rf = [_tr_fold(x) for x in rr]
+					if not any(rf):
+						ri += 1
+						continue
+					if any("ozeti" in x or "istatistik" in x or ("tarih" in x and "1. cesit" in rf) for x in rf):
+						ri -= 1
+						break
+					d_nm = str(rr[c_nm] if 0 <= c_nm < len(rr) else "").strip()
+					if not d_nm or _tr_fold(d_nm) in {"kategori", "genel istatistikler"}:
+						ri += 1
+						continue
+					als: list[str] = []
+					if 0 <= c_glu < len(rr) and _tr_fold(rr[c_glu]) == "var":
+						als.append("Gluten (Buğday/Arpa)")
+					if 0 <= c_mlk < len(rr) and _tr_fold(rr[c_mlk]) == "var":
+						als.append("Süt ve Süt Ürünleri (Laktoz)")
+					if 0 <= c_egg < len(rr) and _tr_fold(rr[c_egg]) == "var":
+						als.append("Yumurta")
+					if not als and 0 <= c_al_det < len(rr):
+						det_s = str(rr[c_al_det] or "")
+						if "gluten" in _tr_fold(det_s):
+							als.append("Gluten (Buğday/Arpa)")
+						if "sut" in _tr_fold(det_s):
+							als.append("Süt ve Süt Ürünleri (Laktoz)")
+						if "yumurta" in _tr_fold(det_s):
+							als.append("Yumurta")
+					cat_raw = str(rr[c_cat] if 0 <= c_cat < len(rr) else "").strip()
+					kcal_v = max(0.0, _safe_float(rr[c_kcal] if 0 <= c_kcal < len(rr) else 0.0, 0.0))
+					carb_v = max(0.0, _safe_float(rr[c_carb] if 0 <= c_carb < len(rr) else 0.0, 0.0))
+					ref_dishes[_tr_fold(d_nm)] = {
+						"name": d_nm,
+						"category": _map_excel_dish_category(cat_raw, d_nm),
+						"kcal": kcal_v,
+						"carbs_g": carb_v,
+						"allergens": als,
+						"notes": str(rr[c_al_det] if 0 <= c_al_det < len(rr) else "").strip(),
+					}
+					ri += 1
+			# 2. Günlük Yemek Listesi başlığı algılama
+			elif any("tarih" in c for c in folded) and any("cesit" in c or "yemekler" in c for c in folded):
+				c_dt = next((i for i, k in enumerate(folded) if "tarih" in k), -1)
+				c_sl = next((i for i, k in enumerate(folded) if k == "ogun"), -1)
+				dish_cols = [i for i, k in enumerate(folded) if "cesit" in k or "yemekler" in k]
+				c_en = next((i for i, k in enumerate(folded) if "enerji" in k or "kalori" in k), -1)
+				c_al = next((i for i, k in enumerate(folded) if "alerjen" in k), -1)
+				ri += 1
+				while ri < len(sheet_rows):
+					rr = sheet_rows[ri]
+					rf = [_tr_fold(x) for x in rr]
+					if any("aylik ortalama" in x or "kalori ve alerjen bilgi" in x for x in rf):
+						break
+					dt_iso = _parse_flexible_date_iso(rr[c_dt] if 0 <= c_dt < len(rr) else "")
+					if dt_iso:
+						d_list = []
+						for dc in dish_cols:
+							if 0 <= dc < len(rr) and str(rr[dc] or "").strip():
+								for part in re.split(r"\s*[·•]\s*", str(rr[dc]).strip()):
+									if part.strip():
+										d_list.append(part.strip())
+						if d_list:
+							sl_v = str(rr[c_sl] if 0 <= c_sl < len(rr) else "").strip() or default_slot
+							en_v = max(0.0, _safe_float(rr[c_en] if 0 <= c_en < len(rr) else 0.0, 0.0))
+							al_v = str(rr[c_al] if 0 <= c_al < len(rr) else "").strip()
+							menu_rows_parsed.append({
+								"plan_date": dt_iso,
+								"meal_slot": sl_v,
+								"dishes": d_list,
+								"energy": en_v,
+								"allergen_note": al_v,
+							})
+					ri += 1
+			ri += 1
+
+	existing = {_tr_fold(d["name"]): int(d["id"]) for d in get_all_dishes(connect_db_fn)}
+	upserted_cnt = 0
+	for rf_k, rd in ref_dishes.items():
+		ings = []
+		if rd["allergens"]:
+			per_k = round(rd["kcal"] / len(rd["allergens"]), 1) if rd["kcal"] > 0 else 0.0
+			per_c = round(rd["carbs_g"] / len(rd["allergens"]), 1) if rd["carbs_g"] > 0 else 0.0
+			for idx_a, al_tag in enumerate(rd["allergens"]):
+				ings.append({
+					"ingredient_name": f"{rd['name']} ({al_tag.split()[0]})" if idx_a > 0 else rd["name"],
+					"amount": 1.0,
+					"unit": "porsiyon",
+					"kcal_portion": per_k,
+					"carbs_portion_g": per_c,
+					"allergen_tag": al_tag,
+				})
+		else:
+			ings.append({
+				"ingredient_name": rd["name"],
+				"amount": 1.0,
+				"unit": "porsiyon",
+				"kcal_portion": rd["kcal"],
+				"carbs_portion_g": rd["carbs_g"],
+				"allergen_tag": "",
+			})
+		did = upsert_dish_with_ingredients(
+			connect_db_fn,
+			dish_id=existing.get(rf_k),
+			name=rd["name"],
+			category=rd["category"],
+			portion_g=250.0,
+			ingredients=ings,
+			recipe_notes=rd["notes"],
+			source="excel_import",
+		)
+		existing[rf_k] = did
+		upserted_cnt += 1
+
+	plans_cnt = 0
+	for mr in menu_rows_parsed:
+		d_ids: list[int] = []
+		for dnm in mr["dishes"]:
+			dk = _tr_fold(dnm)
+			if dk not in existing:
+				per_d_k = round(mr["energy"] / max(1, len(mr["dishes"])), 1) if mr["energy"] > 0 else 0.0
+				existing[dk] = upsert_dish_with_ingredients(
+					connect_db_fn,
+					name=dnm,
+					category=_map_excel_dish_category("", dnm),
+					portion_g=250.0,
+					ingredients=[{
+						"ingredient_name": dnm,
+						"amount": 1.0,
+						"unit": "porsiyon",
+						"kcal_portion": per_d_k,
+						"carbs_portion_g": 0.0,
+						"allergen_tag": "",
+					}],
+					source="excel_import",
+				)
+				upserted_cnt += 1
+			d_ids.append(existing[dk])
+		if d_ids:
+			upsert_menu_plan_slot(
+				connect_db_fn,
+				plan_date=mr["plan_date"],
+				meal_slot=mr["meal_slot"],
+				dish_ids=d_ids,
+				sync_to_diabetes=sync_to_diabetes,
+			)
+			plans_cnt += 1
+
+	return {"dishes_upserted": upserted_cnt, "plans_saved": plans_cnt}
+
+
+def build_purchase_invoice_template_excel(
+	connect_db_fn: Callable[[], sqlite3.Connection] | None = None,
+	*,
+	year_month: str = "",
+	school_meta: dict[str, str] | None = None,
+	purchase_id: int | None = None,
+) -> bytes:
+	"""Karaman Okulu resmi Excel şablonu düzeninde (Kurum antetli, formüllü Birim Maliyet ve özet analiz sekmeli) fatura Excel (.xlsx) üretir."""
+	import openpyxl
+	from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+	from openpyxl.utils import get_column_letter
+
+	meta = dict(school_meta or {})
+	if not meta and callable(connect_db_fn):
+		try:
+			with connect_db_fn() as conn:
+				for sr in conn.execute("SELECT key, value FROM app_settings").fetchall():
+					meta[str(sr["key"])] = str(sr["value"])
+		except Exception:
+			pass
+	school_up = _tr_upper(str(meta.get("school_name") or "OKUL / KURUM YEMEKHANESİ").strip())
+
+	wb = openpyxl.Workbook()
+	ws1 = wb.active
+	ws1.title = "Fatura_Giris_Sablonu"
+	headers = [
+		"Fatura Tarihi",
+		"Fatura No",
+		"Tedarikçi / Firma",
+		"Ödeme Durumu",
+		"Ürün Adı",
+		"Kategori",
+		"Miktar",
+		"Miktar Cinsi",
+		"Birim Fiyat (₺)",
+		"KDV (%)",
+		"Toplam Tutar (₺)",
+		"Birim Maliyet (KDV Dahil ₺)",
+		"SKT (Ops.)",
+		"Not",
+	]
+	_apply_school_sheet_banner(ws1, school_up, "GELEN ÜRÜN VE FATURA GİRİŞ ŞABLONU (BİRİM MALİYET HESAPLAMALI)", len(headers))
+	ws1.cell(row=3, column=1, value="💡 Kullanım: Tablodaki sütunları doldurup Yemekhane > Gelen Ürün & Giderler bölümünden içe aktarabilirsiniz. Toplam Tutar ve Birim Maliyet formülle otomatik hesaplanır.").font = Font(italic=True, size=9, color="475569")
+
+	hdr_fill = PatternFill("solid", fgColor="0F766E")
+	hdr_font = Font(color="FFFFFF", bold=True, size=9.5)
+	thin = Side(style="thin", color="94A3B8")
+	brd = Border(left=thin, right=thin, top=thin, bottom=thin)
+	for ci, hl in enumerate(headers, start=1):
+		hc = ws1.cell(row=4, column=ci, value=hl)
+		hc.fill = hdr_fill
+		hc.font = hdr_font
+		hc.border = brd
+		hc.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+	rows_seed: list[dict[str, Any]] = []
+	if callable(connect_db_fn):
+		if purchase_id is not None:
+			p_one = get_purchase_by_id(connect_db_fn, int(purchase_id))
+			if p_one:
+				for it in (p_one.get("items") or []):
+					rows_seed.append({**it, "invoice_date": p_one["invoice_date"], "invoice_no": p_one.get("invoice_no") or "", "supplier_name": p_one.get("supplier_name") or "", "payment_status": p_one.get("payment_status") or "Ödendi"})
+		else:
+			p_list, it_list = get_purchases_and_items(connect_db_fn, year_month=year_month or "Tümü")
+			p_status_map = {int(pr["id"]): pr.get("payment_status") or "Ödendi" for pr in p_list}
+			for it in it_list[:200]:
+				rows_seed.append({**it, "payment_status": p_status_map.get(int(it.get("purchase_id") or 0), "Ödendi")})
+
+	if not rows_seed:
+		today_tr = date.today().strftime("%d.%m.%Y")
+		rows_seed = [
+			{"invoice_date": today_tr, "invoice_no": "FTR-2026-001", "supplier_name": "Örnek Gıda Ltd.", "payment_status": "Ödendi", "item_name": "Kırmızı Mercimek", "category": "Bakliyat & Kuru Gıda", "quantity": 25.0, "unit_type": "kg", "unit_price": 60.0, "vat_rate": 1.0, "expiry_date": "", "notes": "Örnek satır"},
+			{"invoice_date": today_tr, "invoice_no": "FTR-2026-001", "supplier_name": "Örnek Gıda Ltd.", "payment_status": "Ödendi", "item_name": "Ayçiçek Yağı", "category": "Yağ & Baharat", "quantity": 10.0, "unit_type": "litre", "unit_price": 85.0, "vat_rate": 1.0, "expiry_date": "", "notes": "Örnek satır"},
+			{"invoice_date": today_tr, "invoice_no": "FTR-2026-002", "supplier_name": "Merkez Mandıra", "payment_status": "Vadeli / Bekliyor", "item_name": "Yoğurt", "category": "Süt & Kahvaltılık", "quantity": 15.0, "unit_type": "kg", "unit_price": 45.0, "vat_rate": 1.0, "expiry_date": "", "notes": "Örnek satır"},
+		]
+
+	r_idx = 5
+	for rs in rows_seed:
+		dt_iso = _parse_flexible_date_iso(rs.get("invoice_date"))
+		dt_tr = f"{dt_iso[8:10]}.{dt_iso[5:7]}.{dt_iso[:4]}" if len(dt_iso) == 10 else str(rs.get("invoice_date") or "")
+		vals = [
+			dt_tr,
+			str(rs.get("invoice_no") or ""),
+			str(rs.get("supplier_name") or ""),
+			str(rs.get("payment_status") or "Ödendi"),
+			str(rs.get("item_name") or ""),
+			str(rs.get("category") or "Diğer"),
+			_safe_float(rs.get("quantity"), 1.0),
+			str(rs.get("unit_type") or "kg"),
+			_safe_float(rs.get("unit_price"), 0.0),
+			_safe_float(rs.get("vat_rate"), 1.0),
+			f"=ROUND(G{r_idx}*I{r_idx}*(1+J{r_idx}/100),2)",
+			f"=IF(G{r_idx}>0,ROUND(K{r_idx}/G{r_idx},2),0)",
+			str(rs.get("expiry_date") or ""),
+			str(rs.get("notes") or ""),
+		]
+		bg_c = "FFFFFF" if r_idx % 2 == 1 else "F8FAFC"
+		r_fill = PatternFill("solid", fgColor=bg_c)
+		for ci, rv in enumerate(vals, start=1):
+			cc = ws1.cell(row=r_idx, column=ci, value=rv)
+			cc.fill = r_fill
+			cc.border = brd
+			if ci in (9, 11, 12):
+				cc.number_format = "#,##0.00"
+		r_idx += 1
+
+	ws1.cell(row=r_idx, column=1, value="FATURA / LİSTE GENEL TOPLAMI").font = Font(bold=True, size=10)
+	tot_c = ws1.cell(row=r_idx, column=11, value=f"=SUM(K5:K{r_idx - 1})")
+	tot_c.font = Font(bold=True, color="0F766E")
+	tot_c.number_format = "#,##0.00"
+	_write_school_signers_to_ws(ws1, r_idx + 2, len(headers) - 2, resolve_menu_signers_for_print(meta))
+
+	for ci in range(1, len(headers) + 1):
+		ws1.column_dimensions[get_column_letter(ci)].width = 24 if ci in (3, 5, 6) else 15
+
+	# Sheet 2 & Sheet 3 (analitik varsa gerçek, yoksa şablon başlıkları)
+	an = compute_purchase_analytics(connect_db_fn, year_month=year_month or "Tümü") if callable(connect_db_fn) else None
+	ws2 = wb.create_sheet("Urun_Birim_Maliyet_Referans")
+	h2 = ["Ürün Adı", "Kategori", "Miktar Cinsi", "Alım Sayısı", "Toplam Miktar", "Ort. Birim Fiyat (₺)", "Ort. Birim Maliyet (₺)", "Son Birim Maliyet (₺)", "Toplam Harcama (₺)"]
+	_apply_school_sheet_banner(ws2, "ÜRÜN BAZLI BİRİM MALİYET VE HARCAMA TABLOSU", school_up, len(h2))
+	for ci, hl in enumerate(h2, start=1):
+		c = ws2.cell(row=4, column=ci, value=hl)
+		c.fill = hdr_fill
+		c.font = hdr_font
+		c.border = brd
+	for ri2, pr_r in enumerate((an or {}).get("product_summary") or [], start=5):
+		for ci, kv_k in enumerate(["Ürün Adı", "Kategori", "Birim", "Alım Sayısı", "Toplam Miktar", "Ort. Birim Fiyat (₺)", "Ort. Birim Maliyet (₺)", "Son Birim Maliyet (₺)", "Toplam Harcama (₺)"], start=1):
+			c = ws2.cell(row=ri2, column=ci, value=pr_r.get(kv_k))
+			c.border = brd
+	for ci in range(1, len(h2) + 1):
+		ws2.column_dimensions[get_column_letter(ci)].width = 22 if ci <= 2 else 17
+
+	ws3 = wb.create_sheet("Fatura_Ozeti_ve_Analiz")
+	_apply_school_sheet_banner(ws3, "FATURA VE ÜRÜN HARCAMA ANALİZİ", school_up, 4)
+	ws3.cell(row=4, column=1, value="Genel Fatura & Maliyet Özeti").font = Font(bold=True, size=10.5)
+	sm = (an or {}).get("summary") or {}
+	for ri3, (sk, sv) in enumerate([
+		("Fatura Sayısı", sm.get("invoice_count", 0)),
+		("Toplam Kalem Satırı", sm.get("item_row_count", 0)),
+		("Farklı Ürün Çeşidi", sm.get("distinct_products", 0)),
+		("Toplam Harcama (₺)", sm.get("total_spend_tl", 0.0)),
+		("Ortalama Fatura Tutarı (₺)", sm.get("avg_invoice_tl", 0.0)),
+		("En Yüksek Harcamalı Ürün", sm.get("top_product_name", "—")),
+	], start=5):
+		ws3.cell(row=ri3, column=1, value=sk).border = brd
+		ws3.cell(row=ri3, column=2, value=sv).border = brd
+	ws3.column_dimensions["A"].width = 30
+	ws3.column_dimensions["B"].width = 24
+
+	buf = io.BytesIO()
+	wb.save(buf)
+	return buf.getvalue()
+
+
+def parse_purchase_invoices_from_excel_or_csv(file_bytes: bytes, file_name: str = "") -> list[dict[str, Any]]:
+	"""Excel (.xlsx) veya CSV fatura dosyasını okuyup fatura başlığı ve kalem listelerine dönüştürür."""
+	sheets = _read_tabular_sheets_from_bytes(file_bytes, file_name)
+	grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+	for sheet_rows in sheets:
+		for ri, row in enumerate(sheet_rows):
+			folded = [_tr_fold(c) for c in row]
+			has_item_col = any(c == "urun adi" or c == "urun" or "malzeme" in c for c in folded)
+			has_qty_or_price = any("miktar" in c or "fiyat" in c or "tutar" in c for c in folded)
+			if not (has_item_col and has_qty_or_price):
+				continue
+
+			base_folded = [re.sub(r"\s*\([^)]*\)", "", c).strip() for c in folded]
+			c_dt = next((i for i, k in enumerate(base_folded) if "fatura tarihi" in k or k == "tarih"), -1)
+			c_no = next((i for i, k in enumerate(base_folded) if "fatura no" in k or "fis no" in k), -1)
+			c_sup = next((i for i, k in enumerate(base_folded) if "tedarikci" in k or "firma" in k), -1)
+			c_st = next((i for i, k in enumerate(base_folded) if "odeme" in k or k == "durum"), -1)
+			c_nm = next((i for i, k in enumerate(base_folded) if k == "urun adi" or k == "urun" or "malzeme" in k), -1)
+			c_cat = next((i for i, k in enumerate(base_folded) if "kategori" in k), -1)
+			c_qty = next((i for i, k in enumerate(base_folded) if k == "miktar"), -1)
+			c_unit = next((i for i, k in enumerate(base_folded) if "miktar cins" in k or "miktar cesid" in k or k == "birim"), -1)
+			c_up = next((i for i, k in enumerate(base_folded) if "birim fiyat" in k), -1)
+			c_vat = next((i for i, k in enumerate(base_folded) if k == "kdv" or "kdv oran" in k or k.startswith("kdv ")), -1)
+			c_tot = next((i for i, k in enumerate(base_folded) if "toplam tutar" in k or "satir toplam" in k or k.startswith("tutar")), -1)
+			c_ucost = next((i for i, k in enumerate(base_folded) if "birim maliyet" in k), -1)
+			c_skt = next((i for i, k in enumerate(base_folded) if k.startswith("skt")), -1)
+			c_note = next((i for i, k in enumerate(base_folded) if k == "not"), -1)
+
+			for r_sub in sheet_rows[ri + 1:]:
+				rf = [_tr_fold(x) for x in r_sub]
+				if not any(rf):
+					continue
+				if any("genel toplami" in x for x in rf):
+					break
+				nm_s = str(r_sub[c_nm] if 0 <= c_nm < len(r_sub) else "").strip()
+				if not nm_s or _tr_fold(nm_s) in {"urun adi", "genel toplami"}:
+					continue
+				dt_iso = _parse_flexible_date_iso(r_sub[c_dt] if 0 <= c_dt < len(r_sub) else "") or date.today().isoformat()
+				inv_no_s = str(r_sub[c_no] if 0 <= c_no < len(r_sub) else "").strip()
+				sup_s = str(r_sub[c_sup] if 0 <= c_sup < len(r_sub) else "").strip()
+				st_raw = str(r_sub[c_st] if 0 <= c_st < len(r_sub) else "").strip()
+				st_s = "Vadeli / Bekliyor" if "vadeli" in _tr_fold(st_raw) or "bekliyor" in _tr_fold(st_raw) else "Ödendi"
+				cat_raw = str(r_sub[c_cat] if 0 <= c_cat < len(r_sub) else "").strip()
+				cat_s = cat_raw if cat_raw in PURCHASE_CATEGORIES else "Diğer"
+				qty_v = max(0.0, _safe_float(r_sub[c_qty] if 0 <= c_qty < len(r_sub) else 1.0, 1.0))
+				unit_s = str(r_sub[c_unit] if 0 <= c_unit < len(r_sub) else "").strip() or "kg"
+				up_raw = str(r_sub[c_up] if 0 <= c_up < len(r_sub) else "").strip()
+				tot_raw = str(r_sub[c_tot] if 0 <= c_tot < len(r_sub) else "").strip()
+				uc_raw = str(r_sub[c_ucost] if 0 <= c_ucost < len(r_sub) else "").strip()
+				up_v = max(0.0, _safe_float(up_raw, 0.0)) if not up_raw.startswith("=") else 0.0
+				tot_v = max(0.0, _safe_float(tot_raw, -1.0)) if (tot_raw and not tot_raw.startswith("=")) else -1.0
+				uc_v = max(0.0, _safe_float(uc_raw, 0.0)) if (uc_raw and not uc_raw.startswith("=")) else 0.0
+				vat_v = max(0.0, _safe_float(r_sub[c_vat] if 0 <= c_vat < len(r_sub) else 1.0, 1.0))
+				if up_v <= 0 and tot_v < 0 and uc_v > 0 and qty_v > 0:
+					tot_v = round(uc_v * qty_v, 2)
+				skt_iso = _parse_flexible_date_iso(r_sub[c_skt] if 0 <= c_skt < len(r_sub) else "")
+				note_s = str(r_sub[c_note] if 0 <= c_note < len(r_sub) else "").strip()
+
+				gk = (dt_iso, inv_no_s, sup_s)
+				if gk not in grouped:
+					grouped[gk] = {
+						"invoice_date": dt_iso,
+						"invoice_no": inv_no_s,
+						"supplier_name": sup_s,
+						"category": cat_s,
+						"payment_status": st_s,
+						"items": [],
+					}
+				item_d: dict[str, Any] = {
+					"item_name": nm_s,
+					"category": cat_s,
+					"quantity": qty_v,
+					"unit_type": unit_s,
+					"unit_price": up_v,
+					"vat_rate": vat_v,
+					"expiry_date": skt_iso,
+					"notes": note_s,
+				}
+				if tot_v >= 0:
+					item_d["line_total"] = tot_v
+				grouped[gk]["items"].append(item_d)
+			break
+	return list(grouped.values())
 
 
 # ==============================================================================
@@ -4694,7 +5497,7 @@ def _render_tab_menu_planner(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict
 		school_meta=app_cfg,
 	)
 
-	dl1, dl2 = ui.columns(2)
+	dl1, dl2, dl3 = ui.columns(3)
 	with dl1:
 		ui.download_button(
 			"📝 A4 Resmi Menü İndir (.docx)",
@@ -4714,24 +5517,94 @@ def _render_tab_menu_planner(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict
 			use_container_width=True,
 			key="caf_dl_menu_html",
 		)
+	with dl3:
+		ui.download_button(
+			"📊 3 Sekmeli Menü Excel (.xlsx)",
+			data=lambda: build_school_menu_workbook_excel(connect_db_fn, sel_ym, school_meta=app_cfg),
+			file_name=f"Yemekhane_Menu_{sel_ym}_3Sekme.xlsx",
+			mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+			use_container_width=True,
+			key="caf_dl_menu_xlsx",
+		)
+	with ui.expander("📥 Excel / CSV Şablonundan Menü & Kalori Tablosu İçe Aktar", expanded=False):
+		ui.caption(
+			"Kurum antetli 3 sekmeli Yemek Listesi (.xlsx) veya aynı düzendeki (.csv) şablonunu yükleyerek "
+			"günlük 1./2./3.+ çeşit yemekleri ve Kalori/Alerjen Bilgi Tablosunu menüye aktarabilirsiniz."
+		)
+		up_menu_xl = ui.file_uploader(
+			"Menü Excel (.xlsx) veya CSV (.csv) Dosyası Seçin",
+			type=["xlsx", "csv"],
+			key="caf_menu_import_file",
+		)
+		if ui.button("✅ Excel / CSV Menüyü İçe Aktar", type="primary", key="caf_btn_import_menu_xlsx"):
+			if up_menu_xl is None:
+				ui.warning("Lütfen önce .xlsx veya .csv formatında menü dosyası seçin.")
+			else:
+				def_slot_imp = active_slots[0] if active_slots else "Öğle Yemeği"
+				res_imp = import_school_menu_from_excel_or_csv(
+					connect_db_fn,
+					up_menu_xl.getvalue(),
+					up_menu_xl.name,
+					default_slot=def_slot_imp,
+					sync_to_diabetes=bool(auto_sync_diab),
+				)
+				if res_imp.get("error"):
+					ui.error(str(res_imp["error"]))
+				else:
+					ui.success(
+						f"✅ İçe aktarma tamamlandı: {res_imp.get('plans_saved', 0)} gün/öğün planı "
+						f"ve {res_imp.get('dishes_upserted', 0)} yemek kalemi güncellendi."
+					)
+					ui.rerun()
 	with ui.expander("👁️ A4 Kağıdı Önizleme ve Doğrudan Yazdırma", expanded=False):
 		ui.components.v1.html(a4_html, height=620, scrolling=True)
 
 
-def _calc_live_invoice_totals(rows_in: list[dict[str, Any]]) -> tuple[float, float, float, int]:
-	sub_v, vat_v, valid_n = 0.0, 0.0, 0
+def _calc_live_invoice_details(
+	rows_in: list[dict[str, Any]],
+	*,
+	price_mode: str = "unit",
+) -> tuple[list[dict[str, Any]], float, float, float, int]:
+	"""Fatura satırlarından ara toplam, KDV, genel toplam ve kalem bazlı Birim Maliyet (KDV dahil) hesaplar."""
+	detail_rows: list[dict[str, Any]] = []
+	sub_v, vat_v, tot_sum, valid_n = 0.0, 0.0, 0.0, 0
 	for x in rows_in:
 		nm_x = str(x.get("Ürün Adı") or "").strip()
 		if not nm_x:
 			continue
 		q_x = max(0.0, _safe_float(x.get("Miktar"), 0.0))
-		p_x = max(0.0, _safe_float(x.get("Birim Fiyat (₺)"), 0.0))
+		unit_x = str(x.get("Miktar Çeşidi") or x.get("Miktar Cinsi") or "kg").strip() or "kg"
 		vr_x = max(0.0, _safe_float(x.get("KDV (%)"), 0.0))
-		b_x = q_x * p_x
+		if price_mode == "total":
+			tot_line = max(0.0, _safe_float(x.get("Toplam Tutar (₺)"), 0.0))
+			b_x = tot_line / (1.0 + vr_x / 100.0)
+			vat_line = max(0.0, tot_line - b_x)
+			p_x = (b_x / q_x) if q_x > 0 else 0.0
+		else:
+			p_x = max(0.0, _safe_float(x.get("Birim Fiyat (₺)"), 0.0))
+			b_x = q_x * p_x
+			vat_line = b_x * (vr_x / 100.0)
+			tot_line = b_x + vat_line
+		unit_cost = (tot_line / q_x) if q_x > 0 else 0.0
 		sub_v += b_x
-		vat_v += b_x * (vr_x / 100.0)
+		vat_v += vat_line
+		tot_sum += tot_line
 		valid_n += 1
-	return round(sub_v, 2), round(vat_v, 2), round(sub_v + vat_v, 2), valid_n
+		detail_rows.append({
+			"Ürün Adı": nm_x,
+			"Miktar": round(q_x, 3),
+			"Miktar Cinsi": unit_x,
+			"Birim Fiyat (KDV Hariç ₺)": round(p_x, 2),
+			"KDV (%)": round(vr_x, 1),
+			"Birim Maliyet (KDV Dahil ₺)": round(unit_cost, 2),
+			"Satır Toplamı (₺)": round(tot_line, 2),
+		})
+	return detail_rows, round(sub_v, 2), round(vat_v, 2), round(tot_sum, 2), valid_n
+
+
+def _calc_live_invoice_totals(rows_in: list[dict[str, Any]]) -> tuple[float, float, float, int]:
+	_, sub_v, vat_v, tot_v, valid_n = _calc_live_invoice_details(rows_in, price_mode="unit")
+	return sub_v, vat_v, tot_v, valid_n
 
 
 def _render_invoice_editor_body(
@@ -4741,15 +5614,18 @@ def _render_invoice_editor_body(
 	key_prefix: str,
 	in_dialog: bool,
 ) -> None:
-	"""Fatura başlığını ve içindeki ürün/fiyat kalemlerini görüntüleme, ekleme, çıkarma ve düzenleme formu."""
+	"""Fatura başlığını ve içindeki ürün/fiyat kalemlerini görüntüleme, birim maliyet hesaplama ve düzenleme formu."""
 	connect_db_fn = ctx_api["connect_db"]
 	editing_pid = int(editing_purchase["id"]) if editing_purchase else None
 	p_sig = f"pid:{editing_pid}" if editing_pid else "new"
 	sig_key = f"{key_prefix}_loaded_sig"
+	pm_key = f"{key_prefix}_price_mode"
+	prev_pm_key = f"{key_prefix}_prev_price_mode"
 
 	if ui.session_state.get(sig_key) != p_sig:
 		ui.session_state[sig_key] = p_sig
 		ui.session_state.pop(f"{key_prefix}_items_editor", None)
+		ui.session_state[prev_pm_key] = None
 		if editing_purchase:
 			try:
 				ui.session_state[f"{key_prefix}_date"] = date.fromisoformat(str(editing_purchase["invoice_date"])[:10])
@@ -4780,68 +5656,127 @@ def _render_invoice_editor_body(
 	inv_cat = fc4.selectbox("Fatura Kategorisi", PURCHASE_CATEGORIES, key=f"{key_prefix}_cat")
 	inv_st = fc5.selectbox("Ödeme Durumu", ["Ödendi", "Vadeli / Bekliyor"], key=f"{key_prefix}_st")
 
+	pm_lbl = ui.radio(
+		"Fiyat Giriş Yöntemi",
+		["Birim Fiyattan Hesapla", "Toplam Tutardan Birim Maliyet Hesapla"],
+		horizontal=True,
+		key=pm_key,
+	)
+	pm_code = "total" if "Toplam Tutardan" in str(pm_lbl or "") else "unit"
+	if ui.session_state.get(prev_pm_key) not in (None, pm_code):
+		ui.session_state.pop(f"{key_prefix}_items_editor", None)
+	ui.session_state[prev_pm_key] = pm_code
+
 	draft_pi = ui.session_state.get(f"{key_prefix}_items_draft") or [
-		{"item_name": "", "category": inv_cat, "quantity": 1.0, "unit_type": "kg", "unit_price": 0.0, "vat_rate": 1.0, "expiry_date": ""}
+		{"item_name": "", "category": inv_cat, "quantity": 1.0, "unit_type": "kg", "unit_price": 0.0, "line_total": 0.0, "vat_rate": 1.0, "expiry_date": ""}
 	]
-	df_pi = pd.DataFrame([
-		{
-			"Ürün Adı": str(r.get("item_name") or ""),
-			"Kategori": r.get("category") if r.get("category") in PURCHASE_CATEGORIES else inv_cat,
-			"Miktar": _safe_float(r.get("quantity"), 1.0),
-			"Miktar Çeşidi": r.get("unit_type") if r.get("unit_type") in PURCHASE_UNITS else "kg",
-			"Birim Fiyat (₺)": _safe_float(r.get("unit_price"), 0.0),
-			"KDV (%)": _safe_float(r.get("vat_rate"), 1.0),
-			"SKT (Ops.)": str(r.get("expiry_date") or ""),
+
+	def _draft_row_line_total(r: dict[str, Any]) -> float:
+		lt_e = _safe_float(r.get("line_total"), -1.0)
+		if lt_e >= 0:
+			return round(lt_e, 2)
+		q_e = max(0.0, _safe_float(r.get("quantity"), 1.0))
+		u_e = max(0.0, _safe_float(r.get("unit_price"), 0.0))
+		v_e = max(0.0, _safe_float(r.get("vat_rate"), 1.0))
+		return round(q_e * u_e * (1.0 + v_e / 100.0), 2)
+
+	if pm_code == "total":
+		df_pi = pd.DataFrame([
+			{
+				"Ürün Adı": str(r.get("item_name") or ""),
+				"Kategori": r.get("category") if r.get("category") in PURCHASE_CATEGORIES else inv_cat,
+				"Miktar": _safe_float(r.get("quantity"), 1.0),
+				"Miktar Çeşidi": r.get("unit_type") if r.get("unit_type") in PURCHASE_UNITS else "kg",
+				"Toplam Tutar (₺)": _draft_row_line_total(r),
+				"KDV (%)": _safe_float(r.get("vat_rate"), 1.0),
+				"SKT (Ops.)": str(r.get("expiry_date") or ""),
+			}
+			for r in draft_pi
+		])
+		col_cfg = {
+			"Ürün Adı": ui.column_config.TextColumn("Ürün Adı", required=True),
+			"Kategori": ui.column_config.SelectboxColumn("Kategori", options=PURCHASE_CATEGORIES),
+			"Miktar": ui.column_config.NumberColumn("Miktar", min_value=0.0, step=1.0),
+			"Miktar Çeşidi": ui.column_config.SelectboxColumn("Miktar Cinsi", options=PURCHASE_UNITS),
+			"Toplam Tutar (₺)": ui.column_config.NumberColumn("Toplam Tutar (KDV Dahil ₺)", min_value=0.0, step=10.0),
+			"KDV (%)": ui.column_config.NumberColumn("KDV (%)", min_value=0.0, step=1.0),
+			"SKT (Ops.)": ui.column_config.TextColumn("SKT (YYYY-AA-GG)"),
 		}
-		for r in draft_pi
-	])
-	ui.caption("💡 Ürün adı, miktar, birim, birim fiyat veya KDV hücrelerini tıklayarak düzeltebilir; tablonun altından (`+`) veya **➕ Ürün Satırı Ekle** düğmesiyle yeni kalem ekleyip satır silebilirsiniz.")
+	else:
+		df_pi = pd.DataFrame([
+			{
+				"Ürün Adı": str(r.get("item_name") or ""),
+				"Kategori": r.get("category") if r.get("category") in PURCHASE_CATEGORIES else inv_cat,
+				"Miktar": _safe_float(r.get("quantity"), 1.0),
+				"Miktar Çeşidi": r.get("unit_type") if r.get("unit_type") in PURCHASE_UNITS else "kg",
+				"Birim Fiyat (₺)": _safe_float(r.get("unit_price"), 0.0),
+				"KDV (%)": _safe_float(r.get("vat_rate"), 1.0),
+				"SKT (Ops.)": str(r.get("expiry_date") or ""),
+			}
+			for r in draft_pi
+		])
+		col_cfg = {
+			"Ürün Adı": ui.column_config.TextColumn("Ürün Adı", required=True),
+			"Kategori": ui.column_config.SelectboxColumn("Kategori", options=PURCHASE_CATEGORIES),
+			"Miktar": ui.column_config.NumberColumn("Miktar", min_value=0.0, step=1.0),
+			"Miktar Çeşidi": ui.column_config.SelectboxColumn("Miktar Cinsi", options=PURCHASE_UNITS),
+			"Birim Fiyat (₺)": ui.column_config.NumberColumn("Birim Fiyat (KDV Hariç ₺)", min_value=0.0, step=1.0),
+			"KDV (%)": ui.column_config.NumberColumn("KDV (%)", min_value=0.0, step=1.0),
+			"SKT (Ops.)": ui.column_config.TextColumn("SKT (YYYY-AA-GG)"),
+		}
+
+	ui.caption("💡 Ürün adı, miktar, miktar cinsi, fiyat veya KDV hücrelerini tıklayarak düzeltebilir; tablo altından (`+`) veya **➕ Yeni Ürün Satırı Ekle** ile yeni kalem ekleyip satır silebilirsiniz. Birim maliyet aşağıda anlık hesaplanır.")
 	ed_pi = ui.data_editor(
 		df_pi,
 		num_rows="dynamic",
 		hide_index=True,
 		use_container_width=True,
 		key=f"{key_prefix}_items_editor",
-		column_config={
-			"Ürün Adı": ui.column_config.TextColumn("Ürün Adı", required=True),
-			"Kategori": ui.column_config.SelectboxColumn("Kategori", options=PURCHASE_CATEGORIES),
-			"Miktar": ui.column_config.NumberColumn("Miktar", min_value=0.0, step=1.0),
-			"Miktar Çeşidi": ui.column_config.SelectboxColumn("Miktar Çeşidi / Birim", options=PURCHASE_UNITS),
-			"Birim Fiyat (₺)": ui.column_config.NumberColumn("Birim Fiyat (₺)", min_value=0.0, step=1.0),
-			"KDV (%)": ui.column_config.NumberColumn("KDV (%)", min_value=0.0, step=1.0),
-			"SKT (Ops.)": ui.column_config.TextColumn("SKT (YYYY-AA-GG)"),
-		},
+		column_config=col_cfg,
 	)
 	inv_notes = ui.text_input("Fatura Notu (Opsiyonel)", key=f"{key_prefix}_notes")
 
 	live_rows = ed_pi.to_dict("records")
-	sub_v, vat_v, tot_v, cnt_v = _calc_live_invoice_totals(live_rows)
+	detail_rows, sub_v, vat_v, tot_v, cnt_v = _calc_live_invoice_details(live_rows, price_mode=pm_code)
 	m1, m2, m3, m4 = ui.columns(4)
 	m1.metric("Geçerli Kalem", f"{cnt_v} ürün")
-	m2.metric("Ara Toplam", f"{sub_v:,.2f} ₺")
+	m2.metric("Ara Toplam (KDV Hariç)", f"{sub_v:,.2f} ₺")
 	m3.metric("Toplam KDV", f"{vat_v:,.2f} ₺")
 	m4.metric("Fatura Genel Toplamı", f"{tot_v:,.2f} ₺")
 
-	if in_dialog:
-		ab1, ab2, ab3, ab4 = ui.columns([1.2, 1.5, 0.9, 0.8], vertical_alignment="center")
-	else:
-		ab1, ab2 = ui.columns([1.1, 2.2], vertical_alignment="center")
+	if detail_rows:
+		ui.markdown("###### 📊 Kalem Bazlı Birim Maliyet & Fiyat Özeti (Girilen Verilere Göre)")
+		ui.dataframe(pd.DataFrame(detail_rows), hide_index=True, use_container_width=True)
 
+	def _live_to_draft_items() -> list[dict[str, Any]]:
+		out_d: list[dict[str, Any]] = []
+		for x in live_rows:
+			q_v = max(0.0, _safe_float(x.get("Miktar"), 1.0))
+			vr_v = max(0.0, _safe_float(x.get("KDV (%)"), 1.0))
+			if pm_code == "total":
+				tot_v_row = max(0.0, _safe_float(x.get("Toplam Tutar (₺)"), 0.0))
+				base_v = tot_v_row / (1.0 + vr_v / 100.0)
+				up_v = round((base_v / q_v) if q_v > 0 else 0.0, 4)
+			else:
+				up_v = max(0.0, _safe_float(x.get("Birim Fiyat (₺)"), 0.0))
+				tot_v_row = round(q_v * up_v * (1.0 + vr_v / 100.0), 2)
+			out_d.append({
+				"item_name": str(x.get("Ürün Adı") or ""),
+				"category": x.get("Kategori") or inv_cat,
+				"quantity": q_v,
+				"unit_type": x.get("Miktar Çeşidi") or "kg",
+				"unit_price": up_v,
+				"line_total": tot_v_row,
+				"vat_rate": vr_v,
+				"expiry_date": str(x.get("SKT (Ops.)") or ""),
+			})
+		return out_d
+
+	ab1, ab2 = ui.columns([1.1, 2.2], vertical_alignment="center")
 	with ab1:
 		if ui.button("➕ Yeni Ürün Satırı Ekle", key=f"{key_prefix}_btn_add_row", use_container_width=True):
-			cur_draft = [
-				{
-					"item_name": str(x.get("Ürün Adı") or ""),
-					"category": x.get("Kategori") or inv_cat,
-					"quantity": _safe_float(x.get("Miktar"), 1.0),
-					"unit_type": x.get("Miktar Çeşidi") or "kg",
-					"unit_price": _safe_float(x.get("Birim Fiyat (₺)"), 0.0),
-					"vat_rate": _safe_float(x.get("KDV (%)"), 1.0),
-					"expiry_date": str(x.get("SKT (Ops.)") or ""),
-				}
-				for x in live_rows
-			]
-			cur_draft.append({"item_name": "", "category": inv_cat, "quantity": 1.0, "unit_type": "kg", "unit_price": 0.0, "vat_rate": 1.0, "expiry_date": ""})
+			cur_draft = _live_to_draft_items()
+			cur_draft.append({"item_name": "", "category": inv_cat, "quantity": 1.0, "unit_type": "kg", "unit_price": 0.0, "line_total": 0.0, "vat_rate": 1.0, "expiry_date": ""})
 			ui.session_state[f"{key_prefix}_items_draft"] = cur_draft
 			ui.session_state.pop(f"{key_prefix}_items_editor", None)
 			ui.rerun(scope="fragment" if in_dialog else "app")
@@ -4849,10 +5784,26 @@ def _render_invoice_editor_body(
 	with ab2:
 		btn_lbl_p = "💾 Fatura Değişikliklerini Güncelle" if editing_pid else "💾 Faturayı ve Ürün Kalemlerini Kaydet"
 		if ui.button(btn_lbl_p, type="primary", use_container_width=True, key=f"{key_prefix}_btn_save_inv"):
-			valid_items = [x for x in live_rows if str(x.get("Ürün Adı") or "").strip()]
-			if not valid_items:
+			valid_raw = [x for x in live_rows if str(x.get("Ürün Adı") or "").strip()]
+			if not valid_raw:
 				ui.warning("Lütfen tabloya en az 1 ürün satırı girin.")
 			else:
+				if pm_code == "total":
+					valid_items = [
+						{
+							"item_name": str(x.get("Ürün Adı") or "").strip(),
+							"category": x.get("Kategori") or inv_cat,
+							"quantity": max(0.0, _safe_float(x.get("Miktar"), 1.0)),
+							"unit_type": x.get("Miktar Çeşidi") or "kg",
+							"unit_price": 0.0,
+							"vat_rate": max(0.0, _safe_float(x.get("KDV (%)"), 1.0)),
+							"line_total": max(0.0, _safe_float(x.get("Toplam Tutar (₺)"), 0.0)),
+							"expiry_date": str(x.get("SKT (Ops.)") or ""),
+						}
+						for x in valid_raw
+					]
+				else:
+					valid_items = valid_raw
 				pid = upsert_purchase_invoice(
 					connect_db_fn,
 					purchase_id=editing_pid,
@@ -4867,6 +5818,7 @@ def _render_invoice_editor_body(
 				ui.session_state.pop(f"{key_prefix}_items_draft", None)
 				ui.session_state.pop(f"{key_prefix}_items_editor", None)
 				ui.session_state[sig_key] = None
+				ui.session_state[prev_pm_key] = None
 				ui.session_state["caf_inv_loaded_sig"] = None
 				ui.session_state["caf_inv_toast"] = f"✅ Fatura (#{pid}) ve {len(valid_items)} ürün kalemi güncellendi."
 				if in_dialog:
@@ -4874,7 +5826,31 @@ def _render_invoice_editor_body(
 				ui.rerun()
 
 	if in_dialog and editing_pid:
-		with ab3:
+		is_pending_inv = (editing_purchase or {}).get("payment_status") == "Vadeli / Bekliyor"
+		if is_pending_inv:
+			u1, u2, u3, u4 = ui.columns(4)
+		else:
+			u2, u3, u4 = ui.columns(3)
+			u1 = None
+		if u1 is not None:
+			with u1:
+				if ui.button("✅ Ödendi İşaretle", key=f"{key_prefix}_btn_mark_paid", type="primary", use_container_width=True):
+					update_purchase_payment_status(connect_db_fn, editing_pid, "Ödendi")
+					ui.session_state[sig_key] = None
+					ui.session_state["caf_inv_loaded_sig"] = None
+					ui.session_state["caf_inv_toast"] = f"✅ Fatura (#{editing_pid}) 'Ödendi' olarak işaretlendi."
+					ui.close_dialog(all_dialogs=True)
+					ui.rerun()
+		with u2:
+			ui.download_button(
+				"📥 Faturayı Excel İndir (.xlsx)",
+				data=lambda: build_purchase_invoice_template_excel(connect_db_fn, purchase_id=editing_pid),
+				file_name=f"Fatura_{editing_pid}_{(inv_no or 'Detay').replace('/', '-')}.xlsx",
+				mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+				key=f"{key_prefix}_btn_dl_xlsx",
+				use_container_width=True,
+			)
+		with u3:
 			if ui.button("🗑️ Faturayı Sil", key=f"{key_prefix}_btn_del_inv", use_container_width=True):
 				delete_purchase_by_id(connect_db_fn, editing_pid)
 				ui.session_state[sig_key] = None
@@ -4882,24 +5858,27 @@ def _render_invoice_editor_body(
 				ui.session_state["caf_inv_toast"] = f"🗑️ Fatura (#{editing_pid}) ve bağlı kalemleri silindi."
 				ui.close_dialog(all_dialogs=True)
 				ui.rerun()
-		with ab4:
+		with u4:
 			if ui.button("✖ Kapat", key=f"{key_prefix}_btn_close_inv", use_container_width=True):
 				ui.close_dialog(all_dialogs=True)
 
 
-@ui.dialog("🧾 Fatura Detayı, Ürünler & Fiyat Düzenleyici", width="large")
+@ui.dialog("🧾 Fatura Detayı, Ürünler, Miktar & Birim Maliyet Düzenleyici", width="large")
 def open_invoice_editor_dialog(ctx_api: dict[str, Any], purchase_id: int) -> None:
-	"""Tablodan tıklanan faturanın içindeki ürün/fiyat listesini görüntüleme ve düzenleme pop-up penceresi."""
+	"""Tablodan tıklanan faturanın içindeki ürün, miktar cinsi, fiyat ve birim maliyetini görüntüleme/düzenleme penceresi."""
 	target = get_purchase_by_id(ctx_api["connect_db"], int(purchase_id))
 	if not target:
 		ui.warning("Seçilen fatura bulunamadı.")
 		if ui.button("Kapat", key="caf_dlg_inv_missing_close"):
 			ui.close_dialog(all_dialogs=True)
 		return
+	it_cnt = len(target.get("items") or [])
+	tot_tl = float(target.get("total_amount") or 0)
+	st_lbl = target.get("payment_status") or "Ödendi"
 	ui.caption(
 		f"Fatura #{int(target['id'])} · Tarih: {target.get('invoice_date') or '—'} · "
-		f"Fatura No: {target.get('invoice_no') or '—'} · Kayıtlı Kalem: {len(target.get('items') or [])} · "
-		f"Kayıtlı Tutar: {float(target.get('total_amount') or 0):,.2f} ₺"
+		f"Fatura No: {target.get('invoice_no') or '—'} · Tedarikçi: {target.get('supplier_name') or '—'} · "
+		f"Durum: {st_lbl} · Kayıtlı Kalem: {it_cnt} · Kayıtlı Tutar: {tot_tl:,.2f} ₺"
 	)
 	_render_invoice_editor_body(ctx_api, editing_purchase=target, key_prefix="caf_dlg_i", in_dialog=True)
 
@@ -5049,7 +6028,7 @@ def _render_tab_purchases_and_expenses(ctx_api: dict[str, Any], sel_ym: str, app
 	connect_db_fn = ctx_api["connect_db"]
 	is_on, api_key, model = ctx_api["_get_active_gemini_config"]()
 
-	ui.markdown("### 🚚 Gelen Ürünler, Fatura Kayıtları, SKT & Aylık / Toplam Gider Takibi")
+	ui.markdown("### 🚚 Gelen Ürünler, Fatura Kayıtları, Birim Maliyet & Gider Takibi")
 	if ui.session_state.get("caf_inv_toast"):
 		ui.success(ui.session_state.pop("caf_inv_toast"))
 
@@ -5081,73 +6060,177 @@ def _render_tab_purchases_and_expenses(ctx_api: dict[str, Any], sel_ym: str, app
 			])
 			ui.dataframe(df_skt, hide_index=True, use_container_width=True)
 
-	# AI Fatura / Fiş Okuyucu
-	if is_on:
-		with ui.expander("📸 Gemini AI Fiş / Fatura / İrsaliye Okuyucu (PDF, Fotoğraf, Excel, Word)"):
-			up_inv = ui.file_uploader("Fatura / Fiş Görseli veya Belgesi", type=["pdf", "png", "jpg", "jpeg", "webp", "xlsx", "docx", "txt"], key="caf_ai_inv_file")
-			txt_inv = ui.text_input("Veya Fatura Metnini Yapıştırın", placeholder="Örn: 15.11.2026 Özkan Gıda No:124 - 20 kg pirinç 55 TL/kg, 10 L sıvıyağ 65 TL/L", key="caf_ai_inv_txt")
-			if ui.button("✨ Faturayı AI ile Oku (Önizlemeden Onayla)", type="primary", key="caf_btn_ai_parse_inv"):
-				fb = up_inv.getvalue() if up_inv is not None else None
-				fn = up_inv.name if up_inv is not None else ""
-				strict_pdf = str(app_cfg.get("gemini_strict_kvkk_pdf", "0")).strip() == "1"
-				with ui.spinner("Gemini AI fatura kalemlerini, miktar çeşitlerini ve fiyatları çıkarıyor..."):
-					ok_iv, iv_data, used_iv = gai.parse_cafeteria_invoice_with_gemini(
-						api_key=api_key, model=model, file_bytes=fb, file_name=fn, raw_text=txt_inv, strict_kvkk_pdf=strict_pdf
-					)
-				if ok_iv and iv_data.get("items"):
-					ui.session_state["caf_inv_picker"] = "➕ Yeni Fatura Girişi"
-					ui.session_state["caf_inv_loaded_sig"] = "new"
-					ui.session_state.pop("caf_inv_items_editor", None)
-					ui.session_state["caf_inv_date"] = date.fromisoformat(str(iv_data.get("invoice_date") or date.today().isoformat())[:10]) if re.match(r"^\d{4}-\d{2}-\d{2}$", str(iv_data.get("invoice_date") or "")) else date.today()
-					ui.session_state["caf_inv_no"] = str(iv_data.get("invoice_no") or "")
-					ui.session_state["caf_inv_sup"] = str(iv_data.get("supplier_name") or "")
-					if iv_data.get("category") in PURCHASE_CATEGORIES:
-						ui.session_state["caf_inv_cat"] = iv_data["category"]
-					ui.session_state["caf_inv_items_draft"] = iv_data["items"]
-					ui.success(f"✅ {len(iv_data['items'])} ürün kalemi Gemini ({used_iv}) ile aşağıdaki forma aktarıldı! Kontrol edip Kaydet'e basın.")
-					ui.rerun()
+	# Yeni Fatura Girişi (Manuel / Excel Şablonu / AI)
+	inv_entry_tabs = ["✍️ Yeni Manuel Fatura", "📤 Excel / CSV Şablonundan Yükle"] + (
+		["📸 Gemini AI Fiş / Fatura Okuyucu"] if is_on else []
+	)
+	t_inv_handles = ui.tabs(inv_entry_tabs)
+
+	with t_inv_handles[0]:
+		with ui.container(border=True):
+			ui.markdown("##### ➕ Yeni Gelen Ürün / Fatura Girişi")
+			ui.caption("💡 İster **Birim Fiyat** ister **Toplam Tutar** girin; KDV dahil **Birim Maliyet** kalem bazında otomatik hesaplanır. Kayıtlı bir faturayı düzenlemek için aşağıdaki listeden faturaya tıklayın.")
+			_render_invoice_editor_body(ctx_api, editing_purchase=None, key_prefix="caf_inv", in_dialog=False)
+
+	with t_inv_handles[1]:
+		with ui.container(border=True):
+			ui.markdown("##### 📤 Resmi 3 Sekmeli Excel / CSV Fatura Şablonu İle Giriş")
+			xc1, xc2 = ui.columns([1.25, 1.75], vertical_alignment="center")
+			with xc1:
+				ui.download_button(
+					"📥 Resmi Fatura Excel Şablonu İndir (.xlsx)",
+					data=lambda: build_purchase_invoice_template_excel(connect_db_fn, year_month=sel_ym, school_meta=app_cfg),
+					file_name=f"Yemekhane_Fatura_Sablonu_{sel_ym}.xlsx",
+					mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+					key="caf_dl_inv_tmpl_xlsx",
+					use_container_width=True,
+				)
+			with xc2:
+				ui.caption(
+					"Kurum antetli şablonda **Fatura_Giris_Sablonu** (formüllü Satır Toplamı ve Birim Maliyet), "
+					"**Urun_Birim_Maliyet_Referans** ve **Fatura_Ozeti_ve_Analiz** sekmeleri bulunur. "
+					"Doldurduğunuz `.xlsx` veya `.csv` dosyasını aşağıdan yükleyin:"
+				)
+			up_inv_xl = ui.file_uploader(
+				"Doldurulmuş Fatura Excel (.xlsx) veya CSV (.csv) Dosyası",
+				type=["xlsx", "csv"],
+				key="caf_inv_excel_up",
+			)
+			if up_inv_xl is not None:
+				parsed_xl_invs = parse_purchase_invoices_from_excel_or_csv(up_inv_xl.getvalue(), up_inv_xl.name)
+				if not parsed_xl_invs:
+					ui.warning("Dosyada fatura kalemi bulunamadı. Tabloda en azından 'Ürün Adı' ile 'Miktar' veya 'Birim Fiyat / Toplam Tutar' sütunları yer almalıdır.")
 				else:
-					ui.error(f"Fatura okunamadı: {(iv_data or {}).get('error', 'Kalem bulunamadı')}")
+					prev_rows: list[dict[str, Any]] = []
+					for p_inv in parsed_xl_invs:
+						for it in p_inv.get("items") or []:
+							q_v = max(0.0, _safe_float(it.get("quantity"), 0.0))
+							up_v = max(0.0, _safe_float(it.get("unit_price"), 0.0))
+							vr_v = max(0.0, _safe_float(it.get("vat_rate"), 0.0))
+							lt_raw = it.get("line_total")
+							tot_v = max(0.0, _safe_float(lt_raw, -1.0)) if lt_raw is not None else -1.0
+							if tot_v < 0:
+								tot_v = round(q_v * up_v * (1.0 + vr_v / 100.0), 2)
+							if up_v <= 0 and tot_v > 0 and q_v > 0:
+								up_v = round((tot_v / (1.0 + vr_v / 100.0)) / q_v, 2)
+							uc_v = round((tot_v / q_v) if q_v > 0 else 0.0, 2)
+							prev_rows.append({
+								"Fatura Tarihi": p_inv["invoice_date"],
+								"Fatura No": p_inv.get("invoice_no") or "—",
+								"Tedarikçi": p_inv.get("supplier_name") or "—",
+								"Ödeme": p_inv.get("payment_status") or "Ödendi",
+								"Ürün Adı": it.get("item_name") or "",
+								"Miktar": q_v,
+								"Miktar Cinsi": it.get("unit_type") or "kg",
+								"Birim Fiyat (₺)": up_v,
+								"KDV (%)": vr_v,
+								"Birim Maliyet (KDV Dahil ₺)": uc_v,
+								"Satır Toplamı (₺)": tot_v,
+							})
+					ui.success(f"📄 {len(parsed_xl_invs)} fatura, toplam {len(prev_rows)} ürün kalemi algılandı.")
+					if prev_rows:
+						ui.dataframe(pd.DataFrame(prev_rows), hide_index=True, use_container_width=True)
+					xb_cols = ui.columns(2 if len(parsed_xl_invs) == 1 else 1)
+					with xb_cols[0]:
+						if ui.button(
+							f"✅ Onayla ve Faturalara Kaydet ({len(parsed_xl_invs)} Fatura)",
+							type="primary",
+							use_container_width=True,
+							key="caf_btn_save_xl_invs",
+						):
+							saved_pids: list[int] = []
+							for p_inv in parsed_xl_invs:
+								its_p = [it for it in (p_inv.get("items") or []) if str(it.get("item_name") or "").strip()]
+								if not its_p:
+									continue
+								pid_xl = upsert_purchase_invoice(
+									connect_db_fn,
+									invoice_date=p_inv["invoice_date"],
+									invoice_no=p_inv.get("invoice_no") or "",
+									supplier_name=p_inv.get("supplier_name") or "",
+									category=p_inv.get("category") or "Diğer",
+									items=its_p,
+									payment_status=p_inv.get("payment_status") or "Ödendi",
+								)
+								saved_pids.append(pid_xl)
+							ui.session_state["caf_inv_loaded_sig"] = None
+							ui.session_state["caf_inv_toast"] = f"✅ Excel/CSV'den {len(saved_pids)} fatura ({len(prev_rows)} ürün kalemi) kaydedildi."
+							ui.rerun()
+					if len(parsed_xl_invs) == 1:
+						with xb_cols[1]:
+							if ui.button(
+								"📋 Faturayı Manuel Forma Aktar",
+								type="secondary",
+								use_container_width=True,
+								key="caf_btn_fill_form_from_xl",
+							):
+								p0 = parsed_xl_invs[0]
+								ui.session_state["caf_inv_loaded_sig"] = "new"
+								ui.session_state["caf_inv_prev_price_mode"] = None
+								ui.session_state.pop("caf_inv_items_editor", None)
+								try:
+									ui.session_state["caf_inv_date"] = date.fromisoformat(str(p0["invoice_date"])[:10])
+								except Exception:
+									ui.session_state["caf_inv_date"] = date.today()
+								ui.session_state["caf_inv_no"] = str(p0.get("invoice_no") or "")
+								ui.session_state["caf_inv_sup"] = str(p0.get("supplier_name") or "")
+								if p0.get("category") in PURCHASE_CATEGORIES:
+									ui.session_state["caf_inv_cat"] = p0["category"]
+								ui.session_state["caf_inv_st"] = p0.get("payment_status") if p0.get("payment_status") in ("Ödendi", "Vadeli / Bekliyor") else "Ödendi"
+								ui.session_state["caf_inv_items_draft"] = p0.get("items") or []
+								ui.session_state["caf_inv_toast"] = "✅ Fatura satırları 'Yeni Manuel Fatura' sekmesine aktarıldı; kontrol edip kaydedebilirsiniz."
+								ui.rerun()
 
-	# Yeni veya Mevcut Fatura Seçimi / Düzenleme
-	all_purchases_for_edit, _ = get_purchases_and_items(connect_db_fn, year_month="Tümü")
-	edit_p_map = {
-		f"#{pr['id']} — {pr['invoice_date']} · {pr.get('supplier_name') or 'Tedarikçi Yok'} · {float(pr.get('total_amount') or 0):,.2f} ₺ ({pr['payment_status']})": int(pr["id"])
-		for pr in all_purchases_for_edit[:80]
-	}
-	ep1, ep2, ep3 = ui.columns([2.0, 1.0, 1.0], vertical_alignment="center")
-	with ep1:
-		picked_p_lbl = ui.selectbox("Fatura İşlemi (Yeni Giriş veya Mevcut Fatura Düzenle)", ["➕ Yeni Fatura Girişi"] + list(edit_p_map.keys()), key="caf_inv_picker")
-	editing_pid = edit_p_map.get(picked_p_lbl)
-	editing_p_obj = get_purchase_by_id(connect_db_fn, editing_pid) if editing_pid else None
-	with ep2:
-		if editing_p_obj and ui.button("🪟 Faturayı Pop-up'ta Aç", type="secondary", use_container_width=True, key="caf_btn_open_popup_inv"):
-			open_invoice_editor_dialog(ctx_api, int(editing_pid))
-	with ep3:
-		if editing_p_obj and editing_p_obj.get("payment_status") == "Vadeli / Bekliyor":
-			if ui.button("✅ Vadeli Faturayı Ödendi İşaretle", type="primary", use_container_width=True, key="caf_btn_mark_paid"):
-				update_purchase_payment_status(connect_db_fn, int(editing_pid), "Ödendi")
-				ui.session_state["caf_inv_loaded_sig"] = None
-				ui.success(f"✅ Fatura (#{editing_pid}) 'Ödendi' olarak işaretlendi.")
-				ui.rerun()
+	if is_on and len(t_inv_handles) > 2:
+		with t_inv_handles[2]:
+			with ui.container(border=True):
+				ui.markdown("##### 📸 Gemini AI Fiş / Fatura / İrsaliye Okuyucu (PDF, Fotoğraf, Excel, Word)")
+				up_inv = ui.file_uploader("Fatura / Fiş Görseli veya Belgesi", type=["pdf", "png", "jpg", "jpeg", "webp", "xlsx", "docx", "txt"], key="caf_ai_inv_file")
+				txt_inv = ui.text_input("Veya Fatura Metnini Yapıştırın", placeholder="Örn: 15.11.2026 Özkan Gıda No:124 - 20 kg pirinç 55 TL/kg, 10 L sıvıyağ 65 TL/L", key="caf_ai_inv_txt")
+				if ui.button("✨ Faturayı AI ile Oku (Önizlemeden Onayla)", type="primary", key="caf_btn_ai_parse_inv"):
+					fb = up_inv.getvalue() if up_inv is not None else None
+					fn = up_inv.name if up_inv is not None else ""
+					strict_pdf = str(app_cfg.get("gemini_strict_kvkk_pdf", "0")).strip() == "1"
+					with ui.spinner("Gemini AI fatura kalemlerini, miktar çeşitlerini ve fiyatları çıkarıyor..."):
+						ok_iv, iv_data, used_iv = gai.parse_cafeteria_invoice_with_gemini(
+							api_key=api_key, model=model, file_bytes=fb, file_name=fn, raw_text=txt_inv, strict_kvkk_pdf=strict_pdf
+						)
+					if ok_iv and iv_data.get("items"):
+						ui.session_state["caf_inv_loaded_sig"] = "new"
+						ui.session_state["caf_inv_prev_price_mode"] = None
+						ui.session_state.pop("caf_inv_items_editor", None)
+						ui.session_state["caf_inv_date"] = date.fromisoformat(str(iv_data.get("invoice_date") or date.today().isoformat())[:10]) if re.match(r"^\d{4}-\d{2}-\d{2}$", str(iv_data.get("invoice_date") or "")) else date.today()
+						ui.session_state["caf_inv_no"] = str(iv_data.get("invoice_no") or "")
+						ui.session_state["caf_inv_sup"] = str(iv_data.get("supplier_name") or "")
+						if iv_data.get("category") in PURCHASE_CATEGORIES:
+							ui.session_state["caf_inv_cat"] = iv_data["category"]
+						ui.session_state["caf_inv_items_draft"] = iv_data["items"]
+						ui.success(f"✅ {len(iv_data['items'])} ürün kalemi Gemini ({used_iv}) ile 'Yeni Manuel Fatura' sekmesine aktarıldı! Kontrol edip Kaydet'e basın.")
+						ui.rerun()
+					else:
+						ui.error(f"Fatura okunamadı: {(iv_data or {}).get('error', 'Kalem bulunamadı')}")
 
-	with ui.container(border=True):
-		ui.markdown("##### ✏️ Fatura / İrsaliye Bilgileri ve Ürün Kalemleri" if editing_p_obj else "##### ➕ Yeni Gelen Ürün / Fatura Girişi")
-		_render_invoice_editor_body(ctx_api, editing_purchase=editing_p_obj, key_prefix="caf_inv", in_dialog=False)
-
-	# Fatura Tarihine Göre Filtrelenmiş Faturalar & Ürünler
+	# Fatura Tarihine, Kategoriye ve Ödeme Durumuna Göre Filtrelenmiş Faturalar & Ürünler
 	ui.markdown("---")
-	fl1, fl2, fl3 = ui.columns([1.2, 1.3, 1.5])
+	fl1, fl2, fl3, fl4 = ui.columns([1.15, 1.15, 1.0, 1.3])
 	scope_opt = fl1.selectbox("Dönem Filtresi", [f"Seçili Ay ({_fmt_ym(sel_ym)})", "Tüm Tarihler"], key="caf_purch_scope_flt")
 	cat_flt = fl2.selectbox("Kategori Filtresi", ["Tümü"] + PURCHASE_CATEGORIES, key="caf_purch_cat_flt")
-	q_flt = fl3.text_input("Ürün / Tedarikçi / Fatura No Ara", key="caf_purch_q_flt")
+	inv_st_flt = fl3.selectbox("Ödeme Durumu", ["Tümü", "Ödendi", "Vadeli / Bekliyor"], key="caf_purch_st_flt")
+	q_flt = fl4.text_input("Ürün / Tedarikçi / Fatura No Ara", key="caf_purch_q_flt")
 
 	ym_arg = sel_ym if "Seçili Ay" in scope_opt else "Tümü"
-	purchases, items = get_purchases_and_items(connect_db_fn, year_month=ym_arg, category=cat_flt, query_text=q_flt)
+	st_arg = None if inv_st_flt == "Tümü" else inv_st_flt
+	purchases, items = get_purchases_and_items(
+		connect_db_fn,
+		year_month=ym_arg,
+		category=cat_flt,
+		query_text=q_flt,
+		payment_status=st_arg,
+	)
 
 	if purchases:
 		ui.markdown(f"##### 🧾 Kayıtlı Faturalar Listesi ({len(purchases)} fatura · Görüntülemek & Düzenlemek İçin Faturaya Tıklayın)")
-		ui.caption("💡 Fatura satırına tıkladığınızda o faturadaki tüm alınan ürünler ve fiyatları pop-up pencerede açılır; ürün ekleyip çıkarabilir veya isim/fiyat düzeltebilirsiniz.")
+		ui.caption("💡 Fatura satırına tıkladığınızda alınan ürünler, miktarları, miktar cinsi, girilen fiyatlar ve **hesaplanan Birim Maliyet** pop-up pencerede açılır; ürün ekleyip çıkarabilir, fiyat/isim düzeltebilir veya Excel çıktısı alabilirsiniz.")
 		df_show_invs = pd.DataFrame([
 			{
 				"id": int(pr["id"]),
@@ -5156,7 +6239,7 @@ def _render_tab_purchases_and_expenses(ctx_api: dict[str, Any], sel_ym: str, app
 				"Tedarikçi": pr.get("supplier_name") or "—",
 				"Kategori": pr.get("category") or "Diğer",
 				"Kalem Sayısı": int(pr.get("item_count") or len(pr.get("items") or [])),
-				"Alınan Ürünler & Fiyatlar": pr.get("items_summary") or "—",
+				"Alınan Ürünler, Miktarlar & Birim Maliyetler": pr.get("items_summary") or "—",
 				"Toplam Tutar (₺)": round(_safe_float(pr.get("total_amount"), 0.0), 2),
 				"Durum": pr.get("payment_status") or "Ödendi",
 			}
@@ -5171,7 +6254,10 @@ def _render_tab_purchases_and_expenses(ctx_api: dict[str, Any], sel_ym: str, app
 			key="caf_invoices_list_tbl",
 			column_config={
 				"id": None,
-				"Alınan Ürünler & Fiyatlar": ui.column_config.TextColumn("Alınan Ürünler & Fiyatlar", help="Fatura içindeki ürünleri görüntülemek ve düzenlemek için satıra tıklayın"),
+				"Alınan Ürünler, Miktarlar & Birim Maliyetler": ui.column_config.TextColumn(
+					"Alınan Ürünler, Miktarlar & Birim Maliyetler",
+					help="Fatura içindeki ürünleri ve birim maliyetleri görüntülemek / düzenlemek için satıra tıklayın",
+				),
 			},
 		)
 		inv_rows_sel = getattr(tbl_inv_ev.selection, "rows", []) or []
@@ -5196,33 +6282,35 @@ def _render_tab_purchases_and_expenses(ctx_api: dict[str, Any], sel_ym: str, app
 			open_invoice_editor_dialog(ctx_api, clicked_pid)
 
 	if items:
-		df_show_items = pd.DataFrame([
-			{
-				"Fatura Tarihi": it["invoice_date"],
-				"Fatura No": it.get("invoice_no") or "—",
-				"Tedarikçi": it.get("supplier_name") or "—",
-				"Ürün Adı": it["item_name"],
-				"Kategori": it["category"],
-				"Miktar": it["quantity"],
-				"Çeşidi": it["unit_type"],
-				"Birim Fiyat (₺)": it["unit_price"],
-				"KDV (%)": it["vat_rate"],
-				"SKT": it.get("expiry_date") or "—",
-				"Toplam Tutar (₺)": it["line_total"],
-			}
-			for it in items
-		])
-		ui.markdown(f"##### 📋 Fatura Tarihine Göre Gelen Ürün Kalemleri ({len(items)} kalem · Filtrelenmiş Toplam: **{sum(float(i['line_total'] or 0) for i in items):,.2f} ₺**)")
-		ui.dataframe(df_show_items, hide_index=True, use_container_width=True)
-		_exp_buf = io.BytesIO()
-		df_show_items.to_excel(_exp_buf, index=False, engine="openpyxl")
-		ui.download_button(
-			"📥 Filtrelenen Ürün / Gider Listesini İndir (.xlsx)",
-			data=_exp_buf.getvalue(),
-			file_name=f"Yemekhane_Giderler_{sel_ym}.xlsx",
-			mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-			key="caf_dl_filtered_expenses_xlsx",
-		)
+		tot_flt_tl = sum(float(i["line_total"] or 0) for i in items)
+		with ui.expander(f"📋 Kalem Bazlı Tüm Ürün Hareketleri & Birim Maliyetler ({len(items)} kalem · Filtrelenmiş Toplam: {tot_flt_tl:,.2f} ₺)", expanded=False):
+			df_show_items = pd.DataFrame([
+				{
+					"Fatura Tarihi": it["invoice_date"],
+					"Fatura No": it.get("invoice_no") or "—",
+					"Tedarikçi": it.get("supplier_name") or "—",
+					"Ürün Adı": it["item_name"],
+					"Kategori": it["category"],
+					"Miktar": it["quantity"],
+					"Miktar Cinsi": it["unit_type"],
+					"Birim Fiyat (KDV Hariç ₺)": it["unit_price"],
+					"KDV (%)": it["vat_rate"],
+					"Birim Maliyet (KDV Dahil ₺)": round(_safe_float(it.get("unit_cost"), 0.0), 2),
+					"SKT": it.get("expiry_date") or "—",
+					"Toplam Tutar (₺)": it["line_total"],
+				}
+				for it in items
+			])
+			ui.dataframe(df_show_items, hide_index=True, use_container_width=True)
+			_exp_buf = io.BytesIO()
+			df_show_items.to_excel(_exp_buf, index=False, engine="openpyxl")
+			ui.download_button(
+				"📥 Filtrelenen Ürün / Gider Listesini İndir (.xlsx)",
+				data=_exp_buf.getvalue(),
+				file_name=f"Yemekhane_Giderler_{sel_ym}.xlsx",
+				mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+				key="caf_dl_filtered_expenses_xlsx",
+			)
 	else:
 		ui.info("Seçilen filtrede gelen ürün / fatura kalemi bulunamadı.")
 
