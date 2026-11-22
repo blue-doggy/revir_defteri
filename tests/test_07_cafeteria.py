@@ -1085,6 +1085,115 @@ class TestCafeteriaModule(unittest.TestCase):
         self.assertNotIn("Çalışma Zamanı Hatası", out_cfg["main_html"])
         self.assertIn("Ramazan Modu", out_cfg["main_html"])
 
+    def test_a4_weekly_colors_alternating_tones_and_inline_dishes_with_carbs(self):
+        d1 = caf.upsert_dish_with_ingredients(
+            self.connect,
+            name="Tarhana Çorbası",
+            category="Çorba",
+            ingredients=[{"ingredient_name": "Tarhana", "amount": 40, "unit": "g", "kcal_portion": 150, "carbs_portion_g": 22, "allergen_tag": "Gluten"}],
+        )
+        d2 = caf.upsert_dish_with_ingredients(
+            self.connect,
+            name="Yoğurtlu Semizotu",
+            category="Salata / Meze",
+            ingredients=[{"ingredient_name": "Yoğurt", "amount": 80, "unit": "g", "kcal_portion": 95, "carbs_portion_g": 8, "allergen_tag": "Süt"}],
+        )
+        d3 = caf.upsert_dish_with_ingredients(
+            self.connect,
+            name="Izgara Tavuk",
+            category="Ana Yemek",
+            ingredients=[{"ingredient_name": "Tavuk Göğüs", "amount": 120, "unit": "g", "kcal_portion": 220, "carbs_portion_g": 0, "allergen_tag": ""}],
+        )
+        # Week 1: Oct 1 & 2; Week 2: Oct 5 & 6; Week 3: Oct 12
+        for dt_iso in ("2026-10-01", "2026-10-02", "2026-10-05", "2026-10-06"):
+            caf.upsert_menu_plan_slot(self.connect, plan_date=dt_iso, meal_slot="Öğle Yemeği", dish_ids=[d1, d2])
+        caf.upsert_menu_plan_slot(self.connect, plan_date="2026-10-12", meal_slot="Öğle Yemeği", dish_ids=[d3])
+
+        # 1. Style map checks week palettes + consecutive day light/dark alternation
+        styles, legend = caf._build_week_day_style_map([
+            {"date_iso": "2026-10-01"},
+            {"date_iso": "2026-10-02"},
+            {"date_iso": "2026-10-05"},
+            {"date_iso": "2026-10-06"},
+            {"date_iso": "2026-10-12"},
+        ])
+        self.assertEqual(styles["2026-10-01"]["bg_hex"], "#FEF9C3")  # Week 1 Light Yellow
+        self.assertEqual(styles["2026-10-02"]["bg_hex"], "#FDE68A")  # Week 1 Dark Yellow
+        self.assertEqual(styles["2026-10-05"]["bg_hex"], "#FFF3E0")  # Week 2 Light Orange
+        self.assertEqual(styles["2026-10-06"]["bg_hex"], "#FED7AA")  # Week 2 Dark Orange
+        self.assertEqual(styles["2026-10-12"]["bg_hex"], "#ECFDF5")  # Week 3 Light Green
+        self.assertEqual([w["label"] for w in legend], ["1. Hafta (Sarı)", "2. Hafta (Turuncu)", "3. Hafta (Yeşil)"])
+
+        # 2. HTML outputs across all 3 layout modes: side-by-side dishes + kcal/carb/allergen next line + colors
+        for lm in ("standard", "compact_one_page", "weekly_grid"):
+            html_out = caf.build_menu_a4_html(self.connect, year_month="2026-10", layout_mode=lm)
+            self.assertIn("print-color-adjust: exact", html_out)
+            self.assertIn("1. Hafta (Sarı)", html_out)
+            self.assertIn("2. Hafta (Turuncu)", html_out)
+            self.assertIn("Tarhana Çorbası · Yoğurtlu Semizotu", html_out)
+            self.assertIn("245 kcal", html_out)
+            self.assertIn("30 g Karb.", html_out)
+            self.assertIn("Alerjen: Yok", html_out)
+            for hex_c in ("#FEF9C3", "#FDE68A", "#FFF3E0", "#FED7AA", "#ECFDF5"):
+                self.assertIn(hex_c, html_out)
+
+        # 3. Word (.docx) outputs across all 3 layout modes: inline dishes + newline nutrition + XML cell shading
+        for lm in ("standard", "compact_one_page", "weekly_grid"):
+            raw_doc = caf.build_menu_a4_docx(self.connect, year_month="2026-10", layout_mode=lm)
+            txt = _extract_docx_all_text(raw_doc)
+            self.assertIn("Tarhana Çorbası · Yoğurtlu Semizotu", txt)
+            self.assertIn("Tarhana Çorbası · Yoğurtlu Semizotu\nKalori: 245 kcal  |  Karb.: 30 g  |  Alerjen:", txt)
+            self.assertIn("Izgara Tavuk\nKalori: 220 kcal  |  Karb.: 0 g  |  Alerjen: Yok", txt)
+            d_obj = docx.Document(io.BytesIO(raw_doc))
+            shd_fills = {
+                el.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}fill")
+                for tbl in d_obj.tables
+                for row in tbl.rows
+                for cell in row.cells
+                for el in cell._tc.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}shd")
+            }
+            for w_hex in ("FEF9C3", "FDE68A", "FFF3E0", "FED7AA", "ECFDF5"):
+                self.assertIn(w_hex, shd_fills)
+
+        # 4. Excel Aylik_Menu rows colored per week & alternating days + inline dishes
+        wb_b = caf.build_cafeteria_full_workbook_excel(self.connect, "2026-10")
+        wb = openpyxl.load_workbook(io.BytesIO(wb_b))
+        try:
+            ws = wb["Aylik_Menu"]
+            fills_by_date = {}
+            dishes_by_date = {}
+            for row in ws.iter_rows(min_row=2):
+                dt_v = str(row[0].value or "")[:10]
+                fills_by_date[dt_v] = str(row[0].fill.fgColor.rgb or "")[-6:]
+                dishes_by_date[dt_v] = str(row[2].value or "")
+            self.assertEqual(fills_by_date["2026-10-01"], "FEF9C3")
+            self.assertEqual(fills_by_date["2026-10-02"], "FDE68A")
+            self.assertEqual(fills_by_date["2026-10-05"], "FFF3E0")
+            self.assertEqual(fills_by_date["2026-10-06"], "FED7AA")
+            self.assertEqual(fills_by_date["2026-10-12"], "ECFDF5")
+            self.assertEqual(dishes_by_date["2026-10-01"], "Tarhana Çorbası · Yoğurtlu Semizotu")
+        finally:
+            wb.close()
+
+        # 5. Headless UI menu planner exposes Karbonhidrat toggle & renders without error
+        revir_ui.reset_session()
+        revir_ui.session_state["caf_global_sel_ym"] = "2026-10"
+        ctx_api = {
+            "connect_db": self.connect,
+            "get_app_settings": persantil.get_app_settings,
+            "save_app_settings": persantil.save_app_settings,
+            "_get_active_gemini_config": persantil._get_active_gemini_config,
+            "mask_kvkk_value": persantil.mask_kvkk_value,
+            "clear_all_data_caches": persantil.clear_all_data_caches,
+            "is_section_visible": persantil.is_section_visible,
+        }
+        out_m = revir_ui.run_action_headless(
+            lambda: caf._render_tab_menu_planner(ctx_api, "2026-10", persantil.get_app_settings()),
+            {"action": "render"},
+        )
+        self.assertNotIn("Çalışma Zamanı Hatası", out_m["main_html"])
+        self.assertIn("Karbonhidrat (g) Göster", out_m["main_html"])
+
 
 if __name__ == "__main__":
     unittest.main()

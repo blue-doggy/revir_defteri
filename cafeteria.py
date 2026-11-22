@@ -1342,6 +1342,111 @@ def _build_weekly_grid_rows(days_list: list[dict[str, Any]], include_weekends: b
 	return rows
 
 
+_MENU_WEEK_PALETTES: list[dict[str, str]] = [
+	{"name": "1. Hafta · Sarı", "short": "Sarı", "light": "#FEF9C3", "dark": "#FDE68A", "accent": "#CA8A04", "date_fg": "#713F12"},
+	{"name": "2. Hafta · Turuncu", "short": "Turuncu", "light": "#FFF3E0", "dark": "#FED7AA", "accent": "#EA580C", "date_fg": "#9A3412"},
+	{"name": "3. Hafta · Yeşil", "short": "Yeşil", "light": "#ECFDF5", "dark": "#BBF7D0", "accent": "#16A34A", "date_fg": "#14532D"},
+	{"name": "4. Hafta · Mavi", "short": "Mavi", "light": "#EFF6FF", "dark": "#BFDBFE", "accent": "#2563EB", "date_fg": "#1E3A8A"},
+	{"name": "5. Hafta · Mor", "short": "Mor", "light": "#F5F3FF", "dark": "#DDD6FE", "accent": "#7C3AED", "date_fg": "#4C1D95"},
+	{"name": "6. Hafta · Gül", "short": "Gül", "light": "#FFF1F2", "dark": "#FECDD3", "accent": "#E11D48", "date_fg": "#881337"},
+]
+
+
+def _hex_to_rgb_tuple(hex_color: str) -> tuple[int, int, int]:
+	h = str(hex_color or "0F172A").strip().lstrip("#")
+	if len(h) != 6:
+		return (15, 23, 42)
+	try:
+		return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+	except Exception:
+		return (15, 23, 42)
+
+
+def _build_week_day_style_map(
+	days_list: list[dict[str, Any]],
+	*,
+	start_week_idx: int = 0,
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+	"""Her hafta için ayrı renk paleti (Sarı, Turuncu, Yeşil, Mavi, Mor, Gül) ve ardışık günlerde açık/koyu ton üretir."""
+	style_by_iso: dict[str, dict[str, Any]] = {}
+	legend_weeks: list[dict[str, Any]] = []
+	seen_weeks: set[int] = set()
+	prev_wk_key: tuple[int, int] | None = None
+	cur_wk_pos = -1
+	day_seq_in_week = 0
+
+	ordered_days = sorted(days_list or [], key=lambda x: str(x.get("date_iso") or ""))
+	for d in ordered_days:
+		d_iso = str(d.get("date_iso") or "")[:10]
+		if not d_iso:
+			continue
+		try:
+			iso_cal = date.fromisoformat(d_iso).isocalendar()
+			wk_key = (int(iso_cal[0]), int(iso_cal[1]))
+		except Exception:
+			wk_key = (0, int(d.get("iso_week") or 0))
+		if prev_wk_key is None or wk_key != prev_wk_key:
+			cur_wk_pos += 1
+			prev_wk_key = wk_key
+			day_seq_in_week = 0
+		else:
+			day_seq_in_week += 1
+
+		eff_wk_idx = max(0, int(start_week_idx) + cur_wk_pos)
+		pal = _MENU_WEEK_PALETTES[eff_wk_idx % len(_MENU_WEEK_PALETTES)]
+		is_dark = (day_seq_in_week % 2 == 1)
+		bg_hex = pal["dark"] if is_dark else pal["light"]
+		week_num = eff_wk_idx + 1
+		style_by_iso[d_iso] = {
+			"week_num": week_num,
+			"palette_short": pal["short"],
+			"tone": "dark" if is_dark else "light",
+			"bg_hex": bg_hex,
+			"bg_word": bg_hex.lstrip("#").upper(),
+			"light_hex": pal["light"],
+			"dark_hex": pal["dark"],
+			"accent_hex": pal["accent"],
+			"accent_word": pal["accent"].lstrip("#").upper(),
+			"date_fg_hex": pal["date_fg"],
+			"date_fg_rgb": _hex_to_rgb_tuple(pal["date_fg"]),
+		}
+		if week_num not in seen_weeks:
+			seen_weeks.add(week_num)
+			legend_weeks.append({
+				"week_num": week_num,
+				"label": f"{week_num}. Hafta ({pal['short']})",
+				"light": pal["light"],
+				"dark": pal["dark"],
+				"accent": pal["accent"],
+				"date_fg": pal["date_fg"],
+			})
+	return style_by_iso, legend_weeks
+
+
+def _extract_meal_display_parts(
+	rec: dict[str, Any],
+	*,
+	show_kcal: bool,
+	show_carbs: bool,
+	show_allergens: bool,
+) -> dict[str, Any]:
+	"""Öğün yemeklerini yan yana ve alt satırda kalori + karbonhidrat + alerjen bilgilerini döndürür."""
+	names = [str(nm).strip() for nm in (rec.get("dish_names") or []) if str(nm).strip()]
+	dishes_inline = " · ".join(names)
+	kv = _safe_float(rec.get("total_kcal"), 0.0)
+	cv = _safe_float(rec.get("total_carbs_g"), 0.0)
+	als = [str(a).strip() for a in (rec.get("allergens") or []) if str(a).strip()]
+	return {
+		"dishes_inline": dishes_inline,
+		"kv": kv,
+		"cv": cv,
+		"als": als,
+		"has_kcal": bool(show_kcal and kv > 0),
+		"has_carbs": bool(show_carbs and (cv > 0 or kv > 0)),
+		"show_allergens": bool(show_allergens),
+	}
+
+
 def _prepare_a4_menu_context(
 	connect_db_fn: Callable[[], sqlite3.Connection],
 	*,
@@ -1403,6 +1508,10 @@ def _prepare_a4_menu_context(
 		ramazan_times = get_ramazan_times_for_dates(connect_db_fn, sched["ramazan_province"], [d["date_iso"] for d in target_days])
 		schedule_line += f" · 🌙 Ramazan Modu ({sched['ramazan_province']} İftar & Sahur Saatleri)"
 	eff_wknds = include_weekends or any(wd >= 5 for wd in sched["weekdays_set"])
+	day_styles, week_legend = _build_week_day_style_map(
+		target_days,
+		start_week_idx=safe_idx if (scope == "weekly" and weeks) else 0,
+	)
 
 	return {
 		"ym": ym,
@@ -1419,7 +1528,35 @@ def _prepare_a4_menu_context(
 		"ramazan_mode": sched["ramazan_mode"],
 		"ramazan_province": sched["ramazan_province"],
 		"ramazan_times": ramazan_times,
+		"day_styles": day_styles,
+		"week_legend": week_legend,
 	}
+
+
+def _render_html_meal_cell(
+	rec: dict[str, Any],
+	*,
+	show_kcal: bool,
+	show_carbs: bool,
+	show_allergens: bool,
+) -> str:
+	parts = _extract_meal_display_parts(
+		rec, show_kcal=show_kcal, show_carbs=show_carbs, show_allergens=show_allergens
+	)
+	dishes_html = f"<div class='dishes'>{html.escape(parts['dishes_inline'])}</div>"
+	meta_bits: list[str] = []
+	if parts["has_kcal"]:
+		meta_bits.append(f"<span class='meta-pill kcal-pill'>🔥 {parts['kv']:g} kcal</span>")
+	if parts["has_carbs"]:
+		meta_bits.append(f"<span class='meta-pill carb-pill'>🍞 {parts['cv']:g} g Karb.</span>")
+	if parts["show_allergens"]:
+		if parts["als"]:
+			al_str = " · ".join(format_allergen_badge(a) for a in parts["als"])
+			meta_bits.append(f"<span class='meta-pill al-pill'>⚠️ {html.escape(al_str)}</span>")
+		else:
+			meta_bits.append("<span class='meta-pill ok-pill'>✅ Alerjen: Yok</span>")
+	meta_div = f"<div class='cell-meta'>{' '.join(meta_bits)}</div>" if meta_bits else ""
+	return f"{dishes_html}{meta_div}"
 
 
 def build_menu_a4_html(
@@ -1430,6 +1567,7 @@ def build_menu_a4_html(
 	week_index: int = 0,
 	active_slots: list[str] | None = None,
 	show_kcal: bool = True,
+	show_carbs: bool = True,
 	show_allergens: bool = True,
 	include_weekends: bool = False,
 	layout_mode: str = "standard",
@@ -1437,7 +1575,7 @@ def build_menu_a4_html(
 	signers: list[tuple[str, str]] | None = None,
 	school_meta: dict[str, str] | None = None,
 ) -> str:
-	"""Aylık veya haftalık menüyü standart, tek A4 kompakt veya haftalık ızgara düzeninde imzalı HTML olarak oluşturur."""
+	"""Aylık veya haftalık menüyü standart, tek A4 kompakt veya haftalık ızgara düzeninde haftalık renk tonlu imzalı HTML olarak oluşturur."""
 	ctx_p = _prepare_a4_menu_context(
 		connect_db_fn,
 		year_month=year_month,
@@ -1459,6 +1597,8 @@ def build_menu_a4_html(
 	eff_wknds = ctx_p["eff_wknds"]
 	ramazan_mode = bool(ctx_p.get("ramazan_mode"))
 	ramazan_times = ctx_p.get("ramazan_times") or {}
+	day_styles = ctx_p.get("day_styles") or {}
+	week_legend = ctx_p.get("week_legend") or []
 
 	inst_top = html.escape(meta.get("institution_top_header") or "T.C. MİLLÎ EĞİTİM BAKANLIĞI")
 	school_nm = html.escape(meta.get("school_name") or "Okul / Kurum Yemekhanesi")
@@ -1484,6 +1624,17 @@ def build_menu_a4_html(
 	is_compact = (layout_mode == "compact_one_page")
 	is_grid = (layout_mode == "weekly_grid")
 
+	legend_html = ""
+	if week_legend:
+		chips = "".join(
+			f"<span class='wk-leg-chip' style='border-color:{w['accent']};color:{w['date_fg']};'>"
+			f"<span class='wk-sw' style='background:{w['light']};border-color:{w['accent']};'></span>"
+			f"<span class='wk-sw' style='background:{w['dark']};border-color:{w['accent']};'></span>"
+			f"<span>{html.escape(w['label'])}</span></span>"
+			for w in week_legend
+		)
+		legend_html = f"<div class='wk-legend'><span class='wk-leg-title'>Hafta Renkleri (Günler açık/koyu):</span>{chips}</div>"
+
 	if is_grid:
 		wd_cols = sorted({int(d["weekday"]) for d in target_days}) or [0, 1, 2, 3, 4]
 		hdr_cols = [f"<th>{TR_WEEKDAYS_SHORT[wd]}</th>" for wd in wd_cols]
@@ -1497,67 +1648,79 @@ def build_menu_a4_html(
 					tds.append("<td class='empty-cell'>—</td>")
 					continue
 				d_iso = d["date_iso"]
+				st = day_styles.get(d_iso, {})
+				bg_hex = st.get("bg_hex", "#FEF9C3")
+				acc_hex = st.get("accent_hex", "#CA8A04")
+				fg_hex = st.get("date_fg_hex", "#0F172A")
+				wk_num = st.get("week_num", 1)
 				rt_d = ramazan_times.get(d_iso) if ramazan_mode else None
 				ram_sub = f"<div style='font-size:8.5px;color:#0f766e;font-weight:700;'>🌙 S:{rt_d['sahur']} · 🌅 İ:{rt_d['iftar']}</div>" if rt_d else ""
-				cell_parts = [f"<div class='grid-dt'>{d['day_num']:02d}.{mm:02d}.{yy}{ram_sub}</div>"]
+				cell_parts = [
+					f"<div class='grid-dt' style='color:{fg_hex};border-bottom-color:{acc_hex};'>"
+					f"{d['day_num']:02d}.{mm:02d}.{yy} <span class='wk-tag' style='border-color:{acc_hex};color:{fg_hex};'>{wk_num}. Hft</span>"
+					f"{ram_sub}</div>"
+				]
 				for sl in slots:
 					rec = plans.get((d_iso, sl))
 					if rec and rec.get("dish_names"):
 						tm_s = f" ({html.escape(meal_times[sl])})" if meal_times.get(sl) else ""
 						sl_hdr = f"<div class='grid-sl'>{html.escape(sl)}{tm_s}</div>" if (len(slots) > 1 or tm_s) else ""
-						d_lines = "<br>".join(f"• {html.escape(str(nm))}" for nm in rec["dish_names"])
-						m_bits = []
-						kv = _safe_float(rec.get("total_kcal"), 0.0)
-						if show_kcal and kv > 0:
-							m_bits.append(f"<span class='kcal-pill'>🔥 {kv:g} kcal</span>")
-						if show_allergens and rec.get("allergens"):
-							m_bits.append(f"<span class='al-pill'>{html.escape(' · '.join(format_allergen_badge(a) for a in rec['allergens']))}</span>")
-						m_div = f"<div class='cell-meta'>{' '.join(m_bits)}</div>" if m_bits else ""
-						cell_parts.append(f"{sl_hdr}<div class='dishes'>{d_lines}</div>{m_div}")
+						cell_parts.append(
+							f"{sl_hdr}"
+							+ _render_html_meal_cell(
+								rec, show_kcal=show_kcal, show_carbs=show_carbs, show_allergens=show_allergens
+							)
+						)
 					else:
 						cell_parts.append("<div class='empty-cell'>—</div>")
-				tds.append(f"<td>{''.join(cell_parts)}</td>")
+				tds.append(f"<td style='background:{bg_hex};border-top:3px solid {acc_hex};'>{''.join(cell_parts)}</td>")
 			rows_html.append(f"<tr>{''.join(tds)}</tr>")
 	else:
 		rows_html = []
 		for d in target_days:
 			d_iso = d["date_iso"]
+			st = day_styles.get(d_iso, {})
+			bg_hex = st.get("bg_hex", "#FEF9C3")
+			acc_hex = st.get("accent_hex", "#CA8A04")
+			fg_hex = st.get("date_fg_hex", "#0F172A")
+			wk_num = st.get("week_num", 1)
 			rt_d = ramazan_times.get(d_iso) if ramazan_mode else None
 			ram_line = (
 				f"<br><small style='color:#0f766e;font-weight:700;'>🌙 S:{rt_d['sahur']} · 🌅 İ:{rt_d['iftar']}</small>"
 				if (rt_d and is_compact)
 				else (f"<br><small style='color:#0f766e;font-weight:700;'>🌙 Sahur: {rt_d['sahur']}<br>🌅 İftar: {rt_d['iftar']}</small>" if rt_d else "")
 			)
-			dt_tr = f"{d['day_num']:02d}.{mm:02d}.{yy}<br><small>{html.escape(d['weekday_name'])}</small>{ram_line}"
+			wk_badge = f" <span class='wk-tag' style='border-color:{acc_hex};color:{fg_hex};'>{wk_num}. Hft</span>"
+			dt_tr = f"{d['day_num']:02d}.{mm:02d}.{yy}{wk_badge}<br><small style='color:{fg_hex};'>{html.escape(d['weekday_name'])}</small>{ram_line}"
 			day_kcal = 0.0
-			cells = [f"<td class='col-date'>{dt_tr}</td>"]
+			day_carbs = 0.0
+			cells = [f"<td class='col-date' style='background:{bg_hex};color:{fg_hex};border-left:4px solid {acc_hex};'>{dt_tr}</td>"]
 			for sl in slots:
 				rec = plans.get((d_iso, sl))
 				if rec and rec.get("dish_names"):
-					dishes_str = (" · " if is_compact else "<br>").join(
-						(html.escape(str(nm)) if is_compact else f"• {html.escape(str(nm))}") for nm in rec["dish_names"]
+					day_kcal += _safe_float(rec.get("total_kcal"), 0.0)
+					day_carbs += _safe_float(rec.get("total_carbs_g"), 0.0)
+					inner_h = _render_html_meal_cell(
+						rec, show_kcal=show_kcal, show_carbs=show_carbs, show_allergens=show_allergens
 					)
-					meta_bits = []
-					k_val = _safe_float(rec.get("total_kcal"), 0.0)
-					day_kcal += k_val
-					if show_kcal and k_val > 0:
-						meta_bits.append(f"<span class='kcal-pill'>🔥 {k_val:g} kcal</span>")
-					if show_allergens and rec.get("allergens"):
-						al_str = " · ".join(format_allergen_badge(a) for a in rec["allergens"])
-						meta_bits.append(f"<span class='al-pill'>{html.escape(al_str)}</span>")
-					meta_div = f"<div class='cell-meta'>{' '.join(meta_bits)}</div>" if meta_bits else ""
-					cells.append(f"<td><div class='dishes'>{dishes_str}</div>{meta_div}</td>")
+					cells.append(f"<td style='background:{bg_hex};'>{inner_h}</td>")
 				else:
-					cells.append("<td class='empty-cell'>—</td>")
-			if show_kcal and len(slots) > 1:
-				cells.append(f"<td class='col-tot'><b>{day_kcal:g} kcal</b></td>" if day_kcal > 0 else "<td class='col-tot'>—</td>")
+					cells.append(f"<td class='empty-cell' style='background:{bg_hex};'>—</td>")
+			if (show_kcal or show_carbs) and len(slots) > 1:
+				tot_parts = []
+				if show_kcal and day_kcal > 0:
+					tot_parts.append(f"<b>{day_kcal:g} kcal</b>")
+				if show_carbs and (day_carbs > 0 or day_kcal > 0):
+					tot_parts.append(f"<small style='color:#1e40af;font-weight:700;'>{day_carbs:g} g Karb.</small>")
+				tot_txt = "<br>".join(tot_parts) if tot_parts else "—"
+				cells.append(f"<td class='col-tot' style='background:{bg_hex};color:{fg_hex};'>{tot_txt}</td>")
 			rows_html.append(f"<tr>{''.join(cells)}</tr>")
 
 		hdr_cols = ["<th>Tarih / Gün</th>"] + [
 			f"<th>{html.escape(sl)}" + (f"<br><small style='font-weight:500;opacity:.92'>{html.escape(meal_times[sl])}</small>" if meal_times.get(sl) else "") + "</th>"
 			for sl in slots
 		]
-		if show_kcal and len(slots) > 1:
+		if (show_kcal or show_carbs) and len(slots) > 1:
 			hdr_cols.append("<th>Günlük Toplam</th>")
 
 	sig_html = "".join(
@@ -1569,8 +1732,8 @@ def build_menu_a4_html(
 
 	page_orient = "landscape" if (is_grid or (len(slots) >= 2 and scope != "weekly")) else "portrait"
 	page_w = "297mm" if page_orient == "landscape" else "210mm"
-	tbl_font = "9.3px" if is_compact else ("10px" if is_grid else "11px")
-	cell_pad = "2.5px 5px" if is_compact else "5px 7px"
+	tbl_font = "9.2px" if is_compact else ("10px" if is_grid else "11px")
+	cell_pad = "2.8px 5px" if is_compact else "5px 7px"
 	sig_top = "10px" if is_compact else "22px"
 
 	return f"""<!DOCTYPE html>
@@ -1580,29 +1743,36 @@ def build_menu_a4_html(
 <title>{html.escape(scope_label)}</title>
 <style>
 @page {{ size: A4 {page_orient}; margin: {'6mm 8mm' if is_compact else '10mm 12mm'}; }}
-* {{ box-sizing: border-box; }}
+* {{ box-sizing: border-box; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }}
 body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; color: #0f172a; background: #cbd5e1; margin: 0; padding: 14px; }}
 .topbar {{ max-width: {page_w}; margin: 0 auto 10px auto; display: flex; justify-content: space-between; align-items: center; }}
 .btn-print {{ padding: 8px 16px; background: #0f766e; color: #fff; border: none; border-radius: 7px; font-weight: 700; cursor: pointer; }}
 .a4-sheet {{ width: min(100%, {page_w}); margin: 0 auto; padding: {'6mm 8mm' if is_compact else '11mm 13mm'}; background: #fff; border: 1px solid #94a3b8; box-shadow: 0 8px 24px rgba(15,23,42,.18); }}
-.antet {{ text-align: center; border-bottom: 2px solid #0f766e; padding-bottom: 6px; margin-bottom: 8px; }}
+.antet {{ text-align: center; border-bottom: 2px solid #0f766e; padding-bottom: 6px; margin-bottom: 6px; }}
 .antet-top {{ font-size: 10.5px; color: #64748b; letter-spacing: .5px; }}
 .antet-school {{ font-size: 15px; font-weight: 800; color: #0f766e; margin-top: 2px; }}
 .antet-title {{ font-size: 12.5px; font-weight: 700; color: #1e293b; margin-top: 2px; }}
 .antet-sched {{ font-size: 10px; color: #475569; margin-top: 3px; }}
+.wk-legend {{ display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 {'5px' if is_compact else '7px'} 0; font-size: {'8.5px' if is_compact else '9.5px'}; color: #334155; }}
+.wk-leg-title {{ font-weight: 700; color: #1e293b; }}
+.wk-leg-chip {{ display: inline-flex; align-items: center; gap: 3px; background: #fff; border: 1px solid #cbd5e1; border-radius: 5px; padding: 1px 5px; font-weight: 700; }}
+.wk-sw {{ display: inline-block; width: 10px; height: 10px; border-radius: 2px; border: 1px solid rgba(15,23,42,0.25); }}
+.wk-tag {{ display: inline-block; font-size: {'8px' if is_compact else '8.5px'}; font-weight: 700; background: rgba(255,255,255,0.82); border: 1px solid #94a3b8; border-radius: 4px; padding: 0 3px; margin-left: 3px; vertical-align: middle; }}
 table {{ width: 100%; border-collapse: collapse; font-size: {tbl_font}; table-layout: {'fixed' if is_grid else 'auto'}; }}
-th, td {{ border: 1px solid #cbd5e1; padding: {cell_pad}; vertical-align: top; text-align: left; }}
+th, td {{ border: 1px solid #94a3b8; padding: {cell_pad}; vertical-align: top; text-align: left; color: #0f172a; }}
 th {{ background: #0f766e; color: #fff; font-weight: 700; text-align: center; }}
-tr:nth-child(even) td {{ background: #f8fafc; }}
-.col-date {{ width: 95px; font-weight: 700; color: #0f766e; white-space: nowrap; }}
-.col-tot {{ width: 82px; text-align: center; vertical-align: middle; color: #0f766e; }}
-.grid-dt {{ font-weight: 800; color: #0f766e; border-bottom: 1px solid #e2e8f0; margin-bottom: 3px; padding-bottom: 2px; font-size: 10px; }}
-.grid-sl {{ font-weight: 700; color: #334155; font-size: 9.5px; margin-top: 3px; }}
-.dishes {{ line-height: {'1.2' if is_compact else '1.35'}; }}
-.cell-meta {{ margin-top: 3px; display: flex; flex-wrap: wrap; gap: 3px; }}
-.kcal-pill {{ background: #fef3c7; color: #92400e; border-radius: 4px; padding: 1px 4px; font-size: 9px; font-weight: 700; }}
-.al-pill {{ background: #fee2e2; color: #991b1b; border-radius: 4px; padding: 1px 4px; font-size: 9px; font-weight: 600; }}
-.empty-cell {{ text-align: center; color: #94a3b8; }}
+.col-date {{ width: 108px; font-weight: 700; white-space: nowrap; }}
+.col-tot {{ width: 88px; text-align: center; vertical-align: middle; }}
+.grid-dt {{ font-weight: 800; border-bottom: 1px solid #94a3b8; margin-bottom: 4px; padding-bottom: 2px; font-size: 10px; }}
+.grid-sl {{ font-weight: 700; color: #0f172a; font-size: 9.5px; margin-top: 3px; }}
+.dishes {{ font-weight: 600; color: #0f172a; line-height: {'1.22' if is_compact else '1.35'}; }}
+.cell-meta {{ margin-top: 3px; display: flex; flex-wrap: wrap; gap: 3px; align-items: center; }}
+.meta-pill {{ display: inline-block; background: rgba(255,255,255,0.92); border: 1px solid rgba(15,23,42,0.18); border-radius: 4px; padding: 1px 5px; font-size: {'8.2px' if is_compact else '9px'}; font-weight: 700; line-height: 1.25; }}
+.kcal-pill {{ color: #92400e; border-color: #f59e0b; }}
+.carb-pill {{ color: #1e40af; border-color: #60a5fa; }}
+.al-pill {{ color: #991b1b; border-color: #f87171; background: rgba(255,245,245,0.95); }}
+.ok-pill {{ color: #166534; border-color: #86efac; font-weight: 600; }}
+.empty-cell {{ text-align: center; color: #64748b; background: #f8fafc; }}
 .note-line {{ margin-top: 6px; font-size: 9.5px; color: #475569; }}
 .sig-row {{ margin-top: {sig_top}; display: flex; justify-content: space-around; gap: 16px; page-break-inside: avoid; }}
 .sig-box {{ flex: 1; text-align: center; border-top: 1px solid #94a3b8; padding-top: 5px; font-size: 10.5px; }}
@@ -1629,6 +1799,7 @@ tr:nth-child(even) td {{ background: #f8fafc; }}
     <div class='antet-title'>{html.escape(scope_label)}</div>
     <div class='antet-sched'>{html.escape(schedule_line)}</div>
   </div>
+  {legend_html}
   <table>
     <thead><tr>{''.join(hdr_cols)}</tr></thead>
     <tbody>{''.join(rows_html) if rows_html else f'<tr><td colspan="{max(2, len(hdr_cols))}" class="empty-cell">Bu dönem için öğün girilmiş gün bulunamadı.</td></tr>'}</tbody>
@@ -1663,15 +1834,29 @@ def _ensure_docx_mod():
 	}
 
 
-def _style_docx_cell(dx: dict[str, Any], cell: Any, bg_hex: str, compact: bool = False) -> None:
-	shading = dx["parse_xml"](f'<w:shd {dx["nsdecls"]("w")} w:fill="{bg_hex}"/>')
+def _style_docx_cell(
+	dx: dict[str, Any],
+	cell: Any,
+	bg_hex: str,
+	compact: bool = False,
+	left_accent_hex: str = "",
+	top_accent_hex: str = "",
+) -> None:
 	tcPr = cell._tc.get_or_add_tcPr()
+	if left_accent_hex or top_accent_hex:
+		b_parts = []
+		if top_accent_hex:
+			b_parts.append(f'<w:top w:val="single" w:sz="18" w:space="0" w:color="{top_accent_hex}"/>')
+		if left_accent_hex:
+			b_parts.append(f'<w:left w:val="single" w:sz="18" w:space="0" w:color="{left_accent_hex}"/>')
+		tcPr.append(dx["parse_xml"](f'<w:tcBorders {dx["nsdecls"]("w")}>{"".join(b_parts)}</w:tcBorders>'))
+	shading = dx["parse_xml"](f'<w:shd {dx["nsdecls"]("w")} w:fill="{bg_hex}"/>')
 	tcPr.append(shading)
 	if compact:
 		mar = dx["parse_xml"](
 			f'<w:tcMar {dx["nsdecls"]("w")}>'
-			'<w:top w:w="25" w:type="dxa"/><w:bottom w:w="25" w:type="dxa"/>'
-			'<w:left w:w="65" w:type="dxa"/><w:right w:w="65" w:type="dxa"/>'
+			'<w:top w:w="28" w:type="dxa"/><w:bottom w:w="28" w:type="dxa"/>'
+			'<w:left w:w="70" w:type="dxa"/><w:right w:w="70" w:type="dxa"/>'
 			'</w:tcMar>'
 		)
 		tcPr.append(mar)
@@ -1685,6 +1870,7 @@ def build_menu_a4_docx(
 	week_index: int = 0,
 	active_slots: list[str] | None = None,
 	show_kcal: bool = True,
+	show_carbs: bool = True,
 	show_allergens: bool = True,
 	include_weekends: bool = False,
 	layout_mode: str = "standard",
@@ -1692,7 +1878,7 @@ def build_menu_a4_docx(
 	signers: list[tuple[str, str]] | None = None,
 	school_meta: dict[str, str] | None = None,
 ) -> bytes:
-	"""Aylık veya haftalık yemek menüsünü standart, tek A4 kompakt veya haftalık ızgara düzeninde Word (.docx) belgesi olarak üretir."""
+	"""Aylık veya haftalık yemek menüsünü standart, tek A4 kompakt veya haftalık ızgara düzeninde haftalık renk tonlu Word (.docx) belgesi olarak üretir."""
 	dx = _ensure_docx_mod()
 	docx = dx["docx"]
 	Cm, Pt, RGBColor = dx["Cm"], dx["Pt"], dx["RGBColor"]
@@ -1718,6 +1904,8 @@ def build_menu_a4_docx(
 	eff_wknds = ctx_p["eff_wknds"]
 	ramazan_mode = bool(ctx_p.get("ramazan_mode"))
 	ramazan_times = ctx_p.get("ramazan_times") or {}
+	day_styles = ctx_p.get("day_styles") or {}
+	week_legend = ctx_p.get("week_legend") or []
 
 	inst_top = meta.get("institution_top_header") or "T.C. MİLLÎ EĞİTİM BAKANLIĞI"
 	school_nm = meta.get("school_name") or "Okul / Kurum Yemekhanesi"
@@ -1764,14 +1952,35 @@ def build_menu_a4_docx(
 		r.bold = bold_f
 		r.font.color.rgb = rgb_c
 
+	if week_legend:
+		p_leg = doc.add_paragraph()
+		p_leg.alignment = dx["WD_ALIGN_PARAGRAPH"].CENTER
+		p_leg.paragraph_format.space_before = Pt(0)
+		p_leg.paragraph_format.space_after = Pt(2 if is_compact else 4)
+		rl0 = p_leg.add_run("Hafta Renkleri (Ardışık günlerde açık / koyu): ")
+		rl0.font.name = "Calibri"
+		rl0.font.size = Pt(7.2 if is_compact else 8.0)
+		rl0.bold = True
+		rl0.font.color.rgb = RGBColor(51, 65, 85)
+		for idx_w, w in enumerate(week_legend):
+			if idx_w > 0:
+				rsep = p_leg.add_run("  ·  ")
+				rsep.font.name = "Calibri"
+				rsep.font.size = Pt(7.2 if is_compact else 8.0)
+			rl_sw = p_leg.add_run(f"■ {w['label']}")
+			rl_sw.font.name = "Calibri"
+			rl_sw.font.size = Pt(7.2 if is_compact else 8.0)
+			rl_sw.bold = True
+			rl_sw.font.color.rgb = RGBColor(*_hex_to_rgb_tuple(w["date_fg"]))
+
 	borders = dx["parse_xml"](
 		f'<w:tblBorders {dx["nsdecls"]("w")}>'
-		'<w:top w:val="single" w:sz="4" w:space="0" w:color="CBD5E1"/>'
-		'<w:left w:val="single" w:sz="4" w:space="0" w:color="CBD5E1"/>'
-		'<w:bottom w:val="single" w:sz="4" w:space="0" w:color="CBD5E1"/>'
-		'<w:right w:val="single" w:sz="4" w:space="0" w:color="CBD5E1"/>'
-		'<w:insideH w:val="single" w:sz="4" w:space="0" w:color="CBD5E1"/>'
-		'<w:insideV w:val="single" w:sz="4" w:space="0" w:color="CBD5E1"/>'
+		'<w:top w:val="single" w:sz="4" w:space="0" w:color="94A3B8"/>'
+		'<w:left w:val="single" w:sz="4" w:space="0" w:color="94A3B8"/>'
+		'<w:bottom w:val="single" w:sz="4" w:space="0" w:color="94A3B8"/>'
+		'<w:right w:val="single" w:sz="4" w:space="0" w:color="94A3B8"/>'
+		'<w:insideH w:val="single" w:sz="4" w:space="0" w:color="94A3B8"/>'
+		'<w:insideV w:val="single" w:sz="4" w:space="0" w:color="94A3B8"/>'
 		'</w:tblBorders>'
 	)
 
@@ -1789,8 +1998,44 @@ def build_menu_a4_docx(
 			rr.bold = True
 			rr.font.color.rgb = RGBColor(255, 255, 255)
 
-	body_fsz = 7.2 if is_compact else 8.5
-	meta_fsz = 6.5 if is_compact else 7.5
+	body_fsz = 7.3 if is_compact else 8.5
+	meta_fsz = 6.6 if is_compact else 7.6
+
+	def _append_docx_meal_runs(cp: Any, rec: dict[str, Any], *, trailing_nl: bool = False) -> None:
+		parts = _extract_meal_display_parts(
+			rec, show_kcal=show_kcal, show_carbs=show_carbs, show_allergens=show_allergens
+		)
+		r_d = cp.add_run(parts["dishes_inline"])
+		r_d.font.name = "Calibri"
+		r_d.font.size = Pt(body_fsz)
+		r_d.bold = True
+		r_d.font.color.rgb = RGBColor(15, 23, 42)
+
+		seg_runs: list[tuple[str, Any, bool]] = []
+		if parts["has_kcal"]:
+			seg_runs.append((f"Kalori: {parts['kv']:g} kcal", RGBColor(146, 64, 14), True))
+		if parts["has_carbs"]:
+			seg_runs.append((f"Karb.: {parts['cv']:g} g", RGBColor(30, 64, 175), True))
+		if parts["show_allergens"]:
+			if parts["als"]:
+				seg_runs.append(("Alerjen: " + ", ".join(parts["als"]), RGBColor(153, 27, 27), True))
+			else:
+				seg_runs.append(("Alerjen: Yok", RGBColor(22, 101, 52), False))
+		if seg_runs:
+			cp.add_run("\n")
+			for si_r, (txt_r, col_r, b_r) in enumerate(seg_runs):
+				if si_r > 0:
+					r_sep = cp.add_run("  |  ")
+					r_sep.font.name = "Calibri"
+					r_sep.font.size = Pt(meta_fsz)
+					r_sep.font.color.rgb = RGBColor(71, 85, 105)
+				rm = cp.add_run(txt_r)
+				rm.font.name = "Calibri"
+				rm.font.size = Pt(meta_fsz)
+				rm.bold = b_r
+				rm.font.color.rgb = col_r
+		if trailing_nl:
+			cp.add_run("\n")
 
 	if not target_days:
 		p_emp = doc.add_paragraph()
@@ -1807,51 +2052,46 @@ def build_menu_a4_docx(
 		tbl.autofit = True
 		_render_hdr(tbl, cols_hdr)
 		for ri, wk_dict in enumerate(grid_weeks, start=1):
-			bg = "FFFFFF" if ri % 2 == 1 else "F8FAFC"
 			for ci, wd in enumerate(wd_cols):
 				cell = tbl.cell(ri, ci)
-				_style_docx_cell(dx, cell, bg, compact=is_compact)
 				cp = cell.paragraphs[0]
 				cp.paragraph_format.space_after = Pt(0)
 				d = wk_dict.get(wd)
 				if not d:
+					_style_docx_cell(dx, cell, "F8FAFC", compact=is_compact)
 					cp.add_run("—").font.size = Pt(body_fsz)
 					continue
 				d_iso = d["date_iso"]
+				st = day_styles.get(d_iso, {})
+				bg_w = st.get("bg_word", "FEF9C3")
+				acc_w = st.get("accent_word", "CA8A04")
+				fg_rgb = RGBColor(*st.get("date_fg_rgb", (15, 23, 42)))
+				wk_num = st.get("week_num", 1)
+				_style_docx_cell(dx, cell, bg_w, compact=is_compact, top_accent_hex=acc_w)
 				rt_d = ramazan_times.get(d_iso) if ramazan_mode else None
 				ram_g = f"\n🌙 S:{rt_d['sahur']} · İ:{rt_d['iftar']}\n" if rt_d else "\n"
-				rd = cp.add_run(f"{d['day_num']:02d}.{mm:02d}.{yy}{ram_g}")
+				rd = cp.add_run(f"{d['day_num']:02d}.{mm:02d}.{yy} ({wk_num}. Hft){ram_g}")
 				rd.font.name = "Calibri"
 				rd.font.size = Pt(body_fsz)
 				rd.bold = True
-				rd.font.color.rgb = RGBColor(15, 118, 110)
-				for sl in slots:
-					rec = plans.get((d_iso, sl))
+				rd.font.color.rgb = fg_rgb
+				active_recs = [(sl, plans.get((d_iso, sl))) for sl in slots]
+				for idx_sl, (sl, rec) in enumerate(active_recs):
 					if rec and rec.get("dish_names"):
 						tm_s = f" · {meal_times[sl]}" if meal_times.get(sl) else ""
 						if len(slots) > 1 or tm_s:
 							rs = cp.add_run(f"[{sl}{tm_s}]\n")
 							rs.font.size = Pt(meta_fsz)
 							rs.bold = True
-						r_d = cp.add_run("\n".join(f"• {nm}" for nm in rec["dish_names"]) + "\n")
-						r_d.font.name = "Calibri"
-						r_d.font.size = Pt(body_fsz)
-						kv = _safe_float(rec.get("total_kcal"), 0.0)
-						eb = []
-						if show_kcal and kv > 0:
-							eb.append(f"{kv:g} kcal")
-						if show_allergens and rec.get("allergens"):
-							eb.append("Alerjen: " + ", ".join(rec["allergens"]))
-						if eb:
-							r_m = cp.add_run(" | ".join(eb) + "\n")
-							r_m.font.size = Pt(meta_fsz)
-							r_m.font.color.rgb = RGBColor(153, 27, 27) if rec.get("allergens") else RGBColor(146, 64, 14)
+							rs.font.color.rgb = fg_rgb
+						_append_docx_meal_runs(cp, rec, trailing_nl=(idx_sl < len(active_recs) - 1))
 	else:
 		slot_hdrs = [
 			f"{sl}\n({meal_times[sl]})" if meal_times.get(sl) else sl
 			for sl in slots
 		]
-		cols_hdr = ["Tarih / Gün"] + slot_hdrs + (["Toplam Kalori"] if (show_kcal and len(slots) > 1) else [])
+		show_tot_col = (show_kcal or show_carbs) and len(slots) > 1
+		cols_hdr = ["Tarih / Gün"] + slot_hdrs + (["Günlük Toplam"] if show_tot_col else [])
 		tbl = doc.add_table(rows=len(target_days) + 1, cols=len(cols_hdr))
 		tbl.alignment = dx["WD_TABLE_ALIGNMENT"].CENTER
 		tbl.autofit = True
@@ -1859,10 +2099,15 @@ def build_menu_a4_docx(
 
 		for ri, d in enumerate(target_days, start=1):
 			d_iso = d["date_iso"]
+			st = day_styles.get(d_iso, {})
+			bg_w = st.get("bg_word", "FEF9C3")
+			acc_w = st.get("accent_word", "CA8A04")
+			fg_rgb = RGBColor(*st.get("date_fg_rgb", (15, 23, 42)))
+			wk_num = st.get("week_num", 1)
 			rt_d = ramazan_times.get(d_iso) if ramazan_mode else None
-			bg = "FFFFFF" if ri % 2 == 1 else "F8FAFC"
+
 			c0 = tbl.cell(ri, 0)
-			_style_docx_cell(dx, c0, bg, compact=is_compact)
+			_style_docx_cell(dx, c0, bg_w, compact=is_compact, left_accent_hex=acc_w)
 			p0 = c0.paragraphs[0]
 			p0.paragraph_format.space_after = Pt(0)
 			ram_txt = (
@@ -1870,51 +2115,49 @@ def build_menu_a4_docx(
 				if (rt_d and is_compact)
 				else (f"\nSahur: {rt_d['sahur']}\nİftar: {rt_d['iftar']}" if rt_d else "")
 			)
-			dt_lbl = (f"{d['day_num']:02d}.{mm:02d} {d['weekday_name'][:3]}" if is_compact else f"{d['day_num']:02d}.{mm:02d}.{yy}\n{d['weekday_name']}") + ram_txt
+			dt_lbl = (
+				f"{d['day_num']:02d}.{mm:02d} {d['weekday_name'][:3]} ({wk_num}.H)"
+				if is_compact
+				else f"{d['day_num']:02d}.{mm:02d}.{yy} ({wk_num}. Hft)\n{d['weekday_name']}"
+			) + ram_txt
 			r0 = p0.add_run(dt_lbl)
 			r0.font.name = "Calibri"
 			r0.font.size = Pt(body_fsz)
 			r0.bold = True
-			r0.font.color.rgb = RGBColor(15, 118, 110)
+			r0.font.color.rgb = fg_rgb
 
 			day_kcal = 0.0
+			day_carbs = 0.0
 			for si, sl in enumerate(slots, start=1):
 				cell = tbl.cell(ri, si)
-				_style_docx_cell(dx, cell, bg, compact=is_compact)
+				_style_docx_cell(dx, cell, bg_w, compact=is_compact)
 				cp = cell.paragraphs[0]
 				cp.paragraph_format.space_after = Pt(0)
 				rec = plans.get((d_iso, sl))
 				if rec and rec.get("dish_names"):
-					sep_d = " · " if is_compact else "\n"
-					lines_txt = sep_d.join((str(nm) if is_compact else f"• {nm}") for nm in rec["dish_names"])
-					r_d = cp.add_run(lines_txt)
-					r_d.font.name = "Calibri"
-					r_d.font.size = Pt(body_fsz)
-					kv = _safe_float(rec.get("total_kcal"), 0.0)
-					day_kcal += kv
-					extra_bits = []
-					if show_kcal and kv > 0:
-						extra_bits.append(f"{kv:g} kcal")
-					if show_allergens and rec.get("allergens"):
-						extra_bits.append("Alerjen: " + ", ".join(rec["allergens"]))
-					if extra_bits:
-						r_m = cp.add_run((" — " if is_compact else "\n") + " | ".join(extra_bits))
-						r_m.font.name = "Calibri"
-						r_m.font.size = Pt(meta_fsz)
-						r_m.font.color.rgb = RGBColor(153, 27, 27) if rec.get("allergens") else RGBColor(146, 64, 14)
+					day_kcal += _safe_float(rec.get("total_kcal"), 0.0)
+					day_carbs += _safe_float(rec.get("total_carbs_g"), 0.0)
+					_append_docx_meal_runs(cp, rec, trailing_nl=False)
 				else:
 					r_e = cp.add_run("—")
 					r_e.font.size = Pt(body_fsz)
 
-			if show_kcal and len(slots) > 1:
+			if show_tot_col:
 				ct = tbl.cell(ri, len(slots) + 1)
-				_style_docx_cell(dx, ct, bg, compact=is_compact)
+				_style_docx_cell(dx, ct, bg_w, compact=is_compact)
 				pt = ct.paragraphs[0]
 				pt.alignment = dx["WD_ALIGN_PARAGRAPH"].CENTER
-				rt = pt.add_run(f"{day_kcal:g} kcal" if day_kcal > 0 else "—")
+				pt.paragraph_format.space_after = Pt(0)
+				tot_lines: list[str] = []
+				if show_kcal and day_kcal > 0:
+					tot_lines.append(f"{day_kcal:g} kcal")
+				if show_carbs and (day_carbs > 0 or day_kcal > 0):
+					tot_lines.append(f"Karb: {day_carbs:g} g")
+				rt = pt.add_run("\n".join(tot_lines) if tot_lines else "—")
 				rt.font.name = "Calibri"
 				rt.font.size = Pt(body_fsz)
 				rt.bold = True
+				rt.font.color.rgb = fg_rgb
 
 	if custom_board_note:
 		p_note = doc.add_paragraph()
@@ -3169,10 +3412,10 @@ def build_cafeteria_full_workbook_excel(connect_db_fn: Callable[[], sqlite3.Conn
 				"Sahur (İmsak)": ram_xl.get(rec["plan_date"], {}).get("sahur", ""),
 				"İftar": ram_xl.get(rec["plan_date"], {}).get("iftar", ""),
 			} if sched_xl["ramazan_mode"] else {}),
-			"Yemekler": ", ".join(rec.get("dish_names") or []),
+			"Yemekler": " · ".join(rec.get("dish_names") or []),
 			"Kalori (kcal)": rec["total_kcal"],
 			"Karbonhidrat (g)": rec["total_carbs_g"],
-			"Alerjen Uyarısı": ", ".join(rec.get("allergens") or []),
+			"Alerjen Uyarısı": ", ".join(rec.get("allergens") or []) or "Alerjen: Yok",
 		}
 		for rec in plans.values()
 	]) if plans else pd.DataFrame([{"Bilgi": f"{ym} ayı menüsü boş"}])
@@ -3231,6 +3474,36 @@ def build_cafeteria_full_workbook_excel(connect_db_fn: Callable[[], sqlite3.Conn
 		df_items.to_excel(writer, sheet_name="Gelen_Urun_Gider", index=False)
 		df_fees.to_excel(writer, sheet_name="Abone_Aidat", index=False)
 		df_cash.to_excel(writer, sheet_name="Kasa_Defteri", index=False)
+		if plans:
+			try:
+				from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+				ws_m = writer.sheets["Aylik_Menu"]
+				unique_dates = [{"date_iso": d_i} for d_i in sorted({str(r["plan_date"])[:10] for r in plans.values()})]
+				xl_styles, _ = _build_week_day_style_map(unique_dates)
+				hdr_fill = PatternFill("solid", fgColor="0F766E")
+				hdr_font = Font(color="FFFFFF", bold=True)
+				thin_side = Side(style="thin", color="94A3B8")
+				cell_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+				for ci in range(1, ws_m.max_column + 1):
+					hc = ws_m.cell(row=1, column=ci)
+					hc.fill = hdr_fill
+					hc.font = hdr_font
+					hc.border = cell_border
+					hc.alignment = Alignment(horizontal="center", vertical="center")
+				for ri in range(2, ws_m.max_row + 1):
+					d_val = str(ws_m.cell(row=ri, column=1).value or "")[:10]
+					st_xl = xl_styles.get(d_val)
+					if not st_xl:
+						continue
+					r_fill = PatternFill("solid", fgColor=st_xl["bg_word"])
+					r_font = Font(color="0F172A")
+					for ci in range(1, ws_m.max_column + 1):
+						cc = ws_m.cell(row=ri, column=ci)
+						cc.fill = r_fill
+						cc.font = Font(color=st_xl["date_fg_hex"].lstrip("#"), bold=True) if ci == 1 else r_font
+						cc.border = cell_border
+			except Exception:
+				pass
 	return buf.getvalue()
 
 
@@ -3970,9 +4243,10 @@ def _render_tab_menu_planner(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict
 					"Tarih": f"{d['day_num']:02d}.{sel_ym[5:7]}.{sel_ym[:4]} ({d['weekday_name']})",
 					**({"🌙 Sahur (İmsak)": rt_d["sahur"], "🌅 İftar": rt_d["iftar"]} if (sched["ramazan_mode"] and rt_d) else {}),
 					"Öğün": f"{sl} ({t_s})" if t_s else sl,
-					"Yemekler": ", ".join(rec["dish_names"]),
+					"Yemekler": " · ".join(rec["dish_names"]),
 					"Kalori (kcal)": rec.get("total_kcal") or 0.0,
-					"Alerjen": ", ".join(rec.get("allergens") or []) or "—",
+					"Karbonhidrat (g)": rec.get("total_carbs_g") or 0.0,
+					"Alerjen": ", ".join(rec.get("allergens") or []) or "Alerjen: Yok",
 				})
 	ui.markdown("---")
 	ui.markdown(f"#### 📋 Planlanmış Menü Listesi ({len(planned_only_rows)} Öğün — Öğün Girilmemiş Günler Otomatik Çıkarılır)")
@@ -3983,9 +4257,9 @@ def _render_tab_menu_planner(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict
 
 	# A4 Çıktı ve İmzalı Belge Oluşturucu
 	ui.markdown("---")
-	ui.markdown("#### 🖨️ Resmi A4 Menü Çıktısı (Aylık / Haftalık, Saat Bilgili & İsim-Ünvan-İmza)")
-	ui.caption("ℹ️ A4 çıktıda yalnızca menü/öğün girilen günler basılır; öğün girilmemiş günler listeye dahil edilmez ve ayarlardaki hizmet günü/saat bilgisi çıktıya işlenir.")
-	p_c1, p_c2, p_c3, p_c4 = ui.columns([1.4, 1.3, 0.8, 0.8])
+	ui.markdown("#### 🖨️ Resmi A4 Menü Çıktısı (Haftalık Renk Tonlu, Kalori / Karb. / Alerjen & İmzalı)")
+	ui.caption("ℹ️ A4 çıktıda yalnızca menü/öğün girilen günler basılır; her hafta ayrı renk tonuyla ve ardışık günler açık/koyu ton farkıyla renklendirilir.")
+	p_c1, p_c2, p_c3, p_c4, p_c5 = ui.columns([1.2, 1.3, 0.75, 0.85, 0.85])
 	with p_c1:
 		pr_scope = ui.radio("Çıktı Kapsamı", ["📅 Tüm Ay", "🗓️ Seçili Hafta"], horizontal=True, key="caf_print_scope")
 	with p_c2:
@@ -3997,6 +4271,8 @@ def _render_tab_menu_planner(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict
 	with p_c3:
 		pr_kcal = ui.checkbox("Kalori (kcal) Göster", value=True, key="caf_print_kcal")
 	with p_c4:
+		pr_carb = ui.checkbox("Karbonhidrat (g) Göster", value=True, key="caf_print_carbs")
+	with p_c5:
 		pr_al = ui.checkbox("Alerjen Uyarısı Göster", value=True, key="caf_print_al")
 	scope_code = "weekly" if "Hafta" in pr_scope else "monthly"
 	layout_code = "compact_one_page" if "Kompakt" in pr_layout_lbl else ("weekly_grid" if "Izgarası" in pr_layout_lbl else "standard")
@@ -4013,6 +4289,7 @@ def _render_tab_menu_planner(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict
 		week_index=wk_idx,
 		active_slots=active_slots,
 		show_kcal=pr_kcal,
+		show_carbs=pr_carb,
 		show_allergens=pr_al,
 		include_weekends=inc_wknd,
 		layout_mode=layout_code,
@@ -4026,6 +4303,7 @@ def _render_tab_menu_planner(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict
 		week_index=wk_idx,
 		active_slots=active_slots,
 		show_kcal=pr_kcal,
+		show_carbs=pr_carb,
 		show_allergens=pr_al,
 		include_weekends=inc_wknd,
 		layout_mode=layout_code,
