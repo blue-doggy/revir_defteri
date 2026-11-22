@@ -48,6 +48,9 @@ MEAL_SLOTS: list[str] = [
 	"İkindi Ara Öğünü",
 ]
 
+RAMAZAN_EXTRA_SLOTS: list[str] = ["İftar", "Sahur"]
+ALL_MEAL_SLOTS: list[str] = MEAL_SLOTS + RAMAZAN_EXTRA_SLOTS
+
 DISH_CATEGORIES: list[str] = [
 	"Çorba",
 	"Ana Yemek",
@@ -183,9 +186,69 @@ _MEAL_TIME_SETTING_KEYS: dict[str, tuple[str, str]] = {
 }
 
 
+def resolve_province_name(raw_prov: str | None, fallback: str = "Ankara") -> str:
+	"""Verilen il adını 81 il koordinat sözlüğünde Türkçe karakter uyumlu olarak eşler."""
+	clean = re.sub(r"\s+", " ", str(raw_prov or "").strip())
+	try:
+		import school_calendar as scal
+		coords = scal.TR_PROVINCE_COORDS
+	except Exception:
+		return clean or fallback
+	if not clean:
+		return fallback if fallback in coords else "Ankara"
+	if clean in coords:
+		return clean
+	f_clean = _tr_fold(clean)
+	for k in coords:
+		if _tr_fold(k) == f_clean:
+			return k
+	return fallback if fallback in coords else "Ankara"
+
+
+def get_ramazan_times_for_dates(
+	connect_db_fn: Callable[[], sqlite3.Connection] | None,
+	province: str,
+	date_isos: list[str],
+) -> dict[str, dict[str, str]]:
+	"""Seçili il ve tarih listesi için Sahur (İmsak) ve İftar (Akşam) saatlerini döndürür."""
+	prov = resolve_province_name(province)
+	out: dict[str, dict[str, str]] = {}
+	if not date_isos:
+		return out
+	try:
+		import school_calendar as scal
+	except Exception:
+		return out
+
+	use_online_probe = True
+	for dt_s in date_isos:
+		d_iso = str(dt_s)[:10]
+		try:
+			d_obj = date.fromisoformat(d_iso)
+		except Exception:
+			continue
+		if use_online_probe:
+			pt = scal.get_prayer_times_for_province(prov, d_obj, connect_db_fn)
+			if "Yerleşik" in str(pt.get("source") or ""):
+				use_online_probe = False
+		else:
+			pt = scal._compute_offline_prayer_times(prov, d_obj)
+		out[d_iso] = {
+			"sahur": str(pt.get("İmsak") or ""),
+			"iftar": str(pt.get("Akşam") or ""),
+			"source": str(pt.get("source") or ""),
+			"hijri": scal.gregorian_to_hijri_str(d_obj) if hasattr(scal, "gregorian_to_hijri_str") else "",
+		}
+	return out
+
+
 def parse_service_schedule_from_cfg(app_cfg: dict[str, str] | None = None) -> dict[str, Any]:
-	"""Yemekhane ayarlarından haftalık hizmet günü, günlük öğün sayısı, aktif öğünler ve saatleri çözümler."""
+	"""Yemekhane ayarlarından haftalık hizmet günü, günlük öğün sayısı, aktif öğünler, saatler ve Ramazan modunu çözümler."""
 	cfg = app_cfg or {}
+	ramazan_mode = str(cfg.get("cafeteria_ramazan_mode") or "0").strip() == "1"
+	raw_prov = str(cfg.get("cafeteria_ramazan_province") or "").strip() or str(cfg.get("default_province") or "Ankara").strip()
+	ramazan_province = resolve_province_name(raw_prov)
+
 	raw_wd = str(cfg.get("cafeteria_service_weekdays") or "0,1,2,3,4").strip()
 	wds: set[int] = set()
 	for tok in raw_wd.split(","):
@@ -200,9 +263,10 @@ def parse_service_schedule_from_cfg(app_cfg: dict[str, str] | None = None) -> di
 	except Exception:
 		days_pw = len(wds)
 
-	raw_slots = [s.strip() for s in str(cfg.get("cafeteria_active_meal_slots") or "").split(",") if s.strip() in MEAL_SLOTS]
+	valid_pool = ALL_MEAL_SLOTS if ramazan_mode else MEAL_SLOTS
+	raw_slots = [s.strip() for s in str(cfg.get("cafeteria_active_meal_slots") or "").split(",") if s.strip() in valid_pool]
 	try:
-		meals_pd = max(1, min(3, int(float(str(cfg.get("cafeteria_meals_per_day") or (len(raw_slots) or 1))))))
+		meals_pd = max(1, min(5, int(float(str(cfg.get("cafeteria_meals_per_day") or (len(raw_slots) or 1))))))
 	except Exception:
 		meals_pd = len(raw_slots) or 1
 
@@ -217,6 +281,9 @@ def parse_service_schedule_from_cfg(app_cfg: dict[str, str] | None = None) -> di
 	meal_times: dict[str, str] = {}
 	for sl, (cfg_k, def_v) in _MEAL_TIME_SETTING_KEYS.items():
 		meal_times[sl] = str(cfg.get(cfg_k) or def_v).strip() or def_v
+	if ramazan_mode:
+		meal_times["İftar"] = f"{ramazan_province} İftar Vakti"
+		meal_times["Sahur"] = f"{ramazan_province} İmsak Vakti"
 
 	return {
 		"days_per_week": days_pw,
@@ -224,7 +291,10 @@ def parse_service_schedule_from_cfg(app_cfg: dict[str, str] | None = None) -> di
 		"weekday_names": [TR_WEEKDAYS_SHORT[i] for i in sorted(wds)],
 		"meals_per_day": meals_pd,
 		"active_meal_slots": raw_slots,
+		"available_slots": valid_pool,
 		"meal_times": meal_times,
+		"ramazan_mode": ramazan_mode,
+		"ramazan_province": ramazan_province,
 	}
 
 
@@ -858,6 +928,8 @@ _DIABETES_SLOT_MAP: dict[str, str] = {
 	"Sabah Kahvaltısı": "Kahvaltı",
 	"Öğle Yemeği": "Öğle Yemeği",
 	"İkindi Ara Öğünü": "İkindi / Ara Öğün",
+	"İftar": "Akşam Yemeği",
+	"Sahur": "Sahur / Gece",
 }
 
 
@@ -1326,6 +1398,10 @@ def _prepare_a4_menu_context(
 	days_names_s = ", ".join(nm[:3] for nm in sched["weekday_names"])
 	slot_times_parts = [f"{sl}: {meal_times.get(sl, '')}" if meal_times.get(sl) else sl for sl in slots]
 	schedule_line = f"Haftalık Hizmet: {sched['days_per_week']} Gün ({days_names_s}) · Günlük {len(slots)} Öğün · " + " | ".join(slot_times_parts)
+	ramazan_times: dict[str, dict[str, str]] = {}
+	if sched["ramazan_mode"]:
+		ramazan_times = get_ramazan_times_for_dates(connect_db_fn, sched["ramazan_province"], [d["date_iso"] for d in target_days])
+		schedule_line += f" · 🌙 Ramazan Modu ({sched['ramazan_province']} İftar & Sahur Saatleri)"
 	eff_wknds = include_weekends or any(wd >= 5 for wd in sched["weekdays_set"])
 
 	return {
@@ -1340,6 +1416,9 @@ def _prepare_a4_menu_context(
 		"schedule_line": schedule_line,
 		"meta": meta,
 		"eff_wknds": eff_wknds,
+		"ramazan_mode": sched["ramazan_mode"],
+		"ramazan_province": sched["ramazan_province"],
+		"ramazan_times": ramazan_times,
 	}
 
 
@@ -1378,6 +1457,8 @@ def build_menu_a4_html(
 	schedule_line = ctx_p["schedule_line"]
 	meta = ctx_p["meta"]
 	eff_wknds = ctx_p["eff_wknds"]
+	ramazan_mode = bool(ctx_p.get("ramazan_mode"))
+	ramazan_times = ctx_p.get("ramazan_times") or {}
 
 	inst_top = html.escape(meta.get("institution_top_header") or "T.C. MİLLÎ EĞİTİM BAKANLIĞI")
 	school_nm = html.escape(meta.get("school_name") or "Okul / Kurum Yemekhanesi")
@@ -1416,7 +1497,9 @@ def build_menu_a4_html(
 					tds.append("<td class='empty-cell'>—</td>")
 					continue
 				d_iso = d["date_iso"]
-				cell_parts = [f"<div class='grid-dt'>{d['day_num']:02d}.{mm:02d}.{yy}</div>"]
+				rt_d = ramazan_times.get(d_iso) if ramazan_mode else None
+				ram_sub = f"<div style='font-size:8.5px;color:#0f766e;font-weight:700;'>🌙 S:{rt_d['sahur']} · 🌅 İ:{rt_d['iftar']}</div>" if rt_d else ""
+				cell_parts = [f"<div class='grid-dt'>{d['day_num']:02d}.{mm:02d}.{yy}{ram_sub}</div>"]
 				for sl in slots:
 					rec = plans.get((d_iso, sl))
 					if rec and rec.get("dish_names"):
@@ -1439,7 +1522,13 @@ def build_menu_a4_html(
 		rows_html = []
 		for d in target_days:
 			d_iso = d["date_iso"]
-			dt_tr = f"{d['day_num']:02d}.{mm:02d}.{yy}<br><small>{html.escape(d['weekday_name'])}</small>"
+			rt_d = ramazan_times.get(d_iso) if ramazan_mode else None
+			ram_line = (
+				f"<br><small style='color:#0f766e;font-weight:700;'>🌙 S:{rt_d['sahur']} · 🌅 İ:{rt_d['iftar']}</small>"
+				if (rt_d and is_compact)
+				else (f"<br><small style='color:#0f766e;font-weight:700;'>🌙 Sahur: {rt_d['sahur']}<br>🌅 İftar: {rt_d['iftar']}</small>" if rt_d else "")
+			)
+			dt_tr = f"{d['day_num']:02d}.{mm:02d}.{yy}<br><small>{html.escape(d['weekday_name'])}</small>{ram_line}"
 			day_kcal = 0.0
 			cells = [f"<td class='col-date'>{dt_tr}</td>"]
 			for sl in slots:
@@ -1627,6 +1716,8 @@ def build_menu_a4_docx(
 	schedule_line = ctx_p["schedule_line"]
 	meta = ctx_p["meta"]
 	eff_wknds = ctx_p["eff_wknds"]
+	ramazan_mode = bool(ctx_p.get("ramazan_mode"))
+	ramazan_times = ctx_p.get("ramazan_times") or {}
 
 	inst_top = meta.get("institution_top_header") or "T.C. MİLLÎ EĞİTİM BAKANLIĞI"
 	school_nm = meta.get("school_name") or "Okul / Kurum Yemekhanesi"
@@ -1727,7 +1818,9 @@ def build_menu_a4_docx(
 					cp.add_run("—").font.size = Pt(body_fsz)
 					continue
 				d_iso = d["date_iso"]
-				rd = cp.add_run(f"{d['day_num']:02d}.{mm:02d}.{yy}\n")
+				rt_d = ramazan_times.get(d_iso) if ramazan_mode else None
+				ram_g = f"\n🌙 S:{rt_d['sahur']} · İ:{rt_d['iftar']}\n" if rt_d else "\n"
+				rd = cp.add_run(f"{d['day_num']:02d}.{mm:02d}.{yy}{ram_g}")
 				rd.font.name = "Calibri"
 				rd.font.size = Pt(body_fsz)
 				rd.bold = True
@@ -1766,12 +1859,18 @@ def build_menu_a4_docx(
 
 		for ri, d in enumerate(target_days, start=1):
 			d_iso = d["date_iso"]
+			rt_d = ramazan_times.get(d_iso) if ramazan_mode else None
 			bg = "FFFFFF" if ri % 2 == 1 else "F8FAFC"
 			c0 = tbl.cell(ri, 0)
 			_style_docx_cell(dx, c0, bg, compact=is_compact)
 			p0 = c0.paragraphs[0]
 			p0.paragraph_format.space_after = Pt(0)
-			dt_lbl = f"{d['day_num']:02d}.{mm:02d} {d['weekday_name'][:3]}" if is_compact else f"{d['day_num']:02d}.{mm:02d}.{yy}\n{d['weekday_name']}"
+			ram_txt = (
+				f"\nS:{rt_d['sahur']} İ:{rt_d['iftar']}"
+				if (rt_d and is_compact)
+				else (f"\nSahur: {rt_d['sahur']}\nİftar: {rt_d['iftar']}" if rt_d else "")
+			)
+			dt_lbl = (f"{d['day_num']:02d}.{mm:02d} {d['weekday_name'][:3]}" if is_compact else f"{d['day_num']:02d}.{mm:02d}.{yy}\n{d['weekday_name']}") + ram_txt
 			r0 = p0.add_run(dt_lbl)
 			r0.font.name = "Calibri"
 			r0.font.size = Pt(body_fsz)
@@ -3040,6 +3139,15 @@ def build_cafeteria_full_workbook_excel(connect_db_fn: Callable[[], sqlite3.Conn
 	plans = get_menu_plans_for_month(connect_db_fn, ym)
 	purchases, items = get_purchases_and_items(connect_db_fn, year_month=ym)
 	cash = get_cash_summary_and_diner_balances(connect_db_fn, ym)
+	app_cfg_xl: dict[str, str] = {}
+	try:
+		with connect_db_fn() as conn:
+			for sr in conn.execute("SELECT key, value FROM app_settings").fetchall():
+				app_cfg_xl[str(sr["key"])] = str(sr["value"])
+	except Exception:
+		pass
+	sched_xl = parse_service_schedule_from_cfg(app_cfg_xl)
+	ram_xl = get_ramazan_times_for_dates(connect_db_fn, sched_xl["ramazan_province"], [r["plan_date"] for r in plans.values()]) if sched_xl["ramazan_mode"] else {}
 
 	df_dishes = pd.DataFrame([
 		{
@@ -3057,6 +3165,10 @@ def build_cafeteria_full_workbook_excel(connect_db_fn: Callable[[], sqlite3.Conn
 		{
 			"Tarih": rec["plan_date"],
 			"Öğün": rec["meal_slot"],
+			**({
+				"Sahur (İmsak)": ram_xl.get(rec["plan_date"], {}).get("sahur", ""),
+				"İftar": ram_xl.get(rec["plan_date"], {}).get("iftar", ""),
+			} if sched_xl["ramazan_mode"] else {}),
 			"Yemekler": ", ".join(rec.get("dish_names") or []),
 			"Kalori (kcal)": rec["total_kcal"],
 			"Karbonhidrat (g)": rec["total_carbs_g"],
@@ -3541,8 +3653,8 @@ def _render_tab_menu_planner(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict
 	with cfg_c1:
 		active_slots = ui.multiselect(
 			"Planlanacak Öğünler",
-			MEAL_SLOTS,
-			default=sched["active_meal_slots"],
+			sched["available_slots"],
+			default=[s for s in sched["active_meal_slots"] if s in sched["available_slots"]] or ["Öğle Yemeği"],
 			key="caf_menu_active_slots",
 		) or sched["active_meal_slots"]
 	with cfg_c2:
@@ -3554,12 +3666,18 @@ def _render_tab_menu_planner(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict
 	workdays = [d for d in days_info if d.get("is_workday")]
 	holidays_in_month = [d for d in days_info if d.get("is_holiday")]
 	plans = get_menu_plans_for_month(connect_db_fn, sel_ym)
+	ram_times_planner = (
+		get_ramazan_times_for_dates(connect_db_fn, sched["ramazan_province"], [d["date_iso"] for d in workdays])
+		if sched["ramazan_mode"]
+		else {}
+	)
 
 	tot_planned_days = len({p[0] for p in plans.keys()})
 	slot_times_disp = " · ".join(f"{sl} ({sched['meal_times'][sl]})" for sl in active_slots if sched["meal_times"].get(sl))
+	ram_info_bit = f" · 🌙 **Ramazan Modu ({sched['ramazan_province']})**" if sched["ramazan_mode"] else ""
 	ui.info(
 		f"📅 **{_fmt_ym(sel_ym)} Hizmet & İş Günü Özeti:** Haftada **{sched['days_per_week']} gün**, günde **{len(active_slots)} öğün** "
-		f"({slot_times_disp}) · Ay toplamı **{len(workdays)} hizmet günü** · Planlanmış gün: **{tot_planned_days}**"
+		f"({slot_times_disp}) · Ay toplamı **{len(workdays)} hizmet günü** · Planlanmış gün: **{tot_planned_days}**{ram_info_bit}"
 		+ (f" · Resmi/İdari Tatil ({len(holidays_in_month)}): " + ", ".join(f"{h['day_num']} ({h['holiday_title']})" for h in holidays_in_month[:4]) if holidays_in_month else "")
 	)
 
@@ -3768,8 +3886,10 @@ def _render_tab_menu_planner(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict
 	for d in weeks[wk_idx]:
 		d_iso = d["date_iso"]
 		half_badge = f" · ⏳ {d['holiday_title']}" if d.get("is_half_day") else ""
+		rt_day = ram_times_planner.get(d_iso)
+		ram_badge = f" · 🌙 Sahur: {rt_day['sahur']} · 🌅 İftar: {rt_day['iftar']}" if rt_day else ""
 		with ui.container(border=True):
-			ui.markdown(f"**📆 {d['day_num']:02d}.{sel_ym[5:7]}.{sel_ym[:4]} — {d['weekday_name']}**{html.escape(half_badge)}")
+			ui.markdown(f"**📆 {d['day_num']:02d}.{sel_ym[5:7]}.{sel_ym[:4]} — {d['weekday_name']}**{html.escape(half_badge)}{html.escape(ram_badge)}")
 			day_tot_kcal = 0.0
 			for sl in active_slots:
 				rec = plans.get((d_iso, sl))
@@ -3841,12 +3961,14 @@ def _render_tab_menu_planner(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict
 		d_iso = d["date_iso"]
 		if not any(plans.get((d_iso, sl)) and plans[(d_iso, sl)].get("dish_names") for sl in active_slots):
 			continue
+		rt_d = ram_times_planner.get(d_iso)
 		for sl in active_slots:
 			rec = plans.get((d_iso, sl))
 			if rec and rec.get("dish_names"):
 				t_s = sched["meal_times"].get(sl, "")
 				planned_only_rows.append({
 					"Tarih": f"{d['day_num']:02d}.{sel_ym[5:7]}.{sel_ym[:4]} ({d['weekday_name']})",
+					**({"🌙 Sahur (İmsak)": rt_d["sahur"], "🌅 İftar": rt_d["iftar"]} if (sched["ramazan_mode"] and rt_d) else {}),
 					"Öğün": f"{sl} ({t_s})" if t_s else sl,
 					"Yemekler": ", ".join(rec["dish_names"]),
 					"Kalori (kcal)": rec.get("total_kcal") or 0.0,
@@ -4678,7 +4800,17 @@ def _render_tab_settings_and_exports(ctx_api: dict[str, Any], sel_ym: str, app_c
 	ui.markdown("### ⚙️ Yemekhane Ayarları, Haftalık Çalışma / Öğün Saatleri, İmza & Toplu Excel Çıktısı")
 
 	with ui.container(border=True):
-		ui.markdown("##### 🗓️ Haftalık Yemek Günü, Günlük Öğün Sayısı, Yemek Saatleri & İmza Ayarları")
+		ui.markdown("##### 🗓️ Haftalık Yemek Günü, Günlük Öğün Sayısı, Yemek Saatleri, Ramazan Modu & İmza Ayarları")
+		try:
+			import school_calendar as scal
+			all_prov_names = sorted(scal.TR_PROVINCE_COORDS.keys())
+		except Exception:
+			all_prov_names = ["Ankara", "İstanbul", "İzmir"]
+		auto_prov_lbl = f"Kurum İli (Otomatik - {resolve_province_name(app_cfg.get('default_province') or 'Ankara')})"
+		prov_choices = [auto_prov_lbl] + all_prov_names
+		cur_ram_prov = str(app_cfg.get("cafeteria_ramazan_province") or "").strip()
+		cur_prov_val = cur_ram_prov if cur_ram_prov in all_prov_names else auto_prov_lbl
+
 		with ui.form("caf_form_settings"):
 			wd_name_to_idx = {TR_WEEKDAYS_SHORT[i]: i for i in range(7)}
 			default_wd_names = [TR_WEEKDAYS_SHORT[i] for i in sorted(sched["weekdays_set"])]
@@ -4688,13 +4820,22 @@ def _render_tab_settings_and_exports(ctx_api: dict[str, Any], sel_ym: str, app_c
 			sel_wds_in = hs2.multiselect("Yemek Çıkan Günler", list(wd_name_to_idx.keys()), default=default_wd_names)
 
 			hs3, hs4 = ui.columns([1.0, 2.2])
-			meals_pd_in = hs3.number_input("Günde Kaç Öğün Yemek Çıkıyor?", min_value=1, max_value=3, step=1, value=sched["meals_per_day"])
-			sel_slots_in = hs4.multiselect("Aktif Yemek Öğünleri", MEAL_SLOTS, default=sched["active_meal_slots"])
+			meals_pd_in = hs3.number_input("Günde Kaç Öğün Yemek Çıkıyor?", min_value=1, max_value=5, step=1, value=sched["meals_per_day"])
+			sel_slots_in = hs4.multiselect("Aktif Yemek Öğünleri (Ramazan Modu için İftar / Sahur da seçilebilir)", ALL_MEAL_SLOTS, default=sched["active_meal_slots"])
 
 			tm1, tm2, tm3 = ui.columns(3)
 			t_bkf_in = tm1.text_input("Sabah Kahvaltısı Saati", value=sched["meal_times"]["Sabah Kahvaltısı"], placeholder="08:00 - 08:45")
 			t_lun_in = tm2.text_input("Öğle Yemeği Saati", value=sched["meal_times"]["Öğle Yemeği"], placeholder="12:00 - 13:00")
 			t_snk_in = tm3.text_input("İkindi Ara Öğünü Saati", value=sched["meal_times"]["İkindi Ara Öğünü"], placeholder="15:00 - 15:30")
+
+			rm1, rm2 = ui.columns([1.5, 1.5], vertical_alignment="center")
+			ram_on_in = rm1.checkbox("🌙 Ramazan Modu Aktif (Menüye İl Bazlı İftar ve Sahur Saatlerini İşle)", value=sched["ramazan_mode"])
+			ram_prov_in = rm2.selectbox("İftar & Sahur İçin İl Seçimi", prov_choices, index=prov_choices.index(cur_prov_val) if cur_prov_val in prov_choices else 0)
+
+			if sched["ramazan_mode"]:
+				today_rt = get_ramazan_times_for_dates(connect_db_fn, sched["ramazan_province"], [date.today().isoformat()]).get(date.today().isoformat(), {})
+				if today_rt:
+					ui.info(f"🌙 **{sched['ramazan_province']} Bugünkü Vakitler ({date.today().isoformat()}):** Sahur (İmsak): **{today_rt.get('sahur')}** · İftar (Akşam): **{today_rt.get('iftar')}** _({today_rt.get('source')})_")
 
 			ui.markdown("---")
 			sc1, sc2 = ui.columns(2)
@@ -4726,17 +4867,18 @@ def _render_tab_settings_and_exports(ctx_api: dict[str, Any], sel_ym: str, app_c
 					chosen_wd_idxs = picked_wd_idxs
 					final_days_pw = len(chosen_wd_idxs)
 
-				picked_slots = [s for s in sel_slots_in if s in MEAL_SLOTS]
+				picked_slots = [s for s in sel_slots_in if s in ALL_MEAL_SLOTS]
 				if picked_slots != sched["active_meal_slots"] and picked_slots:
 					chosen_slots = picked_slots
 					final_meals_pd = len(chosen_slots)
 				elif int(meals_pd_in) != sched["meals_per_day"] or not picked_slots:
-					final_meals_pd = max(1, min(3, int(meals_pd_in)))
-					chosen_slots = ["Öğle Yemeği"] if final_meals_pd == 1 else (["Sabah Kahvaltısı", "Öğle Yemeği"] if final_meals_pd == 2 else list(MEAL_SLOTS))
+					final_meals_pd = max(1, min(5, int(meals_pd_in)))
+					chosen_slots = ["Öğle Yemeği"] if final_meals_pd == 1 else (["Sabah Kahvaltısı", "Öğle Yemeği"] if final_meals_pd == 2 else ALL_MEAL_SLOTS[:final_meals_pd])
 				else:
 					chosen_slots = picked_slots
 					final_meals_pd = len(chosen_slots)
 
+				prov_to_save = "" if ram_prov_in == auto_prov_lbl else ram_prov_in
 				save_cfg_fn({
 					"cafeteria_service_days_per_week": str(final_days_pw),
 					"cafeteria_service_weekdays": ",".join(str(i) for i in chosen_wd_idxs),
@@ -4745,6 +4887,8 @@ def _render_tab_settings_and_exports(ctx_api: dict[str, Any], sel_ym: str, app_c
 					"cafeteria_time_breakfast": t_bkf_in.strip() or "08:00 - 08:45",
 					"cafeteria_time_lunch": t_lun_in.strip() or "12:00 - 13:00",
 					"cafeteria_time_snack": t_snk_in.strip() or "15:00 - 15:30",
+					"cafeteria_ramazan_mode": "1" if ram_on_in else "0",
+					"cafeteria_ramazan_province": prov_to_save,
 					"cafeteria_default_meal_price": str(def_stu_p),
 					"cafeteria_default_staff_price": str(def_stf_p),
 					"cafeteria_sig1_role": s1_r.strip(),
@@ -4758,7 +4902,7 @@ def _render_tab_settings_and_exports(ctx_api: dict[str, Any], sel_ym: str, app_c
 				ui.session_state.pop("caf_menu_active_slots", None)
 				if callable(ctx_api.get("clear_all_data_caches")):
 					ctx_api["clear_all_data_caches"]()
-				ui.success("✅ Yemekhane çalışma düzeni, yemek saatleri, tarife ve imza ayarları kaydedildi.")
+				ui.success("✅ Yemekhane çalışma düzeni, Ramazan modu, yemek saatleri, tarife ve imza ayarları kaydedildi.")
 				ui.rerun()
 
 	with ui.expander("🏫 A4 Menü İçin Resmi Okul Logosu / Mühür Yükle (PNG/JPG)", expanded=False):

@@ -948,6 +948,143 @@ class TestCafeteriaModule(unittest.TestCase):
         emp_docx = _extract_docx_all_text(caf.build_menu_a4_docx(self.connect, year_month="2026-12", school_meta=cfg_now))
         self.assertIn("öğün girilmiş gün bulunmamaktadır", emp_docx)
 
+    def test_ramazan_mode_province_iftar_sahur_in_menu_and_exports(self):
+        # 1. Province normalization (ASCII Turkish tolerant + safe fallback)
+        self.assertEqual(caf.resolve_province_name("istanbul"), "İstanbul")
+        self.assertEqual(caf.resolve_province_name("Kahramanmaras"), "Kahramanmaraş")
+        self.assertEqual(caf.resolve_province_name("BilinmeyenIl", fallback="Ankara"), "Ankara")
+
+        # 2. Offline prayer calculation produces deterministic province-specific Sahur (İmsak) & İftar (Akşam)
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("offline")):
+            van_t = caf.get_ramazan_times_for_dates(self.connect, "Van", ["2026-03-02"])
+            ist_t = caf.get_ramazan_times_for_dates(self.connect, "İstanbul", ["2026-03-02"])
+
+        self.assertIn("2026-03-02", van_t)
+        self.assertIn("2026-03-02", ist_t)
+        van_sahur, van_iftar = van_t["2026-03-02"]["sahur"], van_t["2026-03-02"]["iftar"]
+        ist_sahur, ist_iftar = ist_t["2026-03-02"]["sahur"], ist_t["2026-03-02"]["iftar"]
+        for tm in (van_sahur, van_iftar, ist_sahur, ist_iftar):
+            self.assertRegex(tm, r"^\d{2}:\d{2}$")
+        # Eastern Van always has earlier Sahur and İftar than western İstanbul
+        self.assertLess(van_sahur, ist_sahur)
+        self.assertLess(van_iftar, ist_iftar)
+
+        # 3. Enable Ramazan Modu in app settings and verify schedule parser exposes İftar & Sahur slots
+        persantil.save_app_settings({
+            "school_name": "Örnek Anadolu Lisesi",
+            "cafeteria_ramazan_mode": "1",
+            "cafeteria_ramazan_province": "İstanbul",
+            "cafeteria_service_days_per_week": "5",
+            "cafeteria_service_weekdays": "0,1,2,3,4",
+            "cafeteria_meals_per_day": "2",
+            "cafeteria_active_meal_slots": "İftar,Sahur",
+        })
+        cfg_ram = persantil.get_app_settings()
+        sched = caf.parse_service_schedule_from_cfg(cfg_ram)
+        self.assertTrue(sched["ramazan_mode"])
+        self.assertEqual(sched["ramazan_province"], "İstanbul")
+        self.assertEqual(sched["available_slots"], caf.ALL_MEAL_SLOTS)
+        self.assertEqual(sched["active_meal_slots"], ["İftar", "Sahur"])
+
+        # Disabling Ramazan Modu hides İftar/Sahur cleanly
+        sched_off = caf.parse_service_schedule_from_cfg({**cfg_ram, "cafeteria_ramazan_mode": "0"})
+        self.assertFalse(sched_off["ramazan_mode"])
+        self.assertEqual(sched_off["available_slots"], caf.MEAL_SLOTS)
+        self.assertNotIn("İftar", sched_off["active_meal_slots"])
+
+        # 4. Create dishes and plan İftar + Sahur on 2026-03-02
+        d_iftar = caf.upsert_dish_with_ingredients(
+            self.connect,
+            name="Ramazan Mercimek Çorbası",
+            category="Çorba",
+            portion_g=250.0,
+            ingredients=[
+                {"ingredient_name": "Mercimek", "amount": 60.0, "unit": "g", "kcal_portion": 200.0, "carbs_portion_g": 34.0, "allergen_tag": ""},
+            ],
+            source="manual",
+        )
+        d_sahur = caf.upsert_dish_with_ingredients(
+            self.connect,
+            name="Sahur Kahvaltı Tabağı",
+            category="Kahvaltı",
+            portion_g=220.0,
+            ingredients=[
+                {"ingredient_name": "Beyaz Peynir", "amount": 50.0, "unit": "g", "kcal_portion": 145.0, "carbs_portion_g": 1.5, "allergen_tag": "Süt"},
+            ],
+            source="manual",
+        )
+        caf.upsert_menu_plan_slot(self.connect, plan_date="2026-03-02", meal_slot="İftar", dish_ids=[d_iftar])
+        caf.upsert_menu_plan_slot(self.connect, plan_date="2026-03-02", meal_slot="Sahur", dish_ids=[d_sahur])
+
+        # 5. A4 HTML (standard & weekly_grid), A4 Word (standard & weekly_grid), and Excel workbook include İftar/Sahur & times
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("offline")):
+            a4_std_html = caf.build_menu_a4_html(self.connect, year_month="2026-03", layout_mode="standard", school_meta=cfg_ram)
+            a4_wk_html = caf.build_menu_a4_html(self.connect, year_month="2026-03", layout_mode="weekly_grid", school_meta=cfg_ram)
+            a4_std_docx = caf.build_menu_a4_docx(self.connect, year_month="2026-03", layout_mode="standard", school_meta=cfg_ram)
+            a4_wk_docx = caf.build_menu_a4_docx(self.connect, year_month="2026-03", layout_mode="weekly_grid", school_meta=cfg_ram)
+            wb_bytes = caf.build_cafeteria_full_workbook_excel(self.connect, "2026-03")
+
+        for html_out in (a4_std_html, a4_wk_html):
+            self.assertIn("Ramazan Modu", html_out)
+            self.assertIn("İstanbul", html_out)
+            self.assertIn(ist_sahur, html_out)
+            self.assertIn(ist_iftar, html_out)
+            self.assertIn("Ramazan Mercimek Çorbası", html_out)
+            self.assertIn("Sahur Kahvaltı Tabağı", html_out)
+
+        for raw_docx in (a4_std_docx, a4_wk_docx):
+            d_txt = _extract_docx_all_text(raw_docx)
+            self.assertIn("Ramazan Modu", d_txt)
+            self.assertIn("İstanbul", d_txt)
+            self.assertIn(ist_sahur, d_txt)
+            self.assertIn(ist_iftar, d_txt)
+            self.assertIn("Ramazan Mercimek Çorbası", d_txt)
+            self.assertIn("Sahur Kahvaltı Tabağı", d_txt)
+
+        wb = openpyxl.load_workbook(io.BytesIO(wb_bytes), data_only=True)
+        try:
+            ws = wb["Aylik_Menu"]
+            rows = list(ws.iter_rows(values_only=True))
+            headers = list(rows[0])
+            self.assertIn("Sahur (İmsak)", headers)
+            self.assertIn("İftar", headers)
+            sahur_idx = headers.index("Sahur (İmsak)")
+            iftar_idx = headers.index("İftar")
+            data_rows = [r for r in rows[1:] if r and r[0] == "2026-03-02"]
+            self.assertTrue(data_rows)
+            self.assertEqual(data_rows[0][sahur_idx], ist_sahur)
+            self.assertEqual(data_rows[0][iftar_idx], ist_iftar)
+        finally:
+            wb.close()
+
+        # 6. Headless UI rendering of Menu Planner & Settings tabs with Ramazan Modu active
+        revir_ui.reset_session()
+        revir_ui.session_state["caf_global_sel_ym"] = "2026-03"
+        ctx_api = {
+            "connect_db": self.connect,
+            "get_app_settings": persantil.get_app_settings,
+            "save_app_settings": persantil.save_app_settings,
+            "_get_active_gemini_config": persantil._get_active_gemini_config,
+            "mask_kvkk_value": persantil.mask_kvkk_value,
+            "clear_all_data_caches": persantil.clear_all_data_caches,
+            "is_section_visible": persantil.is_section_visible,
+        }
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("offline")):
+            out_menu = revir_ui.run_action_headless(
+                lambda: caf._render_tab_menu_planner(ctx_api, "2026-03", cfg_ram),
+                {"action": "render"},
+            )
+            out_cfg = revir_ui.run_action_headless(
+                lambda: caf._render_tab_settings_and_exports(ctx_api, "2026-03", cfg_ram),
+                {"action": "render"},
+            )
+        self.assertNotIn("Çalışma Zamanı Hatası", out_menu["main_html"])
+        self.assertIn("Ramazan Modu", out_menu["main_html"])
+        self.assertIn(ist_sahur, out_menu["main_html"])
+        self.assertIn(ist_iftar, out_menu["main_html"])
+        self.assertNotIn("Çalışma Zamanı Hatası", out_cfg["main_html"])
+        self.assertIn("Ramazan Modu", out_cfg["main_html"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -125,7 +125,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.20.0"
+_DEFAULT_APP_VERSION = "1.21.0"
 
 
 def _load_app_version() -> str:
@@ -318,6 +318,8 @@ DEFAULT_APP_SETTINGS: dict[str, str] = {
 	"cafeteria_time_breakfast": "08:00 - 08:45",
 	"cafeteria_time_lunch": "12:00 - 13:00",
 	"cafeteria_time_snack": "15:00 - 15:30",
+	"cafeteria_ramazan_mode": "0",
+	"cafeteria_ramazan_province": "",
 }
 
 INCIDENT_LOCATIONS = [
