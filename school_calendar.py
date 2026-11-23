@@ -1000,6 +1000,258 @@ def save_ai_generated_events_to_db(events: list[dict[str, Any]], connect_db_fn: 
 	return added
 
 
+# Resmi MEB Çalışma Takvimi Ön Tanımlı Eğitim Yılı, Ara Tatil ve Yarıyıl (Sömestr) Tarihleri
+MEB_ACADEMIC_CALENDAR_PRESETS: dict[str, dict[str, str]] = {
+	"2024-2025": {
+		"start_date": "2024-09-09",
+		"break1_start": "2024-11-11",
+		"break1_end": "2024-11-15",
+		"semester_start": "2025-01-20",
+		"semester_end": "2025-01-31",
+		"break2_start": "2025-03-31",
+		"break2_end": "2025-04-04",
+		"end_date": "2025-06-20",
+	},
+	"2025-2026": {
+		"start_date": "2025-09-08",
+		"break1_start": "2025-11-10",
+		"break1_end": "2025-11-14",
+		"semester_start": "2026-01-19",
+		"semester_end": "2026-01-30",
+		"break2_start": "2026-03-16",
+		"break2_end": "2026-03-20",
+		"end_date": "2026-06-26",
+	},
+	"2026-2027": {
+		"start_date": "2026-09-07",
+		"break1_start": "2026-11-09",
+		"break1_end": "2026-11-13",
+		"semester_start": "2027-01-18",
+		"semester_end": "2027-01-29",
+		"break2_start": "2027-04-05",
+		"break2_end": "2027-04-09",
+		"end_date": "2027-06-18",
+	},
+	"2027-2028": {
+		"start_date": "2027-09-06",
+		"break1_start": "2027-11-08",
+		"break1_end": "2027-11-12",
+		"semester_start": "2028-01-24",
+		"semester_end": "2028-02-04",
+		"break2_start": "2028-04-10",
+		"break2_end": "2028-04-14",
+		"end_date": "2028-06-16",
+	},
+	"2028-2029": {
+		"start_date": "2028-09-11",
+		"break1_start": "2028-11-13",
+		"break1_end": "2028-11-17",
+		"semester_start": "2029-01-22",
+		"semester_end": "2029-02-02",
+		"break2_start": "2029-04-09",
+		"break2_end": "2029-04-13",
+		"end_date": "2029-06-22",
+	},
+}
+
+
+def get_default_meb_academic_break_dates(
+	academic_year_name: str,
+	start_date_iso: str = "",
+	end_date_iso: str = "",
+) -> dict[str, str]:
+	"""
+	Eğitim öğretim yılı adına (örn. '2026-2027') göre MEB standart başlangıç, bitiş,
+	1. dönem ara tatili, yarıyıl (sömestr) tatili ve 2. dönem ara tatili tarihlerini döndürür.
+	"""
+	ay_norm = re.sub(r"\s+", "", str(academic_year_name or "")).replace("/", "-").replace("_", "-")
+	m_yr = re.search(r"(20\d{2})-(20\d{2})", ay_norm)
+	if m_yr:
+		key_yr = f"{m_yr.group(1)}-{m_yr.group(2)}"
+		if key_yr in MEB_ACADEMIC_CALENDAR_PRESETS:
+			return dict(MEB_ACADEMIC_CALENDAR_PRESETS[key_yr])
+		y1, y2 = int(m_yr.group(1)), int(m_yr.group(2))
+	else:
+		try:
+			y1 = date.fromisoformat(str(start_date_iso)[:10]).year
+		except Exception:
+			y1 = date.today().year
+		y2 = y1 + 1
+		key_yr = f"{y1}-{y2}"
+		if key_yr in MEB_ACADEMIC_CALENDAR_PRESETS:
+			return dict(MEB_ACADEMIC_CALENDAR_PRESETS[key_yr])
+
+	sd = _nth_weekday_of_month(y1, 9, 0, 2)  # Eylül 2. Pazartesi
+	b1_s = _nth_weekday_of_month(y1, 11, 0, 2)  # Kasım 2. Pazartesi
+	b1_e = b1_s + timedelta(days=4)
+	sem_s = _nth_weekday_of_month(y2, 1, 0, 3)  # Ocak 3. Pazartesi
+	sem_e = sem_s + timedelta(days=11)  # 2. Cuma
+	b2_s = _nth_weekday_of_month(y2, 4, 0, 1)  # Nisan 1. Pazartesi
+	b2_e = b2_s + timedelta(days=4)
+	ed = _nth_weekday_of_month(y2, 6, 4, 3)  # Haziran 3. Cuma
+	return {
+		"start_date": sd.isoformat(),
+		"break1_start": b1_s.isoformat(),
+		"break1_end": b1_e.isoformat(),
+		"semester_start": sem_s.isoformat(),
+		"semester_end": sem_e.isoformat(),
+		"break2_start": b2_s.isoformat(),
+		"break2_end": b2_e.isoformat(),
+		"end_date": ed.isoformat(),
+	}
+
+
+def sync_academic_year_breaks_to_calendar(
+	connect_db_fn: Callable,
+	*,
+	academic_year_name: str,
+	start_date: str,
+	end_date: str,
+	break1_start: str,
+	break1_end: str,
+	semester_start: str,
+	semester_end: str,
+	break2_start: str,
+	break2_end: str,
+) -> dict[str, int]:
+	"""
+	Eğitim öğretim yılı açılış/kapanış günlerini, 1. ve 2. dönem ara tatillerini ve
+	yarıyıl (sömestr / 15 tatil) günlerini calendar_events tablosuna işler.
+	"""
+	ay_lbl = (academic_year_name or "").strip() or "Eğitim Yılı"
+	now_iso = datetime.now().isoformat(timespec="seconds")
+
+	def _parse_d(val: str) -> date | None:
+		try:
+			return date.fromisoformat(str(val or "").strip()[:10])
+		except Exception:
+			return None
+
+	def _iter_days(d_start: date | None, d_end: date | None, max_span: int = 35) -> list[date]:
+		if not d_start or not d_end or d_end < d_start:
+			return []
+		span = min((d_end - d_start).days, max_span)
+		return [d_start + timedelta(days=i) for i in range(span + 1)]
+
+	d_start = _parse_d(start_date)
+	d_end = _parse_d(end_date)
+	d_b1_s, d_b1_e = _parse_d(break1_start), _parse_d(break1_end)
+	d_sem_s, d_sem_e = _parse_d(semester_start), _parse_d(semester_end)
+	d_b2_s, d_b2_e = _parse_d(break2_start), _parse_d(break2_end)
+
+	b1_days = _iter_days(d_b1_s, d_b1_e)
+	sem_days = _iter_days(d_sem_s, d_sem_e)
+	b2_days = _iter_days(d_b2_s, d_b2_e)
+
+	records_to_insert: list[tuple[str, str, str, str, int, int, str, str]] = []
+
+	if d_start:
+		records_to_insert.append((
+			d_start.isoformat(),
+			f"🏫 {ay_lbl} Eğitim Öğretim Yılı Başlangıcı (1. Dönem Açılış)",
+			"belirli_gun",
+			"event",
+			0,
+			0,
+			"Öğrenciler, Öğretmenler ve Okul Sağlığı Ekibi",
+			f"{ay_lbl} eğitim öğretim yılı 1. dönem ders başlangıcı.",
+		))
+
+	for idx, cur_d in enumerate(b1_days, start=1):
+		records_to_insert.append((
+			cur_d.isoformat(),
+			f"🍂 1. Dönem Ara Tatili ({idx}. Gün)",
+			"secim_idari_tatil",
+			"ballot",
+			1,
+			0,
+			"Öğrenciler ve Öğretmenler",
+			f"{ay_lbl} MEB 1. Dönem Kasım Ara Tatili ({d_b1_s.strftime('%d.%m.%Y')} - {d_b1_e.strftime('%d.%m.%Y')}).",
+		))
+
+	if d_sem_s:
+		first_term_end = d_sem_s - timedelta(days=3 if d_sem_s.weekday() == 0 else 1)
+		records_to_insert.append((
+			first_term_end.isoformat(),
+			f"🎓 1. Dönem Sonu (Karne Günü)",
+			"belirli_gun",
+			"event",
+			0,
+			0,
+			"Öğrenciler ve Öğretmenler",
+			f"{ay_lbl} eğitim öğretim yılı 1. dönem karne günü.",
+		))
+
+	for idx, cur_d in enumerate(sem_days, start=1):
+		records_to_insert.append((
+			cur_d.isoformat(),
+			f"⛄ Yarıyıl Tatili / Sömestr ({idx}. Gün)",
+			"secim_idari_tatil",
+			"ballot",
+			1,
+			0,
+			"Öğrenciler ve Öğretmenler",
+			f"{ay_lbl} MEB Yarıyıl / Sömestr (15 Tatil) Dönemi ({d_sem_s.strftime('%d.%m.%Y')} - {d_sem_e.strftime('%d.%m.%Y')}).",
+		))
+
+	if d_sem_e:
+		second_term_start = d_sem_e + timedelta(days=3 if d_sem_e.weekday() == 4 else 1)
+		records_to_insert.append((
+			second_term_start.isoformat(),
+			f"🏫 2. Dönem Başlangıcı",
+			"belirli_gun",
+			"event",
+			0,
+			0,
+			"Öğrenciler ve Öğretmenler",
+			f"{ay_lbl} eğitim öğretim yılı 2. dönem ders başlangıcı.",
+		))
+
+	for idx, cur_d in enumerate(b2_days, start=1):
+		records_to_insert.append((
+			cur_d.isoformat(),
+			f"🌸 2. Dönem Ara Tatili ({idx}. Gün)",
+			"secim_idari_tatil",
+			"ballot",
+			1,
+			0,
+			"Öğrenciler ve Öğretmenler",
+			f"{ay_lbl} MEB 2. Dönem Ara Tatili ({d_b2_s.strftime('%d.%m.%Y')} - {d_b2_e.strftime('%d.%m.%Y')}).",
+		))
+
+	if d_end:
+		records_to_insert.append((
+			d_end.isoformat(),
+			f"🏁 {ay_lbl} Eğitim Öğretim Yılı Sonu (Karne & Kapanış Günü)",
+			"belirli_gun",
+			"event",
+			0,
+			0,
+			"Öğrenciler, Öğretmenler ve Okul Sağlığı Ekibi",
+			f"{ay_lbl} eğitim öğretim yılı 2. dönem sonu ve yaz tatili başlangıcı.",
+		))
+
+	with connect_db_fn() as conn:
+		conn.execute("DELETE FROM calendar_events WHERE source = 'meb_akademik_takvim'")
+		for ev_date, title, cat, sym, is_hol, is_half, prof, desc in records_to_insert:
+			conn.execute(
+				"""INSERT INTO calendar_events
+				   (event_date, title, category, symbol_type, is_civil_holiday, is_half_day,
+				    profession_group, start_time, end_time, description, source, is_completed, created_at)
+				   VALUES (?, ?, ?, ?, ?, ?, ?, '', '', ?, 'meb_akademik_takvim', 0, ?)""",
+				(ev_date, title, cat, sym, is_hol, is_half, prof, desc, now_iso),
+			)
+		conn.commit()
+
+	return {
+		"total_events": len(records_to_insert),
+		"break1_days": len(b1_days),
+		"semester_days": len(sem_days),
+		"break2_days": len(b2_days),
+	}
+
+
+
 def _sync_selected_date_when_month_changes(new_year: int, new_month: int, today: date) -> None:
 	"""
 	Ay veya yıl değiştirildiğinde sağdaki Takvim Yaprağının eski ayda takılı kalmasını önler (Hata #4/#7 düzeltmesi).

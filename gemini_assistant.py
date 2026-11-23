@@ -3352,3 +3352,76 @@ SADECE aşağıdaki JSON şemasını döndür:
 	return True, parsed, used_m
 
 
+def generate_meb_academic_calendar_dates_with_ai(
+	*,
+	api_key: str,
+	model: str,
+	academic_year_name: str,
+	custom_note: str = "",
+) -> tuple[bool, dict[str, str], str]:
+	"""
+	Seçilen eğitim öğretim yılı (örn. '2025-2026', '2026-2027') için T.C. Millî Eğitim Bakanlığı (MEB)
+	çalışma takvimine uygun okul açılış, 1. dönem ara tatili, yarıyıl (sömestr / 15 tatil),
+	2. dönem ara tatili ve okul kapanış tarihlerini Gemini AI ile YYYY-MM-DD biçiminde üretir.
+	"""
+	ay_clean = (academic_year_name or "").strip() or "2026-2027"
+	extra_line = f"\n[EK NOT / TALİMAT]: {custom_note.strip()}" if custom_note and custom_note.strip() else ""
+	prompt = f"""T.C. Millî Eğitim Bakanlığı (MEB) resmi iş takvimi kurallarına göre '{ay_clean}' eğitim öğretim yılı için:
+- Okulların açılış (1. dönem başlangıç) tarihi (Eylül ayının 2. Pazartesi günü),
+- 1. Dönem Ara Tatili başlangıç ve bitiş tarihleri (Kasım ayının 2. haftası, Pazartesi - Cuma),
+- Yarıyıl Tatili (Sömestr / 15 Tatil) başlangıç ve bitiş tarihleri (Ocak ayının son iki haftası, Pazartesi - 2. Cuma),
+- 2. Dönem Ara Tatili başlangıç ve bitiş tarihleri (Nisan ayının 1. veya 2. haftası ya da Ramazan Bayramı haftası, Pazartesi - Cuma),
+- Okulların kapanış (2. dönem bitiş / karne) tarihi (Haziran ayının 3. Cuma günü)
+bilgilerini hesapla.{extra_line}
+
+SADECE aşağıdaki JSON şemasını döndür (tüm tarihler YYYY-MM-DD biçiminde olmalı):
+{{
+  "start_date": "YYYY-MM-DD",
+  "break1_start": "YYYY-MM-DD",
+  "break1_end": "YYYY-MM-DD",
+  "semester_start": "YYYY-MM-DD",
+  "semester_end": "YYYY-MM-DD",
+  "break2_start": "YYYY-MM-DD",
+  "break2_end": "YYYY-MM-DD",
+  "end_date": "YYYY-MM-DD",
+  "summary": "MEB {ay_clean} eğitim öğretim yılı çalışma takvimi özeti"
+}}"""
+
+	ok, raw, used_m = call_gemini(
+		prompt,
+		api_key=api_key,
+		model=model,
+		expect_json=True,
+		temperature=0.1,
+		timeout=22.0,
+	)
+	if not ok:
+		return False, {"error": raw}, used_m
+	parsed = _parse_json_response(raw)
+	if not isinstance(parsed, dict):
+		return False, {"error": "Gemini takvim yanıtı JSON olarak ayrıştırılamadı."}, used_m
+
+	required_keys = (
+		"start_date",
+		"break1_start",
+		"break1_end",
+		"semester_start",
+		"semester_end",
+		"break2_start",
+		"break2_end",
+		"end_date",
+	)
+	out: dict[str, str] = {}
+	for k in required_keys:
+		v = str(parsed.get(k) or "").strip()[:10]
+		if re.match(r"^\d{2}[./-]\d{2}[./-]\d{4}$", v):
+			dp, mp, yp = re.split(r"[./-]", v)
+			v = f"{yp}-{mp}-{dp}"
+		if not re.match(r"^\d{4}-\d{2}-\d{2}$", v):
+			return False, {"error": f"Geçersiz veya eksik tarih alanı: {k}"}, used_m
+		out[k] = v
+	out["summary"] = str(parsed.get("summary") or f"{ay_clean} MEB eğitim öğretim yılı takvim tarihleri hazırlandı.").strip()
+	return True, out, used_m
+
+
+

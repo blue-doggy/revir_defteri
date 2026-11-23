@@ -474,7 +474,7 @@ class TestPersantilDeepCRUDAndExports(unittest.TestCase):
             cmds = persantil._handle_cmd_search("Gemini Klinik")
         self.assertTrue(all("Sesli" not in c["subtitle"] for c in cmds))
 
-        for pg in ("📅 Takvim & Planlama", "🖨️ Raporlar", "📏 Ölçüm ve Gelişim", "💓 Vital Takip", "📋 Sağlık Profili ve Bakım Planı", "🧑‍💼 Yetişkinler"):
+        for pg in ("📅 Takvim & Planlama", "🖨️ Raporlar", "📏 Ölçüm ve Gelişim", "💓 Vital Takip", "📋 Sağlık Profili ve Bakım Planı", "👫 Yetişkinler"):
             chips = persantil._build_context_chat_chips(pg)
             self.assertGreaterEqual(len(chips), 4)
             self.assertNotEqual(chips[0]["label"], "🩺 Kişiyi Özetle")

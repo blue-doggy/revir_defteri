@@ -247,6 +247,44 @@ class TestPersantilCoreAndUI(unittest.TestCase):
         out_scr = revir_ui.run_action_headless(persantil.render_screening_import_section, {"action": "render"})
         self.assertIn(".docx", out_scr["main_html"])
 
+    def test_08_academic_year_breaks_ai_fill_and_single_adult_emoji(self):
+        import school_calendar
+
+        # 1. Verify single man-woman emoji (👫) is used for Yetişkinler and no double ZWJ (🧑‍💼) remains
+        self.assertIn("👫 Yetişkinler", persantil.PAGES)
+        self.assertNotIn("🧑‍💼 Yetişkinler", persantil.PAGES)
+
+        # 2. Render render_academic_year_settings and click AI fill button (btn_ai_fill_ay_calendar)
+        revir_ui.reset_session()
+        out_ay = revir_ui.run_action_headless(persantil.render_academic_year_settings, {"action": "render"})
+        self.assertIn("Ara Tatiller ve Yarıyıl (Sömestr / 15 Tatil) Tarihleri", out_ay["main_html"])
+        self.assertIn("Yapay Zekâ ile Bilgileri Otomatik Doldur", out_ay["main_html"])
+
+        out_ai_fill = revir_ui.run_action_headless(
+            persantil.render_academic_year_settings,
+            {"action": "click", "key": "btn_ai_fill_ay_calendar"},
+        )
+        self.assertNotIn("Çalışma Zamanı Hatası", out_ai_fill["main_html"])
+
+        with self.connect() as c:
+            cnt_all = c.execute(
+                "SELECT COUNT(*) FROM calendar_events WHERE source = 'meb_akademik_takvim'"
+            ).fetchone()[0]
+            cnt_b1 = c.execute(
+                "SELECT COUNT(*) FROM calendar_events WHERE source = 'meb_akademik_takvim' AND title LIKE '%1. Dönem Ara Tatili%'"
+            ).fetchone()[0]
+            cnt_sem = c.execute(
+                "SELECT COUNT(*) FROM calendar_events WHERE source = 'meb_akademik_takvim' AND title LIKE '%Yarıyıl Tatili / Sömestr%'"
+            ).fetchone()[0]
+            cnt_b2 = c.execute(
+                "SELECT COUNT(*) FROM calendar_events WHERE source = 'meb_akademik_takvim' AND title LIKE '%2. Dönem Ara Tatili%'"
+            ).fetchone()[0]
+
+        self.assertGreaterEqual(cnt_b1, 5)
+        self.assertGreaterEqual(cnt_sem, 10)
+        self.assertGreaterEqual(cnt_b2, 5)
+        self.assertGreaterEqual(cnt_all, 22)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
