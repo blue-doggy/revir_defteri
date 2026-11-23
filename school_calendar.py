@@ -1300,9 +1300,9 @@ def _handle_calendar_event_inline_click(connect_db_fn: Callable, *, set_flash: b
 				conn.commit()
 				if set_flash:
 					if new_done == 1:
-						ui.session_state["_cal_flash_msg"] = f"✅ '{row['title']}' yapıldı olarak işaretlendi."
+						ui.session_state["_cal_flash_msg"] = f"✅ '{row['title']}' tamamlandı olarak işaretlendi ve Tamamlanan Etkinlikler bölümüne taşındı."
 					else:
-						ui.session_state["_cal_flash_msg"] = f"↩️ '{row['title']}' bekleyen duruma geri alındı."
+						ui.session_state["_cal_flash_msg"] = f"↩️ '{row['title']}' tekrar Günlük Takvim Yaprağı'na geri alındı."
 		ctx.clicked_button = None
 		return True
 
@@ -1320,7 +1320,7 @@ def _handle_calendar_event_inline_click(connect_db_fn: Callable, *, set_flash: b
 				conn.execute("DELETE FROM calendar_events WHERE id = ?", (ev_id,))
 				conn.commit()
 				if set_flash:
-					ui.session_state["_cal_flash_msg"] = f"✕ '{row['title']}' takvimden kaldırıldı."
+					ui.session_state["_cal_flash_msg"] = f"✕ '{row['title']}' takvimden silindi."
 		ctx.clicked_button = None
 		return True
 
@@ -1866,6 +1866,19 @@ def _render_interactive_calendar_leaf(
 			   WHERE note_date = ?""",
 			(sel_iso,),
 		).fetchone()
+		completed_all_events = [
+			dict(r)
+			for r in conn.execute(
+				"""SELECT id, event_date, title, category, symbol_type, is_civil_holiday,
+				          is_half_day, start_time, end_time, description, is_completed
+				   FROM calendar_events
+				   WHERE is_completed = 1
+				   ORDER BY CASE WHEN event_date = ? THEN 0 ELSE 1 END,
+				            event_date DESC, start_time ASC, id DESC
+				   LIMIT 100""",
+				(sel_iso,),
+			).fetchall()
+		]
 
 	sp_builtin = PROFESSION_AND_SPECIAL_DAYS.get((sel_date.month, sel_date.day))
 	active_meb_weeks = get_active_meb_weeks_for_date(sel_date)
@@ -1971,45 +1984,32 @@ def _render_interactive_calendar_leaf(
 			f'{"".join(meb_weeks_html_list)}</div>'
 		)
 
-	# 3. Günün Tatil / Sınav / Planlanan Etkinlik Özeti
+	# 3. Günün Tatil / Sınav / Planlanan Etkinlik Özeti (Tamamlananlar yapraktan çıkar, alttaki 'Tamamlanan Etkinlikler'de gösterilir)
+	active_day_events = [e for e in day_events if not bool(e.get("is_completed"))]
+	completed_day_events = [e for e in day_events if bool(e.get("is_completed"))]
+	existing_titles_low: set[str] = {str(e.get("title") or "").strip().lower() for e in day_events if str(e.get("title") or "").strip()}
 	special_badges_html: list[str] = []
-	existing_titles_low: set[str] = set()
-	for e in day_events:
+	for e in active_day_events:
 		ev_id = int(e["id"])
-		ev_done = bool(e.get("is_completed"))
 		sym_html = render_symbol_badge(e.get("symbol_type") or "event")
 		raw_ttl = str(e.get("title") or "").strip()
-		existing_titles_low.add(raw_ttl.lower())
 		e_ttl = html.escape(raw_ttl)
 		e_desc = html.escape(str(e.get("description") or ""))
 		t_rng = " - ".join(filter(None, [e.get("start_time"), e.get("end_time")]))
-		t_span = f'<span style="background:rgba(15,23,42,0.08);padding:1px 6px;border-radius:4px;font-size:10.5px;font-weight:800;">⏰ {html.escape(t_rng)}</span>' if t_rng else ""
+		t_span = f'<span style="background:rgba(15,23,42,0.08);padding:1px 6px;border-radius:4px;font-size:10.5px;font-weight:800;flex-shrink:0;">⏰ {html.escape(t_rng)}</span>' if t_rng else ""
 		is_h = bool(e.get("is_civil_holiday"))
-		if ev_done:
-			b_bg, b_bd, b_fg = "#ecfdf5", "#6ee7b7", "#047857"
-			title_done_css = "text-decoration:line-through;opacity:0.75;"
-			done_badge = '<span style="background:#d1fae5;color:#065f46;border:1px solid #6ee7b7;padding:0 5px;border-radius:4px;font-size:10px;font-weight:800;">✓ Yapıldı</span>'
-			done_btn_css = "background:#10b981;color:#ffffff;border:1px solid #059669;"
-			done_title = "Yapıldı işaretini kaldır / geri al"
-		else:
-			b_bg = "#fef2f2" if is_h else "#f8fafc"
-			b_bd = "#fca5a5" if is_h else "#cbd5e1"
-			b_fg = "#b91c1c" if is_h else "#1e293b"
-			title_done_css = ""
-			done_badge = ""
-			done_btn_css = "background:#ffffff;color:#059669;border:1px solid #6ee7b7;"
-			done_title = "Yapıldı olarak işaretle"
+		b_bg = "#fef2f2" if is_h else "#f8fafc"
+		b_bd = "#fca5a5" if is_h else "#cbd5e1"
+		b_fg = "#b91c1c" if is_h else "#1e293b"
 		special_badges_html.append(
-			f"""<div style="padding:7px 10px;border-radius:8px;background:{b_bg};border:1px solid {b_bd};margin-bottom:5px;">
+			f"""<div class="revir-leaf-ev-card" style="background:{b_bg};border:1px solid {b_bd};color:{b_fg};">
+				<button type="button" class="revir-leaf-ev-del" onclick="event.stopPropagation();window.__revirClick('btn_cal_ev_del_{ev_id}');" onkeydown="event.stopPropagation();" title="Bu etkinliği takvimden sil / kaldır">✕</button>
 				<div style="font-size:12.5px;font-weight:800;color:{b_fg};display:flex;align-items:center;justify-content:space-between;gap:6px;">
-					<span style="display:flex;align-items:center;gap:6px;min-width:0;flex:1;">{sym_html} <span style="{title_done_css}">{e_ttl}</span>{done_badge}</span>
-					<span style="display:inline-flex;align-items:center;gap:4px;flex-shrink:0;">
-						{t_span}
-						<button type="button" onclick="event.stopPropagation();window.__revirClick('btn_cal_ev_done_{ev_id}');" onkeydown="event.stopPropagation();" title="{done_title}" style="width:24px;height:24px;padding:0;border-radius:6px;display:inline-flex;align-items:center;justify-content:center;font-size:13px;font-weight:900;line-height:1;cursor:pointer;{done_btn_css}">✓</button>
-						<button type="button" onclick="event.stopPropagation();window.__revirClick('btn_cal_ev_del_{ev_id}');" onkeydown="event.stopPropagation();" title="Bu etkinliği takvimden kaldır" style="width:24px;height:24px;padding:0;border-radius:6px;display:inline-flex;align-items:center;justify-content:center;font-size:13px;font-weight:900;line-height:1;cursor:pointer;background:#ffffff;color:#dc2626;border:1px solid #fca5a5;">✕</button>
-					</span>
+					<span style="display:flex;align-items:center;gap:6px;min-width:0;flex:1;">{sym_html} <span>{e_ttl}</span></span>
+					{t_span}
 				</div>
-				{f'<div style="font-size:11.2px;color:#475569;margin-top:2px;">{e_desc}</div>' if e_desc else ''}
+				{f'<div style="font-size:11.2px;color:#475569;margin-top:3px;">{e_desc}</div>' if e_desc else ''}
+				<button type="button" class="revir-leaf-ev-done" onclick="event.stopPropagation();window.__revirClick('btn_cal_ev_done_{ev_id}');" onkeydown="event.stopPropagation();" title="Etkinliği tamamlandı olarak işaretle">✓ Tamamlandı</button>
 			</div>"""
 		)
 	if sp_builtin and sp_builtin["title"].lower() not in existing_titles_low:
@@ -2022,11 +2022,12 @@ def _render_interactive_calendar_leaf(
 			</div>"""
 		)
 
-	special_block = (
-		"".join(special_badges_html)
-		if special_badges_html
-		else '<div style="font-size:12px;color:#64748b;font-style:italic;">Bu güne kayıtlı resmi tatil, sınav veya etkinlik bulunmuyor.</div>'
-	)
+	if special_badges_html:
+		special_block = "".join(special_badges_html)
+	elif completed_day_events:
+		special_block = '<div style="font-size:12px;color:#059669;font-style:italic;">✅ Bu güne ait tüm etkinlikler tamamlandı (aşağıdaki <b>Tamamlanan Etkinlikler</b> bölümünden inceleyebilirsiniz).</div>'
+	else:
+		special_block = '<div style="font-size:12px;color:#64748b;font-style:italic;">Bu güne kayıtlı resmi tatil, sınav veya etkinlik bulunmuyor.</div>'
 
 	# 4. TAKVİM YAPRAĞI İÇİNE GÖMÜLÜ EZAN VAKİTLERİ VE CANLI GERİ SAYIM SAYACI
 	show_prayer = str(cfg.get("calendar_show_prayer_times", "1")).strip() != "0"
@@ -2211,6 +2212,134 @@ def _render_interactive_calendar_leaf(
 				{''.join(back_parts)}
 			</div>"""
 
+	ui.markdown(
+		"""<style>
+		.revir-leaf-ev-card {
+			position: relative;
+			padding: 8px 34px 27px 10px;
+			border-radius: 9px;
+			margin-bottom: 6px;
+			transition: box-shadow 0.16s ease, border-color 0.16s ease;
+		}
+		.revir-leaf-ev-card:hover {
+			box-shadow: 0 4px 12px rgba(15, 23, 42, 0.09);
+		}
+		.revir-leaf-ev-del {
+			position: absolute;
+			top: 5px;
+			right: 5px;
+			width: 22px;
+			height: 22px;
+			padding: 0;
+			border-radius: 6px;
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			font-size: 12px;
+			font-weight: 900;
+			line-height: 1;
+			cursor: pointer;
+			background: rgba(255, 255, 255, 0.95);
+			color: #dc2626;
+			border: 1px solid #fca5a5;
+			opacity: 0;
+			pointer-events: none;
+			transform: scale(0.9);
+			transition: opacity 0.15s ease, transform 0.15s ease, background 0.15s ease, color 0.15s ease;
+		}
+		.revir-leaf-ev-del:hover {
+			background: #dc2626;
+			color: #ffffff;
+			border-color: #b91c1c;
+		}
+		.revir-leaf-ev-done {
+			position: absolute;
+			bottom: 5px;
+			right: 6px;
+			height: 22px;
+			padding: 0 8px;
+			border-radius: 6px;
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			gap: 3px;
+			font-size: 10.5px;
+			font-weight: 800;
+			line-height: 1;
+			cursor: pointer;
+			background: rgba(255, 255, 255, 0.96);
+			color: #059669;
+			border: 1px solid #6ee7b7;
+			opacity: 0;
+			pointer-events: none;
+			transform: translateY(2px);
+			transition: opacity 0.15s ease, transform 0.15s ease, background 0.15s ease, color 0.15s ease;
+		}
+		.revir-leaf-ev-done:hover {
+			background: #10b981;
+			color: #ffffff;
+			border-color: #059669;
+		}
+		.revir-leaf-ev-card:hover .revir-leaf-ev-del,
+		.revir-leaf-ev-card:focus-within .revir-leaf-ev-del {
+			opacity: 1;
+			pointer-events: auto;
+			transform: scale(1);
+		}
+		.revir-leaf-ev-card:hover .revir-leaf-ev-done,
+		.revir-leaf-ev-card:focus-within .revir-leaf-ev-done {
+			opacity: 1;
+			pointer-events: auto;
+			transform: translateY(0);
+		}
+		.revir-done-ev-card {
+			position: relative;
+			padding: 8px 34px 28px 10px;
+			border-radius: 9px;
+			background: #ecfdf5;
+			border: 1px solid #6ee7b7;
+			margin-bottom: 6px;
+			color: #064e3b;
+		}
+		.revir-done-ev-undo {
+			position: absolute;
+			bottom: 5px;
+			right: 6px;
+			height: 22px;
+			padding: 0 8px;
+			border-radius: 6px;
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			gap: 3px;
+			font-size: 10.5px;
+			font-weight: 800;
+			line-height: 1;
+			cursor: pointer;
+			background: #ffffff;
+			color: #047857;
+			border: 1px solid #6ee7b7;
+			opacity: 0.88;
+			transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
+		}
+		.revir-done-ev-undo:hover {
+			opacity: 1;
+			background: #059669;
+			color: #ffffff;
+			border-color: #047857;
+		}
+		.revir-done-ev-card .revir-leaf-ev-del {
+			opacity: 0.75;
+			pointer-events: auto;
+			transform: scale(1);
+		}
+		.revir-done-ev-card:hover .revir-leaf-ev-del {
+			opacity: 1;
+		}
+		</style>""",
+		unsafe_allow_html=True,
+	)
+
 	# BİRLEŞİK TEK PARÇA TAKVİM YAPRAĞI KARTI (Tarih + Meslek + MEB Haftası + Tatil + Ezan Vakti + Yaprak Arkası Yazısı)
 	ui.markdown(
 		f"""<div style="border-radius:14px;overflow:hidden;border:2px solid {header_accent};background:#fffdf9;
@@ -2330,6 +2459,60 @@ def _render_interactive_calendar_leaf(
 			ui.session_state["target_page"] = "⚙️ Ayarlar"
 			ui.session_state["main_menu_page"] = "⚙️ Ayarlar"
 			ui.rerun()
+
+	# Tamamlanan Etkinlikler Bölümü (Yapraktan kaldırılan ama aylık takvimde görünmeye devam eden etkinlikler)
+	with ui.expander(f"✅ Tamamlanan Etkinlikler ({len(completed_all_events)})", expanded=False):
+		if not completed_all_events:
+			ui.caption(
+				"Henüz tamamlanmış takvim etkinliği bulunmuyor. Günlük Takvim Yaprağı içindeki bir etkinlik "
+				"kutucuğunun üzerine gelip **✓ Tamamlandı** butonuna tıkladığınızda kayıt yapraktan buraya "
+				"taşınır (aylık takvimde görünmeye devam eder)."
+			)
+		else:
+			ui.caption(
+				"Tamamlanan etkinlikler Günlük Takvim Yaprağı'ndan kaldırılır; aylık takvimde görünmeye devam eder. "
+				"İsterseniz buradan tekrar yaprağa geri alabilir veya **✕** ile takvimden silebilirsiniz."
+			)
+			for ce in completed_all_events:
+				ce_id = int(ce["id"])
+				ce_d_str = str(ce.get("event_date") or "")[:10]
+				try:
+					ce_d_obj = date.fromisoformat(ce_d_str)
+					ce_m_name = TR_MONTH_NAMES.get(ce_d_obj.month, str(ce_d_obj.month))
+					ce_date_lbl = f"{ce_d_obj.day:02d} {ce_m_name} {ce_d_obj.year}"
+				except Exception:
+					ce_date_lbl = ce_d_str
+				ce_sel_badge = (
+					"<span style='background:#0d9488;color:#ffffff;padding:1px 5px;border-radius:4px;font-size:9.5px;font-weight:800;'>SEÇİLİ GÜN</span>"
+					if ce_d_str == sel_iso
+					else ""
+				)
+				ce_sym_html = render_symbol_badge(ce.get("symbol_type") or "event")
+				ce_ttl = html.escape(str(ce.get("title") or "").strip())
+				ce_desc = html.escape(str(ce.get("description") or "").strip())
+				ce_t_rng = " - ".join(filter(None, [ce.get("start_time"), ce.get("end_time")]))
+				ce_t_span = (
+					f'<span style="background:rgba(6,78,59,0.1);padding:1px 6px;border-radius:4px;font-size:10.5px;font-weight:800;">⏰ {html.escape(ce_t_rng)}</span>'
+					if ce_t_rng
+					else ""
+				)
+				ui.markdown(
+					f"""<div class="revir-done-ev-card">
+						<button type="button" class="revir-leaf-ev-del" onclick="event.stopPropagation();window.__revirClick('btn_cal_ev_del_{ce_id}');" onkeydown="event.stopPropagation();" title="Bu etkinliği takvimden kalıcı olarak sil">✕</button>
+						<div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;">
+							<span style="display:inline-flex;align-items:center;gap:6px;min-width:0;flex:1;flex-wrap:wrap;">
+								<span style="background:#d1fae5;color:#065f46;border:1px solid #6ee7b7;padding:1px 6px;border-radius:5px;font-size:10.5px;font-weight:800;">📅 {html.escape(ce_date_lbl)}</span>
+								{ce_sel_badge}
+								{ce_sym_html}
+								<span style="font-size:12.5px;font-weight:800;text-decoration:line-through;opacity:0.88;">{ce_ttl}</span>
+							</span>
+							{ce_t_span}
+						</div>
+						{f'<div style="font-size:11px;color:#047857;margin-top:3px;">{ce_desc}</div>' if ce_desc else ''}
+						<button type="button" class="revir-done-ev-undo" onclick="event.stopPropagation();window.__revirClick('btn_cal_ev_done_{ce_id}');" onkeydown="event.stopPropagation();" title="Tamamlandı işaretini geri al ve tekrar Takvim Yaprağı'na koy">↩️ Geri Al</button>
+					</div>""",
+					unsafe_allow_html=True,
+				)
 
 	# -----------------------------------------------------------------------
 	# ETKİNLİK & PLAN YÖNETİMİ POP-UP DİYALOG TETİKLEYİCİSİ (+ BUTONU)

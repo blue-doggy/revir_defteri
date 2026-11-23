@@ -166,10 +166,15 @@ class TestSchoolCalendar(unittest.TestCase):
                 {"action": "render"},
             )
             self.assertNotIn("Çalışma Zamanı Hatası", out_cal["main_html"])
+            self.assertIn(".revir-leaf-ev-card:hover .revir-leaf-ev-del", out_cal.get("styles_html", ""))
+            self.assertIn(".revir-leaf-ev-card:hover .revir-leaf-ev-done", out_cal.get("styles_html", ""))
+            self.assertIn("revir-leaf-ev-card", out_cal["main_html"])
+            self.assertIn("✓ Tamamlandı", out_cal["main_html"])
             self.assertIn(f"btn_cal_ev_done_{ev_id}", out_cal["main_html"])
             self.assertIn(f"btn_cal_ev_del_{ev_id}", out_cal["main_html"])
             self.assertEqual(out_cal["main_html"].count(f"btn_cal_ev_done_{ev_id}"), 1)
             self.assertEqual(out_cal["main_html"].count(f"btn_cal_ev_del_{ev_id}"), 1)
+            self.assertIn("Tamamlanan Etkinlikler (0)", out_cal["main_html"])
 
             other_day_iso = date.today().replace(day=2 if date.today().day == 1 else 1).isoformat()
             revir_ui.session_state["cal_selected_date"] = other_day_iso
@@ -180,6 +185,7 @@ class TestSchoolCalendar(unittest.TestCase):
             self.assertNotIn("Çalışma Zamanı Hatası", out_other["main_html"])
             self.assertNotIn(f"btn_cal_ev_done_{ev_id}", out_other["main_html"])
             self.assertNotIn(f"btn_cal_ev_del_{ev_id}", out_other["main_html"])
+            self.assertIn("4-A Göz Taraması", out_other["main_html"])
             revir_ui.session_state["cal_selected_date"] = today_iso
 
             out_ov = revir_ui.run_action_headless(
@@ -193,21 +199,28 @@ class TestSchoolCalendar(unittest.TestCase):
             self.assertIn(f"btn_cal_ev_done_{ev_id}", out_ov["main_html"])
             self.assertIn(f"btn_cal_ev_del_{ev_id}", out_ov["main_html"])
 
-            # 1. Click ✓ (done) on calendar page -> is_completed == 1 and line-through / ✓ Yapıldı shown
+            # 1. Click ✓ Tamamlandı -> removed from leaf, moved to Tamamlanan Etkinlikler, still visible in monthly grid
             out_done = revir_ui.run_action_headless(
                 lambda: school_calendar.render_calendar_and_planning_page(**cal_kwargs),
                 {"action": "click", "key": f"btn_cal_ev_done_{ev_id}"},
             )
             self.assertNotIn("Çalışma Zamanı Hatası", out_done["main_html"])
-            self.assertIn("✓ Yapıldı", out_done["main_html"])
-            self.assertIn("line-through", out_done["main_html"])
             with self.connect() as c:
                 self.assertEqual(
                     int(c.execute("SELECT is_completed FROM calendar_events WHERE id = ?", (ev_id,)).fetchone()[0]),
                     1,
                 )
+            grid_part = out_done["main_html"].split("🗓️ GÜNLÜK TAKVİM YAPRAĞI")[0]
+            self.assertIn("✓ 4-A Göz Taraması", grid_part)
+            leaf_part = out_done["main_html"].split("📌 GÜNÜN TATİL, SINAV VE ETKİNLİKLERİ")[1].split("EZAN VAKİTLERİ")[0]
+            self.assertNotIn("4-A Göz Taraması", leaf_part)
+            self.assertIn("Bu güne ait tüm etkinlikler tamamlandı", leaf_part)
+            self.assertIn("Tamamlanan Etkinlikler (1)", out_done["main_html"])
+            completed_part = out_done["main_html"].split("Tamamlanan Etkinlikler (1)")[1]
+            self.assertIn("4-A Göz Taraması", completed_part)
+            self.assertIn("↩️ Geri Al", completed_part)
 
-            # 2. Click ✓ again -> toggles back to is_completed == 0
+            # 2. Click ↩️ Geri Al -> toggles back to is_completed == 0 and returns to leaf
             out_undo = revir_ui.run_action_headless(
                 lambda: school_calendar.render_calendar_and_planning_page(**cal_kwargs),
                 {"action": "click", "key": f"btn_cal_ev_done_{ev_id}"},
@@ -218,13 +231,24 @@ class TestSchoolCalendar(unittest.TestCase):
                     int(c.execute("SELECT is_completed FROM calendar_events WHERE id = ?", (ev_id,)).fetchone()[0]),
                     0,
                 )
+            self.assertIn("Tamamlanan Etkinlikler (0)", out_undo["main_html"])
+            leaf_undo_part = out_undo["main_html"].split("📌 GÜNÜN TATİL, SINAV VE ETKİNLİKLERİ")[1].split("EZAN VAKİTLERİ")[0]
+            self.assertIn("4-A Göz Taraması", leaf_undo_part)
+            self.assertIn("✓ Tamamlandı", leaf_undo_part)
 
-            # 3. Click ✕ (delete) -> removes row from DB
+            # 3. Click ✕ (delete) -> removes row from DB and disappears everywhere (grid, leaf, completed)
             out_del = revir_ui.run_action_headless(
                 lambda: school_calendar.render_calendar_and_planning_page(**cal_kwargs),
                 {"action": "click", "key": f"btn_cal_ev_del_{ev_id}"},
             )
             self.assertNotIn("Çalışma Zamanı Hatası", out_del["main_html"])
+            self.assertIn("takvimden silindi", out_del["main_html"])
+            self.assertNotIn("4-A Göz Taraması", out_del["main_html"].split("Kayıtlı Gün/Etkinlik:")[1])
+            out_after_del = revir_ui.run_action_headless(
+                lambda: school_calendar.render_calendar_and_planning_page(**cal_kwargs),
+                {"action": "render"},
+            )
+            self.assertNotIn("4-A Göz Taraması", out_after_del["main_html"])
             with self.connect() as c:
                 self.assertEqual(
                     int(c.execute("SELECT COUNT(*) FROM calendar_events WHERE id = ?", (ev_id,)).fetchone()[0]),
