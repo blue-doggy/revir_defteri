@@ -1200,6 +1200,28 @@ def _df_fingerprint(df: pd.DataFrame) -> str:
 		return str(id(df))
 
 
+def _parse_editor_number(raw_val: Any) -> float:
+	if isinstance(raw_val, (int, float)) and not isinstance(raw_val, bool):
+		return float(raw_val)
+	s = re.sub(r"[₺\s]", "", str(raw_val or "").replace("TL", "").replace("tl", "")).strip()
+	if not s:
+		raise ValueError("empty")
+	if "." in s and "," in s:
+		if s.rfind(",") > s.rfind("."):
+			s = s.replace(".", "").replace(",", ".")
+		else:
+			s = s.replace(",", "")
+	elif "," in s:
+		if s.count(",") > 1 or re.match(r"^-?[1-9]\d{0,2}(?:,\d{3})+$", s):
+			s = s.replace(",", "")
+		else:
+			s = s.replace(",", ".")
+	elif "." in s:
+		if s.count(".") > 1 or re.match(r"^-?[1-9]\d{0,2}(?:\.\d{3})+$", s):
+			s = s.replace(".", "")
+	return float(s)
+
+
 def _coerce_editor_value(raw_val: Any, col_cfg: _ColumnConfig | None, orig_dtype: Any) -> Any:
 	if col_cfg and col_cfg.kind == "checkbox":
 		if isinstance(raw_val, bool):
@@ -1220,9 +1242,8 @@ def _coerce_editor_value(raw_val: Any, col_cfg: _ColumnConfig | None, orig_dtype
 		return ""
 
 	if col_cfg and col_cfg.kind == "number":
-		s = str(raw_val).strip().replace(",", ".")
 		try:
-			num = float(s)
+			num = _parse_editor_number(raw_val)
 			if col_cfg.min_value is not None and num < float(col_cfg.min_value):
 				num = float(col_cfg.min_value)
 			if col_cfg.max_value is not None and num > float(col_cfg.max_value):
@@ -1236,9 +1257,8 @@ def _coerce_editor_value(raw_val: Any, col_cfg: _ColumnConfig | None, orig_dtype
 	if pd.api.types.is_bool_dtype(orig_dtype):
 		return bool(raw_val)
 	if pd.api.types.is_numeric_dtype(orig_dtype) and not (col_cfg and col_cfg.kind in ("text", "selectbox")):
-		s = str(raw_val).strip().replace(",", ".")
 		try:
-			return float(s)
+			return _parse_editor_number(raw_val)
 		except Exception:
 			return raw_val
 	return str(raw_val)

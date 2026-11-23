@@ -2970,6 +2970,98 @@ SADECE aşağıdaki JSON yapısını döndür:
 	return True, {"plans": parsed["plans"]}, used_m
 
 
+def _parse_invoice_num(val: Any, default: float = 0.0, *, allow_tr_thousands: bool = True) -> float:
+	if val is None:
+		return default
+	if isinstance(val, (int, float)) and not isinstance(val, bool):
+		return float(val)
+	s = re.sub(r"[₺\s]", "", str(val).replace("TL", "").replace("tl", "")).strip()
+	if not s:
+		return default
+	if "." in s and "," in s:
+		if s.rfind(",") > s.rfind("."):
+			s = s.replace(".", "").replace(",", ".")
+		else:
+			s = s.replace(",", "")
+	elif "," in s:
+		if s.count(",") > 1 or (allow_tr_thousands and re.match(r"^-?[1-9]\d{0,2}(?:,\d{3})+$", s)):
+			s = s.replace(",", "")
+		else:
+			s = s.replace(",", ".")
+	elif "." in s:
+		if s.count(".") > 1 or (allow_tr_thousands and re.match(r"^-?[1-9]\d{0,2}(?:\.\d{3})+$", s)):
+			s = s.replace(".", "")
+	try:
+		return float(s)
+	except Exception:
+		m = re.search(r"-?\d+(?:\.\d+)?", s)
+		return float(m.group(0)) if m else default
+
+
+def _render_scanned_pdf_for_gemini(file_bytes: bytes, max_pages: int = 8) -> list[tuple[bytes, str]]:
+	"""Metin katmanı olmayan tarama PDF sayfalarını yüksek okunurluklu JPEG görsellerine çevirir."""
+	try:
+		import pymupdf
+		out: list[tuple[bytes, str]] = []
+		with pymupdf.open(stream=file_bytes, filetype="pdf") as doc:
+			for idx, page in enumerate(doc):
+				if idx >= max_pages:
+					break
+				pix = page.get_pixmap(dpi=165, alpha=False)
+				img_bytes = pix.tobytes("jpeg", jpg_quality=88) if hasattr(pix, "tobytes") else b""
+				if img_bytes:
+					out.append((img_bytes, "image/jpeg"))
+		return out
+	except Exception:
+		return []
+
+
+def _normalize_gemini_invoice_dict(raw_obj: dict[str, Any]) -> dict[str, Any]:
+	"""Gemini JSON fatura çıktısındaki sayıları, birimleri ve kalem toplamlarını tutarlılaştırır."""
+	norm_items: list[dict[str, Any]] = []
+	for it in (raw_obj.get("items") or []):
+		if not isinstance(it, dict):
+			continue
+		nm = str(it.get("item_name") or it.get("Malın Cinsi") or it.get("product_name") or "").strip()
+		if not nm:
+			continue
+		qty = max(0.0, _parse_invoice_num(it.get("quantity", 1.0), 1.0, allow_tr_thousands=False))
+		up = max(0.0, _parse_invoice_num(it.get("unit_price", 0.0), 0.0, allow_tr_thousands=True))
+		lt = _parse_invoice_num(it.get("line_total", -1.0), -1.0, allow_tr_thousands=True)
+		vr = max(0.0, _parse_invoice_num(it.get("vat_rate", 0.0), 0.0, allow_tr_thousands=False))
+
+		# Türkçe nokta binlik ayracı nedeniyle model örn. 4.48 döndürdüyse ve qty*up çok küçük/büyük sapıyorsa düzelt
+		if qty > 0 and up > 0 and lt > 0:
+			expected = qty * up * (1.0 + vr / 100.0)
+			if abs(lt - expected) > 1.0:
+				if abs((lt * 1000.0) - expected) <= max(5.0, expected * 0.05):
+					lt = round(lt * 1000.0, 2)
+				elif abs(lt - (expected * 1000.0)) <= max(5.0, lt * 0.05):
+					up = round(up * 1000.0, 2)
+		if lt < 0 and qty > 0 and up > 0:
+			lt = round(qty * up * (1.0 + vr / 100.0), 2)
+		elif up <= 0 and lt > 0 and qty > 0:
+			up = round((lt / (1.0 + vr / 100.0)) / qty, 2)
+
+		item_rec: dict[str, Any] = {
+			"item_name": nm,
+			"category": str(it.get("category") or "Diğer").strip() or "Diğer",
+			"quantity": round(qty, 3),
+			"unit_type": str(it.get("unit_type") or "kg").strip() or "kg",
+			"unit_price": round(up, 2),
+			"vat_rate": round(vr, 1),
+			"expiry_date": str(it.get("expiry_date") or "").strip()[:10],
+			"notes": str(it.get("notes") or "").strip(),
+		}
+		if lt >= 0:
+			item_rec["line_total"] = round(lt, 2)
+		norm_items.append(item_rec)
+
+	out = dict(raw_obj)
+	out["items"] = norm_items
+	return out
+
+
 def parse_cafeteria_invoice_with_gemini(
 	*,
 	api_key: str,
@@ -2979,21 +3071,46 @@ def parse_cafeteria_invoice_with_gemini(
 	raw_text: str = "",
 	strict_kvkk_pdf: bool = False,
 ) -> tuple[bool, dict[str, Any], str]:
-	"""Yemekhaneye gelen ürün faturasını/fişini/irsaliyesini okuyup tedarikçi, tarih, miktar çeşidi ve fiyat satırları çıkarır."""
+	"""Yemekhaneye gelen ürün faturasını/fişini/irsaliyesini (taranmış çok sayfalı el yazısı dahil) okuyup kalem listesi çıkarır."""
 	inline_files: list[tuple[bytes, str]] = []
-	doc_txt = anonymize_free_text(raw_text[:12000]) if raw_text else ""
+	doc_txt = anonymize_free_text(raw_text[:18000]) if raw_text else ""
 	if file_bytes and file_name:
-		in_item, txt_b = _build_strict_clinical_doc_input(
-			file_bytes, file_name, sensitive_names=None, strict_kvkk_pdf=strict_kvkk_pdf
-		)
-		inline_files.extend(in_item)
-		if txt_b:
-			doc_txt = (doc_txt + "\n" + txt_b).strip()[:14000]
+		low_fn = file_name.lower()
+		is_pdf_file = low_fn.endswith(".pdf")
+		if is_pdf_file:
+			local_txt = _extract_pdf_text_layer_locally(file_bytes)
+			if len(re.sub(r"\s+", "", local_txt)) >= 60:
+				safe_pdf_txt = anonymize_free_text(local_txt[:16000])
+				doc_txt = (doc_txt + "\n" + safe_pdf_txt).strip()[:18000]
+			if not (strict_kvkk_pdf and len(re.sub(r"\s+", "", local_txt)) >= 60):
+				# Taranmış veya el yazılı çok sayfalı PDF ise sayfa görsellerine dönüştürmek doğruluğu artırır
+				if len(re.sub(r"\s+", "", local_txt)) < 60:
+					page_imgs = _render_scanned_pdf_for_gemini(file_bytes)
+					if page_imgs:
+						inline_files.extend(page_imgs)
+					else:
+						inline_files.append((file_bytes, "application/pdf"))
+				else:
+					inline_files.append((file_bytes, "application/pdf"))
+		else:
+			in_item, txt_b = _build_strict_clinical_doc_input(
+				file_bytes, file_name, sensitive_names=None, strict_kvkk_pdf=strict_kvkk_pdf
+			)
+			inline_files.extend(in_item)
+			if txt_b:
+				doc_txt = (doc_txt + "\n" + txt_b).strip()[:18000]
 
-	prompt = f"""Aşağıdaki yemekhane alım faturası / irsaliye / market fişinden fatura bilgilerini ve her ürün satırını çıkar.
+	prompt = f"""Aşağıdaki yemekhane alım faturası / sipariş fişi / irsaliye / market fişinden (el yazısı ve çok sayfalı taramalar dahil) fatura başlık bilgilerini ve TÜM ürün satırlarını eksiksiz çıkar.
 
 [DOSYA ADI]: {file_name or 'Metin'}
-{('[BELGE METNİ]: ' + doc_txt) if doc_txt else ''}
+{('[BELGE METNİ]:\n' + doc_txt) if doc_txt else ''}
+
+Önemli Okuma Kuralları:
+1. Türkçe sayılarda nokta çoğu zaman binlik ayracıdır (ör. `4.480` -> `4480`, `11.600` -> `11600`, `1.450` -> `1450`, `21.425` -> `21425`); miktar sütunundaki `7.5`, `1.5`, `6.5`, `8.5`, `0.300` ise ondalıktır. `quantity * unit_price = line_total` eşitliğini kontrol et.
+2. El yazısı Sipariş Fişlerinde miktar rakamı bazen `BİRİM` sütununun içine, birim veya gramaj bilgisi (`1kg Yoğurt`, `10kg Yoğurt`, `5 Lt`, `Koli`, `200ml`) ise `MALIN CİNSİ` içine yazılmış olabilir. Doğru sayıyı `quantity` alanına yaz.
+3. Çok sayfalı bir belgenin 2. sayfasında Tarih boş bırakılmışsa o sayfa 1. sayfadaki faturanın devamıdır; tüm kalemleri tek faturada topla. Farklı tarihlere ait ayrı fişler varsa `"invoices"` dizisinde ayrı objeler döndür.
+4. Alt toplam / genel toplam satırlarını (`21.425`, `22.700`, `17.815`) ürün kalemi olarak ekleme.
+5. `vat_rate` belirtilmemişse `0.0` ver (fişlerdeki fiyat ve tutarları değiştirme).
 
 Geçerli `unit_type` değerleri: "kg", "g", "litre", "ml", "adet", "koli", "paket", "bağ", "teneke", "çuval"
 Geçerli `category` değerleri: "Sebze & Meyve", "Et / Tavuk / Balık", "Süt & Kahvaltılık", "Bakliyat & Kuru Gıda", "Yağ & Baharat", "Unlu Mamul & Ekmek", "İçecek", "Temizlik & Mutfak Sarf", "Diğer"
@@ -3001,8 +3118,10 @@ Geçerli `category` değerleri: "Sebze & Meyve", "Et / Tavuk / Balık", "Süt & 
 SADECE aşağıdaki JSON şemasını döndür:
 {{
   "invoice_date": "YYYY-MM-DD",
+  "document_type": "Sipariş Fişi / Fatura / İrsaliye",
+  "invoice_name": "Örn: 11.09.2026 · Sipariş Fişi",
   "invoice_no": "Fatura no veya boş",
-  "supplier_name": "Tedarikçi veya firma adı",
+  "supplier_name": "Tedarikçi / Sayın veya firma adı",
   "category": "En uygun kategori",
   "items": [
     {{
@@ -3011,26 +3130,35 @@ SADECE aşağıdaki JSON şemasını döndür:
       "quantity": 10.0,
       "unit_type": "kg",
       "unit_price": 45.0,
-      "vat_rate": 1.0,
+      "line_total": 450.0,
+      "vat_rate": 0.0,
       "expiry_date": ""
     }}
   ]
 }}"""
+	timeout_s = 90.0 if inline_files else 45.0
 	ok, raw, used_m = call_gemini(
 		prompt,
 		api_key=api_key,
 		model=model,
 		inline_files=inline_files if inline_files else None,
 		expect_json=True,
-		temperature=0.1,
-		timeout=30.0,
+		temperature=0.05,
+		timeout=timeout_s,
 	)
 	if not ok:
 		return False, {"error": raw}, used_m
 	parsed = _parse_json_response(raw)
-	if not parsed or not isinstance(parsed.get("items"), list):
+	if isinstance(parsed.get("invoices"), list) and parsed["invoices"]:
+		norm_list = [_normalize_gemini_invoice_dict(inv) for inv in parsed["invoices"] if isinstance(inv, dict) and isinstance(inv.get("items"), list)]
+		norm_list = [inv for inv in norm_list if inv.get("items")]
+		if norm_list:
+			first = dict(norm_list[0])
+			first["invoices"] = norm_list
+			return True, first, used_m
+	if not parsed or not isinstance(parsed.get("items"), list) or not parsed.get("items"):
 		return False, {"error": "Fatura kalemleri JSON olarak ayrıştırılamadı."}, used_m
-	return True, parsed, used_m
+	return True, _normalize_gemini_invoice_dict(parsed), used_m
 
 
 def parse_cafeteria_menu_or_payments_text_with_gemini(

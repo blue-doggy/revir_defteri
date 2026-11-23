@@ -1295,7 +1295,7 @@ class TestCafeteriaModule(unittest.TestCase):
         tab_fn = lambda: caf._render_tab_purchases_and_expenses(ctx_api, "2026-11", persantil.get_app_settings())
         out_init = revir_ui.run_action_headless(tab_fn, {"action": "render"})
         self.assertNotIn("Çalışma Zamanı Hatası", out_init["main_html"])
-        self.assertIn("Kayıtlı Faturalar Listesi", out_init["main_html"])
+        self.assertIn("Kayıtlı Faturalar", out_init["main_html"])
         self.assertIn("FTR-1102", out_init["main_html"])
 
         out_open = revir_ui.run_action_headless(
@@ -1375,18 +1375,29 @@ class TestCafeteriaModule(unittest.TestCase):
         finally:
             wb_an.close()
 
-        # Select ONLY Kategori + Tekil Ürün Geçmişi views in UI and verify others are hidden
-        revir_ui.session_state["caf_stat_views"] = [caf.PURCHASE_STAT_VIEWS[1], caf.PURCHASE_STAT_VIEWS[5]]
+        # Select ONE view at a time via single-window selector box (caf_stat_view_pick) & verify others stay hidden
+        import html as _html_m
+        revir_ui.session_state["caf_stat_view_pick"] = caf.PURCHASE_STAT_VIEWS[1]
+        out_cat_st = revir_ui.run_action_headless(tab_fn, {"action": "render"})
+        cat_html = str(out_cat_st.get("main_html") or "")
+        self.assertNotIn("Çalışma Zamanı Hatası", cat_html)
+        self.assertIn(f"<h5 class='revir-h5'>{_html_m.escape(caf.PURCHASE_STAT_VIEWS[1])}</h5>", cat_html)
+        self.assertNotIn(f"<h5 class='revir-h5'>{_html_m.escape(caf.PURCHASE_STAT_VIEWS[0])}</h5>", cat_html)
+
+        revir_ui.session_state["caf_stat_view_pick"] = caf.PURCHASE_STAT_VIEWS[5]
         revir_ui.session_state["caf_stat_prod_pick"] = "Osmancık Pirinç"
         out_stats = revir_ui.run_action_headless(tab_fn, {"action": "render"})
-        import html as _html_m
         st_html = str(out_stats.get("main_html") or "")
         self.assertNotIn("Çalışma Zamanı Hatası", st_html)
-        self.assertIn(f"<h5 class='revir-h5'>{_html_m.escape(caf.PURCHASE_STAT_VIEWS[1])}</h5>", st_html)
         self.assertIn(f"<h5 class='revir-h5'>{_html_m.escape(caf.PURCHASE_STAT_VIEWS[5])}</h5>", st_html)
         self.assertIn("Osmancık Pirinç", st_html)
         self.assertNotIn(f"<h5 class='revir-h5'>{_html_m.escape(caf.PURCHASE_STAT_VIEWS[0])}</h5>", st_html)
         self.assertNotIn(f"<h5 class='revir-h5'>{_html_m.escape(caf.PURCHASE_STAT_VIEWS[2])}</h5>", st_html)
+
+        # Month-by-month selector in stats filters cleanly to 2026-10 (450.00 TL only)
+        revir_ui.session_state["caf_stat_scope"] = f"2026-10 — {caf._fmt_ym('2026-10')}"
+        out_oct_st = revir_ui.run_action_headless(tab_fn, {"action": "render"})
+        self.assertIn("450.00 ₺", str(out_oct_st.get("main_html") or ""))
 
     def test_color_tone_setting_and_right_signature_persistence_bugfix(self):
         # 1. Color tone preset configures background lightness across HTML, Word & Excel
@@ -1989,6 +2000,161 @@ Tarih,Fiş/Fatura No,Malın Cinsi,Miktar,Birim,Birim Fiyatı,Tutar
         self.assertAlmostEqual(newest["total_amount"], 3600.0, places=2)
         self.assertAlmostEqual(newest["items"][0]["unit_price"], 1200.0, places=2)
         self.assertEqual(newest["items"][0]["category"], "Et / Tavuk / Balık")
+
+    def test_text_invoice_parser_multi_invoice_headers_and_single_window_stats(self):
+        # 1. Exact user-pasted Sipariş Fişi text with Turkish thousands dots (4.480, 11.600, 1.425, 2.490)
+        pasted_sep = """Belge Türü: Sipariş Fişi
+Tarih: 11.09.2026
+
+Miktar | Malın Cinsi | Fiyat | Tutar
+1 | Zerdeçal | 280 | 280
+1 | Sarımsak Tozu | 195 | 195
+1 | Susam | 210 | 210
+1 | Sucuk | 585 | 585
+2 | Toz Tarhana | 100 | 200
+5 | 15'li Vanilin / Kabartma Tozu | 40 | 200
+5 | 5'li Kabartma Tozu | 25 | 125
+8 | Ayçiçek Yağı (Teneke) | 560 | 4.480
+8 | Zeytinyağı (5 Lt) | 1.450 | 11.600
+1 | Kakao | 740 | 740
+5 | Susamlı Bisküvi / Pirinç | 720 | 3.600
+5 | Bulgur | 285 | 1.425
+2 | Şehriye / Makarna | 300 | 600
+3 | Konserve Bezelye | 240 | 720
+3 | Konserve Garnitür | 295 | 885
+3 | Salça (Biber / Domates) | 120 | 360
+5 | İnce Domates / Biber Salçası | 135 | 675
+6 | Süt (Koli) | 580 | 3.480
+4 | Şeker (5 kg) | 895 | 3.580
+24 | Süt / İçecek (Adet) | 58 | 1.392
+3 | Donuk Mısır (2.5 kg) | 830 | 2.490
+10 | Okunamayan Kalem | 160 | 1.600
+2 | Okunamayan Kalem | 245 | 490
+2 | Okunamayan Kalem | 440 | 880"""
+
+        pasted_oct = """Belge Türü: Sipariş Fişi
+Tarih: 08.10.2026
+
+Miktar | Malın Cinsi | Fiyat | Tutar
+2 | 10kg Yoğurt | 700 | 1.400
+7.5 | Baget | 180 | 1.350"""
+
+        parsed_single = caf.parse_purchase_invoices_from_text(pasted_sep)
+        self.assertEqual(len(parsed_single), 1)
+        inv1 = parsed_single[0]
+        self.assertEqual(inv1["invoice_date"], "2026-09-11")
+        self.assertEqual(inv1["invoice_name"], "11.09.2026 · Sipariş Fişi")
+        self.assertEqual(len(inv1["items"]), 24)
+        by_nm1 = {it["item_name"]: it for it in inv1["items"] if it["item_name"] != "Okunamayan Kalem"}
+        self.assertEqual(by_nm1["Ayçiçek Yağı (Teneke)"]["unit_type"], "teneke")
+        self.assertAlmostEqual(by_nm1["Ayçiçek Yağı (Teneke)"]["line_total"], 4480.0, places=2)
+        self.assertAlmostEqual(by_nm1["Zeytinyağı (5 Lt)"]["unit_price"], 1450.0, places=2)
+        self.assertAlmostEqual(by_nm1["Zeytinyağı (5 Lt)"]["line_total"], 11600.0, places=2)
+        self.assertAlmostEqual(by_nm1["Zeytinyağı (5 Lt)"]["net_qty"], 40.0, places=2)
+        self.assertEqual(by_nm1["Zeytinyağı (5 Lt)"]["net_unit"], "litre")
+        self.assertEqual(by_nm1["Süt (Koli)"]["unit_type"], "koli")
+        self.assertAlmostEqual(by_nm1["Donuk Mısır (2.5 kg)"]["net_qty"], 7.5, places=2)
+        expected_sep_total = 280+195+210+585+200+200+125+4480+11600+740+3600+1425+600+720+885+360+675+3480+3580+1392+2490+1600+490+880
+        self.assertAlmostEqual(sum(it["line_total"] for it in inv1["items"]), float(expected_sep_total), places=2)
+
+        # 2. Multi-invoice text splits into 2 separate headers
+        parsed_multi = caf.parse_purchase_invoices_from_text(pasted_sep + "\n\n" + pasted_oct)
+        self.assertEqual(len(parsed_multi), 2)
+        self.assertEqual([x["invoice_date"] for x in parsed_multi], ["2026-09-11", "2026-10-08"])
+        self.assertAlmostEqual(parsed_multi[1]["items"][1]["quantity"], 7.5, places=2)
+
+        # 3. Scanned image PDF without text layer triggers Gemini fallback cleanly & keeps errors informative when AI off
+        import pymupdf
+        doc_img = pymupdf.open()
+        doc_img.new_page()
+        pdf_bytes = doc_img.tobytes()
+        doc_img.close()
+        invs_no_ai, errs_no_ai = caf._parse_uploaded_invoice_sources(
+            raw_text="",
+            uploaded_files=[("fis_25_09.pdf", pdf_bytes)],
+            is_gemini_on=False,
+        )
+        self.assertEqual(invs_no_ai, [])
+        self.assertEqual(len(errs_no_ai), 1)
+        self.assertIn("Gemini API", errs_no_ai[0])
+
+        def _fake_ai_pdf(**_kw):
+            return True, {
+                "invoice_date": "2026-09-25",
+                "document_type": "Sipariş Fişi",
+                "invoice_name": "25.09.2026 · Sipariş Fişi",
+                "items": [{"item_name": "Tavuk Pirzola", "quantity": 7.5, "unit_type": "kg", "unit_price": 260, "line_total": 1950}],
+            }, "gemini-mock"
+
+        invs_with_ai, errs_with_ai = caf._parse_uploaded_invoice_sources(
+            raw_text="",
+            uploaded_files=[("fis_25_09.pdf", pdf_bytes)],
+            is_gemini_on=True,
+            api_key="test",
+            model="gemini-mock",
+            gemini_parse_fn=_fake_ai_pdf,
+        )
+        self.assertEqual(errs_with_ai, [])
+        self.assertEqual(len(invs_with_ai), 1)
+        self.assertAlmostEqual(invs_with_ai[0]["total_preview"], 1950.0, places=2)
+
+        # 4. Headless UI end-to-end: paste 2 invoices -> parse -> save -> separate expanders + month/view box stats
+        revir_ui.reset_session()
+        ctx_api = {
+            "connect_db": self.connect,
+            "get_app_settings": persantil.get_app_settings,
+            "save_app_settings": persantil.save_app_settings,
+            "_get_active_gemini_config": lambda: (False, "", ""),
+            "mask_kvkk_value": persantil.mask_kvkk_value,
+            "clear_all_data_caches": persantil.clear_all_data_caches,
+            "is_section_visible": persantil.is_section_visible,
+        }
+        purch_tab = lambda: caf._render_tab_purchases_and_expenses(ctx_api, "2026-11", {})
+        revir_ui.run_action_headless(purch_tab, {"action": "change", "key": "caf_ai_inv_txt", "value": pasted_sep + "\n\n" + pasted_oct})
+        out_parse = revir_ui.run_action_headless(purch_tab, {"action": "click", "key": "caf_btn_ai_parse_inv"})
+        self.assertIn("2 fatura", out_parse["main_html"])
+        out_save_q = revir_ui.run_action_headless(purch_tab, {"action": "click", "key": "caf_btn_save_parsed_queue"})
+        html_after = out_save_q["main_html"]
+        self.assertIn("11.09.2026 · Sipariş Fişi", html_after)
+        self.assertIn("08.10.2026 · Sipariş Fişi", html_after)
+        self.assertIn("Zerdeçal", html_after)
+        self.assertIn("Baget", html_after)
+
+        # Test switching single-window stats scope from All -> 2026-09 month only
+        revir_ui.session_state["caf_stat_scope"] = f"2026-09 — {caf._fmt_ym('2026-09')}"
+        out_sep_st = revir_ui.run_action_headless(purch_tab, {"action": "render"})
+        stats_slice = out_sep_st["main_html"].split("Fatura &amp; Tüketim İstatistikleri", 1)[1].split("Planlı Menüye Göre", 1)[0]
+        self.assertIn("40,792.00 ₺", stats_slice)
+        self.assertNotIn("2,750.00 ₺", stats_slice)
+        self.assertNotIn("43,542.00 ₺", stats_slice)
+
+        # Verify Gemini invoice normalizer handles Turkish thousands strings & unit_price*qty checks
+        norm_g = gemini_assistant._normalize_gemini_invoice_dict({
+            "invoice_date": "2026-10-08",
+            "items": [
+                {"item_name": "Kuşbaşı", "quantity": "7", "unit_type": "kg", "unit_price": "1.200", "line_total": "8.400"},
+                {"item_name": "Baget", "quantity": "7.5", "unit_type": "kg", "unit_price": "180", "line_total": "1.350"},
+            ],
+        })
+        self.assertAlmostEqual(norm_g["items"][0]["line_total"], 8400.0, places=2)
+        self.assertAlmostEqual(norm_g["items"][1]["quantity"], 7.5, places=2)
+        self.assertAlmostEqual(norm_g["items"][1]["line_total"], 1350.0, places=2)
+
+        # Verify Sipariş Fişi 5-col table where MİKTAR is blank and quantity ('2', '4kg') is inside BİRİM column
+        siparis_5col = """Belge Türü: Sipariş Fişi
+Tarih: 30 / 10 / 2026
+
+MİKTAR | BİRİM | MALIN CİNSİ | FİYAT | TUTAR
+| 2 | 10kg Yoğurt | 700 | 1.400
+| 4kg | Et Kırmızı | 1.200 | 4.800"""
+        parsed_5col = caf.parse_purchase_invoices_from_text(siparis_5col)
+        self.assertEqual(len(parsed_5col), 1)
+        self.assertEqual(parsed_5col[0]["invoice_date"], "2026-10-30")
+        self.assertAlmostEqual(parsed_5col[0]["items"][0]["quantity"], 2.0, places=2)
+        self.assertAlmostEqual(parsed_5col[0]["items"][0]["line_total"], 1400.0, places=2)
+        self.assertAlmostEqual(parsed_5col[0]["items"][1]["quantity"], 4.0, places=2)
+        self.assertEqual(parsed_5col[0]["items"][1]["unit_type"], "kg")
+        self.assertAlmostEqual(parsed_5col[0]["items"][1]["line_total"], 4800.0, places=2)
 
 
 if __name__ == "__main__":
