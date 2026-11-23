@@ -126,7 +126,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.26.0"
+_DEFAULT_APP_VERSION = "1.26.1"
 
 
 def _load_app_version() -> str:
@@ -160,7 +160,7 @@ AUTO_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 PAGES = [
 	"📊 Genel Bakış",
 	"👥 Öğrenciler",
-	"🧑‍💼 Yetişkinler",
+	"👫 Yetişkinler",
 	"🏫 Okul Taraması",
 	"🩺 Revir Kaydı",
 	"💊 İlaç Takip Sistemi",
@@ -3466,7 +3466,7 @@ PAGE_SECTIONS_REGISTRY: dict[str, dict[str, Any]] = {
 			"essential": True,
 		},
 	},
-	"🧑💼 Yetişkinler": {
+	"👫 Yetişkinler": {
 		"civilians_search": {
 			"name": "Yetişkin Arama ve Filtreleme",
 			"desc": "Personel ve sivil kişiler için arama kutusu",
@@ -8801,7 +8801,7 @@ def select_shared_person(key_prefix: str, person_type: str | None = None, label:
 		is_row_adult = (c_name == "Sivil / Diğer" or "Sivil" in str(row["person_type"] or ""))
 		if is_row_adult:
 			role_s = str(row["notes"] or "").strip()
-			prefix = f"[🧑‍💼 Yetişkin · {role_s}] " if role_s else "[🧑‍💼 Yetişkin] "
+			prefix = f"[👫 Yetişkin · {role_s}] " if role_s else "[👫 Yetişkin] "
 			parts = [f"{prefix}{row['full_name']}"]
 		else:
 			prefix = f"[🎒 {c_name}] " if chosen_class == "Tüm sınıflar" or (chosen_class != c_name) else ""
@@ -13473,7 +13473,7 @@ def _build_context_chat_chips(cur_page: str) -> list[dict[str, str]]:
 		]
 	if p_clean in ("Yetişkinler", "Sivil Kişiler"):
 		return [
-			{"label": "🧑‍💼 Personel Risk Özeti", "prompt": "Seçili yetişkin/personelin vital, tansiyon, şeker ve kronik profiline göre işyeri koruyucu sağlık özeti yaz."},
+			{"label": "👫 Personel Risk Özeti", "prompt": "Seçili yetişkin/personelin vital, tansiyon, şeker ve kronik profiline göre işyeri koruyucu sağlık özeti yaz."},
 			{"label": "📊 Personel Vital Listesi (Excel)", "prompt": "Yetişkin / personel kategorisindeki kişilerin son tansiyon ve kan şekeri kayıtlarını Excel (.xlsx) olarak çıkar."},
 			{"label": "🩺 Revir Başvuruları", "prompt": "Personel / yetişkin revir başvurularının son dönem özetini çıkar."},
 			{"label": "📎 Tahlil/Rapor Ekle", "action": "upload"},
@@ -15980,8 +15980,8 @@ def render_person_dossier() -> None:
 	top_c1, top_c2 = ui.columns([1.2, 2.8])
 	with top_c1:
 		is_civ = person and (person["class_name"] == "Sivil / Diğer" or "Sivil" in str(person["person_type"] or ""))
-		back_label = "🧑‍💼 Yetişkinler Listesine Dön" if is_civ else "👥 Öğrenci Listesine Dön"
-		back_target = "🧑‍💼 Yetişkinler" if is_civ else "👥 Öğrenciler"
+		back_label = "👫 Yetişkinler Listesine Dön" if is_civ else "👥 Öğrenci Listesine Dön"
+		back_target = "👫 Yetişkinler" if is_civ else "👥 Öğrenciler"
 		if ui.button(f"⬅️ {back_label}", key="dossier_btn_back", use_container_width=True):
 			ui.session_state["target_page"] = back_target
 			ui.rerun()
@@ -18667,10 +18667,10 @@ def render_students() -> None:
 def render_civilians() -> None:
 	top_title_col, top_vis_col, top_btn_col = ui.columns([3.0, 1.35, 1.15])
 	with top_title_col:
-		ui.markdown("## 🧑‍💼 Yetişkinler (Personel, Öğretmen ve Ziyaretçi Rehberi)")
+		ui.markdown("## 👫 Yetişkinler (Personel, Öğretmen ve Ziyaretçi Rehberi)")
 	with top_vis_col:
 		if ui.button("🩺 Yetişkin Revir Kaydı", type="secondary", key="btn_civ_page_goto_visit", use_container_width=True):
-			ui.session_state["visit_person_mode"] = "🧑‍💼 Yalnızca Yetişkinler / Personel"
+			ui.session_state["visit_person_mode"] = "👫 Yalnızca Yetişkinler / Personel"
 			ui.session_state["target_page"] = "🩺 Revir Kaydı"
 			ui.rerun()
 	with top_btn_col:
@@ -18801,7 +18801,7 @@ def render_civilians() -> None:
 			with act_c_vis:
 				if ui.button("🩺 Revir Kaydı Aç", type="secondary", key="civ_goto_visit_btn", use_container_width=True):
 					set_active_person(active_person_obj["id"])
-					ui.session_state["visit_person_mode"] = "🧑‍💼 Yalnızca Yetişkinler / Personel"
+					ui.session_state["visit_person_mode"] = "👫 Yalnızca Yetişkinler / Personel"
 					ui.session_state["target_page"] = "🩺 Revir Kaydı"
 					ui.rerun()
 			with act_c2:
@@ -19101,7 +19101,7 @@ def _render_express_adult_registration() -> None:
 					sync_after_person_mutation(new_cid)
 					set_active_person(new_cid)
 					ui.session_state["show_express_adult_bar"] = False
-					ui.session_state["visit_person_mode"] = "🧑‍💼 Yalnızca Yetişkinler / Personel"
+					ui.session_state["visit_person_mode"] = "👫 Yalnızca Yetişkinler / Personel"
 					for k_clr in ("exp_adult_name", "exp_adult_phone"):
 						ui.session_state.pop(k_clr, None)
 					ui.session_state["visit_flash_toast"] = toast_msg
@@ -19113,7 +19113,7 @@ def _select_visit_person_unified(mode: str) -> sqlite3.Row | None:
 	if mode == "🎒 Yalnızca Öğrenciler":
 		return select_shared_person("visit_stu", person_type="Öğrenci", label="🎒 Öğrenci Seçin")
 
-	if mode == "🧑‍💼 Yalnızca Yetişkinler / Personel":
+	if mode == "👫 Yalnızca Yetişkinler / Personel":
 		all_civs = student_options(None, person_type="Sivil")
 		if not all_civs:
 			ui.info("Henüz kayıtlı yetişkin / personel bulunmuyor. Yukarıdaki **⚡ Hızlı Yetişkin/Veli** veya **➕ Yeni Yetişkin** butonunu kullanabilirsiniz.")
@@ -19127,7 +19127,7 @@ def _select_visit_person_unified(mode: str) -> sqlite3.Row | None:
 			filtered_civs = all_civs
 		active_id = ui.session_state.get("active_person_id")
 		lookup = {
-			f"[🧑‍💼 {str(r['notes'] or 'Yetişkin').strip()}] {r['full_name']} · #{r['id']}": r
+			f"[👫 {str(r['notes'] or 'Yetişkin').strip()}] {r['full_name']} · #{r['id']}": r
 			for r in filtered_civs
 		}
 		labels = list(lookup.keys())
@@ -19138,7 +19138,7 @@ def _select_visit_person_unified(mode: str) -> sqlite3.Row | None:
 			ui.session_state[w_key] = id_to_lbl.get(active_id)
 			ui.session_state[sync_k] = active_id
 		with p_col:
-			picked = ui.selectbox("🧑‍💼 Yetişkin / Personel / Veli Seçin", labels, placeholder="Ad soyad veya görev ile arayın...", key=w_key)
+			picked = ui.selectbox("👫 Yetişkin / Personel / Veli Seçin", labels, placeholder="Ad soyad veya görev ile arayın...", key=w_key)
 		if picked and picked in lookup:
 			chosen = lookup[picked]
 			if int(chosen["id"]) != active_id:
@@ -19245,7 +19245,7 @@ def _render_unified_visit_workspace(person: sqlite3.Row) -> None:
 					band_html = (
 						f"<div style='display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;"
 						f"border-left:4px solid #6366f1;padding:4px 10px;margin-bottom:8px;border-radius:7px;background:rgba(99,102,241,0.09);'>"
-						f"<div><span style='background:#4f46e5;color:#fff;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:800;margin-right:6px;'>🧑‍💼 YETİŞKİN / PERSONEL</span>"
+						f"<div><span style='background:#4f46e5;color:#fff;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:800;margin-right:6px;'>👫 YETİŞKİN / PERSONEL</span>"
 						f"<span style='color:var(--text-muted);font-size:0.84rem;font-weight:600;'>{html.escape(role_lbl)}</span></div>"
 						f"<span style='font-size:11px;font-weight:700;color:#6366f1;'>Tansiyon / Şeker & İş Kazası Modu</span></div>"
 					)
@@ -19529,12 +19529,12 @@ def _render_today_visits_ledger() -> None:
 	k1, k2, k3, k4 = ui.columns(4)
 	k1.metric("Bugünkü Toplam", len(rows))
 	k2.metric("🎒 Öğrenci Başvurusu", len(stu_rows))
-	k3.metric("🧑‍💼 Yetişkin / Personel", len(adult_rows))
+	k3.metric("👫 Yetişkin / Personel", len(adult_rows))
 	k4.metric("🚑 Sevk Edilen", len(ref_rows))
 
 	flt = ui.radio(
 		"Defter Filtresi",
-		["🌐 Tümü", "🎒 Yalnızca Öğrenciler", "🧑‍💼 Yalnızca Yetişkinler"],
+		["🌐 Tümü", "🎒 Yalnızca Öğrenciler", "👫 Yalnızca Yetişkinler"],
 		horizontal=True,
 		key="today_ledger_type_filter",
 		label_visibility="collapsed",
@@ -19552,7 +19552,7 @@ def _render_today_visits_ledger() -> None:
 		disp_act = mask_kvkk_value(r["action"] or "", "medical")
 		if is_a:
 			role_s = str(r["person_notes"] or "Yetişkin").strip()
-			badge = f"<span style='background:#ede9fe;color:#5b21b6;border:1px solid #c4b5fd;padding:2px 8px;border-radius:999px;font-size:11.5px;font-weight:800;'>🧑‍💼 {html.escape(role_s)}</span>"
+			badge = f"<span style='background:#ede9fe;color:#5b21b6;border:1px solid #c4b5fd;padding:2px 8px;border-radius:999px;font-size:11.5px;font-weight:800;'>👫 {html.escape(role_s)}</span>"
 		else:
 			badge = f"<span style='background:#e0f2fe;color:#0369a1;border:1px solid #bae6fd;padding:2px 8px;border-radius:999px;font-size:11.5px;font-weight:800;'>🎒 {html.escape(str(r['class_name']))}</span>"
 		ref_html = (
@@ -19590,7 +19590,7 @@ def render_civilian_visit_tab(show_new_button: bool = True) -> None:
 	if show_new_button:
 		if ui.button("➕ Yeni Yetişkin / Personel", type="primary", key="btn_open_civ_modal_from_visit"):
 			open_new_profile_dialog("Sivil / diğer kişi")
-	person = _select_visit_person_unified("🧑‍💼 Yalnızca Yetişkinler / Personel")
+	person = _select_visit_person_unified("👫 Yalnızca Yetişkinler / Personel")
 	if person:
 		_render_unified_visit_workspace(person)
 
@@ -19625,7 +19625,7 @@ def render_visit() -> None:
 		mode_opts = [
 			"🌐 Tümü (Otomatik Algıla)",
 			"🎒 Yalnızca Öğrenciler",
-			"🧑‍💼 Yalnızca Yetişkinler / Personel",
+			"👫 Yalnızca Yetişkinler / Personel",
 		]
 		cur_mode = ui.session_state.get("visit_person_mode", mode_opts[0])
 		if cur_mode not in mode_opts:
@@ -19640,7 +19640,7 @@ def render_visit() -> None:
 		)
 		picked_person = _select_visit_person_unified(selected_mode)
 		if not picked_person:
-			ui.info("💡 Yukarıdan bir **öğrenci** veya **yetişkin (öğretmen, personel, veli)** seçin; form seçtiğiniz kişiye göre otomatik olarak **🎒 Öğrenci** veya **🧑‍💼 Yetişkin** klinik düzenine geçecektir.")
+			ui.info("💡 Yukarıdan bir **öğrenci** veya **yetişkin (öğretmen, personel, veli)** seçin; form seçtiğiniz kişiye göre otomatik olarak **🎒 Öğrenci** veya **👫 Yetişkin** klinik düzenine geçecektir.")
 		else:
 			_render_unified_visit_workspace(picked_person)
 
@@ -30090,13 +30090,43 @@ def render_academic_year_settings() -> None:
 		ui.markdown("##### 🚀 Yeni Bir Eğitim Öğretim Yılı Oluştur")
 		ui.caption("Her yeni eğitim öğretim yılında yeni öğrenciler geldiği ve son sınıflar mezun olduğu için yeni bir bağımsız veritabanı açılır. Böylece önceki yılların verileriyle asla karışmaz. WHO persantil referansları ve revir şablonları aynen korunur.")
 
-		ny_c1, ny_c2, ny_c3 = ui.columns([1.5, 1.2, 1.2])
+		ny_c1, ny_c2, ny_c3, ny_c4 = ui.columns([1.4, 1.15, 1.15, 1.3], vertical_alignment="bottom")
 		with ny_c1:
 			new_y_name = ui.text_input("Eğitim Yılı Adı", placeholder="Örn: 2026-2027", key="new_ay_name_inp")
 		with ny_c2:
 			new_y_start = ui.date_input("Başlangıç Tarihi", value=date.today(), key="new_ay_start_inp")
 		with ny_c3:
 			new_y_end = ui.date_input("Bitiş Tarihi", value=date.today() + timedelta(days=280), key="new_ay_end_inp")
+		with ny_c4:
+			if ui.button("🤖 Yapay Zekâ ile Tarihleri Doldur", type="secondary", use_container_width=True, key="btn_ai_fill_new_ay_dates"):
+				_target_new_nm = (new_y_name or "").strip() or f"{date.today().year}-{date.today().year + 1}"
+				_ai_on_ny, _ai_k_ny, _ai_m_ny = _get_active_gemini_config()
+				_ny_dates: dict[str, str] = {}
+				if _ai_on_ny and _ai_k_ny:
+					_ok_ny, _res_ny, _ = gai.generate_meb_academic_calendar_dates_with_ai(
+						api_key=_ai_k_ny,
+						model=_ai_m_ny,
+						academic_year_name=_target_new_nm,
+					)
+					if _ok_ny:
+						_ny_dates = _res_ny
+				if not _ny_dates:
+					_ny_dates = school_calendar.get_default_meb_academic_break_dates(_target_new_nm)
+				try:
+					ui.session_state["new_ay_name_inp"] = _target_new_nm
+					ui.session_state["new_ay_start_inp"] = date.fromisoformat(_ny_dates["start_date"])
+					ui.session_state["new_ay_end_inp"] = date.fromisoformat(_ny_dates["end_date"])
+					ui.session_state["_new_ay_prefilled_breaks"] = _ny_dates
+					ui.success(f"✨ '{_target_new_nm}' eğitim yılı başlangıç, bitiş, ara tatil ve sömestr tarihleri otomatik dolduruldu!")
+					ui.rerun()
+				except Exception:
+					pass
+
+		auto_sync_new_ay_breaks = ui.checkbox(
+			"📅 Yeni eğitim yılı oluşturulduğunda 1. ve 2. dönem ara tatilleri ile yarıyıl (sömestr) tatilini okul takvimine otomatik işle",
+			value=True,
+			key="chk_auto_sync_new_ay_breaks",
+		)
 
 		ui.markdown("###### 🎓 Mezun Olacak Sınıf Seviyesi Ayarı:")
 		_ay_settings = get_app_settings()
@@ -30150,6 +30180,32 @@ def render_academic_year_settings() -> None:
 					graduation_grade=int(sel_grad_grade),
 				)
 				set_active_academic_year(new_id)
+				if auto_sync_new_ay_breaks:
+					_pref_b = ui.session_state.pop("_new_ay_prefilled_breaks", None)
+					if not isinstance(_pref_b, dict) or not _pref_b.get("break1_start"):
+						_pref_b = school_calendar.get_default_meb_academic_break_dates(
+							new_y_name.strip(), new_y_start.isoformat(), new_y_end.isoformat()
+						)
+					save_app_settings({
+						"ay_break1_start": _pref_b["break1_start"],
+						"ay_break1_end": _pref_b["break1_end"],
+						"ay_semester_start": _pref_b["semester_start"],
+						"ay_semester_end": _pref_b["semester_end"],
+						"ay_break2_start": _pref_b["break2_start"],
+						"ay_break2_end": _pref_b["break2_end"],
+					})
+					school_calendar.sync_academic_year_breaks_to_calendar(
+						connect_db,
+						academic_year_name=new_y_name.strip(),
+						start_date=new_y_start.isoformat(),
+						end_date=new_y_end.isoformat(),
+						break1_start=_pref_b["break1_start"],
+						break1_end=_pref_b["break1_end"],
+						semester_start=_pref_b["semester_start"],
+						semester_end=_pref_b["semester_end"],
+						break2_start=_pref_b["break2_start"],
+						break2_end=_pref_b["break2_end"],
+					)
 				ui.success(f"'{new_y_name.strip()}' eğitim yılı başarıyla oluşturuldu, bağımsız veritabanı hazırlandı ve aktif eğitim yılı yapıldı!")
 				ui.rerun()
 
@@ -30204,26 +30260,201 @@ def render_academic_year_settings() -> None:
 						ui.success(f"✅ {done_cnt} öğrenci ve sağlık profilleri '{active_ay['name']}' eğitim yılına başarıyla aktarıldı!")
 						ui.rerun()
 
-	# 4. Edit Dates of Active Year
-	with ui.expander("✏️ Seçili Eğitim Yılının Tarihlerini Düzenle", expanded=False):
-		ui.caption(f"'{active_ay['name']}' eğitim öğretim yılı için resmi başlangıç ve bitiş tarihlerini güncelleyebilirsiniz:")
+	# 4. Edit Dates of Active Year + Mid-term Breaks (1. & 2. Ara Tatil) + Semester (Yarıyıl / Sömestr) & Calendar Sync
+	with ui.expander("🗓️ Seçili Eğitim Yılının Başlangıç-Bitiş, Ara Tatil ve Sömestr (Yarıyıl) Takvimi", expanded=True):
+		ui.caption(
+			f"**'{active_ay['name']}'** eğitim öğretim yılı için okul açılış/kapanış günlerini, **1. Dönem Ara Tatili**, "
+			f"**Yarıyıl Tatili (Sömestr / 15 Tatil)** ve **2. Dönem Ara Tatili** tarihlerini aşağıdan belirleyip tek tıkla "
+			f"**📅 Takvim & Planlama** modülüne işleyebilir veya **🤖 Yapay Zekâ** düğmesiyle otomatik doldurabilirsiniz:"
+		)
+
+		_cur_cfg_ay = get_app_settings()
+		_def_breaks = school_calendar.get_default_meb_academic_break_dates(
+			active_ay["name"], active_ay.get("start_date", ""), active_ay.get("end_date", "")
+		)
+
+		def _safe_date_val(raw_iso: str | None, fallback_iso: str) -> date:
+			for candidate in (raw_iso, fallback_iso):
+				if candidate:
+					try:
+						return date.fromisoformat(str(candidate).strip()[:10])
+					except Exception:
+						pass
+			return date.today()
+
+		ai_hdr_c1, ai_hdr_c2 = ui.columns([2.1, 1.3], vertical_alignment="center")
+		with ai_hdr_c1:
+			ui.markdown("###### 🤖 MEB Çalışma Takvimi & Tatil Tarihlerini Otomatik Doldur")
+			ui.caption("Seçili eğitim yılına (`" + str(active_ay["name"]) + "`) ait okul başlangıç-bitiş, 1. ve 2. ara tatil ile sömestr tarihlerini otomatik getirir.")
+		with ai_hdr_c2:
+			if ui.button(
+				"🤖 Yapay Zekâ ile Bilgileri Otomatik Doldur",
+				type="secondary",
+				use_container_width=True,
+				key="btn_ai_fill_ay_calendar",
+				help="Gemini AI (veya MEB resmi çalışma takvimi motoru) ile başlangıç, bitiş, 1. ara tatil, yarıyıl (sömestr) ve 2. ara tatil tarihlerini otomatik doldurur ve takvime işler.",
+			):
+				_ai_on_ay, _ai_key_ay, _ai_mod_ay = _get_active_gemini_config()
+				_filled_dates: dict[str, str] = {}
+				_ai_src_lbl = "MEB Resmi Takvim Motoru"
+				if _ai_on_ay and _ai_key_ay:
+					with ui.spinner(f"Gemini AI ({_ai_mod_ay}) '{active_ay['name']}' MEB çalışma takvimini ve tatil tarihlerini hazırlıyor..."):
+						_ok_ai_cal, _res_ai_cal, _used_m_cal = gai.generate_meb_academic_calendar_dates_with_ai(
+							api_key=_ai_key_ay,
+							model=_ai_mod_ay,
+							academic_year_name=active_ay["name"],
+						)
+					if _ok_ai_cal:
+						_filled_dates = _res_ai_cal
+						_ai_src_lbl = f"Gemini AI ({_used_m_cal})"
+				if not _filled_dates:
+					_filled_dates = dict(_def_breaks)
+
+				try:
+					_sd_obj = date.fromisoformat(_filled_dates["start_date"])
+					_ed_obj = date.fromisoformat(_filled_dates["end_date"])
+					_b1s_obj = date.fromisoformat(_filled_dates["break1_start"])
+					_b1e_obj = date.fromisoformat(_filled_dates["break1_end"])
+					_sems_obj = date.fromisoformat(_filled_dates["semester_start"])
+					_seme_obj = date.fromisoformat(_filled_dates["semester_end"])
+					_b2s_obj = date.fromisoformat(_filled_dates["break2_start"])
+					_b2e_obj = date.fromisoformat(_filled_dates["break2_end"])
+
+					ui.session_state["ay_edit_start_date"] = _sd_obj
+					ui.session_state["ay_edit_end_date"] = _ed_obj
+					ui.session_state["ay_break1_start"] = _b1s_obj
+					ui.session_state["ay_break1_end"] = _b1e_obj
+					ui.session_state["ay_semester_start"] = _sems_obj
+					ui.session_state["ay_semester_end"] = _seme_obj
+					ui.session_state["ay_break2_start"] = _b2s_obj
+					ui.session_state["ay_break2_end"] = _b2e_obj
+
+					update_academic_year(active_ay["id"], active_ay["name"], _sd_obj.isoformat(), _ed_obj.isoformat())
+					save_app_settings({
+						"ay_break1_start": _b1s_obj.isoformat(),
+						"ay_break1_end": _b1e_obj.isoformat(),
+						"ay_semester_start": _sems_obj.isoformat(),
+						"ay_semester_end": _seme_obj.isoformat(),
+						"ay_break2_start": _b2s_obj.isoformat(),
+						"ay_break2_end": _b2e_obj.isoformat(),
+					})
+					_sync_stats = school_calendar.sync_academic_year_breaks_to_calendar(
+						connect_db,
+						academic_year_name=active_ay["name"],
+						start_date=_sd_obj.isoformat(),
+						end_date=_ed_obj.isoformat(),
+						break1_start=_b1s_obj.isoformat(),
+						break1_end=_b1e_obj.isoformat(),
+						semester_start=_sems_obj.isoformat(),
+						semester_end=_seme_obj.isoformat(),
+						break2_start=_b2s_obj.isoformat(),
+						break2_end=_b2e_obj.isoformat(),
+					)
+					clear_all_data_caches()
+					ui.session_state["_ay_cal_flash_msg"] = (
+						f"✨ **{_ai_src_lbl}** ile **{active_ay['name']}** eğitim yılı başlangıç-bitiş, ara tatil ve sömestr tarihleri "
+						f"otomatik dolduruldu ve **{_sync_stats['total_events']}** gün okul takvimine işlendi!"
+					)
+					ui.rerun()
+				except Exception as _exc_cal:
+					ui.error(f"Tarihler doldurulurken hata oluştu: {_exc_cal}")
+
+		_ay_flash = ui.session_state.pop("_ay_cal_flash_msg", None)
+		if _ay_flash:
+			ui.success(_ay_flash)
+
+		ui.markdown("###### 🏫 Eğitim Öğretim Yılı Açılış ve Kapanış Günleri")
 		ed_c1, ed_c2 = ui.columns(2)
 		with ed_c1:
-			try:
-				def_sd = date.fromisoformat(active_ay["start_date"][:10])
-			except Exception:
-				def_sd = date(2025, 9, 8)
-			new_start_d = ui.date_input("🗓️ Başlangıç Tarihi", value=def_sd, key="ay_edit_start_date")
+			def_sd = _safe_date_val(active_ay.get("start_date"), _def_breaks["start_date"])
+			new_start_d = ui.date_input("🗓️ Başlangıç Tarihi (1. Dönem Açılış)", value=def_sd, key="ay_edit_start_date")
 		with ed_c2:
-			try:
-				def_ed = date.fromisoformat(active_ay["end_date"][:10])
-			except Exception:
-				def_ed = date(2026, 6, 19)
-			new_end_d = ui.date_input("🏁 Bitiş Tarihi", value=def_ed, key="ay_edit_end_date")
-		if ui.button("💾 Tarihleri Güncelle", type="primary", key="btn_save_ay_dates"):
-			update_academic_year(active_ay["id"], active_ay["name"], new_start_d.isoformat(), new_end_d.isoformat())
-			ui.success("Eğitim öğretim yılı tarihleri güncellendi.")
-			ui.rerun()
+			def_ed = _safe_date_val(active_ay.get("end_date"), _def_breaks["end_date"])
+			new_end_d = ui.date_input("🏁 Bitiş Tarihi (2. Dönem Kapanış / Karne)", value=def_ed, key="ay_edit_end_date")
+
+		ui.markdown("###### 🍂⛄🌸 Ara Tatiller ve Yarıyıl (Sömestr / 15 Tatil) Tarihleri")
+		br_c1, br_c2, br_c3 = ui.columns(3)
+		with br_c1:
+			with ui.container(border=True):
+				ui.markdown("**🍂 1. Dönem Ara Tatili (Kasım)**")
+				def_b1s = _safe_date_val(_cur_cfg_ay.get("ay_break1_start"), _def_breaks["break1_start"])
+				def_b1e = _safe_date_val(_cur_cfg_ay.get("ay_break1_end"), _def_breaks["break1_end"])
+				b1_start_d = ui.date_input("1. Ara Tatil Başlangıç", value=def_b1s, key="ay_break1_start")
+				b1_end_d = ui.date_input("1. Ara Tatil Bitiş", value=def_b1e, key="ay_break1_end")
+		with br_c2:
+			with ui.container(border=True):
+				ui.markdown("**⛄ Yarıyıl Tatili (Sömestr / 15 Tatil)**")
+				def_sems = _safe_date_val(_cur_cfg_ay.get("ay_semester_start"), _def_breaks["semester_start"])
+				def_seme = _safe_date_val(_cur_cfg_ay.get("ay_semester_end"), _def_breaks["semester_end"])
+				sem_start_d = ui.date_input("Sömestr Başlangıç", value=def_sems, key="ay_semester_start")
+				sem_end_d = ui.date_input("Sömestr Bitiş", value=def_seme, key="ay_semester_end")
+		with br_c3:
+			with ui.container(border=True):
+				ui.markdown("**🌸 2. Dönem Ara Tatili (Bahar)**")
+				def_b2s = _safe_date_val(_cur_cfg_ay.get("ay_break2_start"), _def_breaks["break2_start"])
+				def_b2e = _safe_date_val(_cur_cfg_ay.get("ay_break2_end"), _def_breaks["break2_end"])
+				b2_start_d = ui.date_input("2. Ara Tatil Başlangıç", value=def_b2s, key="ay_break2_start")
+				b2_end_d = ui.date_input("2. Ara Tatil Bitiş", value=def_b2e, key="ay_break2_end")
+
+		act_b1, act_b2 = ui.columns([1.8, 1.2])
+		with act_b1:
+			if ui.button(
+				"📅 Tarihleri Kaydet ve Ara Tatilleri / Sömestr Tatilini Takvime İşle",
+				type="primary",
+				use_container_width=True,
+				key="btn_save_and_sync_ay_calendar",
+			):
+				update_academic_year(active_ay["id"], active_ay["name"], new_start_d.isoformat(), new_end_d.isoformat())
+				save_app_settings({
+					"ay_break1_start": b1_start_d.isoformat(),
+					"ay_break1_end": b1_end_d.isoformat(),
+					"ay_semester_start": sem_start_d.isoformat(),
+					"ay_semester_end": sem_end_d.isoformat(),
+					"ay_break2_start": b2_start_d.isoformat(),
+					"ay_break2_end": b2_end_d.isoformat(),
+				})
+				sync_res = school_calendar.sync_academic_year_breaks_to_calendar(
+					connect_db,
+					academic_year_name=active_ay["name"],
+					start_date=new_start_d.isoformat(),
+					end_date=new_end_d.isoformat(),
+					break1_start=b1_start_d.isoformat(),
+					break1_end=b1_end_d.isoformat(),
+					semester_start=sem_start_d.isoformat(),
+					semester_end=sem_end_d.isoformat(),
+					break2_start=b2_start_d.isoformat(),
+					break2_end=b2_end_d.isoformat(),
+				)
+				clear_all_data_caches()
+				ui.session_state["_ay_cal_flash_msg"] = (
+					f"✅ '{active_ay['name']}' eğitim yılı tarihleri güncellendi; "
+					f"**1. Ara Tatil ({sync_res['break1_days']} gün)**, **Yarıyıl/Sömestr ({sync_res['semester_days']} gün)**, "
+					f"**2. Ara Tatil ({sync_res['break2_days']} gün)** ve dönem açılış/kapanış günleri (toplam **{sync_res['total_events']}** kayıt) okul takvimine işlendi!"
+				)
+				ui.rerun()
+		with act_b2:
+			if ui.button("💾 Sadece Başlangıç / Bitiş Tarihlerini Güncelle", type="secondary", use_container_width=True, key="btn_save_ay_dates"):
+				update_academic_year(active_ay["id"], active_ay["name"], new_start_d.isoformat(), new_end_d.isoformat())
+				save_app_settings({
+					"ay_break1_start": b1_start_d.isoformat(),
+					"ay_break1_end": b1_end_d.isoformat(),
+					"ay_semester_start": sem_start_d.isoformat(),
+					"ay_semester_end": sem_end_d.isoformat(),
+					"ay_break2_start": b2_start_d.isoformat(),
+					"ay_break2_end": b2_end_d.isoformat(),
+				})
+				clear_all_data_caches()
+				ui.success("Eğitim öğretim yılı tarihleri güncellendi.")
+				ui.rerun()
+
+		with connect_db() as _cal_chk_conn:
+			_synced_cnt = _cal_chk_conn.execute(
+				"SELECT COUNT(*) FROM calendar_events WHERE source = 'meb_akademik_takvim'"
+			).fetchone()[0]
+		if _synced_cnt > 0:
+			ui.caption(
+				f"📌 **Takvim Durumu:** Bu eğitim yılının takviminde şu anda **{_synced_cnt}** adet MEB dönem başlangıç/bitiş, ara tatil ve yarıyıl (sömestr) günü işlenmiş durumdadır."
+			)
 
 	# 5. Year Database Backup & Download
 	with ui.expander("💾 Bu Eğitim Yılının Veritabanını İndir / Yedekle", expanded=False):
@@ -33035,7 +33266,7 @@ def _handle_cmd_search(query: str) -> list[dict[str, Any]]:
 		{"group": "⚡ Hızlı İşlemler", "kind": "page", "value": "💉 İnsülin & Diyabet Yönetimi", "icon": "💉", "title": "İnsülin Dozu Hesapla & Yemek Menüsü", "subtitle": "Bolus hesaplayıcı ve aylık okul yemek menüsü yönetimi", "tag": "Diyabet"},
 		{"group": "⚡ Hızlı İşlemler", "kind": "page", "value": "🍽️ Yemekhane Yönetimi", "icon": "🍽️", "title": "Yemekhane Yönetimi (Menü, Gider & Kasa)", "subtitle": "Yemekler bankası, iş günü menü planı, A4 çıktı, fatura/gider ve kasa takibi", "tag": "Yemekhane"},
 		{"group": "⚡ Hızlı İşlemler", "kind": "new_student", "value": "Öğrenci", "icon": "➕", "title": "Yeni Öğrenci Profili Ekle", "subtitle": "Sağlık profili ve ilk ölçüm formu", "tag": "Çekmece"},
-		{"group": "⚡ Hızlı İşlemler", "kind": "new_student", "value": "Sivil / diğer kişi", "icon": "🧑‍💼", "title": "Yeni Yetişkin / Personel Ekle", "subtitle": "Öğretmen, personel veya veli kaydı oluştur", "tag": "Çekmece"},
+		{"group": "⚡ Hızlı İşlemler", "kind": "new_student", "value": "Sivil / diğer kişi", "icon": "👫", "title": "Yeni Yetişkin / Personel Ekle", "subtitle": "Öğretmen, personel veya veli kaydı oluştur", "tag": "Çekmece"},
 		{"group": "⚡ Hızlı İşlemler", "kind": "class_mgr", "value": "", "icon": "🏫", "title": "Okul Sınıfları & Şube Yönetimi", "subtitle": "Sınıf ekle, çıkar veya öğrenci ata", "tag": "Pencere"},
 		{"group": "⚡ Hızlı İşlemler", "kind": "page", "value": "📁 Evraklar", "icon": "🛠️", "title": "Evrak Deposu — Word / Excel Düzenle & PDF Doldur", "subtitle": "Evrak deposundaki belgeleri düzenle, PDF form alanlarını tara ve doldur", "tag": "Stüdyo"},
 		{"group": "⚡ Hızlı İşlemler", "kind": "toggle_kvkk", "value": "", "icon": "🛡️", "title": "KVKK Ekran Gizliliğini Aç / Kapat", "subtitle": "İsim, telefon ve tıbbi verileri anında maskele", "tag": "Gizlilik"},
@@ -33100,7 +33331,7 @@ def _handle_cmd_search(query: str) -> list[dict[str, Any]]:
 				"group": "👤 Öğrenciler & Kişiler",
 				"kind": "person",
 				"value": int(r["id"]),
-				"icon": "💙" if int(r["is_diab"] or 0) == 1 else ("🧑‍💼" if str(r["person_type"] or "") != "Öğrenci" else "👤"),
+				"icon": "💙" if int(r["is_diab"] or 0) == 1 else ("👫" if str(r["person_type"] or "") != "Öğrenci" else "👤"),
 				"title": disp_nm,
 				"subtitle": sub_s,
 				"tag": "Kişi Dosyası",
@@ -33370,7 +33601,7 @@ def main() -> None:
 		]),
 		("KİŞİ & TARAMA", [
 			{"value": "👥 Öğrenciler", "icon": "👥", "label": "Öğrenciler"},
-			{"value": "🧑‍💼 Yetişkinler", "icon": "🧑‍💼", "label": "Yetişkinler"},
+			{"value": "👫 Yetişkinler", "icon": "👫", "label": "Yetişkinler"},
 			{"value": "🏫 Okul Taraması", "icon": "🏫", "label": "Okul Taraması"},
 		]),
 		("GELİŞİM & PLAN", [

@@ -1271,6 +1271,62 @@ def _sync_selected_date_when_month_changes(new_year: int, new_month: int, today:
 		ui.session_state["cal_selected_date"] = date(new_year, new_month, target_day).isoformat()
 
 
+def _handle_calendar_event_inline_click(connect_db_fn: Callable, *, set_flash: bool = True) -> bool:
+	"""Takvim kutucukları içindeki '✓' (yapıldı) ve '✕' (kaldır) hızlı işlem butonlarını işler."""
+	try:
+		ctx = ui._get_ctx()
+		clicked_wid = getattr(ctx, "clicked_button", None)
+	except Exception:
+		return False
+	if not isinstance(clicked_wid, str):
+		return False
+
+	if clicked_wid.startswith("btn_cal_ev_done_"):
+		try:
+			ev_id = int(clicked_wid[len("btn_cal_ev_done_"):])
+		except ValueError:
+			return False
+		with connect_db_fn() as conn:
+			row = conn.execute(
+				"SELECT title, is_completed FROM calendar_events WHERE id = ?",
+				(ev_id,),
+			).fetchone()
+			if row is not None:
+				new_done = 0 if bool(row["is_completed"]) else 1
+				conn.execute(
+					"UPDATE calendar_events SET is_completed = ? WHERE id = ?",
+					(new_done, ev_id),
+				)
+				conn.commit()
+				if set_flash:
+					if new_done == 1:
+						ui.session_state["_cal_flash_msg"] = f"✅ '{row['title']}' yapıldı olarak işaretlendi."
+					else:
+						ui.session_state["_cal_flash_msg"] = f"↩️ '{row['title']}' bekleyen duruma geri alındı."
+		ctx.clicked_button = None
+		return True
+
+	if clicked_wid.startswith("btn_cal_ev_del_"):
+		try:
+			ev_id = int(clicked_wid[len("btn_cal_ev_del_"):])
+		except ValueError:
+			return False
+		with connect_db_fn() as conn:
+			row = conn.execute(
+				"SELECT title FROM calendar_events WHERE id = ?",
+				(ev_id,),
+			).fetchone()
+			if row is not None:
+				conn.execute("DELETE FROM calendar_events WHERE id = ?", (ev_id,))
+				conn.commit()
+				if set_flash:
+					ui.session_state["_cal_flash_msg"] = f"✕ '{row['title']}' takvimden kaldırıldı."
+		ctx.clicked_button = None
+		return True
+
+	return False
+
+
 # ---------------------------------------------------------------------------
 # ANA TAKVİM VE TAKVİM YAPRAĞI EKRANI RENDER FONKSİYONU
 # ---------------------------------------------------------------------------
@@ -1303,6 +1359,8 @@ def render_calendar_and_planning_page(
 			ui.session_state["cal_selected_date"] = picked_iso
 	except Exception:
 		pass
+
+	_handle_calendar_event_inline_click(connect_db_fn, set_flash=True)
 
 	if "cal_selected_date" not in ui.session_state:
 		ui.session_state["cal_selected_date"] = today.isoformat()
@@ -1663,26 +1721,44 @@ def render_calendar_and_planning_page(
 
 						pills_html_list: list[str] = []
 						for ev in cell_events[:2]:
+							ev_id = int(ev["id"])
+							ev_done = bool(ev.get("is_completed"))
 							ev_title = html.escape(str(ev.get("title") or ""))
 							ev_hol = bool(ev.get("is_civil_holiday"))
 							ev_cat = str(ev.get("category") or "belirli_gun")
-							if ev_hol:
-								p_bg, p_fg, p_bd = "#fee2e2", "#b91c1c", "#fca5a5"
-							elif ev_cat == "dini_bayram":
-								p_bg, p_fg, p_bd = "#fef3c7", "#b45309", "#fde68a"
-							elif ev_cat == "osym_sinav":
-								p_bg, p_fg, p_bd = "#dbeafe", "#1d4ed8", "#93c5fd"
-							elif ev_cat == "secim_idari_tatil":
-								p_bg, p_fg, p_bd = "#ede9fe", "#6d28d9", "#c4b5fd"
-							elif ev_cat == "revir_etkinlik":
-								p_bg, p_fg, p_bd = "#d1fae5", "#047857", "#6ee7b7"
+							if ev_done:
+								p_bg, p_fg, p_bd = "#ecfdf5", "#047857", "#6ee7b7"
+								title_done_css = "text-decoration:line-through;opacity:0.75;"
+								done_btn_css = "background:#10b981;color:#ffffff;border:1px solid #059669;"
+								done_title = "Yapıldı işaretini geri al"
 							else:
-								p_bg, p_fg, p_bd = "#f1f5f9", "#334155", "#cbd5e1"
+								title_done_css = ""
+								done_btn_css = "background:rgba(255,255,255,0.9);color:#059669;border:1px solid #6ee7b7;"
+								done_title = "Yapıldı olarak işaretle"
+								if ev_hol:
+									p_bg, p_fg, p_bd = "#fee2e2", "#b91c1c", "#fca5a5"
+								elif ev_cat == "dini_bayram":
+									p_bg, p_fg, p_bd = "#fef3c7", "#b45309", "#fde68a"
+								elif ev_cat == "osym_sinav":
+									p_bg, p_fg, p_bd = "#dbeafe", "#1d4ed8", "#93c5fd"
+								elif ev_cat == "secim_idari_tatil":
+									p_bg, p_fg, p_bd = "#ede9fe", "#6d28d9", "#c4b5fd"
+								elif ev_cat == "revir_etkinlik":
+									p_bg, p_fg, p_bd = "#d1fae5", "#047857", "#6ee7b7"
+								else:
+									p_bg, p_fg, p_bd = "#f1f5f9", "#334155", "#cbd5e1"
 							pills_html_list.append(
 								f'<div style="font-size:10px;font-weight:700;color:{p_fg};background:{p_bg};'
-								f'border:1px solid {p_bd};border-radius:4px;padding:1.5px 4px;margin-top:2px;'
-								f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="{ev_title}">'
-								f'{ev_title}</div>'
+								f'border:1px solid {p_bd};border-radius:4px;padding:1.5px 3px 1.5px 4px;margin-top:2px;'
+								f'display:flex;align-items:center;justify-content:space-between;gap:2px;" title="{ev_title}">'
+								f'<span style="min-width:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;{title_done_css}">{ev_title}</span>'
+								f'<span style="display:inline-flex;align-items:center;gap:2px;flex-shrink:0;">'
+								f'<button type="button" onclick="event.stopPropagation();window.__revirClick(\'btn_cal_ev_done_{ev_id}\');" onkeydown="event.stopPropagation();" title="{done_title}" '
+								f'style="width:15px;height:15px;padding:0;border-radius:3px;display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:900;line-height:1;cursor:pointer;{done_btn_css}">✓</button>'
+								f'<button type="button" onclick="event.stopPropagation();window.__revirClick(\'btn_cal_ev_del_{ev_id}\');" onkeydown="event.stopPropagation();" title="Etkinliği takvimden kaldır" '
+								f'style="width:15px;height:15px;padding:0;border-radius:3px;display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:900;line-height:1;cursor:pointer;background:rgba(255,255,255,0.9);color:#dc2626;border:1px solid #fca5a5;">✕</button>'
+								f'</span>'
+								f'</div>'
 							)
 
 						if sp_builtin and len(pills_html_list) < 2:
@@ -1909,6 +1985,8 @@ def _render_interactive_calendar_leaf(
 	special_badges_html: list[str] = []
 	existing_titles_low: set[str] = set()
 	for e in day_events:
+		ev_id = int(e["id"])
+		ev_done = bool(e.get("is_completed"))
 		sym_html = render_symbol_badge(e.get("symbol_type") or "event")
 		raw_ttl = str(e.get("title") or "").strip()
 		existing_titles_low.add(raw_ttl.lower())
@@ -1917,14 +1995,29 @@ def _render_interactive_calendar_leaf(
 		t_rng = " - ".join(filter(None, [e.get("start_time"), e.get("end_time")]))
 		t_span = f'<span style="background:rgba(15,23,42,0.08);padding:1px 6px;border-radius:4px;font-size:10.5px;font-weight:800;">⏰ {html.escape(t_rng)}</span>' if t_rng else ""
 		is_h = bool(e.get("is_civil_holiday"))
-		b_bg = "#fef2f2" if is_h else "#f8fafc"
-		b_bd = "#fca5a5" if is_h else "#cbd5e1"
-		b_fg = "#b91c1c" if is_h else "#1e293b"
+		if ev_done:
+			b_bg, b_bd, b_fg = "#ecfdf5", "#6ee7b7", "#047857"
+			title_done_css = "text-decoration:line-through;opacity:0.75;"
+			done_badge = '<span style="background:#d1fae5;color:#065f46;border:1px solid #6ee7b7;padding:0 5px;border-radius:4px;font-size:10px;font-weight:800;">✓ Yapıldı</span>'
+			done_btn_css = "background:#10b981;color:#ffffff;border:1px solid #059669;"
+			done_title = "Yapıldı işaretini kaldır / geri al"
+		else:
+			b_bg = "#fef2f2" if is_h else "#f8fafc"
+			b_bd = "#fca5a5" if is_h else "#cbd5e1"
+			b_fg = "#b91c1c" if is_h else "#1e293b"
+			title_done_css = ""
+			done_badge = ""
+			done_btn_css = "background:#ffffff;color:#059669;border:1px solid #6ee7b7;"
+			done_title = "Yapıldı olarak işaretle"
 		special_badges_html.append(
 			f"""<div style="padding:7px 10px;border-radius:8px;background:{b_bg};border:1px solid {b_bd};margin-bottom:5px;">
 				<div style="font-size:12.5px;font-weight:800;color:{b_fg};display:flex;align-items:center;justify-content:space-between;gap:6px;">
-					<span style="display:flex;align-items:center;gap:6px;">{sym_html} <span>{e_ttl}</span></span>
-					{t_span}
+					<span style="display:flex;align-items:center;gap:6px;min-width:0;flex:1;">{sym_html} <span style="{title_done_css}">{e_ttl}</span>{done_badge}</span>
+					<span style="display:inline-flex;align-items:center;gap:4px;flex-shrink:0;">
+						{t_span}
+						<button type="button" onclick="event.stopPropagation();window.__revirClick('btn_cal_ev_done_{ev_id}');" onkeydown="event.stopPropagation();" title="{done_title}" style="width:24px;height:24px;padding:0;border-radius:6px;display:inline-flex;align-items:center;justify-content:center;font-size:13px;font-weight:900;line-height:1;cursor:pointer;{done_btn_css}">✓</button>
+						<button type="button" onclick="event.stopPropagation();window.__revirClick('btn_cal_ev_del_{ev_id}');" onkeydown="event.stopPropagation();" title="Bu etkinliği takvimden kaldır" style="width:24px;height:24px;padding:0;border-radius:6px;display:inline-flex;align-items:center;justify-content:center;font-size:13px;font-weight:900;line-height:1;cursor:pointer;background:#ffffff;color:#dc2626;border:1px solid #fca5a5;">✕</button>
+					</span>
 				</div>
 				{f'<div style="font-size:11.2px;color:#475569;margin-top:2px;">{e_desc}</div>' if e_desc else ''}
 			</div>"""
@@ -2323,10 +2416,10 @@ def open_calendar_event_manager_dialog(
 							conn.execute("UPDATE calendar_events SET is_completed = ? WHERE id = ?", (0 if ev_done else 1, ev_id))
 						ui.rerun()
 				with row_c3:
-					if ui.button("🗑️", key=f"dlg_btn_cal_del_{ev_id}", help="Bu kaydı sil", use_container_width=True):
+					if ui.button("✕", key=f"dlg_btn_cal_del_{ev_id}", help="Bu etkinliği takvimden kaldır", use_container_width=True):
 						with connect_db_fn() as conn:
 							conn.execute("DELETE FROM calendar_events WHERE id = ?", (ev_id,))
-						ui.session_state["_cal_dlg_flash"] = f"🗑️ '{ev['title']}' takvimden silindi."
+						ui.session_state["_cal_dlg_flash"] = f"✕ '{ev['title']}' takvimden kaldırıldı."
 						ui.rerun()
 	else:
 		ui.info("Bu güne henüz kayıtlı bir etkinlik, tatil veya sınav bulunmuyor. Aşağıdan hemen ekleyebilirsiniz.")
@@ -2768,6 +2861,8 @@ def render_overview_calendar_widget(
 		except Exception:
 			pass
 
+	_handle_calendar_event_inline_click(connect_db_fn, set_flash=False)
+
 	with connect_db_fn() as conn:
 		rows = conn.execute(
 			"""SELECT id, event_date, title, category, symbol_type, is_civil_holiday,
@@ -2847,28 +2942,30 @@ def render_overview_calendar_widget(
 			t_html = f"<span style='color:var(--teal);font-weight:700;font-size:11.5px;'>⏰ {html.escape(t_rng)}</span>" if t_rng else ""
 			is_hol = bool(r["is_civil_holiday"])
 			is_done = bool(r["is_completed"])
-			d_bg = "#fee2e2" if is_hol else ("#dbeafe" if ev_d_str == today_iso else "#f1f5f9")
-			d_fg = "#dc2626" if is_hol else ("#1d4ed8" if ev_d_str == today_iso else "#334155")
+			d_bg = "#d1fae5" if is_done else ("#fee2e2" if is_hol else ("#dbeafe" if ev_d_str == today_iso else "#f1f5f9"))
+			d_fg = "#047857" if is_done else ("#dc2626" if is_hol else ("#1d4ed8" if ev_d_str == today_iso else "#334155"))
 			ttl_style = "text-decoration:line-through;opacity:0.65;" if is_done else ""
+			done_badge = "<span style='background:#d1fae5;color:#065f46;border:1px solid #6ee7b7;padding:0 5px;border-radius:4px;font-size:10px;font-weight:800;flex-shrink:0;'>✓ Yapıldı</span>" if is_done else ""
+			done_btn_css = "background:#10b981;color:#ffffff;border:1px solid #059669;" if is_done else "background:#ffffff;color:#059669;border:1px solid #6ee7b7;"
+			done_title = "Yapıldı işaretini geri al" if is_done else "Yapıldı olarak işaretle"
+			row_tint_css = "background:#ecfdf5;border-color:#6ee7b7;" if is_done else ""
 
-			c_row, c_btn = ui.columns([4.8, 0.85])
-			with c_row:
-				ui.markdown(
-					f"""<div class="revir-op-row" style="padding:6px 9px;display:flex;align-items:center;justify-content:space-between;gap:8px;">
-						<div style="display:flex;align-items:center;gap:7px;min-width:0;">
-							<span style="background:{d_bg};color:{d_fg};padding:2px 7px;border-radius:6px;font-size:11px;font-weight:800;white-space:nowrap;">{html.escape(d_lbl)}</span>
-							{sym_html}
-							<span style="font-weight:700;font-size:13px;color:var(--text-heading);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;{ttl_style}">{html.escape(str(r['title'] or ''))}</span>
-						</div>
-						<div style="white-space:nowrap;">{t_html}</div>
-					</div>""",
-					unsafe_allow_html=True,
-				)
-			with c_btn:
-				if ui.button("✓" if not is_done else "↩️", key=f"ov_cal_done_{ev_id}", help="Tamamlandı olarak işaretle", use_container_width=True):
-					with connect_db_fn() as conn:
-						conn.execute("UPDATE calendar_events SET is_completed = ? WHERE id = ?", (0 if is_done else 1, ev_id))
-					ui.rerun()
+			ui.markdown(
+				f"""<div class="revir-op-row" style="padding:6px 9px;display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px;{row_tint_css}">
+					<div style="display:flex;align-items:center;gap:7px;min-width:0;flex:1;">
+						<span style="background:{d_bg};color:{d_fg};padding:2px 7px;border-radius:6px;font-size:11px;font-weight:800;white-space:nowrap;">{html.escape(d_lbl)}</span>
+						{sym_html}
+						<span style="font-weight:700;font-size:13px;color:var(--text-heading);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;{ttl_style}">{html.escape(str(r['title'] or ''))}</span>
+						{done_badge}
+					</div>
+					<div style="display:inline-flex;align-items:center;gap:5px;white-space:nowrap;flex-shrink:0;">
+						{t_html}
+						<button type="button" onclick="event.stopPropagation();window.__revirClick('btn_cal_ev_done_{ev_id}');" onkeydown="event.stopPropagation();" title="{done_title}" style="width:24px;height:24px;padding:0;border-radius:6px;display:inline-flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:900;line-height:1;cursor:pointer;{done_btn_css}">✓</button>
+						<button type="button" onclick="event.stopPropagation();window.__revirClick('btn_cal_ev_del_{ev_id}');" onkeydown="event.stopPropagation();" title="Bu etkinliği takvimden kaldır" style="width:24px;height:24px;padding:0;border-radius:6px;display:inline-flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:900;line-height:1;cursor:pointer;background:#ffffff;color:#dc2626;border:1px solid #fca5a5;">✕</button>
+					</div>
+				</div>""",
+				unsafe_allow_html=True,
+			)
 
 		if len(rows) > 6:
 			ui.caption(f"… ve önümüzdeki 14 gün içinde {len(rows) - 6} takvim kaydı daha.")

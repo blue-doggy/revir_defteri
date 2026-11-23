@@ -129,6 +129,95 @@ class TestSchoolCalendar(unittest.TestCase):
             self.assertIn("main_html", out2)
             self.assertNotIn("Çalışma Zamanı Hatası", out2["main_html"])
 
+    def test_calendar_event_box_confirm_and_delete_buttons(self):
+        today_iso = date.today().isoformat()
+        with self.connect() as c:
+            cur = c.execute(
+                """INSERT INTO calendar_events(
+                    event_date, title, category, symbol_type, is_civil_holiday, is_half_day,
+                    start_time, end_time, description, source, is_completed, created_at
+                ) VALUES (?, '4-A Göz Taraması', 'revir_etkinlik', 'health', 0, 0, '09:30', '11:00', 'Test tarama', 'manual', 0, ?)""",
+                (today_iso, datetime.now().isoformat(timespec="seconds")),
+            )
+            ev_id = int(cur.lastrowid)
+            c.commit()
+
+        settings = {
+            "calendar_province": "Ankara",
+            "calendar_show_prayer_times": "1",
+            "calendar_quote_mode": "Karışık (Hadis-i Şerif + Özlü Söz / Günün Yazısı)",
+            "calendar_auto_load_holidays": "0",
+        }
+        cal_kwargs = dict(
+            connect_db_fn=self.connect,
+            get_app_settings_fn=lambda: settings,
+            save_app_settings_fn=lambda d: settings.update(d),
+            get_active_gemini_config_fn=lambda: (False, "", "gemini-2.5-flash"),
+            get_tr_provinces_fn=lambda: ["Ankara", "İstanbul", "İzmir"],
+        )
+
+        with mock.patch.object(school_calendar, "get_prayer_times_for_province", return_value={
+            "İmsak": "06:00", "Güneş": "07:30", "Öğle": "12:50", "İkindi": "15:20", "Akşam": "17:45", "Yatsı": "19:05"
+        }):
+            revir_ui.reset_session()
+            revir_ui.session_state["cal_selected_date"] = today_iso
+            out_cal = revir_ui.run_action_headless(
+                lambda: school_calendar.render_calendar_and_planning_page(**cal_kwargs),
+                {"action": "render"},
+            )
+            self.assertNotIn("Çalışma Zamanı Hatası", out_cal["main_html"])
+            self.assertIn(f"btn_cal_ev_done_{ev_id}", out_cal["main_html"])
+            self.assertIn(f"btn_cal_ev_del_{ev_id}", out_cal["main_html"])
+
+            out_ov = revir_ui.run_action_headless(
+                lambda: school_calendar.render_overview_calendar_widget(
+                    connect_db_fn=self.connect,
+                    get_active_gemini_config_fn=lambda: (False, "", "gemini-2.5-flash"),
+                ),
+                {"action": "render"},
+            )
+            self.assertNotIn("Çalışma Zamanı Hatası", out_ov["main_html"])
+            self.assertIn(f"btn_cal_ev_done_{ev_id}", out_ov["main_html"])
+            self.assertIn(f"btn_cal_ev_del_{ev_id}", out_ov["main_html"])
+
+            # 1. Click ✓ (done) on calendar page -> is_completed == 1 and line-through / ✓ Yapıldı shown
+            out_done = revir_ui.run_action_headless(
+                lambda: school_calendar.render_calendar_and_planning_page(**cal_kwargs),
+                {"action": "click", "key": f"btn_cal_ev_done_{ev_id}"},
+            )
+            self.assertNotIn("Çalışma Zamanı Hatası", out_done["main_html"])
+            self.assertIn("✓ Yapıldı", out_done["main_html"])
+            self.assertIn("line-through", out_done["main_html"])
+            with self.connect() as c:
+                self.assertEqual(
+                    int(c.execute("SELECT is_completed FROM calendar_events WHERE id = ?", (ev_id,)).fetchone()[0]),
+                    1,
+                )
+
+            # 2. Click ✓ again -> toggles back to is_completed == 0
+            out_undo = revir_ui.run_action_headless(
+                lambda: school_calendar.render_calendar_and_planning_page(**cal_kwargs),
+                {"action": "click", "key": f"btn_cal_ev_done_{ev_id}"},
+            )
+            self.assertNotIn("Çalışma Zamanı Hatası", out_undo["main_html"])
+            with self.connect() as c:
+                self.assertEqual(
+                    int(c.execute("SELECT is_completed FROM calendar_events WHERE id = ?", (ev_id,)).fetchone()[0]),
+                    0,
+                )
+
+            # 3. Click ✕ (delete) -> removes row from DB
+            out_del = revir_ui.run_action_headless(
+                lambda: school_calendar.render_calendar_and_planning_page(**cal_kwargs),
+                {"action": "click", "key": f"btn_cal_ev_del_{ev_id}"},
+            )
+            self.assertNotIn("Çalışma Zamanı Hatası", out_del["main_html"])
+            with self.connect() as c:
+                self.assertEqual(
+                    int(c.execute("SELECT COUNT(*) FROM calendar_events WHERE id = ?", (ev_id,)).fetchone()[0]),
+                    0,
+                )
+
 
 class TestInsulinDiabetes(unittest.TestCase):
     def setUp(self):
