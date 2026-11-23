@@ -168,6 +168,19 @@ class TestSchoolCalendar(unittest.TestCase):
             self.assertNotIn("Çalışma Zamanı Hatası", out_cal["main_html"])
             self.assertIn(f"btn_cal_ev_done_{ev_id}", out_cal["main_html"])
             self.assertIn(f"btn_cal_ev_del_{ev_id}", out_cal["main_html"])
+            self.assertEqual(out_cal["main_html"].count(f"btn_cal_ev_done_{ev_id}"), 1)
+            self.assertEqual(out_cal["main_html"].count(f"btn_cal_ev_del_{ev_id}"), 1)
+
+            other_day_iso = date.today().replace(day=2 if date.today().day == 1 else 1).isoformat()
+            revir_ui.session_state["cal_selected_date"] = other_day_iso
+            out_other = revir_ui.run_action_headless(
+                lambda: school_calendar.render_calendar_and_planning_page(**cal_kwargs),
+                {"action": "render"},
+            )
+            self.assertNotIn("Çalışma Zamanı Hatası", out_other["main_html"])
+            self.assertNotIn(f"btn_cal_ev_done_{ev_id}", out_other["main_html"])
+            self.assertNotIn(f"btn_cal_ev_del_{ev_id}", out_other["main_html"])
+            revir_ui.session_state["cal_selected_date"] = today_iso
 
             out_ov = revir_ui.run_action_headless(
                 lambda: school_calendar.render_overview_calendar_widget(

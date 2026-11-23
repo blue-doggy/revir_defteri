@@ -1721,7 +1721,6 @@ def render_calendar_and_planning_page(
 
 						pills_html_list: list[str] = []
 						for ev in cell_events[:2]:
-							ev_id = int(ev["id"])
 							ev_done = bool(ev.get("is_completed"))
 							ev_title = html.escape(str(ev.get("title") or ""))
 							ev_hol = bool(ev.get("is_civil_holiday"))
@@ -1729,12 +1728,10 @@ def render_calendar_and_planning_page(
 							if ev_done:
 								p_bg, p_fg, p_bd = "#ecfdf5", "#047857", "#6ee7b7"
 								title_done_css = "text-decoration:line-through;opacity:0.75;"
-								done_btn_css = "background:#10b981;color:#ffffff;border:1px solid #059669;"
-								done_title = "Yapıldı işaretini geri al"
+								pill_txt = f"✓ {ev_title}"
 							else:
 								title_done_css = ""
-								done_btn_css = "background:rgba(255,255,255,0.9);color:#059669;border:1px solid #6ee7b7;"
-								done_title = "Yapıldı olarak işaretle"
+								pill_txt = ev_title
 								if ev_hol:
 									p_bg, p_fg, p_bd = "#fee2e2", "#b91c1c", "#fca5a5"
 								elif ev_cat == "dini_bayram":
@@ -1749,16 +1746,9 @@ def render_calendar_and_planning_page(
 									p_bg, p_fg, p_bd = "#f1f5f9", "#334155", "#cbd5e1"
 							pills_html_list.append(
 								f'<div style="font-size:10px;font-weight:700;color:{p_fg};background:{p_bg};'
-								f'border:1px solid {p_bd};border-radius:4px;padding:1.5px 3px 1.5px 4px;margin-top:2px;'
-								f'display:flex;align-items:center;justify-content:space-between;gap:2px;" title="{ev_title}">'
-								f'<span style="min-width:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;{title_done_css}">{ev_title}</span>'
-								f'<span style="display:inline-flex;align-items:center;gap:2px;flex-shrink:0;">'
-								f'<button type="button" onclick="event.stopPropagation();window.__revirClick(\'btn_cal_ev_done_{ev_id}\');" onkeydown="event.stopPropagation();" title="{done_title}" '
-								f'style="width:15px;height:15px;padding:0;border-radius:3px;display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:900;line-height:1;cursor:pointer;{done_btn_css}">✓</button>'
-								f'<button type="button" onclick="event.stopPropagation();window.__revirClick(\'btn_cal_ev_del_{ev_id}\');" onkeydown="event.stopPropagation();" title="Etkinliği takvimden kaldır" '
-								f'style="width:15px;height:15px;padding:0;border-radius:3px;display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:900;line-height:1;cursor:pointer;background:rgba(255,255,255,0.9);color:#dc2626;border:1px solid #fca5a5;">✕</button>'
-								f'</span>'
-								f'</div>'
+								f'border:1px solid {p_bd};border-radius:4px;padding:1.5px 4px;margin-top:2px;'
+								f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;{title_done_css}" title="{ev_title}">'
+								f'{pill_txt}</div>'
 							)
 
 						if sp_builtin and len(pills_html_list) < 2:
