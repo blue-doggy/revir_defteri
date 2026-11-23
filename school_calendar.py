@@ -10,6 +10,7 @@ import calendar
 import html
 import json
 import math
+import re
 import urllib.parse
 import urllib.request
 from datetime import date, datetime, timedelta
@@ -948,8 +949,13 @@ def save_ai_generated_events_to_db(events: list[dict[str, Any]], connect_db_fn: 
 		for ev in events:
 			if not isinstance(ev, dict):
 				continue
-			ev_date = str(ev.get("event_date") or "").strip()[:10]
-			title = str(ev.get("title") or "").strip()
+			raw_date = str(ev.get("event_date") or ev.get("date") or ev.get("tarih") or "").strip()[:10]
+			if re.match(r"^\d{2}[./-]\d{2}[./-]\d{4}$", raw_date):
+				d_p, m_p, y_p = re.split(r"[./-]", raw_date)
+				ev_date = f"{y_p}-{m_p}-{d_p}"
+			else:
+				ev_date = raw_date
+			title = str(ev.get("title") or ev.get("name") or ev.get("baslik") or "").strip()
 			if len(ev_date) != 10 or not title:
 				continue
 			try:
@@ -1999,7 +2005,7 @@ def _render_interactive_calendar_leaf(
 			open_calendar_event_manager_dialog(
 				sel_iso=sel_iso,
 				connect_db_fn=connect_db_fn,
-				get_active_gemini_config_fn=get_active_gemini_config_fn,
+				get_active_gemini_config_fn=lambda: (ai_enabled, ai_key, ai_model),
 			)
 	except Exception:
 		pass

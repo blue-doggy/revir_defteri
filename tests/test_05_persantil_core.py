@@ -82,8 +82,9 @@ class TestPersantilCoreAndUI(unittest.TestCase):
         persantil.update_academic_year(y_id, "2028-2029 Güncel", "2028-09-05", "2029-06-20")
         persantil.set_active_academic_year(y_id)
         y_db = self.tmp_p / "egitim_yillari" / "2028_2029" / "revir_defteri.db"
+        import contextlib
         import sqlite3
-        with sqlite3.connect(y_db) as yc:
+        with contextlib.closing(sqlite3.connect(y_db)) as yc:
             names = sorted([r[0] for r in yc.execute("SELECT name FROM classes").fetchall()])
             self.assertEqual(names, ["2-A", "4-A", "Anasınıfı"])
 

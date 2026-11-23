@@ -14,7 +14,7 @@ import math
 import re
 import sqlite3
 from urllib.parse import quote as url_quote
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import date, datetime, timedelta, time
 from hashlib import sha256
 import io
@@ -28,6 +28,7 @@ import gemini_assistant as gai
 import insulin_diabetes as idm
 import document_studio as dstudio
 import cafeteria as caf
+import school_calendar
 
 # Ağır kütüphaneler (altair, openpyxl, python-docx) açılışta değil, ilk kullanıldıklarında tembel yüklenir.
 docx = None
@@ -125,7 +126,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.25.0"
+_DEFAULT_APP_VERSION = "1.25.1"
 
 
 def _load_app_version() -> str:
@@ -1849,6 +1850,10 @@ def delete_academic_year(year_id: int) -> tuple[bool, str]:
 				ui.session_state["active_academic_year_id"] = other_row["id"]
 
 		connection.execute("DELETE FROM academic_years WHERE id=?", (year_id,))
+
+	_DB_PATH_CACHE.clear()
+	_ACTIVE_YEAR_CACHE.clear()
+	gc.collect()
 
 	# Safely remove year folder from disk
 	if folder_name and "egitim_yillari" in folder_name:
@@ -6988,6 +6993,32 @@ def extract_health_form_fields(text: str) -> dict[str, str]:
 	return fields
 
 
+def extract_lab_results_from_text(text: str) -> list[dict[str, Any]]:
+	if not text or not str(text).strip():
+		return []
+	pattern = re.compile(
+		r"^(?P<test>[\wİıĞğÜüŞşÖöÇç ()/.,+-]{2,60}?)\s+"
+		r"(?P<value>-?\d+(?:[.,]\d+)?)\s*"
+		r"(?P<unit>[^\s\d]+(?:/[^\s\d]+)?)?\s*"
+		r"(?:(?P<low>-?\d+(?:[.,]\d+)?)\s*[-–]\s*(?P<high>-?\d+(?:[.,]\d+)?))?\s*"
+		r"(?P<flag>HIGH|LOW|H|L|YÜKSEK|DÜŞÜK|\*)?\s*$",
+		re.IGNORECASE,
+	)
+	results: list[dict[str, Any]] = []
+	for line in str(text).splitlines():
+		match = pattern.match(line.strip())
+		if match:
+			results.append({
+				"test_name": match["test"].strip(),
+				"value": numeric_value(match["value"]),
+				"unit": match["unit"] or "",
+				"ref_low": numeric_value(match["low"]),
+				"ref_high": numeric_value(match["high"]),
+				"lab_flag": match["flag"] or "",
+			})
+	return results
+
+
 def parse_lab_upload(uploaded_file) -> tuple[pd.DataFrame, str]:
 	content = uploaded_file.getvalue()
 	suffix = Path(uploaded_file.name).suffix.lower()
@@ -7913,7 +7944,7 @@ def format_measurements_for_html(df: pd.DataFrame) -> pd.DataFrame:
 	}
 	for col, fn in fmt_map.items():
 		if col in out.columns:
-			out[col] = out[col].apply(lambda x: fn(float(x)) if pd.notna(x) else "—")
+			out[col] = out[col].apply(lambda x, _fn=fn: _fn(float(x)) if pd.notna(x) else "—")
 	return out
 
 
@@ -22337,7 +22368,7 @@ def render_measurements() -> None:
 		ui.caption("🩺 **Klinik Büyüme Eğrileri Mantığı:** Büyüme eğrisi, çocuğun boy, kilo veya VKİ ölçümünü doğrudan yaşa göre Dünya Sağlık Örgütü (WHO) persantil kanalları (**3p, 15p, 50p, 85p, 97p**) üzerinde gösterir. Böylece çocuğun kendi genetik persantil kanalında kalıp kalmadığı net olarak değerlendirilir.")
 
 		if not can_eval_age_m:
-			if not stu_birth:
+			if not student["birth_date"]:
 				ui.warning("⚠️ Seçili öğrencinin doğum tarihi girilmediği için yaşa göre büyüme eğrisi ve Z-skorları değerlendirilememektedir. Öğrenci düzenleme formundan doğum tarihini kaydedebilirsiniz.")
 			else:
 				ui.info("ℹ️ Kişi 19 yaşından büyük (yetişkin) olduğu için çocukluk çağı WHO büyüme eğrileri ve persantil kanalları uygulanamamaktadır.")
@@ -29691,12 +29722,18 @@ button {{ padding: 9px 18px; background: #176b68; color: white; border: none; bo
 """
 
 	if report_mode == "🏫 Tüm Sınıf Raporu (Toplu)":
+		if not all_classes:
+			ui.info("Henüz kayıtlı öğrenci sınıfı bulunmuyor.")
+			return
 		with col_m2:
 			sel_cls_for_report = ui.selectbox(
 				"Raporu Yazdırılacak Sınıfı Seçin",
-			all_classes,
+				all_classes,
 				key="report_chosen_class",
 			)
+		if not sel_cls_for_report:
+			ui.info("Lütfen raporu yazdırılacak bir sınıf seçin.")
+			return
 
 		class_students = student_options(sel_cls_for_report, person_type="Öğrenci")
 		if not class_students:
@@ -30227,10 +30264,9 @@ def render_academic_year_settings() -> None:
 			del_stu_cnt, del_vis_cnt = 0, 0
 			if del_db_path.exists():
 				try:
-					dconn = sqlite3.connect(del_db_path)
-					del_stu_cnt = dconn.execute("SELECT COUNT(*) FROM students").fetchone()[0]
-					del_vis_cnt = dconn.execute("SELECT COUNT(*) FROM visits").fetchone()[0]
-					dconn.close()
+					with closing(sqlite3.connect(del_db_path)) as dconn:
+						del_stu_cnt = dconn.execute("SELECT COUNT(*) FROM students").fetchone()[0]
+						del_vis_cnt = dconn.execute("SELECT COUNT(*) FROM visits").fetchone()[0]
 				except Exception:
 					pass
 			del_f_path = APP_DIR / del_target_y["folder_name"] / "kisi_verileri"
@@ -30264,12 +30300,11 @@ def render_academic_year_settings() -> None:
 		ydb_path = APP_DIR / y["folder_name"] / "revir_defteri.db"
 		if ydb_path.exists():
 			try:
-				yconn = sqlite3.connect(ydb_path)
-				y_stu = yconn.execute("SELECT COUNT(*) FROM students").fetchone()[0]
-				y_vis = yconn.execute("SELECT COUNT(*) FROM visits").fetchone()[0]
-				y_meas = yconn.execute("SELECT COUNT(*) FROM measurements").fetchone()[0]
-				y_scr = yconn.execute("SELECT COUNT(*) FROM school_screenings").fetchone()[0]
-				yconn.close()
+				with closing(sqlite3.connect(ydb_path)) as yconn:
+					y_stu = yconn.execute("SELECT COUNT(*) FROM students").fetchone()[0]
+					y_vis = yconn.execute("SELECT COUNT(*) FROM visits").fetchone()[0]
+					y_meas = yconn.execute("SELECT COUNT(*) FROM measurements").fetchone()[0]
+					y_scr = yconn.execute("SELECT COUNT(*) FROM school_screenings").fetchone()[0]
 			except Exception:
 				y_stu, y_vis, y_meas, y_scr = 0, 0, 0, 0
 		else:

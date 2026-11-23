@@ -168,7 +168,9 @@ class TestDesktopApp(unittest.TestCase):
             desktop_app._save_window_state(d, None)
 
     def test_single_instance_lock_and_release(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            desktop_app, "MUTEX_NAME", "Local\\OkulRevirDefteri_SingleInstance_Mutex_UnitTest"
+        ):
             d = Path(tmp)
             ok = desktop_app.acquire_single_instance_lock(d)
             self.assertTrue(ok)
