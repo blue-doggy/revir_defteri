@@ -2156,6 +2156,109 @@ MİKTAR | BİRİM | MALIN CİNSİ | FİYAT | TUTAR
         self.assertEqual(parsed_5col[0]["items"][1]["unit_type"], "kg")
         self.assertAlmostEqual(parsed_5col[0]["items"][1]["line_total"], 4800.0, places=2)
 
+    def test_menu_json_recovery_docx_table_excel_and_retry(self):
+        import io
+        import docx
+
+        # 1. JSON recovery: truncated MAX_TOKENS JSON, trailing commas, top-level array with prose, non-json
+        trunc = (
+            '{"plans": ['
+            '{"plan_date": "2026-11-02", "meal_slot": "Öğle Yemeği", "dishes": [{"name": "Mercimek Çorbası"}]}, '
+            '{"plan_date": "2026-11-03", "dishes": [{"name": "Piri'
+        )
+        rescued = gemini_assistant._parse_json_value(trunc)
+        self.assertIsInstance(rescued, dict)
+        self.assertEqual(len(rescued["plans"]), 1)
+        self.assertEqual(rescued["plans"][0]["plan_date"], "2026-11-02")
+
+        trailing = '{"plans": [{"plan_date": "2026-11-04", "dishes": ["Pilav",],}],}'
+        self.assertEqual(gemini_assistant._parse_json_response(trailing)["plans"][0]["plan_date"], "2026-11-04")
+
+        arr_prose = 'İşte menü:\n[{"date": "02.11.2026", "meal_type": "Öğle", "yemekler": ["Tarhana Çorbası", "Kuru Fasulye"]}]\nAfiyet olsun.'
+        arr_val = gemini_assistant._parse_json_value(arr_prose)
+        self.assertIsInstance(arr_val, list)
+        self.assertEqual(gemini_assistant._parse_json_response("not json"), {})
+
+        # 2. Word .docx with menu stored ONLY inside a table (empty paragraphs) including horizontally merged cells
+        doc = docx.Document()
+        tbl = doc.add_table(rows=2, cols=3)
+        tbl.cell(0, 0).merge(tbl.cell(0, 2))
+        tbl.cell(0, 0).text = "KASIM 2026 YEMEK LİSTESİ"
+        tbl.cell(1, 0).text = "02.11.2026"
+        tbl.cell(1, 1).text = "Öğle Yemeği"
+        tbl.cell(1, 2).text = "Mercimek Çorbası, Etli Nohut, Pilav"
+        bio_docx = io.BytesIO()
+        doc.save(bio_docx)
+        _, docx_txt = gemini_assistant._extract_attachment_context("kasim_menu.docx", "", bio_docx.getvalue())
+        self.assertIn("Mercimek Çorbası", docx_txt)
+        self.assertIn("Etli Nohut", docx_txt)
+        self.assertEqual(docx_txt.count("KASIM 2026 YEMEK LİSTESİ"), 1)
+
+        # 3. Excel .xlsx with title row and meal data across columns
+        df_xl = pd.DataFrame([
+            ["OKUL YEMEKHANESİ AYLIK MENÜ", None, None],
+            ["03.11.2026", "Öğle", "Yayla Çorbası, İzmir Köfte"],
+        ])
+        bio_xl = io.BytesIO()
+        with pd.ExcelWriter(bio_xl, engine="openpyxl") as writer:
+            df_xl.to_excel(writer, index=False, header=False, sheet_name="Kasim")
+        _, xl_txt = gemini_assistant._extract_attachment_context("kasim_menu.xlsx", "", bio_xl.getvalue())
+        self.assertIn("Yayla Çorbası", xl_txt)
+        self.assertIn("İzmir Köfte", xl_txt)
+
+        # 4. End-to-end menu parser: truncated JSON, alternate keys/array, retry after garbage, and empty input
+        with mock.patch.object(gemini_assistant, "call_gemini", return_value=(True, trunc, "gemini-3-flash-preview")):
+            ok_t, res_t, _ = gemini_assistant.parse_cafeteria_menu_or_payments_text_with_gemini(
+                api_key="k",
+                model="gemini-3-flash-preview",
+                task_mode="menu",
+                workdays_list=["2026-11-02", "2026-11-03"],
+                meal_slots=["Sabah Kahvaltısı", "Öğle Yemeği"],
+                file_bytes=bio_docx.getvalue(),
+                file_name="kasim_menu.docx",
+            )
+        self.assertTrue(ok_t)
+        self.assertEqual(len(res_t["plans"]), 1)
+        self.assertEqual(res_t["plans"][0]["plan_date"], "2026-11-02")
+
+        with mock.patch.object(gemini_assistant, "call_gemini", return_value=(True, arr_prose, "gemini-3-flash-preview")):
+            ok_a, res_a, _ = gemini_assistant.parse_cafeteria_menu_or_payments_text_with_gemini(
+                api_key="k",
+                model="gemini-3-flash-preview",
+                task_mode="menu",
+                workdays_list=["2026-11-02"],
+                meal_slots=["Sabah Kahvaltısı", "Öğle Yemeği"],
+                raw_text="02.11.2026 Öğle: Tarhana Çorbası, Kuru Fasulye",
+            )
+        self.assertTrue(ok_a)
+        self.assertEqual(res_a["plans"][0]["plan_date"], "2026-11-02")
+        self.assertEqual(res_a["plans"][0]["meal_slot"], "Öğle Yemeği")
+        self.assertEqual([d["name"] for d in res_a["plans"][0]["dishes"]], ["Tarhana Çorbası", "Kuru Fasulye"])
+
+        retry_responses = [
+            (True, "Üzgünüm, metin anlaşılamadı.", "gemini-3-flash-preview"),
+            (True, '{"plans":[{"plan_date":"2026-11-05","dishes":[{"name":"Ezogelin Çorbası"}]}]}', "gemini-3-flash-preview"),
+        ]
+        with mock.patch.object(gemini_assistant, "call_gemini", side_effect=retry_responses) as m_call:
+            ok_r, res_r, _ = gemini_assistant.parse_cafeteria_menu_or_payments_text_with_gemini(
+                api_key="k",
+                model="gemini-3-flash-preview",
+                task_mode="menu",
+                workdays_list=["2026-11-05"],
+                raw_text="05.11.2026 Ezogelin Çorbası",
+            )
+        self.assertTrue(ok_r)
+        self.assertEqual(m_call.call_count, 2)
+        self.assertEqual(res_r["plans"][0]["dishes"][0]["name"], "Ezogelin Çorbası")
+
+        with mock.patch.object(gemini_assistant, "call_gemini") as m_empty:
+            ok_e, res_e, _ = gemini_assistant.parse_cafeteria_menu_or_payments_text_with_gemini(
+                api_key="k", model="gemini-3-flash-preview", task_mode="menu", raw_text="   ",
+            )
+        self.assertFalse(ok_e)
+        self.assertEqual(m_empty.call_count, 0)
+        self.assertIn("belge", res_e["error"].lower())
+
 
 if __name__ == "__main__":
     unittest.main()

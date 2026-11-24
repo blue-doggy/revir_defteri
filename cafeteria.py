@@ -6196,26 +6196,41 @@ def _render_tab_menu_planner(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict
 					fb = up_mfile.getvalue() if up_mfile is not None else None
 					fn = up_mfile.name if up_mfile is not None else ""
 					strict_pdf = str(app_cfg.get("gemini_strict_kvkk_pdf", "0")).strip() == "1"
-					with ui.spinner("Gemini AI belgeyi iş günlerine ayrıştırıyor..."):
-						ok_pm, res_pm, used_pm = gai.parse_cafeteria_menu_or_payments_text_with_gemini(
-							api_key=api_key,
-							model=model,
-							task_mode="menu",
-							workdays_list=[w["date_iso"] for w in workdays],
-							raw_text=paste_mtxt,
-							file_bytes=fb,
-							file_name=fn,
-							strict_kvkk_pdf=strict_pdf,
-						)
-					if ok_pm and res_pm.get("plans"):
-						ui.session_state["caf_ai_menu_preview"] = {"plans": res_pm["plans"], "note": f"{len(res_pm['plans'])} öğün belgeden çıkarıldı ({used_pm})."}
+					if fb is None and not (paste_mtxt or "").strip():
+						ui.warning("Lütfen önce bir yemek listesi dosyası yükleyin veya menü metnini yapıştırın.")
 					else:
-						ui.error(f"Menü okuma hatası: {(res_pm or {}).get('error', 'Satır bulunamadı')}")
+						with ui.spinner("Gemini AI belgeyi iş günlerine ayrıştırıyor..."):
+							ok_pm, res_pm, used_pm = gai.parse_cafeteria_menu_or_payments_text_with_gemini(
+								api_key=api_key,
+								model=model,
+								task_mode="menu",
+								workdays_list=[w["date_iso"] for w in workdays],
+								meal_slots=active_slots,
+								raw_text=paste_mtxt,
+								file_bytes=fb,
+								file_name=fn,
+								strict_kvkk_pdf=strict_pdf,
+							)
+						if ok_pm and res_pm.get("plans"):
+							ui.session_state["caf_ai_menu_preview"] = {"plans": res_pm["plans"], "note": f"{len(res_pm['plans'])} öğün belgeden çıkarıldı ({used_pm})."}
+						else:
+							ui.error(f"Menü okuma hatası: {(res_pm or {}).get('error', 'Satır bulunamadı')}")
 
 			prev_m = ui.session_state.get("caf_ai_menu_preview")
 			if isinstance(prev_m, dict) and prev_m.get("plans"):
 				ui.success(f"🤖 **Önizleme:** {prev_m.get('note')}")
-				ui.dataframe(pd.DataFrame(prev_m["plans"]).head(25), hide_index=True, use_container_width=True)
+				prev_rows = []
+				for pl_it in prev_m["plans"][:40]:
+					d_nms = [
+						(str(x.get("name") or "").strip() if isinstance(x, dict) else str(x or "").strip())
+						for x in (pl_it.get("dishes") or [])
+					]
+					prev_rows.append({
+						"Tarih": str(pl_it.get("plan_date") or "")[:10],
+						"Öğün": str(pl_it.get("meal_slot") or ""),
+						"Yemekler": ", ".join(nm for nm in d_nms if nm),
+					})
+				ui.dataframe(pd.DataFrame(prev_rows), hide_index=True, use_container_width=True)
 				save_new_bank = ui.checkbox("✨ Bankada olmayan yeni yemekleri Yemekler Bankasına da otomatik kaydet", value=True, key="caf_ai_menu_save_bank")
 				pm1, pm2 = ui.columns(2)
 				with pm1:

@@ -360,6 +360,7 @@ def call_gemini(
 	inline_files: list[tuple[bytes, str]] | None = None,
 	temperature: float = 0.25,
 	timeout: float = 16.0,
+	max_output_tokens: int | None = None,
 ) -> tuple[bool, str, str]:
 	"""
 	Gemini generateContent çağrısı yapar.
@@ -401,6 +402,8 @@ def call_gemini(
 		gen_cfg: dict[str, Any] = {"temperature": temperature}
 		if expect_json:
 			gen_cfg["responseMimeType"] = "application/json"
+		if max_output_tokens is not None and int(max_output_tokens) > 0:
+			gen_cfg["maxOutputTokens"] = int(max_output_tokens)
 		if cand_model.startswith("gemini-3"):
 			gen_cfg["thinkingConfig"] = {"thinkingLevel": "LOW"}
 		req_payload = dict(payload)
@@ -447,23 +450,102 @@ def call_gemini(
 	return False, last_error or "Gemini API yanıt vermedi.", ""
 
 
-def _parse_json_response(raw_text: str) -> dict[str, Any]:
-	cleaned = raw_text.strip()
-	if cleaned.startswith("```"):
-		cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
-		cleaned = re.sub(r"\s*```$", "", cleaned)
-	try:
-		obj = json.loads(cleaned)
-		return obj if isinstance(obj, dict) else {}
-	except Exception:
-		m = re.search(r"\{.*\}", cleaned, re.S)
-		if m:
+def _repair_truncated_json(text: str) -> dict[str, Any] | list[Any] | None:
+	"""MAX_TOKENS nedeniyle yarıda kesilmiş JSON metninden tamamlanmış son öğeye kadar olan kısmı kurtarır."""
+	s = str(text or "")
+	starts = [i for i in (s.find("{"), s.find("[")) if i != -1]
+	if not starts:
+		return None
+	s = s[min(starts):]
+	in_str = False
+	escape = False
+	stack: list[str] = []
+	checkpoints: list[tuple[int, list[str]]] = []
+	for idx, ch in enumerate(s):
+		if in_str:
+			if escape:
+				escape = False
+			elif ch == "\\":
+				escape = True
+			elif ch == '"':
+				in_str = False
+			continue
+		if ch == '"':
+			in_str = True
+		elif ch == "{":
+			stack.append("}")
+		elif ch == "[":
+			stack.append("]")
+		elif ch in ("}", "]"):
+			if stack and stack[-1] == ch:
+				stack.pop()
+				checkpoints.append((idx + 1, list(stack)))
+	for end_pos, open_stack in reversed(checkpoints[-80:]):
+		prefix = s[:end_pos].rstrip()
+		cand = prefix + "".join(reversed(open_stack))
+		cand_clean = re.sub(r",\s*([}\]])", r"\1", cand)
+		for attempt in (cand, cand_clean):
 			try:
-				obj = json.loads(m.group(0))
-				return obj if isinstance(obj, dict) else {}
+				obj = json.loads(attempt)
+				if isinstance(obj, (dict, list)):
+					return obj
 			except Exception:
 				pass
-	return {}
+	return None
+
+
+def _parse_json_value(raw_text: str) -> dict[str, Any] | list[Any] | None:
+	"""Gemini çıktısından JSON nesnesi veya dizisi çıkarır (kod bloğu, ön/arka metin, sonda virgül ve kesik JSON toleranslı)."""
+	cleaned = (raw_text or "").strip().lstrip("\ufeff").strip()
+	if not cleaned:
+		return None
+	if cleaned.startswith("```"):
+		cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+		cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+	else:
+		fence_m = re.search(r"```(?:json)?\s*([\[{].*?)\s*```", cleaned, flags=re.IGNORECASE | re.DOTALL)
+		if fence_m:
+			cleaned = fence_m.group(1).strip()
+
+	cleaned_no_trailing = re.sub(r",\s*([}\]])", r"\1", cleaned)
+	for cand in (cleaned, cleaned_no_trailing):
+		try:
+			obj = json.loads(cand)
+			if isinstance(obj, (dict, list)):
+				return obj
+		except Exception:
+			pass
+
+	decoder = json.JSONDecoder()
+	for src in (cleaned, cleaned_no_trailing):
+		first_m = re.search(r"[\[{]", src)
+		if first_m:
+			try:
+				obj, _ = decoder.raw_decode(src, first_m.start())
+				if isinstance(obj, (dict, list)):
+					return obj
+			except Exception:
+				pass
+		repaired = _repair_truncated_json(src)
+		if repaired is not None:
+			return repaired
+
+	for src in (cleaned, cleaned_no_trailing):
+		for idx_cnt, m in enumerate(re.finditer(r"[\[{]", src)):
+			if idx_cnt >= 25:
+				break
+			try:
+				obj, _ = decoder.raw_decode(src, m.start())
+				if isinstance(obj, (dict, list)):
+					return obj
+			except Exception:
+				continue
+	return None
+
+
+def _parse_json_response(raw_text: str) -> dict[str, Any]:
+	val = _parse_json_value(raw_text)
+	return val if isinstance(val, dict) else {}
 
 
 def _stringify_ai_field(val: Any) -> str:
@@ -1239,21 +1321,66 @@ def _extract_attachment_context(
 	extracted = ""
 	try:
 		if low.endswith((".xlsx", ".xls")):
-			df = pd.read_excel(_io.BytesIO(raw_bytes)).head(60)
-			extracted = df.to_csv(index=False)
+			try:
+				xl = pd.read_excel(_io.BytesIO(raw_bytes), sheet_name=None, header=None)
+			except Exception:
+				xl = {"Sayfa1": pd.read_excel(_io.BytesIO(raw_bytes), header=None)}
+			if not isinstance(xl, dict):
+				xl = {"Sayfa1": xl}
+			sheet_parts: list[str] = []
+			for sname, sdf in list(xl.items())[:4]:
+				if sdf is None or sdf.empty:
+					continue
+				rows_txt: list[str] = []
+				for row_vals in sdf.head(250).values.tolist():
+					cells: list[str] = []
+					for v in row_vals:
+						if pd.isna(v):
+							continue
+						sv = re.sub(r"\s+", " ", str(v)).strip()
+						if sv and sv.lower() != "nan":
+							cells.append(sv)
+					if cells:
+						rows_txt.append(" | ".join(cells))
+				if rows_txt:
+					sheet_parts.append(f"[Sayfa: {sname}]\n" + "\n".join(rows_txt))
+			extracted = "\n\n".join(sheet_parts)
 		elif low.endswith(".csv"):
-			df = pd.read_csv(_io.BytesIO(raw_bytes)).head(80)
+			df = pd.read_csv(_io.BytesIO(raw_bytes)).head(150)
 			extracted = df.to_csv(index=False)
 		elif low.endswith(".docx"):
 			import docx as _docx
 			doc = _docx.Document(_io.BytesIO(raw_bytes))
-			extracted = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+			doc_parts: list[str] = []
+			for p in doc.paragraphs:
+				pt = (p.text or "").strip()
+				if pt:
+					doc_parts.append(pt)
+			for tbl in doc.tables:
+				t_rows: list[str] = []
+				for row in tbl.rows:
+					seen_tcs: set[int] = set()
+					cells_txt: list[str] = []
+					for cell in row.cells:
+						tc_obj = getattr(cell, "_tc", None)
+						tc_id = id(tc_obj) if tc_obj is not None else id(cell)
+						if tc_id in seen_tcs:
+							continue
+						seen_tcs.add(tc_id)
+						ct = re.sub(r"\s+", " ", (cell.text or "")).strip()
+						if ct:
+							cells_txt.append(ct)
+					if cells_txt:
+						t_rows.append(" | ".join(cells_txt))
+				if t_rows:
+					doc_parts.append("\n".join(t_rows))
+			extracted = "\n\n".join(doc_parts)
 		else:
 			extracted = raw_bytes.decode("utf-8", errors="replace")
 	except Exception as exc:
 		extracted = f"(Dosya içeriği okunamadı: {exc})"
 
-	safe_txt = anonymize_free_text(extracted[:10000], sensitive_names)
+	safe_txt = anonymize_free_text(extracted[:24000], sensitive_names)
 	return None, f"[Ekli Belge ({name}) İçeriği]:\n{safe_txt}"
 
 
@@ -1572,7 +1699,8 @@ Kurallar:
 		expect_json=True,
 		inline_files=inline_files if inline_files else None,
 		temperature=0.15,
-		timeout=40.0,
+		timeout=60.0,
+		max_output_tokens=16384,
 	)
 	if not ok:
 		return False, [], raw
@@ -2389,7 +2517,7 @@ def _build_strict_clinical_doc_input(
 		if item is not None:
 			inline_files.append(item)
 		if txt_blk:
-			doc_txt = txt_blk[:14000]
+			doc_txt = txt_blk[:24000]
 	return inline_files, doc_txt
 
 def parse_vaccination_card_with_gemini(
@@ -2961,7 +3089,15 @@ SADECE aşağıdaki JSON yapısını döndür:
     }}
   ]
 }}"""
-	ok, raw, used_m = call_gemini(prompt, api_key=api_key, model=model, expect_json=True, temperature=0.3, timeout=34.0)
+	ok, raw, used_m = call_gemini(
+		prompt,
+		api_key=api_key,
+		model=model,
+		expect_json=True,
+		temperature=0.3,
+		timeout=60.0,
+		max_output_tokens=16384,
+	)
 	if not ok:
 		return False, {"error": raw}, used_m
 	parsed = _parse_json_response(raw)
@@ -3145,6 +3281,7 @@ SADECE aşağıdaki JSON şemasını döndür:
 		expect_json=True,
 		temperature=0.05,
 		timeout=timeout_s,
+		max_output_tokens=16384,
 	)
 	if not ok:
 		return False, {"error": raw}, used_m
@@ -3161,12 +3298,213 @@ SADECE aşağıdaki JSON şemasını döndür:
 	return True, _normalize_gemini_invoice_dict(parsed), used_m
 
 
+def _fold_tr_ascii(val: str) -> str:
+	return (
+		str(val or "")
+		.lower()
+		.replace("ı", "i")
+		.replace("ğ", "g")
+		.replace("ü", "u")
+		.replace("ş", "s")
+		.replace("ö", "o")
+		.replace("ç", "c")
+		.replace("İ", "i")
+	)
+
+
+def _normalize_gemini_menu_plans(
+	parsed: dict[str, Any] | list[Any] | None,
+	workdays_list: list[str] | None = None,
+	meal_slots: list[str] | None = None,
+) -> list[dict[str, Any]]:
+	"""Farklı JSON şekillerindeki (dizi, Türkçe tarih, alternatif anahtarlar, çoklu öğün) menü çıktısını `plans` şemasına normalleştirir."""
+	if not parsed:
+		return []
+
+	valid_workdays = [
+		str(w)[:10]
+		for w in (workdays_list or [])
+		if re.match(r"^\d{4}-\d{2}-\d{2}$", str(w)[:10])
+	]
+	if valid_workdays:
+		def_year, def_month = int(valid_workdays[0][:4]), int(valid_workdays[0][5:7])
+	else:
+		now_d = datetime.now()
+		def_year, def_month = now_d.year, now_d.month
+
+	slots = [str(s).strip() for s in (meal_slots or []) if str(s).strip()] or ["Öğle Yemeği"]
+	default_slot = slots[0]
+
+	def _norm_date(raw_val: Any, seq_idx: int) -> str:
+		s = str(raw_val or "").strip()
+		cand = ""
+		m_ymd = re.match(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\b", s)
+		m_dmy = re.match(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})\b", s)
+		m_dm = re.match(r"^(\d{1,2})[-/.](\d{1,2})(?:\b|$)", s)
+		m_day = re.match(r"^(\d{1,2})(?:\s|$)", s)
+		if m_ymd:
+			y, m, d = int(m_ymd.group(1)), int(m_ymd.group(2)), int(m_ymd.group(3))
+			cand = f"{y:04d}-{m:02d}-{d:02d}"
+		elif m_dmy:
+			d, m, y = int(m_dmy.group(1)), int(m_dmy.group(2)), int(m_dmy.group(3))
+			cand = f"{y:04d}-{m:02d}-{d:02d}"
+		elif m_dm:
+			d, m = int(m_dm.group(1)), int(m_dm.group(2))
+			if 1 <= m <= 12 and 1 <= d <= 31:
+				cand = f"{def_year:04d}-{m:02d}-{d:02d}"
+		elif m_day:
+			d = int(m_day.group(1))
+			if 1 <= d <= 31:
+				matched_wd = next((w for w in valid_workdays if int(w[8:10]) == d), "")
+				cand = matched_wd or f"{def_year:04d}-{def_month:02d}-{d:02d}"
+		if cand:
+			try:
+				datetime.strptime(cand, "%Y-%m-%d")
+				return cand
+			except Exception:
+				cand = ""
+		if 0 <= seq_idx < len(valid_workdays):
+			return valid_workdays[seq_idx]
+		return ""
+
+	def _norm_slot(raw_val: Any) -> str:
+		s = str(raw_val or "").strip()
+		if not s:
+			return default_slot
+		low = _fold_tr_ascii(s)
+		for cs in slots:
+			if _fold_tr_ascii(cs) == low:
+				return cs
+		if "ikindi" in low or "ara" in low or "kusluk" in low:
+			for cs in slots:
+				cl = _fold_tr_ascii(cs)
+				if "ikindi" in cl or "ara" in cl or "kusluk" in cl:
+					return cs
+		elif "kahvalti" in low or "sabah" in low:
+			for cs in slots:
+				cl = _fold_tr_ascii(cs)
+				if ("kahvalti" in cl or "sabah" in cl) and "ikindi" not in cl:
+					return cs
+		elif "ogle" in low:
+			for cs in slots:
+				if "ogle" in _fold_tr_ascii(cs):
+					return cs
+		elif "aksam" in low:
+			for cs in slots:
+				if "aksam" in _fold_tr_ascii(cs):
+					return cs
+		return s
+
+	def _norm_dishes(raw_dishes: Any) -> list[dict[str, Any]]:
+		if isinstance(raw_dishes, str):
+			parts: list[Any] = [p.strip() for p in re.split(r"[,;\n]+", raw_dishes) if p.strip()]
+		elif isinstance(raw_dishes, list):
+			parts = raw_dishes
+		else:
+			return []
+		out_d: list[dict[str, Any]] = []
+		for item in parts:
+			if isinstance(item, dict):
+				nm = str(item.get("name") or item.get("dish") or item.get("yemek") or item.get("title") or "").strip()
+				kcal = max(0.0, _parse_invoice_num(item.get("kcal", item.get("calories", 0)), 0.0, allow_tr_thousands=False))
+				carbs = max(0.0, _parse_invoice_num(item.get("carbs_g", item.get("carbs", 0)), 0.0, allow_tr_thousands=False))
+				alg = str(item.get("allergen") or item.get("allergens") or "").strip()
+			else:
+				nm = str(item or "").strip()
+				kcal, carbs, alg = 0.0, 0.0, ""
+			if not nm or nm in ("-", "—", "tatil", "Tatil"):
+				continue
+			out_d.append({
+				"name": nm,
+				"kcal": round(kcal, 1),
+				"carbs_g": round(carbs, 1),
+				"allergen": alg,
+			})
+		return out_d
+
+	raw_entries: list[Any] = []
+	if isinstance(parsed, list):
+		raw_entries = parsed
+	elif isinstance(parsed, dict):
+		for key in ("plans", "menu", "menus", "days", "meals", "schedule", "rows", "items", "data"):
+			val = parsed.get(key)
+			if isinstance(val, list):
+				raw_entries = val
+				break
+		if not raw_entries:
+			date_entries: list[dict[str, Any]] = []
+			for k, v in parsed.items():
+				if re.match(r"^\d{1,4}[-/.]\d{1,2}", str(k).strip()):
+					if isinstance(v, dict) and not any(dk in v for dk in ("dishes", "items", "yemekler", "menu")):
+						for sk, sv in v.items():
+							date_entries.append({"plan_date": k, "meal_slot": sk, "dishes": sv})
+					elif isinstance(v, dict):
+						entry = dict(v)
+						entry.setdefault("plan_date", k)
+						date_entries.append(entry)
+					else:
+						date_entries.append({"plan_date": k, "dishes": v})
+			raw_entries = date_entries
+
+	norm_plans: list[dict[str, Any]] = []
+	seq_i = 0
+	for entry in raw_entries:
+		if not isinstance(entry, dict):
+			continue
+		raw_dt = entry.get("plan_date") or entry.get("date") or entry.get("menu_date") or entry.get("tarih") or entry.get("day")
+		dt_iso = _norm_date(raw_dt, seq_i)
+		seq_i += 1
+		if not dt_iso:
+			continue
+
+		if isinstance(entry.get("meals"), list) and not entry.get("dishes"):
+			for m_sub in entry["meals"]:
+				if not isinstance(m_sub, dict):
+					continue
+				sl_nm = _norm_slot(m_sub.get("meal_slot") or m_sub.get("meal_type") or m_sub.get("slot") or m_sub.get("ogun"))
+				ds = _norm_dishes(m_sub.get("dishes") or m_sub.get("items") or m_sub.get("yemekler") or m_sub.get("menu"))
+				if ds:
+					norm_plans.append({"plan_date": dt_iso, "meal_slot": sl_nm, "dishes": ds})
+			continue
+
+		raw_dishes = entry.get("dishes") or entry.get("items") or entry.get("yemekler") or entry.get("menu")
+		if raw_dishes is not None:
+			sl_nm = _norm_slot(entry.get("meal_slot") or entry.get("meal_type") or entry.get("slot") or entry.get("ogun") or entry.get("öğün"))
+			ds = _norm_dishes(raw_dishes)
+			if ds:
+				norm_plans.append({"plan_date": dt_iso, "meal_slot": sl_nm, "dishes": ds})
+			continue
+
+		for k, v in entry.items():
+			kl = _fold_tr_ascii(k)
+			if any(tag in kl for tag in ("kahvalti", "sabah", "ogle", "ikindi", "aksam")) and v:
+				ds = _norm_dishes(v)
+				if ds:
+					norm_plans.append({"plan_date": dt_iso, "meal_slot": _norm_slot(k), "dishes": ds})
+
+	return norm_plans
+
+
+def _normalize_gemini_payments(parsed: dict[str, Any] | list[Any] | None) -> list[dict[str, Any]]:
+	if not parsed:
+		return []
+	if isinstance(parsed, list):
+		return [r for r in parsed if isinstance(r, dict)]
+	if isinstance(parsed, dict):
+		for key in ("payments", "items", "rows", "transactions", "data"):
+			val = parsed.get(key)
+			if isinstance(val, list):
+				return [r for r in val if isinstance(r, dict)]
+	return []
+
+
 def parse_cafeteria_menu_or_payments_text_with_gemini(
 	*,
 	api_key: str,
 	model: str,
 	task_mode: str = "menu",
 	workdays_list: list[str] | None = None,
+	meal_slots: list[str] | None = None,
 	raw_text: str = "",
 	file_bytes: bytes | None = None,
 	file_name: str = "",
@@ -3174,14 +3512,36 @@ def parse_cafeteria_menu_or_payments_text_with_gemini(
 ) -> tuple[bool, dict[str, Any], str]:
 	"""Yemekhane menü belgesini (`menu`) veya ödeme/tahsilat mesajını (`payments`) yapılandırılmış JSON'a çevirir."""
 	inline_files: list[tuple[bytes, str]] = []
-	doc_txt = raw_text[:12000] if raw_text else ""
+	doc_txt = raw_text[:24000] if raw_text else ""
 	if file_bytes and file_name:
-		in_item, txt_b = _build_strict_clinical_doc_input(
-			file_bytes, file_name, sensitive_names=None, strict_kvkk_pdf=strict_kvkk_pdf
-		)
-		inline_files.extend(in_item)
-		if txt_b:
-			doc_txt = (doc_txt + "\n" + txt_b).strip()[:14000]
+		low_fn = file_name.lower()
+		if low_fn.endswith(".pdf"):
+			local_txt = _extract_pdf_text_layer_locally(file_bytes)
+			if len(re.sub(r"\s+", "", local_txt)) >= 60:
+				safe_pdf_txt = anonymize_free_text(local_txt[:22000])
+				doc_txt = (doc_txt + "\n" + safe_pdf_txt).strip()[:24000]
+			if not (strict_kvkk_pdf and len(re.sub(r"\s+", "", local_txt)) >= 60):
+				if len(re.sub(r"\s+", "", local_txt)) < 60:
+					page_imgs = _render_scanned_pdf_for_gemini(file_bytes)
+					if page_imgs:
+						inline_files.extend(page_imgs)
+					else:
+						inline_files.append((file_bytes, "application/pdf"))
+				else:
+					inline_files.append((file_bytes, "application/pdf"))
+		else:
+			in_item, txt_b = _build_strict_clinical_doc_input(
+				file_bytes, file_name, sensitive_names=None, strict_kvkk_pdf=strict_kvkk_pdf
+			)
+			inline_files.extend(in_item)
+			if txt_b:
+				doc_txt = (doc_txt + "\n" + txt_b).strip()[:24000]
+
+	if not inline_files and not doc_txt.strip():
+		return False, {"error": "Lütfen önce bir belge yükleyin veya metin yapıştırın."}, ""
+
+	slots_hint = [str(s).strip() for s in (meal_slots or []) if str(s).strip()] or ["Öğle Yemeği"]
+	timeout_s = 90.0 if inline_files else 60.0
 
 	if task_mode == "payments":
 		prompt = f"""Aşağıdaki okul yemekhanesi ücret ödeme metninden / listesinden her ödeme satırını çıkar.
@@ -3189,7 +3549,7 @@ def parse_cafeteria_menu_or_payments_text_with_gemini(
 [ÖDEME METNİ]:
 {doc_txt}
 
-SADECE şu JSON şemasını döndür:
+SADECE şu JSON şemasını döndür (ekstra açıklama veya markdown ekleme):
 {{
   "payments": [
     {{
@@ -3202,25 +3562,39 @@ SADECE şu JSON şemasını döndür:
     }}
   ]
 }}"""
+		retry_prompt = f"""YALNIZCA geçerli tek bir JSON objesi döndür: {{"payments":[{{"tx_date":"YYYY-MM-DD","for_person_name":"","delivered_by_name":"","amount":0,"payment_method":"Nakit","notes":""}}]}}
+
+[ÖDEME METNİ]:
+{doc_txt[:18000]}"""
 	else:
-		prompt = f"""Aşağıdaki okul yemek menüsü belgesinden tarih ve öğünlere göre yemekleri çıkar.
+		prompt = f"""Aşağıdaki okul yemek menüsü belgesinden veya tablosundan tarih ve öğünlere göre yemekleri eksiksiz çıkar.
+Öğün seçenekleri: {json.dumps(slots_hint, ensure_ascii=False)}
 Tarih yoksa `[İŞ GÜNLERİ]` listesinden sırayla eşle: {json.dumps(workdays_list or [], ensure_ascii=False)}
 
-[DOSYA / METİN]:
-{doc_txt}
+Kurallar:
+- Tarihleri `YYYY-MM-DD` formatına çevir (örn. `02.11.2026` -> `2026-11-02`). Sadece gün numarası varsa seçili ay/yıl iş günlerinden eşle.
+- `kcal` ve `carbs_g` için yaklaşık tam sayı ver, alerjen yoksa `allergen` alanını `""` bırak.
+- Çıktıyı kısa ve sıkı geçerli JSON olarak ver (açıklama veya yorum yazma).
+
+[DOSYA ADI]: {file_name or 'Metin'}
+{('[DOSYA / METİN]:\n' + doc_txt) if doc_txt else ''}
 
 SADECE şu JSON şemasını döndür:
 {{
   "plans": [
     {{
       "plan_date": "YYYY-MM-DD",
-      "meal_slot": "Öğle Yemeği",
+      "meal_slot": "{slots_hint[0]}",
       "dishes": [
-        {{"name": "Tarhana Çorbası", "kcal": 160, "carbs_g": 22, "allergen": "Gluten (Buğday/Arpa)"}}
+        {{"name": "Tarhana Çorbası", "kcal": 160, "carbs_g": 22, "allergen": ""}}
       ]
     }}
   ]
 }}"""
+		retry_prompt = f"""Önceki yanıt geçerli menü JSON'u üretmedi. Belgedeki her günün yemeğini YALNIZCA şu en sade JSON şemasıyla döndür (açıklama/markdown yok):
+{{"plans":[{{"plan_date":"YYYY-MM-DD","meal_slot":"{slots_hint[0]}","dishes":[{{"name":"Yemek Adı"}}]}}]}}
+[İŞ GÜNLERİ]: {json.dumps((workdays_list or [])[:25], ensure_ascii=False)}
+{('[METİN]:\n' + doc_txt[:18000]) if doc_txt else ''}"""
 
 	ok, raw, used_m = call_gemini(
 		prompt,
@@ -3228,15 +3602,54 @@ SADECE şu JSON şemasını döndür:
 		model=model,
 		inline_files=inline_files if inline_files else None,
 		expect_json=True,
-		temperature=0.1,
-		timeout=30.0,
+		temperature=0.05,
+		timeout=timeout_s,
+		max_output_tokens=16384,
 	)
 	if not ok:
 		return False, {"error": raw}, used_m
-	parsed = _parse_json_response(raw)
-	if not parsed:
-		return False, {"error": "Yemekhane belgesi JSON olarak ayrıştırılamadı."}, used_m
-	return True, parsed, used_m
+
+	parsed = _parse_json_value(raw)
+	if task_mode == "payments":
+		payments_norm = _normalize_gemini_payments(parsed)
+		if payments_norm:
+			out_obj = dict(parsed) if isinstance(parsed, dict) else {}
+			out_obj["payments"] = payments_norm
+			return True, out_obj, used_m
+	else:
+		plans_norm = _normalize_gemini_menu_plans(parsed, workdays_list=workdays_list, meal_slots=slots_hint)
+		if plans_norm:
+			return True, {"plans": plans_norm}, used_m
+
+	# Otomatik tek seferlik sıkı-JSON tekrar denemesi
+	ok2, raw2, used_m2 = call_gemini(
+		retry_prompt,
+		api_key=api_key,
+		model=model,
+		inline_files=inline_files if inline_files else None,
+		expect_json=True,
+		temperature=0.0,
+		timeout=timeout_s,
+		max_output_tokens=16384,
+	)
+	if ok2:
+		parsed2 = _parse_json_value(raw2)
+		if task_mode == "payments":
+			payments_norm2 = _normalize_gemini_payments(parsed2)
+			if payments_norm2:
+				out_obj2 = dict(parsed2) if isinstance(parsed2, dict) else {}
+				out_obj2["payments"] = payments_norm2
+				return True, out_obj2, used_m2
+		else:
+			plans_norm2 = _normalize_gemini_menu_plans(parsed2, workdays_list=workdays_list, meal_slots=slots_hint)
+			if plans_norm2:
+				return True, {"plans": plans_norm2}, used_m2
+
+	raw_preview = re.sub(r"\s+", " ", (raw2 if ok2 and raw2 else raw or "")).strip()[:160]
+	err_msg = "Yemekhane belgesi JSON olarak ayrıştırılamadı."
+	if raw_preview:
+		err_msg += f" (Model özeti: {raw_preview})"
+	return False, {"error": err_msg}, (used_m2 if ok2 and used_m2 else used_m)
 
 
 def audit_cafeteria_menu_with_gemini(
