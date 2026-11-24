@@ -485,6 +485,199 @@ class TestGeminiAssistant(unittest.TestCase):
             self.assertTrue(ok9)
             self.assertIn("Brifing", d9)
 
+    def test_evren_platform_integration_and_settings_ui(self):
+        import io
+        import urllib.error
+        import persantil
+        import revir_ui
+        from tests.db_test_helper import isolated_real_db
+
+        captured_reqs = []
+
+        class _FakeResp:
+            def __init__(self, payload_obj):
+                self._raw = json.dumps(payload_obj, ensure_ascii=False).encode("utf-8")
+
+            def read(self):
+                return self._raw
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        def _fake_urlopen_ok(req, timeout=0):
+            body = json.loads(req.data.decode("utf-8")) if getattr(req, "data", None) else {}
+            captured_reqs.append((req.full_url, dict(req.headers), body, req.get_method()))
+            return _FakeResp({
+                "choices": [
+                    {
+                        "message": {
+                            "content": "<think>iç düşünce</think>{\"ok\": true, \"yanit\": \"EVREN hazır\"}"
+                        }
+                    }
+                ]
+            })
+
+        # 1. call_gemini auto-routes evren_llm_* keys to EVREN /chat/completions and strips <think>
+        with mock.patch("urllib.request.urlopen", side_effect=_fake_urlopen_ok):
+            ok_ev, txt_ev, used_ev = gemini_assistant.call_gemini(
+                "Merhaba EVREN",
+                api_key="evren_llm_test_key_123",
+                model="gemini-3-flash-preview",
+                expect_json=True,
+                temperature=0.1,
+            )
+        self.assertTrue(ok_ev)
+        self.assertTrue(used_ev.startswith("evren:"))
+        self.assertNotIn("<think>", txt_ev)
+        self.assertEqual(json.loads(txt_ev)["yanit"], "EVREN hazır")
+        self.assertEqual(captured_reqs[0][0], "https://evren-llmapi.ssyz.org.tr/v1/chat/completions")
+        hdrs0 = {k.lower(): v for k, v in captured_reqs[0][1].items()}
+        self.assertEqual(hdrs0.get("authorization"), "Bearer evren_llm_test_key_123")
+        self.assertEqual(hdrs0.get("x-api-key"), "evren_llm_test_key_123")
+        self.assertEqual(captured_reqs[0][2].get("response_format"), {"type": "json_object"})
+
+        # 2. HTTP 400 on response_format automatically retries once without response_format
+        rf_attempts = []
+
+        def _fake_urlopen_400_then_ok(req, timeout=0):
+            body = json.loads(req.data.decode("utf-8"))
+            rf_attempts.append(body)
+            if len(rf_attempts) == 1:
+                raise urllib.error.HTTPError(
+                    req.full_url,
+                    400,
+                    "Bad Request",
+                    hdrs=None,
+                    fp=io.BytesIO(b'{"error":{"message":"response_format json_object unsupported"}}'),
+                )
+            return _FakeResp({"choices": [{"message": {"content": '{"plans":[]}'}}]})
+
+        with mock.patch("urllib.request.urlopen", side_effect=_fake_urlopen_400_then_ok):
+            ok_rf, txt_rf, _ = gemini_assistant.call_gemini(
+                "Test JSON",
+                api_key="evren_llm_test_key_123",
+                model="glm-5.3",
+                expect_json=True,
+                provider="evren",
+            )
+        self.assertTrue(ok_rf)
+        self.assertEqual(len(rf_attempts), 2)
+        self.assertIn("response_format", rf_attempts[0])
+        self.assertNotIn("response_format", rf_attempts[1])
+        self.assertEqual(txt_rf, '{"plans":[]}')
+
+        # 3. HTTP 403 terms_not_accepted stops immediately with clear Turkish guidance
+        def _fake_urlopen_terms(req, timeout=0):
+            raise urllib.error.HTTPError(
+                req.full_url,
+                403,
+                "Forbidden",
+                hdrs=None,
+                fp=io.BytesIO(b'{"error":{"message":"terms_not_accepted"}}'),
+            )
+
+        with mock.patch("urllib.request.urlopen", side_effect=_fake_urlopen_terms) as m_terms:
+            ok_tm_err, msg_tm_err, _ = gemini_assistant.call_gemini(
+                "Merhaba",
+                api_key="evren_llm_test_key_123",
+                model="gemma-4-31b",
+                provider="evren",
+            )
+        self.assertFalse(ok_tm_err)
+        self.assertEqual(m_terms.call_count, 1)
+        self.assertIn("terms_not_accepted", msg_tm_err)
+        self.assertIn("EVREN Kullanım Şartlarını Onayla", msg_tm_err)
+
+        # 4. Multimodal image with text-only requested model routes to EVREN vision model + data URI
+        img_reqs = []
+
+        def _fake_urlopen_vision(req, timeout=0):
+            body = json.loads(req.data.decode("utf-8"))
+            img_reqs.append(body)
+            return _FakeResp({"choices": [{"message": {"content": "Görsel okundu"}}]})
+
+        with mock.patch("urllib.request.urlopen", side_effect=_fake_urlopen_vision):
+            ok_img, txt_img, used_img = gemini_assistant.call_gemini(
+                "Bu fişi oku",
+                api_key="evren_llm_test_key_123",
+                model="deepseek-v4-flash",
+                inline_files=[(b"\xff\xd8\xff\xe0testimg", "image/jpeg")],
+                provider="evren",
+            )
+        self.assertTrue(ok_img)
+        self.assertEqual(used_img, "evren:gemma-4-31b")
+        self.assertEqual(txt_img, "Görsel okundu")
+        user_content = img_reqs[0]["messages"][0]["content"]
+        self.assertIsInstance(user_content, list)
+        self.assertEqual(user_content[1]["type"], "image_url")
+        self.assertTrue(user_content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,"))
+
+        # 5. list_evren_models & accept_evren_terms parse API endpoints properly
+        def _fake_urlopen_mgmt(req, timeout=0):
+            if req.full_url.endswith("/models"):
+                return _FakeResp({"data": [{"id": "qwen3-embedding-8b"}, {"id": "deepseek-v4-flash"}, {"id": "gemma-4-31b"}]})
+            if req.full_url.endswith("/terms/status"):
+                return _FakeResp({"accepted": False, "current_version": 2})
+            if req.full_url.endswith("/terms/text"):
+                return _FakeResp({"version": 2, "text": "Kullanım şartları metni"})
+            if req.full_url.endswith("/terms/accept"):
+                return _FakeResp({"accepted": True, "version": 2})
+            return _FakeResp({})
+
+        with mock.patch("urllib.request.urlopen", side_effect=_fake_urlopen_mgmt):
+            ok_ls, ids_ls, _ = gemini_assistant.list_evren_models("evren_llm_test_key_123")
+            ok_ac, msg_ac = gemini_assistant.accept_evren_terms("evren_llm_test_key_123")
+        self.assertTrue(ok_ls)
+        self.assertEqual(ids_ls, ["gemma-4-31b", "deepseek-v4-flash", "qwen3-embedding-8b"])
+        self.assertTrue(ok_ac)
+        self.assertIn("v2", msg_ac)
+
+        # 6. persantil._get_active_gemini_config + settings UI headless render for both Gemini & EVREN
+        with isolated_real_db():
+            persantil.save_app_settings({
+                "ai_provider": "evren",
+                "gemini_enabled": "1",
+                "evren_api_key": "evren_llm_cfg_999",
+                "evren_model": "qwen3-vl-30b",
+                "evren_base_url": "https://evren-llmapi.ssyz.org.tr/v1",
+            })
+            persantil.clear_all_data_caches()
+            is_on_ev, key_ev, mod_ev = persantil._get_active_gemini_config()
+            self.assertTrue(is_on_ev)
+            self.assertEqual(key_ev, "evren_llm_cfg_999")
+            self.assertEqual(mod_ev, "qwen3-vl-30b")
+
+            revir_ui.reset_session()
+            cfg_ev = persantil.get_app_settings()
+            out_ev_ui = revir_ui.run_action_headless(
+                lambda: persantil.render_gemini_ai_settings_panel(cfg_ev),
+                {"action": "render"},
+            )
+            self.assertNotIn("Çalışma Zamanı Hatası", out_ev_ui["main_html"])
+            self.assertIn("cfg_evren_api_key_inp", out_ev_ui["main_html"])
+            self.assertIn("btn_accept_evren_terms", out_ev_ui["main_html"])
+            self.assertIn("evren.ssyz.org.tr", out_ev_ui["main_html"])
+
+            out_gm_switch = revir_ui.run_action_headless(
+                lambda: persantil.render_gemini_ai_settings_panel(persantil.get_app_settings()),
+                {"action": "change", "key": "cfg_ai_provider_sel", "value": "gemini"},
+            )
+            self.assertNotIn("Çalışma Zamanı Hatası", out_gm_switch["main_html"])
+            self.assertEqual(persantil.get_app_settings().get("ai_provider"), "gemini")
+
+            revir_ui.reset_session()
+            cfg_gm = persantil.get_app_settings()
+            out_gm_ui = revir_ui.run_action_headless(
+                lambda: persantil.render_gemini_ai_settings_panel(cfg_gm),
+                {"action": "render"},
+            )
+            self.assertNotIn("Çalışma Zamanı Hatası", out_gm_ui["main_html"])
+            self.assertIn("cfg_gemini_api_key_inp", out_gm_ui["main_html"])
+            self.assertIn("btn_save_gemini_cfg", out_gm_ui["main_html"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

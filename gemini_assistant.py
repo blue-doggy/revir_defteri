@@ -33,6 +33,35 @@ from typing import Any
 import pandas as pd
 
 
+AI_PROVIDER_OPTIONS: list[str] = ["gemini", "evren"]
+
+AI_PROVIDER_LABELS: dict[str, str] = {
+	"gemini": "🌐 Google Gemini API",
+	"evren": "🇹🇷 EVREN Platformu (SSB · Yerli Yapay Zekâ)",
+}
+
+EVREN_DEFAULT_BASE_URL: str = "https://evren-llmapi.ssyz.org.tr/v1"
+
+EVREN_MODEL_OPTIONS: list[str] = [
+	"gemma-4-31b",
+	"qwen3-vl-30b",
+	"qwen3.8-flash-next",
+	"deepseek-v4-flash",
+	"glm-5.3",
+]
+
+EVREN_VISION_MODELS: list[str] = ["gemma-4-31b", "qwen3-vl-30b"]
+
+EVREN_MODEL_LABELS: dict[str, str] = {
+	"gemma-4-31b": "🇹🇷 Gemma 4 31B (Çok Amaçlı + Görsel/Belge Analiz)",
+	"qwen3-vl-30b": "👁️ Qwen3 VL 30B (Görsel & PDF/Reçete/Fatura Okuma)",
+	"qwen3.8-flash-next": "⚡ Qwen 3.8 Flash Next (Hızlı Klinik & Tablo Çözümleme)",
+	"deepseek-v4-flash": "🧠 DeepSeek V4 Flash (Hızlı Akıl Yürütme & JSON)",
+	"glm-5.3": "💬 GLM 5.3 (Sohbet, Metin & Kod Asistanı)",
+}
+
+_ACTIVE_EVREN_BASE_URL: str = EVREN_DEFAULT_BASE_URL
+
 GEMINI_MODEL_OPTIONS: list[str] = [
 	"gemini-3-flash-preview",
 	"gemini-3.5-flash-lite",
@@ -67,9 +96,32 @@ _LEGACY_MODEL_MAP: dict[str, str] = {
 # 1. ANAHTAR YÖNETİMİ VE KVKK ANONİMLEŞTİRME KATMANI
 # ==============================================================================
 
+def set_evren_base_url(url: str | None) -> str:
+	global _ACTIVE_EVREN_BASE_URL
+	clean_u = (url or "").strip().rstrip("/") or EVREN_DEFAULT_BASE_URL
+	_ACTIVE_EVREN_BASE_URL = clean_u
+	return _ACTIVE_EVREN_BASE_URL
+
+
+def get_evren_base_url(app_cfg: dict[str, Any] | None = None) -> str:
+	if app_cfg:
+		u = str(app_cfg.get("evren_base_url") or "").strip().rstrip("/")
+		if u:
+			return u
+	env_u = os.environ.get("EVREN_BASE_URL", "").strip().rstrip("/")
+	if env_u:
+		return env_u
+	return _ACTIVE_EVREN_BASE_URL or EVREN_DEFAULT_BASE_URL
+
+
 def _local_key_file(app_dir: Path | None = None) -> Path:
 	base = app_dir or Path(__file__).resolve().parent
 	return base / ".gemini_api_key"
+
+
+def _local_evren_key_file(app_dir: Path | None = None) -> Path:
+	base = app_dir or Path(__file__).resolve().parent
+	return base / ".evren_api_key"
 
 
 def get_api_key(app_cfg: dict[str, Any] | None = None, app_dir: Path | None = None) -> str:
@@ -81,6 +133,23 @@ def get_api_key(app_cfg: dict[str, Any] | None = None, app_dir: Path | None = No
 	if env_k:
 		return env_k
 	kf = _local_key_file(app_dir)
+	if kf.exists():
+		try:
+			return kf.read_text(encoding="utf-8").strip()
+		except Exception:
+			pass
+	return ""
+
+
+def get_evren_api_key(app_cfg: dict[str, Any] | None = None, app_dir: Path | None = None) -> str:
+	if app_cfg:
+		k = str(app_cfg.get("evren_api_key") or "").strip()
+		if k:
+			return k
+	env_k = os.environ.get("EVREN_API_KEY", "").strip()
+	if env_k:
+		return env_k
+	kf = _local_evren_key_file(app_dir)
 	if kf.exists():
 		try:
 			return kf.read_text(encoding="utf-8").strip()
@@ -101,9 +170,32 @@ def save_local_api_key(api_key: str, app_dir: Path | None = None) -> None:
 		pass
 
 
+def save_local_evren_api_key(api_key: str, app_dir: Path | None = None) -> None:
+	kf = _local_evren_key_file(app_dir)
+	clean_k = (api_key or "").strip()
+	try:
+		if clean_k:
+			kf.write_text(clean_k + "\n", encoding="utf-8")
+		elif kf.exists():
+			kf.unlink(missing_ok=True)
+	except Exception:
+		pass
+
+
+def is_evren_key_or_model(api_key: str = "", model: str = "") -> bool:
+	k_low = (api_key or "").strip().lower()
+	m_clean = (model or "").strip()
+	m_low = m_clean.lower()
+	if k_low.startswith("evren_") or m_low.startswith("evren:"):
+		return True
+	return m_clean in EVREN_MODEL_OPTIONS
+
+
 def is_ai_enabled(app_cfg: dict[str, Any] | None = None, app_dir: Path | None = None) -> bool:
 	if app_cfg and str(app_cfg.get("gemini_enabled", "1")).strip() == "0":
 		return False
+	if app_cfg and str(app_cfg.get("ai_provider") or "").strip().lower() == "evren":
+		return bool(get_evren_api_key(app_cfg, app_dir))
 	return bool(get_api_key(app_cfg, app_dir))
 
 
@@ -350,6 +442,271 @@ def _ensure_gemini_tls_trust() -> None:
 		pass
 
 
+def _evren_headers(api_key: str) -> dict[str, str]:
+	return {
+		"Content-Type": "application/json; charset=utf-8",
+		"Authorization": f"Bearer {api_key}",
+		"X-API-Key": api_key,
+	}
+
+
+def _parse_urllib_http_error(he: urllib.error.HTTPError) -> str:
+	try:
+		raw_e = he.read().decode("utf-8", errors="replace")
+		err_json = json.loads(raw_e)
+		if isinstance(err_json, dict):
+			err_sub = err_json.get("error")
+			if isinstance(err_sub, dict) and err_sub.get("message"):
+				return str(err_sub["message"])
+			if err_json.get("detail"):
+				return str(err_json["detail"])
+			if err_json.get("message"):
+				return str(err_json["message"])
+		return raw_e.strip() or str(he)
+	except Exception:
+		return str(he)
+
+
+def list_evren_models(
+	api_key: str,
+	base_url: str = "",
+	timeout: float = 12.0,
+) -> tuple[bool, list[str], str]:
+	"""EVREN API `/models` uç noktasından aktif model listesini çeker."""
+	_ensure_gemini_tls_trust()
+	clean_key = (api_key or "").strip()
+	if not clean_key:
+		return False, [], "EVREN API anahtarı tanımlanmamış."
+	eff_base = (base_url or "").strip().rstrip("/") or get_evren_base_url()
+	req = urllib.request.Request(f"{eff_base}/models", headers=_evren_headers(clean_key), method="GET")
+	try:
+		with urllib.request.urlopen(req, timeout=timeout) as resp:
+			data = json.loads(resp.read().decode("utf-8", errors="replace"))
+		raw_items = data.get("data") if isinstance(data, dict) else (data if isinstance(data, list) else [])
+		all_ids: list[str] = []
+		seen: set[str] = set()
+		for item in raw_items or []:
+			mid = str(item.get("id") if isinstance(item, dict) else item or "").strip()
+			if mid and mid not in seen:
+				seen.add(mid)
+				all_ids.append(mid)
+		if not all_ids:
+			return False, [], "EVREN /models yanıtı boş döndü."
+		util_tags = ("embedding", "rerank", "guard", "asr", "ocr")
+		prioritized: list[str] = [m for m in EVREN_MODEL_OPTIONS if m in seen]
+		other_chat = [m for m in all_ids if m not in prioritized and not any(t in m.lower() for t in util_tags)]
+		utility = [m for m in all_ids if m not in prioritized and m not in other_chat]
+		return True, prioritized + other_chat + utility, ""
+	except urllib.error.HTTPError as he:
+		msg = _parse_urllib_http_error(he)
+		return False, [], f"HTTP {he.code}: {msg}"
+	except Exception as exc:
+		return False, [], f"EVREN model listesi alınamadı: {exc}"
+
+
+def get_evren_terms_info(
+	api_key: str,
+	base_url: str = "",
+	timeout: float = 12.0,
+) -> tuple[bool, dict[str, Any], str]:
+	"""EVREN kullanım şartları onay durumunu ve güncel şartlar metnini alır."""
+	_ensure_gemini_tls_trust()
+	clean_key = (api_key or "").strip()
+	if not clean_key:
+		return False, {"accepted": False, "version": 1, "text": ""}, "EVREN API anahtarı boş."
+	eff_base = (base_url or "").strip().rstrip("/") or get_evren_base_url()
+	info: dict[str, Any] = {"accepted": False, "version": 1, "text": ""}
+	last_err = ""
+	got_any = False
+	for ep in ("terms/status", "terms/text"):
+		req = urllib.request.Request(f"{eff_base}/{ep}", headers=_evren_headers(clean_key), method="GET")
+		try:
+			with urllib.request.urlopen(req, timeout=timeout) as resp:
+				obj = json.loads(resp.read().decode("utf-8", errors="replace"))
+			if isinstance(obj, dict):
+				got_any = True
+				if "accepted" in obj:
+					info["accepted"] = bool(obj.get("accepted"))
+				for vk in ("current_version", "version", "accepted_version"):
+					if obj.get(vk) is not None:
+						try:
+							info["version"] = int(obj[vk])
+							break
+						except Exception:
+							pass
+				if obj.get("text") or obj.get("terms_text") or obj.get("content"):
+					info["text"] = str(obj.get("text") or obj.get("terms_text") or obj.get("content") or "").strip()
+		except urllib.error.HTTPError as he:
+			last_err = f"HTTP {he.code}: {_parse_urllib_http_error(he)}"
+		except Exception as exc:
+			last_err = str(exc)
+	if not got_any:
+		return False, info, last_err or "EVREN kullanım şartları alınamadı."
+	return True, info, ""
+
+
+def accept_evren_terms(
+	api_key: str,
+	version: int | None = None,
+	base_url: str = "",
+	timeout: float = 12.0,
+) -> tuple[bool, str]:
+	"""EVREN LLM API kullanım şartlarını API üzerinden onaylar (`/v1/terms/accept`)."""
+	_ensure_gemini_tls_trust()
+	clean_key = (api_key or "").strip()
+	if not clean_key:
+		return False, "EVREN API anahtarı tanımlanmamış."
+	eff_base = (base_url or "").strip().rstrip("/") or get_evren_base_url()
+	eff_ver = int(version) if version is not None else 1
+	if version is None:
+		ok_i, info, _ = get_evren_terms_info(clean_key, eff_base, timeout=timeout)
+		if ok_i:
+			eff_ver = int(info.get("version") or 1)
+			if info.get("accepted"):
+				return True, f"EVREN kullanım şartları (v{eff_ver}) zaten onaylı."
+	body = json.dumps({"version": eff_ver}).encode("utf-8")
+	req = urllib.request.Request(f"{eff_base}/terms/accept", data=body, headers=_evren_headers(clean_key), method="POST")
+	try:
+		with urllib.request.urlopen(req, timeout=timeout) as resp:
+			_ = resp.read()
+		return True, f"EVREN kullanım şartları (v{eff_ver}) onaylandı."
+	except urllib.error.HTTPError as he:
+		return False, f"HTTP {he.code}: {_parse_urllib_http_error(he)}"
+	except Exception as exc:
+		return False, f"EVREN kullanım şartları onaylanamadı: {exc}"
+
+
+def _is_evren_vision_model(model_id: str) -> bool:
+	ml = (model_id or "").strip().lower()
+	return (model_id in EVREN_VISION_MODELS) or ("-vl" in ml) or ("vision" in ml) or ("gemma-4" in ml)
+
+
+def _call_evren_openai_compat(
+	prompt: str,
+	*,
+	api_key: str,
+	model: str = "",
+	base_url: str = "",
+	system_instruction: str | None = None,
+	expect_json: bool = False,
+	inline_files: list[tuple[bytes, str]] | None = None,
+	temperature: float = 0.25,
+	timeout: float = 30.0,
+	max_output_tokens: int | None = None,
+) -> tuple[bool, str, str]:
+	"""EVREN OpenAI-uyumlu `/chat/completions` uç noktasına istek gönderir."""
+	_ensure_gemini_tls_trust()
+	clean_key = (api_key or "").strip()
+	if not clean_key:
+		return False, "EVREN API anahtarı tanımlanmamış. Ayarlar > Yapay Zekâ menüsünden anahtarınızı kaydedin.", ""
+
+	eff_base = (base_url or "").strip().rstrip("/") or get_evren_base_url()
+	req_model = (model or "").strip()
+	if req_model.lower().startswith("evren:"):
+		req_model = req_model[6:].strip()
+	if not req_model or req_model.startswith("gemini-") or req_model in _LEGACY_MODEL_MAP:
+		req_model = EVREN_MODEL_OPTIONS[0]
+
+	eff_prompt = str(prompt or "")
+	image_parts: list[dict[str, Any]] = []
+	extra_pdf_notes: list[str] = []
+	has_audio_note = False
+	if inline_files:
+		for raw_bytes, mime_type in inline_files:
+			m_low = (mime_type or "").strip().lower()
+			if m_low.startswith("image/"):
+				b64 = base64.b64encode(raw_bytes).decode("ascii")
+				image_parts.append({"type": "image_url", "image_url": {"url": f"data:{m_low};base64,{b64}"}})
+			elif m_low == "application/pdf":
+				local_txt = _extract_pdf_text_layer_locally(raw_bytes)
+				if len(re.sub(r"\s+", "", local_txt)) >= 60 and local_txt[:120].strip() not in eff_prompt:
+					extra_pdf_notes.append(anonymize_free_text(local_txt[:18000]))
+				page_imgs = _render_scanned_pdf_for_gemini(raw_bytes, max_pages=4)
+				for img_b, img_m in page_imgs:
+					b64 = base64.b64encode(img_b).decode("ascii")
+					image_parts.append({"type": "image_url", "image_url": {"url": f"data:{img_m};base64,{b64}"}})
+			elif m_low.startswith("audio/"):
+				has_audio_note = True
+
+	if extra_pdf_notes:
+		eff_prompt = eff_prompt + "\n\n[EKLİ PDF METNİ]:\n" + "\n\n".join(extra_pdf_notes)[:20000]
+	if has_audio_note and not image_parts:
+		eff_prompt += "\n[Not: Ses dosyası metin uç noktasına aktarılamadı; yalnızca metin içeriği değerlendirildi.]"
+
+	if image_parts and not _is_evren_vision_model(req_model):
+		cand_models = list(EVREN_VISION_MODELS) + [req_model] + [m for m in EVREN_MODEL_OPTIONS if m not in EVREN_VISION_MODELS and m != req_model]
+	else:
+		cand_models = [req_model] + [m for m in EVREN_MODEL_OPTIONS if m != req_model]
+
+	messages: list[dict[str, Any]] = []
+	if system_instruction:
+		messages.append({"role": "system", "content": system_instruction})
+	if image_parts:
+		messages.append({"role": "user", "content": [{"type": "text", "text": eff_prompt}] + image_parts})
+	else:
+		messages.append({"role": "user", "content": eff_prompt})
+
+	eff_max_tok = int(max_output_tokens) if (max_output_tokens is not None and int(max_output_tokens) > 0) else 4096
+	url = f"{eff_base}/chat/completions"
+	last_error = ""
+
+	for cand_model in cand_models:
+		for use_json_fmt in ([True, False] if expect_json else [False]):
+			req_payload: dict[str, Any] = {
+				"model": cand_model,
+				"messages": messages,
+				"temperature": temperature,
+				"max_tokens": eff_max_tok,
+			}
+			if use_json_fmt:
+				req_payload["response_format"] = {"type": "json_object"}
+			body_bytes = json.dumps(req_payload, ensure_ascii=False).encode("utf-8")
+			req = urllib.request.Request(url, data=body_bytes, headers=_evren_headers(clean_key), method="POST")
+			try:
+				with urllib.request.urlopen(req, timeout=max(float(timeout), 25.0)) as resp:
+					raw_resp = resp.read().decode("utf-8", errors="replace")
+				data = json.loads(raw_resp)
+				choices = data.get("choices") or []
+				if not choices:
+					last_error = f"EVREN ({cand_model}) yanıt üretmedi (choices boş)."
+					break
+				msg_obj = choices[0].get("message") or {}
+				content = msg_obj.get("content")
+				if isinstance(content, list):
+					txt_chunks = [str(p.get("text") or "") for p in content if isinstance(p, dict) and p.get("text")]
+					full_text = "\n".join(txt_chunks).strip()
+				else:
+					full_text = str(content or "").strip()
+				if not full_text and msg_obj.get("reasoning_content"):
+					full_text = str(msg_obj.get("reasoning_content") or "").strip()
+				full_text = re.sub(r"<think>.*?</think>", "", full_text, flags=re.DOTALL | re.IGNORECASE).strip()
+				if full_text:
+					return True, full_text, f"evren:{cand_model}"
+				last_error = f"EVREN ({cand_model}) boş metin döndürdü."
+				break
+			except urllib.error.HTTPError as he:
+				msg = _parse_urllib_http_error(he)
+				low_msg = msg.lower()
+				if he.code == 403 and ("terms_not_accepted" in low_msg or ("terms" in low_msg and "accept" in low_msg)):
+					return (
+						False,
+						"EVREN kullanım şartları henüz onaylanmamış (terms_not_accepted). Ayarlar > Yapay Zekâ bölümündeki '📜 EVREN Kullanım Şartlarını Onayla' butonuna tıklayın veya evren.ssyz.org.tr üzerinden onaylayın.",
+						f"evren:{cand_model}",
+					)
+				if he.code == 400 and use_json_fmt and ("response_format" in low_msg or "json" in low_msg):
+					last_error = f"HTTP 400 ({cand_model}): {msg}"
+					continue
+				last_error = f"HTTP {he.code} ({cand_model}): {msg}"
+				if he.code in (401, 403) and ("key" in low_msg or "unauth" in low_msg or "token" in low_msg):
+					return False, last_error, f"evren:{cand_model}"
+				break
+			except Exception as exc:
+				last_error = f"EVREN Bağlantı/Zaman aşımı ({cand_model}): {exc}"
+				break
+
+	return False, last_error or "EVREN API yanıt vermedi.", ""
+
+
 def call_gemini(
 	prompt: str,
 	*,
@@ -361,17 +718,33 @@ def call_gemini(
 	temperature: float = 0.25,
 	timeout: float = 16.0,
 	max_output_tokens: int | None = None,
+	provider: str = "",
+	base_url: str = "",
 ) -> tuple[bool, str, str]:
 	"""
-	Gemini generateContent çağrısı yapar.
+	Gemini generateContent (veya EVREN OpenAI-uyumlu) çağrısı yapar.
 	Dönüş: (başarılı_mı, yanıt_metni_veya_hata, kullanılan_model)
 	"""
 	_ensure_gemini_tls_trust()
 	clean_key = (api_key or "").strip()
 	if not clean_key:
-		return False, "Gemini API anahtarı tanımlanmamış. Ayarlar > Yapay Zekâ (Gemini API) menüsünden anahtarınızı kaydedin.", ""
+		return False, "Yapay Zekâ API anahtarı tanımlanmamış. Ayarlar > Yapay Zekâ menüsünden Gemini veya EVREN anahtarınızı kaydedin.", ""
 
 	raw_pref = (model or "gemini-3-flash-preview").strip().replace("models/", "")
+	if (provider or "").strip().lower() == "evren" or is_evren_key_or_model(clean_key, raw_pref):
+		return _call_evren_openai_compat(
+			prompt,
+			api_key=clean_key,
+			model=raw_pref,
+			base_url=base_url,
+			system_instruction=system_instruction,
+			expect_json=expect_json,
+			inline_files=inline_files,
+			temperature=temperature,
+			timeout=timeout,
+			max_output_tokens=max_output_tokens,
+		)
+
 	preferred = _LEGACY_MODEL_MAP.get(raw_pref, raw_pref)
 	models_to_try = [preferred] + [m for m in _FALLBACK_MODELS if m != preferred]
 
@@ -564,13 +937,21 @@ def _stringify_ai_field(val: Any) -> str:
 	return str(val).strip()
 
 
-def test_gemini_connection(api_key: str, model: str = "gemini-3-flash-preview") -> tuple[bool, str, str]:
+def test_gemini_connection(
+	api_key: str,
+	model: str = "gemini-3-flash-preview",
+	*,
+	provider: str = "",
+	base_url: str = "",
+) -> tuple[bool, str, str]:
 	ok, txt, used_model = call_gemini(
-		"Merhaba! Okul revir sistemi bağlantı testi için tek cümleyle Türkçe 'Gemini Klinik Asistan bağlantısı başarılı.' yaz.",
+		"Merhaba! Okul revir sistemi bağlantı testi için tek cümleyle Türkçe 'Yapay zekâ asistan bağlantısı başarılı.' yaz.",
 		api_key=api_key,
 		model=model,
 		temperature=0.1,
-		timeout=12.0,
+		timeout=18.0,
+		provider=provider,
+		base_url=base_url,
 	)
 	return ok, txt, used_model
 

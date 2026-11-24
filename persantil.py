@@ -126,7 +126,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.27.1"
+_DEFAULT_APP_VERSION = "1.28.0"
 
 
 def _load_app_version() -> str:
@@ -298,6 +298,10 @@ DEFAULT_APP_SETTINGS: dict[str, str] = {
 	"gemini_model": "gemini-3-flash-preview",
 	"gemini_api_key": "",
 	"gemini_strict_kvkk_pdf": "0",
+	"ai_provider": "gemini",
+	"evren_api_key": "",
+	"evren_model": "gemma-4-31b",
+	"evren_base_url": "https://evren-llmapi.ssyz.org.tr/v1",
 	"calendar_quote_mode": "Karışık (Hadis-i Şerif + Özlü Söz / Günün Yazısı)",
 	"calendar_show_prayer_times": "1",
 	"calendar_auto_load_holidays": "1",
@@ -10885,6 +10889,14 @@ def render_clinical_growth_curve(enriched_records: pd.DataFrame, person: dict | 
 def _get_active_gemini_config() -> tuple[bool, str, str]:
 	cfg = get_app_settings()
 	enabled = str(cfg.get("gemini_enabled", "1")).strip() != "0"
+	gai.set_evren_base_url(gai.get_evren_base_url(cfg))
+	provider = str(cfg.get("ai_provider") or "gemini").strip().lower()
+	if provider == "evren":
+		key = gai.get_evren_api_key(cfg, APP_DIR)
+		model = str(cfg.get("evren_model") or "gemma-4-31b").strip() or "gemma-4-31b"
+		if model not in gai.EVREN_MODEL_OPTIONS and not model.lower().startswith("evren:"):
+			model = f"evren:{model}"
+		return (enabled and bool(key)), key, model
 	key = gai.get_api_key(cfg, APP_DIR)
 	model = str(cfg.get("gemini_model") or "gemini-3-flash-preview").strip()
 	model = getattr(gai, "_LEGACY_MODEL_MAP", {}).get(model, model)
@@ -13496,7 +13508,12 @@ def _sync_floating_chat_ui(cur_page: str = "") -> None:
 	if active_p:
 		sub_lbl = f"📌 Aktif Kişi Bağlamı ({active_p['class_name']}) · 🛡️ KVKK"
 	else:
-		sub_lbl = f"🛡️ KVKK Korumalı · {model}"
+		provider = str(cfg.get("ai_provider") or "gemini").strip().lower()
+		m_disp = model[6:] if str(model).lower().startswith("evren:") else model
+		if provider == "evren" or gai.is_evren_key_or_model("", model):
+			sub_lbl = f"🇹🇷 EVREN · {m_disp} · 🛡️ KVKK"
+		else:
+			sub_lbl = f"🛡️ KVKK Korumalı · {m_disp}"
 	eff_page = cur_page or str(ui.session_state.get("main_menu_page") or "")
 	ui.configure_floating_chat(
 		enabled=float_on,
@@ -13871,19 +13888,26 @@ def open_gemini_api_guide_dialog() -> None:
 
 
 def render_gemini_ai_settings_panel(current_cfg: dict[str, str]) -> None:
-	ui.markdown("### 🤖 Yapay Zekâ (Gemini API) & KVKK Anonimleştirme Ayarları")
+	ui.markdown("### 🤖 Yapay Zekâ (Google Gemini / 🇹🇷 EVREN Platformu) & KVKK Ayarları")
 	if ui.session_state.pop("_ai_key_needed_warn", False):
-		ui.warning("⚠️ AI modunu aktif edebilmek için lütfen aşağıya geçerli bir Google Gemini API anahtarı girip kaydedin.")
+		ui.warning("⚠️ AI modunu aktif edebilmek için lütfen aşağıya geçerli bir Google Gemini veya EVREN Platformu API anahtarı girip kaydedin.")
 	ui.caption(
-		"Revir Defteri'ndeki klinik yapay zekâ senaryolarını ve sağ alt köşedeki yüzen Gemini sohbet balonunu (dosya & görsel analiz destekli) buradan yönetebilirsiniz."
+		"Revir Defteri'ndeki klinik yapay zekâ senaryolarını, yemekhane/takvim ayrıştırmasını ve sağ alt köşedeki yüzen sohbet balonunu Google Gemini veya yerli EVREN Platformu üzerinden yönetebilirsiniz."
 	)
 	cur_enabled = str(current_cfg.get("gemini_enabled", "1")).strip() != "0"
 	cur_float = str(current_cfg.get("gemini_floating_chat", "1")).strip() != "0"
 	cur_strict_pdf = str(current_cfg.get("gemini_strict_kvkk_pdf", "0")).strip() == "1"
+	cur_provider = str(current_cfg.get("ai_provider") or "gemini").strip().lower()
+	if cur_provider not in gai.AI_PROVIDER_OPTIONS:
+		cur_provider = "gemini"
 	cur_key = gai.get_api_key(current_cfg, APP_DIR)
 	cur_model = str(current_cfg.get("gemini_model") or "gemini-3-flash-preview").strip()
 	if cur_model not in gai.GEMINI_MODEL_OPTIONS:
 		cur_model = "gemini-3-flash-preview"
+
+	cur_evren_key = gai.get_evren_api_key(current_cfg, APP_DIR)
+	cur_evren_base = gai.get_evren_base_url(current_cfg)
+	cur_evren_model = str(current_cfg.get("evren_model") or gai.EVREN_MODEL_OPTIONS[0]).strip() or gai.EVREN_MODEL_OPTIONS[0]
 
 	def _on_quick_toggle_change() -> None:
 		en_v = bool(ui.session_state.get("cfg_gemini_enabled_toggle", True))
@@ -13896,18 +13920,35 @@ def render_gemini_ai_settings_panel(current_cfg: dict[str, str]) -> None:
 		})
 		clear_all_data_caches()
 
+	def _on_provider_change() -> None:
+		pv = str(ui.session_state.get("cfg_ai_provider_sel") or "gemini").strip().lower()
+		if pv not in gai.AI_PROVIDER_OPTIONS:
+			pv = "gemini"
+		save_app_settings({"ai_provider": pv})
+		clear_all_data_caches()
+		_sync_floating_chat_ui()
+
 	with ui.container(border=True):
+		sel_provider = ui.selectbox(
+			"🔌 Aktif Yapay Zekâ Sağlayıcısı",
+			options=gai.AI_PROVIDER_OPTIONS,
+			index=gai.AI_PROVIDER_OPTIONS.index(cur_provider),
+			format_func=lambda p: gai.AI_PROVIDER_LABELS.get(p, p),
+			key="cfg_ai_provider_sel",
+			on_change=_on_provider_change,
+			help="Google Gemini veya T.C. SSB EVREN Platformu (evren.ssyz.org.tr) arasında dilediğiniz zaman geçiş yapabilirsiniz.",
+		)
 		t_c1, t_c2 = ui.columns(2)
 		with t_c1:
 			en_val = ui.toggle(
-				"🤖 Gemini Klinik Yapay Zekâ Asistanını Etkinleştir",
+				"🤖 Klinik Yapay Zekâ Asistanını Etkinleştir (Gemini / EVREN)",
 				value=cur_enabled,
 				key="cfg_gemini_enabled_toggle",
 				on_change=_on_quick_toggle_change,
 			)
 		with t_c2:
 			float_val = ui.toggle(
-				"💬 Sağ Altta Yüzen Gemini Sohbet Balonunu Göster (Dosya & Görsel Analiz)",
+				"💬 Sağ Altta Yüzen Sohbet Balonunu Göster (Dosya & Görsel Analiz)",
 				value=cur_float,
 				key="cfg_gemini_floating_toggle",
 				on_change=_on_quick_toggle_change,
@@ -13919,47 +13960,138 @@ def render_gemini_ai_settings_panel(current_cfg: dict[str, str]) -> None:
 			on_change=_on_quick_toggle_change,
 			help="Açık olduğunda dijital metin katmanına sahip PDF belgelerinden önce ad, soyad, T.C. ve telefonlar yerel olarak maskelenir; yalnızca tarama (görsel) PDF'lerde vision gönderimi kullanılır.",
 		)
-		k_c1, k_c2 = ui.columns([2.2, 1.8])
-		with k_c1:
-			api_key_inp = ui.text_input(
-				"🔑 Google Gemini API Anahtarı",
-				value=cur_key,
-				type="password",
-				placeholder="AIza... veya AQ....",
-				help="Anahtarınız yalnızca bu bilgisayardaki yerel veritabanında ve .gitignore korumalı yerel dosyada saklanır; GitHub'a asla yüklenmez.",
-				key="cfg_gemini_api_key_inp",
-			)
-		with k_c2:
-			m_idx = gai.GEMINI_MODEL_OPTIONS.index(cur_model)
-			sel_model = ui.selectbox(
-				"🧠 Tercih Edilen Gemini Modeli",
-				options=gai.GEMINI_MODEL_OPTIONS,
-				index=m_idx,
-				format_func=lambda m: gai.GEMINI_MODEL_LABELS.get(m, m),
-				key="cfg_gemini_model_sel",
-			)
 
-		b_c1, b_c2 = ui.columns(2)
-		with b_c1:
-			if ui.button("💾 Gemini AI Ayarlarını Kaydet", type="primary", use_container_width=True, key="btn_save_gemini_cfg"):
-				save_app_settings({
-					"gemini_enabled": "1" if en_val else "0",
-					"gemini_floating_chat": "1" if float_val else "0",
-					"gemini_strict_kvkk_pdf": "1" if strict_pdf_val else "0",
-					"gemini_model": sel_model,
-					"gemini_api_key": api_key_inp.strip(),
-				})
-				gai.save_local_api_key(api_key_inp.strip(), APP_DIR)
-				clear_all_data_caches()
-				_sync_floating_chat_ui()
-				ui.success("✅ Gemini AI ve yüzen sohbet balonu ayarları kaydedildi.")
-		with b_c2:
-			if ui.button("🔌 Bağlantıyı Şimdi Test Et", type="secondary", use_container_width=True, key="btn_test_gemini_conn"):
-				ok, msg, used_m = gai.test_gemini_connection(api_key_inp.strip(), sel_model)
-				if ok:
-					ui.success(f"✅ Bağlantı Başarılı ({used_m}): {msg}")
-				else:
-					ui.error(f"❌ Bağlantı Hatası: {msg}")
+		if sel_provider == "evren":
+			fetched_evren = list(ui.session_state.get("_evren_fetched_models") or [])
+			evren_opts: list[str] = []
+			for m_cand in list(gai.EVREN_MODEL_OPTIONS) + fetched_evren + [cur_evren_model]:
+				ms = str(m_cand or "").strip()
+				if ms and ms not in evren_opts:
+					evren_opts.append(ms)
+			ek_c1, ek_c2 = ui.columns([2.1, 1.9])
+			with ek_c1:
+				evren_key_inp = ui.text_input(
+					"🔑 EVREN Platformu API Anahtarı",
+					value=cur_evren_key,
+					type="password",
+					placeholder="evren_llm_...",
+					help="e-Devlet ile evren.ssyz.org.tr üzerinden oluşturduğunuz API anahtarı yalnızca bu bilgisayardaki yerel veritabanında ve .gitignore korumalı .evren_api_key dosyasında saklanır.",
+					key="cfg_evren_api_key_inp",
+				)
+			with ek_c2:
+				sel_evren_model = ui.selectbox(
+					"🧠 Tercih Edilen EVREN Modeli",
+					options=evren_opts,
+					index=evren_opts.index(cur_evren_model),
+					format_func=lambda m: gai.EVREN_MODEL_LABELS.get(m, m),
+					key="cfg_evren_model_sel",
+				)
+			eu_c1, eu_c2 = ui.columns(2)
+			with eu_c1:
+				evren_base_inp = ui.text_input(
+					"🌐 EVREN API Uç Noktası (OpenAI Uyumlu Base URL)",
+					value=cur_evren_base,
+					placeholder=gai.EVREN_DEFAULT_BASE_URL,
+					key="cfg_evren_base_url_inp",
+				)
+			with eu_c2:
+				evren_custom_inp = ui.text_input(
+					"🎛️ Özel EVREN Model Kimliği (Opsiyonel)",
+					value="",
+					placeholder="Boşsa soldaki seçili model kullanılır",
+					key="cfg_evren_custom_model_inp",
+				)
+			eff_evren_model = evren_custom_inp.strip() or sel_evren_model
+			eff_evren_base = gai.set_evren_base_url(evren_base_inp.strip() or gai.EVREN_DEFAULT_BASE_URL)
+
+			eb_c1, eb_c2 = ui.columns(2)
+			with eb_c1:
+				if ui.button("💾 EVREN & Yapay Zekâ Ayarlarını Kaydet", type="primary", use_container_width=True, key="btn_save_evren_cfg"):
+					save_app_settings({
+						"ai_provider": "evren",
+						"gemini_enabled": "1" if en_val else "0",
+						"gemini_floating_chat": "1" if float_val else "0",
+						"gemini_strict_kvkk_pdf": "1" if strict_pdf_val else "0",
+						"evren_model": eff_evren_model,
+						"evren_api_key": evren_key_inp.strip(),
+						"evren_base_url": eff_evren_base,
+					})
+					gai.save_local_evren_api_key(evren_key_inp.strip(), APP_DIR)
+					clear_all_data_caches()
+					_sync_floating_chat_ui()
+					ui.success(f"✅ EVREN Platformu ayarları kaydedildi (Model: {eff_evren_model}).")
+			with eb_c2:
+				if ui.button("🔌 EVREN Bağlantısını Test Et", type="secondary", use_container_width=True, key="btn_test_evren_conn"):
+					ok_ev, msg_ev, used_ev = gai.test_gemini_connection(
+						evren_key_inp.strip(),
+						eff_evren_model,
+						provider="evren",
+						base_url=eff_evren_base,
+					)
+					if ok_ev:
+						ui.success(f"✅ EVREN Bağlantısı Başarılı ({used_ev}): {msg_ev}")
+					else:
+						ui.error(f"❌ EVREN Bağlantı Hatası: {msg_ev}")
+
+			eb2_c1, eb2_c2 = ui.columns(2)
+			with eb2_c1:
+				if ui.button("🔄 Modelleri EVREN'den Çek (/v1/models)", type="secondary", use_container_width=True, key="btn_fetch_evren_models"):
+					ok_lm, mod_ids, err_lm = gai.list_evren_models(evren_key_inp.strip(), eff_evren_base)
+					if ok_lm:
+						ui.session_state["_evren_fetched_models"] = mod_ids
+						ui.success(f"✅ {len(mod_ids)} EVREN modeli alındı: {', '.join(mod_ids[:8])}")
+					else:
+						ui.error(f"❌ Modeller alınamadı: {err_lm}")
+			with eb2_c2:
+				if ui.button("📜 EVREN Kullanım Şartlarını Onayla", type="secondary", use_container_width=True, key="btn_accept_evren_terms"):
+					ok_tm, msg_tm = gai.accept_evren_terms(evren_key_inp.strip(), base_url=eff_evren_base)
+					if ok_tm:
+						ui.success(f"✅ {msg_tm}")
+					else:
+						ui.error(f"❌ Onay hatası: {msg_tm}")
+		else:
+			k_c1, k_c2 = ui.columns([2.2, 1.8])
+			with k_c1:
+				api_key_inp = ui.text_input(
+					"🔑 Google Gemini API Anahtarı",
+					value=cur_key,
+					type="password",
+					placeholder="AIza... veya AQ....",
+					help="Anahtarınız yalnızca bu bilgisayardaki yerel veritabanında ve .gitignore korumalı yerel dosyada saklanır; GitHub'a asla yüklenmez.",
+					key="cfg_gemini_api_key_inp",
+				)
+			with k_c2:
+				m_idx = gai.GEMINI_MODEL_OPTIONS.index(cur_model)
+				sel_model = ui.selectbox(
+					"🧠 Tercih Edilen Gemini Modeli",
+					options=gai.GEMINI_MODEL_OPTIONS,
+					index=m_idx,
+					format_func=lambda m: gai.GEMINI_MODEL_LABELS.get(m, m),
+					key="cfg_gemini_model_sel",
+				)
+
+			b_c1, b_c2 = ui.columns(2)
+			with b_c1:
+				if ui.button("💾 Gemini AI Ayarlarını Kaydet", type="primary", use_container_width=True, key="btn_save_gemini_cfg"):
+					save_app_settings({
+						"ai_provider": "gemini",
+						"gemini_enabled": "1" if en_val else "0",
+						"gemini_floating_chat": "1" if float_val else "0",
+						"gemini_strict_kvkk_pdf": "1" if strict_pdf_val else "0",
+						"gemini_model": sel_model,
+						"gemini_api_key": api_key_inp.strip(),
+					})
+					gai.save_local_api_key(api_key_inp.strip(), APP_DIR)
+					clear_all_data_caches()
+					_sync_floating_chat_ui()
+					ui.success("✅ Gemini AI ve yüzen sohbet balonu ayarları kaydedildi.")
+			with b_c2:
+				if ui.button("🔌 Bağlantıyı Şimdi Test Et", type="secondary", use_container_width=True, key="btn_test_gemini_conn"):
+					ok, msg, used_m = gai.test_gemini_connection(api_key_inp.strip(), sel_model)
+					if ok:
+						ui.success(f"✅ Bağlantı Başarılı ({used_m}): {msg}")
+					else:
+						ui.error(f"❌ Bağlantı Hatası: {msg}")
 
 	# API Anahtarı Alma & Görsel PDF Kılavuz Bölümü
 	guide_pdf_path = _resolve_bundled_asset("gemini_api_anahtari_kilavuzu.pdf")
@@ -13967,9 +14099,9 @@ def render_gemini_ai_settings_panel(current_cfg: dict[str, str]) -> None:
 		ui.markdown("#### 🔑 API Anahtarı Alma & Nasıl Alınır Kılavuzu")
 		api_get_col, api_guide_col = ui.columns(2)
 		with api_get_col:
-			ui.markdown("##### 🌐 API Anahtarı Al (Google AI Studio)")
+			ui.markdown("##### 🌐 API Anahtarı Al (Google AI Studio / 🇹🇷 EVREN)")
 			ui.caption(
-				"Henüz bir Gemini API anahtarınız yoksa aşağıdaki butona tıklayarak bilgisayarınızın web tarayıcısında Google AI Studio'yu açıp ücretsiz anahtar oluşturabilirsiniz."
+				"Google AI Studio veya e-Devlet girişli yerli EVREN Platformu üzerinden ücretsiz API anahtarı oluşturup yukarıya yapıştırabilirsiniz."
 			)
 			ui.link_button(
 				"🌐 Google AI Studio'yu Tarayıcıda Aç (API Anahtarı Al) ↗",
@@ -13978,7 +14110,14 @@ def render_gemini_ai_settings_panel(current_cfg: dict[str, str]) -> None:
 				use_container_width=True,
 				help="Bilgisayarınızın varsayılan tarayıcısında https://aistudio.google.com/welcome sayfasını açar.",
 			)
-			ui.caption("🔗 Adres: `https://aistudio.google.com/welcome`")
+			ui.link_button(
+				"🇹🇷 EVREN Platformu'nu Tarayıcıda Aç (evren.ssyz.org.tr) ↗",
+				"https://evren.ssyz.org.tr",
+				type="secondary",
+				use_container_width=True,
+				help="T.C. SSB EVREN yerli yapay zekâ platformunu tarayıcıda açar (e-Devlet girişi ve API anahtarı oluşturma).",
+			)
+			ui.caption("🔗 Gemini: `https://aistudio.google.com/welcome` · EVREN: `https://evren.ssyz.org.tr`")
 		with api_guide_col:
 			ui.markdown("##### 📘 API Anahtarı Nasıl Alınır? (Görsel PDF Kılavuz)")
 			ui.caption(
