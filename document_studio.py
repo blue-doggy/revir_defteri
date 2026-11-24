@@ -2015,7 +2015,7 @@ def render_smart_document_importer_dialog(ctx_api: dict[str, Any], initial_file_
 	"""
 	is_gai_on, gai_key, gai_model = ctx_api["_get_active_gemini_config"]()
 	if not is_gai_on:
-		ui.warning("🤖 Bu özellik için **Ayarlar → Yapay Zekâ (Gemini)** bölümünden Gemini AI'nın etkinleştirilmesi gerekir. Yapay zekâ kapalıyken tüm manuel form ve Excel/PDF yükleme ekranlarını normal şekilde kullanabilirsiniz.")
+		ui.warning("🤖 Bu özellik için **Ayarlar → Yapay Zekâ & KVKK** bölümünden yapay zekâ asistanının etkinleştirilmesi gerekir. Yapay zekâ kapalıyken tüm manuel form ve Excel/PDF yükleme ekranlarını normal şekilde kullanabilirsiniz.")
 		return
 
 	ui.caption("Yüklediğiniz veya Evrak Deposundan seçtiğiniz belgeyi Gemini okur, hangi öğrenciye ait olduğunu yerel veritabanından eşleştirir ve çıkardığı tüm klinik bilgileri onayınızla doğrudan dosyasına işler.")

@@ -176,6 +176,26 @@ class TestRevirUI(unittest.TestCase):
                 self.assertIn("window.__revirInitResizableTables", body)
                 self.assertIn("colResizeAt", body)
                 self.assertIn("__revirLastResizeEndAt", body)
+                # Collapsible UI polish & Page box layout (excluding calendar) hooks
+                for marker in (
+                    "revir-pop-close",
+                    "revir-modal-dirty-pill",
+                    "revir-chat-pin-btn",
+                    "revir-chat-resize-nw",
+                    "window.__revirToggleChatPin",
+                    "window.__revirClosePopovers",
+                    "isCalendarPageName",
+                    "window.__revirToggleLayoutEdit",
+                    "window.__revirInitBoxLayout",
+                    "revir-box-res-se",
+                    "revir_box_layout_v1",
+                    "revir-layout-bar",
+                ):
+                    self.assertIn(marker, body)
+                out_box_off = revir_ui.run_action_headless(lambda: (_app(), revir_ui.configure_box_layout(False)), {"action": "render"})
+                self.assertFalse(out_box_off.get("box_layout_enabled"))
+                out_box_on = revir_ui.run_action_headless(lambda: (_app(), revir_ui.configure_box_layout(True)), {"action": "render"})
+                self.assertTrue(out_box_on.get("box_layout_enabled"))
         finally:
             srv.stop()
 

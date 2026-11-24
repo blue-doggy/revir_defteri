@@ -5776,7 +5776,7 @@ def _render_dish_editor_body(
 	"""Yemek adı, makro besinler, AI malzeme çözücü, ölçeklenebilir malzeme tablosu ve alerji/menü etki bölümlerini çizer."""
 	connect_db_fn = ctx_api["connect_db"]
 	is_on, api_key, model = ctx_api["_get_active_gemini_config"]()
-	mask_fn = ctx_api["mask_kvkk_value"]
+	mask_fn = ctx_api.get("mask_kvkk_value") or (lambda v, *_a, **_kw: str(v or ""))
 
 	sel_sig = f"id:{editing_dish['id']}" if editing_dish else "new"
 	sig_k = f"{key_prefix}_loaded_sig"
@@ -6122,7 +6122,7 @@ def _render_tab_dishes(ctx_api: dict[str, Any]) -> None:
 def _render_tab_menu_planner(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict[str, str]) -> None:
 	connect_db_fn = ctx_api["connect_db"]
 	is_on, api_key, model = ctx_api["_get_active_gemini_config"]()
-	mask_fn = ctx_api["mask_kvkk_value"]
+	mask_fn = ctx_api.get("mask_kvkk_value") or (lambda v, *_a, **_kw: str(v or ""))
 
 	ui.markdown("### 🗓️ İş Günü Bazlı Öğün Menü Planlayıcı & A4 Çıktı")
 	dishes = get_all_dishes(connect_db_fn)
@@ -8591,14 +8591,15 @@ def _render_tab_diners_and_cash(ctx_api: dict[str, Any], sel_ym: str, app_cfg: d
 						ui.text_area("📩 Örnek Veli Aidat Hatırlatma Mesajı (Kopyalanabilir)", value=str(f_res["parent_reminder_template"]), height=100, key="caf_ai_rem_tmpl")
 
 
-def _render_tab_settings_and_exports(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict[str, str]) -> None:
+def render_cafeteria_settings_panel(ctx_api: dict[str, Any], app_cfg: dict[str, str], *, key_prefix: str = "caf") -> None:
+	"""Merkezi Ayarlar ve Yemekhane sayfasında paylaşılan Yemekhane ayar paneli."""
 	connect_db_fn = ctx_api["connect_db"]
 	save_cfg_fn = ctx_api.get("save_app_settings")
 	sched = parse_service_schedule_from_cfg(app_cfg)
-	ui.markdown("### ⚙️ Yemekhane Ayarları, Haftalık Çalışma / Öğün Saatleri, İmza & Toplu Excel Çıktısı")
+	kp = str(key_prefix or "caf").strip() or "caf"
 
 	with ui.container(border=True):
-		ui.markdown("##### 🗓️ Haftalık Yemek Günü, Günlük Öğün Sayısı, Yemek Saatleri, Ramazan Modu & İmza Ayarları")
+		ui.markdown("#### 🍽️ Çalışma Düzeni, Öğün Saatleri, Ramazan Modu & İmzalar")
 		try:
 			import school_calendar as scal
 			all_prov_names = sorted(scal.TR_PROVINCE_COORDS.keys())
@@ -8609,26 +8610,26 @@ def _render_tab_settings_and_exports(ctx_api: dict[str, Any], sel_ym: str, app_c
 		cur_ram_prov = str(app_cfg.get("cafeteria_ramazan_province") or "").strip()
 		cur_prov_val = cur_ram_prov if cur_ram_prov in all_prov_names else auto_prov_lbl
 
-		with ui.form("caf_form_settings"):
+		with ui.form(f"{kp}_form_settings"):
 			wd_name_to_idx = {TR_WEEKDAYS_SHORT[i]: i for i in range(7)}
 			default_wd_names = [TR_WEEKDAYS_SHORT[i] for i in sorted(sched["weekdays_set"])]
 
 			hs1, hs2 = ui.columns([1.0, 2.2])
-			days_pw_in = hs1.number_input("Haftada Kaç Gün Yemek Çıkıyor?", min_value=1, max_value=7, step=1, value=sched["days_per_week"])
-			sel_wds_in = hs2.multiselect("Yemek Çıkan Günler", list(wd_name_to_idx.keys()), default=default_wd_names)
+			days_pw_in = hs1.number_input("Haftada Kaç Gün Yemek Çıkıyor?", min_value=1, max_value=7, step=1, value=sched["days_per_week"], key=f"{kp}_days_pw")
+			sel_wds_in = hs2.multiselect("Yemek Çıkan Günler", list(wd_name_to_idx.keys()), default=default_wd_names, key=f"{kp}_wds")
 
 			hs3, hs4 = ui.columns([1.0, 2.2])
-			meals_pd_in = hs3.number_input("Günde Kaç Öğün Yemek Çıkıyor?", min_value=1, max_value=5, step=1, value=sched["meals_per_day"])
-			sel_slots_in = hs4.multiselect("Aktif Yemek Öğünleri (Ramazan Modu için İftar / Sahur da seçilebilir)", ALL_MEAL_SLOTS, default=sched["active_meal_slots"])
+			meals_pd_in = hs3.number_input("Günde Kaç Öğün Yemek Çıkıyor?", min_value=1, max_value=5, step=1, value=sched["meals_per_day"], key=f"{kp}_meals_pd")
+			sel_slots_in = hs4.multiselect("Aktif Yemek Öğünleri (Ramazan Modu için İftar / Sahur da seçilebilir)", ALL_MEAL_SLOTS, default=sched["active_meal_slots"], key=f"{kp}_slots")
 
 			tm1, tm2, tm3 = ui.columns(3)
-			t_bkf_in = tm1.text_input("Sabah Kahvaltısı Saati", value=sched["meal_times"]["Sabah Kahvaltısı"], placeholder="08:00 - 08:45")
-			t_lun_in = tm2.text_input("Öğle Yemeği Saati", value=sched["meal_times"]["Öğle Yemeği"], placeholder="12:00 - 13:00")
-			t_snk_in = tm3.text_input("İkindi Ara Öğünü Saati", value=sched["meal_times"]["İkindi Ara Öğünü"], placeholder="15:00 - 15:30")
+			t_bkf_in = tm1.text_input("Sabah Kahvaltısı Saati", value=sched["meal_times"]["Sabah Kahvaltısı"], placeholder="08:00 - 08:45", key=f"{kp}_t_bkf")
+			t_lun_in = tm2.text_input("Öğle Yemeği Saati", value=sched["meal_times"]["Öğle Yemeği"], placeholder="12:00 - 13:00", key=f"{kp}_t_lun")
+			t_snk_in = tm3.text_input("İkindi Ara Öğünü Saati", value=sched["meal_times"]["İkindi Ara Öğünü"], placeholder="15:00 - 15:30", key=f"{kp}_t_snk")
 
 			rm1, rm2 = ui.columns([1.5, 1.5], vertical_alignment="center")
-			ram_on_in = rm1.checkbox("🌙 Ramazan Modu Aktif (Menüye İl Bazlı İftar ve Sahur Saatlerini İşle)", value=sched["ramazan_mode"])
-			ram_prov_in = rm2.selectbox("İftar & Sahur İçin İl Seçimi", prov_choices, index=prov_choices.index(cur_prov_val) if cur_prov_val in prov_choices else 0)
+			ram_on_in = rm1.checkbox("🌙 Ramazan Modu Aktif (Menüye İl Bazlı İftar ve Sahur Saatlerini İşle)", value=sched["ramazan_mode"], key=f"{kp}_ram_on")
+			ram_prov_in = rm2.selectbox("İftar & Sahur İçin İl Seçimi", prov_choices, index=prov_choices.index(cur_prov_val) if cur_prov_val in prov_choices else 0, key=f"{kp}_ram_prov")
 
 			if sched["ramazan_mode"]:
 				today_rt = get_ramazan_times_for_dates(connect_db_fn, sched["ramazan_province"], [date.today().isoformat()]).get(date.today().isoformat(), {})
@@ -8643,20 +8644,20 @@ def _render_tab_settings_and_exports(ctx_api: dict[str, Any], sel_ym: str, app_c
 				cur_tone = DEFAULT_MENU_COLOR_TONE
 
 			cfg_fp = json.dumps([s1_def_r, s1_def_n, s2_def_r, s2_def_n, s3_def_r, s3_def_n, cur_tone], ensure_ascii=False)
-			if ui.session_state.get("caf_cfg_form_fp") != cfg_fp:
-				ui.session_state["caf_cfg_form_fp"] = cfg_fp
-				ui.session_state["caf_cfg_s1_r"] = s1_def_r
-				ui.session_state["caf_cfg_s1_n"] = s1_def_n
-				ui.session_state["caf_cfg_s2_r"] = s2_def_r
-				ui.session_state["caf_cfg_s2_n"] = s2_def_n
-				ui.session_state["caf_cfg_s3_r"] = s3_def_r
-				ui.session_state["caf_cfg_s3_n"] = s3_def_n
-				ui.session_state["caf_cfg_menu_tone"] = cur_tone
+			if ui.session_state.get(f"{kp}_cfg_form_fp") != cfg_fp:
+				ui.session_state[f"{kp}_cfg_form_fp"] = cfg_fp
+				ui.session_state[f"{kp}_cfg_s1_r"] = s1_def_r
+				ui.session_state[f"{kp}_cfg_s1_n"] = s1_def_n
+				ui.session_state[f"{kp}_cfg_s2_r"] = s2_def_r
+				ui.session_state[f"{kp}_cfg_s2_n"] = s2_def_n
+				ui.session_state[f"{kp}_cfg_s3_r"] = s3_def_r
+				ui.session_state[f"{kp}_cfg_s3_n"] = s3_def_n
+				ui.session_state[f"{kp}_cfg_menu_tone"] = cur_tone
 
 			ct1, ct2, ct3 = ui.columns([1.2, 0.9, 0.9], vertical_alignment="center")
-			tone_in = ct1.selectbox("🎨 Menü Çıktısı Renk Tonu", tone_choices, index=tone_choices.index(cur_tone), key="caf_cfg_menu_tone")
-			def_stu_p = ct2.number_input("Varsayılan Öğrenci Öğün Ücreti (₺)", min_value=0.0, step=5.0, value=_safe_float(app_cfg.get("cafeteria_default_meal_price"), 75.0))
-			def_stf_p = ct3.number_input("Varsayılan Öğretmen/Personel Öğün Ücreti (₺)", min_value=0.0, step=5.0, value=_safe_float(app_cfg.get("cafeteria_default_staff_price"), 90.0))
+			tone_in = ct1.selectbox("🎨 Menü Çıktısı Renk Tonu", tone_choices, index=tone_choices.index(cur_tone), key=f"{kp}_cfg_menu_tone")
+			def_stu_p = ct2.number_input("Varsayılan Öğrenci Öğün Ücreti (₺)", min_value=0.0, step=5.0, value=_safe_float(app_cfg.get("cafeteria_default_meal_price"), 75.0), key=f"{kp}_def_stu_p")
+			def_stf_p = ct3.number_input("Varsayılan Öğretmen/Personel Öğün Ücreti (₺)", min_value=0.0, step=5.0, value=_safe_float(app_cfg.get("cafeteria_default_staff_price"), 90.0), key=f"{kp}_def_stf_p")
 
 			# Seçili renk tonunun canlı mini önizlemesi
 			sw_items = []
@@ -8671,16 +8672,17 @@ def _render_tab_settings_and_exports(ctx_api: dict[str, Any], sel_ym: str, app_c
 			ui.markdown(f"<div style='display:flex;flex-wrap:wrap;gap:6px;margin:-4px 0 6px 0;'>{''.join(sw_items)}</div>", unsafe_allow_html=True)
 
 			sg1, sg2, sg3 = ui.columns(3)
-			s1_r = sg1.text_input("1. İmzacı Ünvan (Sol)", value=s1_def_r, key="caf_cfg_s1_r")
-			s1_n = sg1.text_input("1. İmzacı Ad Soyad (Sol)", value=s1_def_n, key="caf_cfg_s1_n")
-			s2_r = sg2.text_input("2. İmzacı Ünvan (Orta — boş bırakılırsa 2 imza)", value=s2_def_r, key="caf_cfg_s2_r")
-			s2_n = sg2.text_input("2. İmzacı Ad Soyad (Orta)", value=s2_def_n, key="caf_cfg_s2_n")
-			s3_r = sg3.text_input("3. İmzacı Ünvan (Sağ)", value=s3_def_r, key="caf_cfg_s3_r")
-			s3_n = sg3.text_input("3. İmzacı Ad Soyad (Sağ)", value=s3_def_n, key="caf_cfg_s3_n")
+			s1_r = sg1.text_input("1. İmzacı Ünvan (Sol)", value=s1_def_r, key=f"{kp}_cfg_s1_r")
+			s1_n = sg1.text_input("1. İmzacı Ad Soyad (Sol)", value=s1_def_n, key=f"{kp}_cfg_s1_n")
+			s2_r = sg2.text_input("2. İmzacı Ünvan (Orta — boş bırakılırsa 2 imza)", value=s2_def_r, key=f"{kp}_cfg_s2_r")
+			s2_n = sg2.text_input("2. İmzacı Ad Soyad (Orta)", value=s2_def_n, key=f"{kp}_cfg_s2_n")
+			s3_r = sg3.text_input("3. İmzacı Ünvan (Sağ)", value=s3_def_r, key=f"{kp}_cfg_s3_r")
+			s3_n = sg3.text_input("3. İmzacı Ad Soyad (Sağ)", value=s3_def_n, key=f"{kp}_cfg_s3_n")
 			b_note_in = ui.text_input(
 				"A4 Menü Alt Bilgi Notu (Opsiyonel — boş bırakılırsa standart alerji/revir uyarısı yazılır)",
 				value=app_cfg.get("cafeteria_board_note", ""),
 				placeholder="* Gıda alerjisi / özel diyeti olan öğrencilerimiz için revirle koordineli sunum yapılır.",
+				key=f"{kp}_b_note",
 			)
 
 			if ui.form_submit_button("💾 Yemekhane Ayarlarını Kaydet", type="primary", use_container_width=True) and callable(save_cfg_fn):
@@ -8731,6 +8733,7 @@ def _render_tab_settings_and_exports(ctx_api: dict[str, Any], sel_ym: str, app_c
 				})
 				ui.session_state.pop("caf_menu_active_slots", None)
 				ui.session_state.pop("caf_cfg_form_fp", None)
+				ui.session_state.pop("cfg_caf_cfg_form_fp", None)
 				if callable(ctx_api.get("clear_all_data_caches")):
 					ctx_api["clear_all_data_caches"]()
 				ui.success("✅ Yemekhane çalışma düzeni, Ramazan modu, renk tonu, yemek saatleri ve imza ayarları kaydedildi.")
@@ -8740,10 +8743,10 @@ def _render_tab_settings_and_exports(ctx_api: dict[str, Any], sel_ym: str, app_c
 		has_logo = bool(str(app_cfg.get("cafeteria_school_logo_b64") or "").strip())
 		if has_logo:
 			ui.info("✅ Kayıtlı okul logosu mevcut (A4 Word ve HTML çıktılarında otomatik gösterilir).")
-		up_logo = ui.file_uploader("Logo Dosyası Seç (.png, .jpg)", type=["png", "jpg", "jpeg"], key="caf_logo_up")
+		up_logo = ui.file_uploader("Logo Dosyası Seç (.png, .jpg)", type=["png", "jpg", "jpeg"], key=f"{kp}_logo_up")
 		lg_c1, lg_c2 = ui.columns(2)
 		with lg_c1:
-			if ui.button("🖼️ Logoyu Kaydet", disabled=up_logo is None, use_container_width=True, key="caf_btn_save_logo") and callable(save_cfg_fn) and up_logo is not None:
+			if ui.button("🖼️ Logoyu Kaydet", disabled=up_logo is None, use_container_width=True, key=f"{kp}_btn_save_logo") and callable(save_cfg_fn) and up_logo is not None:
 				b64_logo = base64.b64encode(up_logo.getvalue()).decode("ascii")
 				save_cfg_fn({"cafeteria_school_logo_b64": b64_logo})
 				if callable(ctx_api.get("clear_all_data_caches")):
@@ -8751,12 +8754,18 @@ def _render_tab_settings_and_exports(ctx_api: dict[str, Any], sel_ym: str, app_c
 				ui.success("✅ Okul logosu kaydedildi.")
 				ui.rerun()
 		with lg_c2:
-			if has_logo and ui.button("🗑️ Logoyu Kaldır", type="secondary", use_container_width=True, key="caf_btn_del_logo") and callable(save_cfg_fn):
+			if has_logo and ui.button("🗑️ Logoyu Kaldır", type="secondary", use_container_width=True, key=f"{kp}_btn_del_logo") and callable(save_cfg_fn):
 				save_cfg_fn({"cafeteria_school_logo_b64": ""})
 				if callable(ctx_api.get("clear_all_data_caches")):
 					ctx_api["clear_all_data_caches"]()
 				ui.success("Logo kaldırıldı.")
 				ui.rerun()
+
+
+def _render_tab_settings_and_exports(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict[str, str]) -> None:
+	connect_db_fn = ctx_api["connect_db"]
+	ui.markdown("### ⚙️ Yemekhane Ayarları & Toplu Excel Çıktısı")
+	render_cafeteria_settings_panel(ctx_api, app_cfg, key_prefix="caf")
 
 	ui.markdown("---")
 	ui.download_button(

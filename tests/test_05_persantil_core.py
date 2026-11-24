@@ -285,6 +285,61 @@ class TestPersantilCoreAndUI(unittest.TestCase):
         self.assertGreaterEqual(cnt_b2, 5)
         self.assertGreaterEqual(cnt_all, 22)
 
+    def test_09_consolidated_settings_and_box_layout_excludes_calendar(self):
+        expected_groups = [
+            "🏫 Kurum & Şube",
+            "🎨 Görünüm & Düzen",
+            "📅 Takvim & Yemekhane",
+            "🎛️ Görünürlük & Rapor",
+            "🩺 Klinik & WHO",
+            "🤖 Yapay Zekâ & KVKK",
+            "💾 Veri & Sistem",
+        ]
+        self.assertEqual([g["key"] for g in persantil.SETTINGS_GROUPS_META], expected_groups)
+
+        # 1. Verify all 7 groups render cleanly & contain expected consolidated tabs
+        revir_ui.reset_session()
+        revir_ui.session_state["main_menu_page"] = "⚙️ Ayarlar"
+        for gk in expected_groups:
+            revir_ui.session_state["settings_vertical_nav"] = gk
+            out = revir_ui.run_action_headless(persantil.main, {"action": "render"})
+            self.assertNotIn("Çalışma Zamanı Hatası", out["main_html"])
+            if gk == "📅 Takvim & Yemekhane":
+                self.assertIn("Takvim Ayarları", out["main_html"])
+                self.assertIn("Yemekhane Ayarları", out["main_html"])
+                self.assertIn("Haftada Kaç Gün Yemek Çıkıyor?", out["main_html"])
+            elif gk == "🎨 Görünüm & Düzen":
+                self.assertIn("Kutucuk &amp; Pencere Düzeni", out["main_html"])
+            elif gk == "🎛️ Görünürlük & Rapor":
+                self.assertIn("Rapor Çıktı Ayarları", out["main_html"])
+
+        # 2. Verify legacy settings navigation group mapping
+        revir_ui.session_state["settings_vertical_nav"] = "🤖 Yapay Zekâ (Gemini) & KVKK"
+        revir_ui.run_action_headless(persantil.main, {"action": "render"})
+        self.assertEqual(revir_ui.session_state["settings_vertical_nav"], "🤖 Yapay Zekâ & KVKK")
+
+        # 3. Verify saving box_layout_enabled toggle from Görünüm & Düzen
+        revir_ui.session_state["settings_vertical_nav"] = "🎨 Görünüm & Düzen"
+        revir_ui.session_state["cfg_box_layout_enabled_toggle"] = False
+        revir_ui.run_action_headless(persantil.main, {"action": "click", "key": "btn_save_box_layout_cfg"})
+        self.assertEqual(persantil.get_app_settings().get("box_layout_enabled"), "0")
+        revir_ui.session_state["cfg_box_layout_enabled_toggle"] = True
+        revir_ui.run_action_headless(persantil.main, {"action": "click", "key": "btn_save_box_layout_cfg"})
+        self.assertEqual(persantil.get_app_settings().get("box_layout_enabled"), "1")
+
+        # 4. Verify topbar box layout button is disabled on Takvim & Planlama and enabled elsewhere
+        revir_ui.session_state["main_menu_page"] = "📅 Takvim & Planlama"
+        out_cal = revir_ui.run_action_headless(persantil.main, {"action": "render"})
+        tb_cal = out_cal.get("topbar_html") or ""
+        cal_btn_tag = tb_cal.split('id="revir-tb-layout-btn"')[1].split(">")[0]
+        self.assertIn("disabled", cal_btn_tag)
+
+        revir_ui.session_state["main_menu_page"] = "📊 Genel Bakış"
+        out_ov = revir_ui.run_action_headless(persantil.main, {"action": "render"})
+        tb_ov = out_ov.get("topbar_html") or ""
+        ov_btn_tag = tb_ov.split('id="revir-tb-layout-btn"')[1].split(">")[0]
+        self.assertNotIn("disabled", ov_btn_tag)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

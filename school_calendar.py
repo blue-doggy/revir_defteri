@@ -1394,12 +1394,12 @@ def render_calendar_and_planning_page(
 		ui.markdown("## 📅 Okul & Revir Takvimi ve Günlük Takvim Yaprağı")
 		ui.caption(
 			"Gün kutucuklarına doğrudan tıklayarak sağdaki **Takvim Yaprağını** açın. "
-			"Ezan vakti ili, görünüm ve yapay zeka ile toplu tatil/sınav/belirli gün ekleme işlemleri **Ayarlar → Kurum, Yıl & Şube Yapısı → Takvim Ayarları** bölümündedir."
+			"Ezan vakti ili, görünüm ve yapay zeka ile toplu tatil/sınav/belirli gün ekleme işlemleri **Ayarlar → Takvim & Yemekhane → Takvim Ayarları** bölümündedir."
 		)
 	with top_h2:
 		ui.write("")
 		if ui.button("⚙️ Takvim Ayarları & AI Sihirbazı", key="btn_goto_cal_settings_top", type="secondary", use_container_width=True):
-			ui.session_state["settings_vertical_nav"] = "🏫 Kurum, Yıl & Şube Yapısı"
+			ui.session_state["settings_vertical_nav"] = "📅 Takvim & Yemekhane"
 			ui.session_state["_force_tab_label"] = "🗓️ Takvim Ayarları"
 			ui.session_state["target_page"] = "⚙️ Ayarlar"
 			ui.session_state["main_menu_page"] = "⚙️ Ayarlar"
@@ -2022,10 +2022,11 @@ def _render_interactive_calendar_leaf(
 			</div>"""
 		)
 
-	if special_badges_html:
+	if completed_day_events and not active_day_events:
+		done_note = '<div style="font-size:12px;color:#059669;font-style:italic;margin-top:4px;">✅ Bu güne ait tüm etkinlikler tamamlandı (aşağıdaki <b>Tamamlanan Etkinlikler</b> bölümünden inceleyebilirsiniz).</div>'
+		special_block = "".join(special_badges_html) + done_note
+	elif special_badges_html:
 		special_block = "".join(special_badges_html)
-	elif completed_day_events:
-		special_block = '<div style="font-size:12px;color:#059669;font-style:italic;">✅ Bu güne ait tüm etkinlikler tamamlandı (aşağıdaki <b>Tamamlanan Etkinlikler</b> bölümünden inceleyebilirsiniz).</div>'
 	else:
 		special_block = '<div style="font-size:12px;color:#64748b;font-style:italic;">Bu güne kayıtlı resmi tatil, sınav veya etkinlik bulunmuyor.</div>'
 
@@ -2454,7 +2455,7 @@ def _render_interactive_calendar_leaf(
 					ui.error(f"Gemini hatası: {res.get('error')}")
 	with leaf_act2:
 		if ui.button("⚙️ Takvim Ayarları (İl / Ezan / AI)", key="btn_goto_cal_settings_leaf", type="secondary", use_container_width=True):
-			ui.session_state["settings_vertical_nav"] = "🏫 Kurum, Yıl & Şube Yapısı"
+			ui.session_state["settings_vertical_nav"] = "📅 Takvim & Yemekhane"
 			ui.session_state["_force_tab_label"] = "🗓️ Takvim Ayarları"
 			ui.session_state["target_page"] = "⚙️ Ayarlar"
 			ui.session_state["main_menu_page"] = "⚙️ Ayarlar"
@@ -2719,15 +2720,19 @@ def render_calendar_settings_tab(
 	"""
 	today = date.today()
 	ai_enabled, ai_key, ai_model = get_active_gemini_config_fn()
+	ai_provider_lbl = "EVREN AI" if (
+		str(ai_key or "").strip().lower().startswith("evren_")
+		or str(ai_model or "").strip().lower().startswith("evren:")
+		or str(ai_model or "").strip() in ("gemma-4-31b", "gpt-oss-120b")
+	) else "Gemini AI"
 	all_provs = get_tr_provinces_fn() or sorted(TR_PROVINCE_COORDS.keys())
 	cur_prov = (current_cfg.get("default_province") or "Ankara").strip() or "Ankara"
 	if cur_prov not in all_provs:
 		cur_prov = "Ankara"
 
-	ui.markdown("### 🗓️ Takvim Yaprağı, Ezan Vakitleri ve Yapay Zekâ Takvim Planlama Ayarları")
+	ui.markdown("### 🗓️ Takvim Ayarları")
 	ui.caption(
-		"Gelişim & Plan → **Takvim & Planlama** sayfasındaki **Günlük Takvim Yaprağı** içinde gösterilecek bölümleri, "
-		"ezan vakti ilini, Hadis-i Şerif / Özlü Söz tercihini yönetin ve yapay zeka veya yazı kutucuğuyla takvime tatil/sınav/etkinlik işleyin."
+		"**Takvim & Planlama** yaprağı bölümlerini, ezan vakti ilini, günün sözünü yönetin veya yapay zekâ / hazır paketlerle tatil, sınav ve etkinlik ekleyin."
 	)
 
 	cal_cfg_flash = ui.session_state.pop("_cal_settings_flash", None)
@@ -2738,7 +2743,7 @@ def render_calendar_settings_tab(
 	# 1. BÖLÜM: TAKVİM YAPRAĞI GÖRÜNÜM, EZAN VAKTİ VE İL AYARLARI
 	# -----------------------------------------------------------------------
 	with ui.container(border=True):
-		ui.markdown("#### 🕌 1. Takvim Yaprağı İçerik, Ezan Vakti İli ve Günün Yazısı (Hadis / Özlü Söz) Ayarları")
+		ui.markdown("#### 🕌 Yaprak İçeriği, Ezan Vakti İli ve Sözler")
 		s_c1, s_c2 = ui.columns(2)
 		with s_c1:
 			sel_prov = ui.selectbox(
@@ -2800,8 +2805,8 @@ def render_calendar_settings_tab(
 	# 2. BÖLÜM: YAPAY ZEKA & HAZIR PAKETLERLE RESMİ TATİL, MEB BELİRLİ GÜNLER VE ÖSYM SINAVLARI EKLEME
 	# -----------------------------------------------------------------------
 	with ui.container(border=True):
-		ui.markdown("#### ✨ 2. Yapay Zekâ (Gemini AI) ve Hazır Paketlerle Takvime Tatil, MEB Belirli Gün ve Sınav İşleme")
-		ui.caption("İşlem yapılacak hedef yılı ve ayı seçerek resmi/dini tatilleri, yarım gün arife çalışmalarını, MEB Belirli Gün ve Haftalarını ve ÖSYM/MEB sınavlarını takvime ekleyin.")
+		ui.markdown("#### ✨ Otomatik Tatil, MEB Günleri & Sınav Ekleme")
+		ui.caption("Hedef yıl/ayı seçerek resmi tatilleri, yarım gün arifeleri, MEB Belirli Günlerini ve ÖSYM/MEB sınavlarını takvime işleyin.")
 
 		ym_c1, ym_c2 = ui.columns(2)
 		year_opts = list(range(2024, 2031))
@@ -2816,7 +2821,7 @@ def render_calendar_settings_tab(
 			picked_m_lbl = ui.selectbox("🗓️ Hedef Ay (Ay Bazlı İşlemler İçin)", month_labels, index=def_mn - 1, key="cfg_cal_target_month")
 			target_month = month_labels.index(picked_m_lbl) + 1
 
-		ui.markdown("##### 🇹🇷 A) Resmi Tatiller, Yarım Gün Arifeler, Dini Bayramlar ve MEB Belirli Gün/Haftalar")
+		ui.markdown("##### 🇹🇷 A) Resmi Tatiller, Arifeler ve MEB Belirli Günler")
 		p_c1, p_c2, p_c3 = ui.columns(3)
 		with p_c1:
 			if ui.button(f"📥 {target_year} Resmi & Dini Tatiller + Yarım Günleri İşle", key="cfg_btn_seed_holidays", type="primary", use_container_width=True):
@@ -2830,7 +2835,7 @@ def render_calendar_settings_tab(
 				ui.rerun()
 		with p_c3:
 			if ai_enabled and ai_key:
-				if ui.button(f"✨ Gemini AI ile {TR_MONTH_NAMES[target_month]} {target_year} MEB Belirli Günlerini Zenginleştir", key="cfg_btn_ai_meb_month", type="secondary", use_container_width=True):
+				if ui.button(f"✨ {ai_provider_lbl} ile {TR_MONTH_NAMES[target_month]} {target_year} MEB Günlerini Ekle", key="cfg_btn_ai_meb_month", type="secondary", use_container_width=True):
 					ok, res, used_m = generate_calendar_events_with_ai(
 						api_key=ai_key,
 						model=ai_model,
@@ -2840,15 +2845,15 @@ def render_calendar_settings_tab(
 					)
 					if ok:
 						added = save_ai_generated_events_to_db(res.get("events") or [], connect_db_fn)
-						ui.session_state["_cal_settings_flash"] = f"✨ Gemini AI ({used_m}) ile {TR_MONTH_NAMES[target_month]} {target_year} için {added} MEB Belirli Gün ve Haftası eklendi!"
+						ui.session_state["_cal_settings_flash"] = f"✨ {ai_provider_lbl} ({used_m}) ile {TR_MONTH_NAMES[target_month]} {target_year} için {added} MEB Belirli Gün ve Haftası eklendi!"
 						ui.rerun()
 					else:
-						ui.error(f"Gemini hatası: {res.get('error')}")
+						ui.error(f"AI hatası: {res.get('error')}")
 			else:
-				ui.caption("💡 Gemini AI açık olduğunda yapay zeka ile ay/yıl bazlı ek MEB belirli gün taraması yapabilirsiniz.")
+				ui.caption("💡 Yapay zekâ açık olduğunda ay/yıl bazlı ek MEB belirli gün taraması yapabilirsiniz.")
 
 		ui.divider()
-		ui.markdown("##### 📝 B) ÖSYM ve MEB Merkezi Sınavlarını Takvime İşle")
+		ui.markdown("##### 📝 B) ÖSYM ve MEB Merkezi Sınavları")
 		exam_choices = ["YKS (TYT-AYT-YDT)", "LGS", "KPSS", "MSÜ", "ALES", "DGS", "YDS / YÖKDİL", "İOKBS Bursluluk"]
 		picked_exams = ui.multiselect(
 			"Takvimde İşaretlenecek ÖSYM / MEB Sınavlarını Seçin",
@@ -2864,7 +2869,7 @@ def render_calendar_settings_tab(
 				ui.rerun()
 		with ex_b2:
 			if ai_enabled and ai_key:
-				if ui.button(f"✨ Gemini AI ile {target_year} ÖSYM Sınav Takvimini Sorgula & İşle", key="cfg_btn_ai_exams", type="secondary", use_container_width=True):
+				if ui.button(f"✨ {ai_provider_lbl} ile {target_year} ÖSYM Sınav Takvimini İşle", key="cfg_btn_ai_exams", type="secondary", use_container_width=True):
 					ok, res, used_m = generate_calendar_events_with_ai(
 						api_key=ai_key,
 						model=ai_model,
@@ -2875,24 +2880,22 @@ def render_calendar_settings_tab(
 					)
 					if ok:
 						added = save_ai_generated_events_to_db(res.get("events") or [], connect_db_fn)
-						ui.session_state["_cal_settings_flash"] = f"✨ Gemini AI ({used_m}) ile {added} ÖSYM/MEB sınav tarihi takvime eklendi."
+						ui.session_state["_cal_settings_flash"] = f"✨ {ai_provider_lbl} ({used_m}) ile {added} ÖSYM/MEB sınav tarihi takvime eklendi."
 						ui.rerun()
 					else:
-						ui.error(f"Gemini hatası: {res.get('error')}")
+						ui.error(f"AI hatası: {res.get('error')}")
 
 	# -----------------------------------------------------------------------
 	# 3. BÖLÜM: EKSTRA EKLEMEK İSTEDİĞİMİZ ŞEYLERİ VEYA DURUMLARI YAZARAK EKLEME KUTUCUĞU
 	# -----------------------------------------------------------------------
 	with ui.container(border=True):
-		ui.markdown("#### ✍️ 3. Ekstra Etkinlik, Tatil, Sınav veya Özel Durumları Yazarak Ekleme Kutucuğu")
+		ui.markdown("#### ✍️ Serbest Yazarak veya Manuel Etkinlik Ekleme")
 		ui.caption(
-			"Eklemek istediğiniz özel tatilleri (seçim tatili, kar tatili, ara tatil, idari izin), revir taramalarını, "
-			"toplantıları veya etkinlikleri **günü ve saatiyle birlikte** serbestçe yazarak veya manuel form ile takvime ekleyin. "
-			"*(Ayrıca sağ alttaki yüzen **Gemini Asistan** sohbet balonuna yazarak veya konuşarak da doğrudan etkinlik/gün/saat ekleyebilirsiniz!)*"
+			"Özel tatilleri (seçim/kar tatili, ara tatil, idari izin), taramaları veya toplantıları **günü ve saatiyle** yazarak ya da manuel form ile takvime ekleyin."
 		)
 
 		free_txt_prompt = ui.text_area(
-			"🤖 Yapay Zekâya (Gemini AI) Yazarak Etkinlik / Gün / Saat / Tatil Ekle",
+			f"🤖 {ai_provider_lbl} ile Yazarak Etkinlik / Tatil Ekle",
 			placeholder=(
 				f"Örn: '25 Kasım {target_year} Çarşamba saat 14:00-15:30 arası Veli Toplantısı ekle', "
 				f"'18 Aralık {target_year} Cuma gününü kar tatili (idari izin) olarak işaretle', "
@@ -2903,11 +2906,11 @@ def render_calendar_settings_tab(
 		)
 		ft_c1, ft_c2 = ui.columns([1.6, 1.4])
 		with ft_c1:
-			if ui.button("✨ Yazılanları Gemini AI ile Analiz Et ve Takvime Ekle", key="cfg_btn_ai_free_add", type="primary", use_container_width=True):
+			if ui.button(f"✨ {ai_provider_lbl} ile Analiz Et ve Takvime Ekle", key="cfg_btn_ai_free_add", type="primary", use_container_width=True):
 				if not free_txt_prompt.strip():
 					ui.warning("Lütfen eklenecek etkinlik, gün, saat veya tatil durumunu yukarıdaki kutucuğa yazın.")
 				elif not (ai_enabled and ai_key):
-					ui.error("Gemini AI şu an kapalı veya API anahtarı girilmemiş. Lütfen Ayarlar → Yapay Zekâ bölümünden aktif edin veya aşağıdaki manuel ekleme kutusunu kullanın.")
+					ui.error("Yapay Zekâ şu an kapalı veya API anahtarı girilmemiş. Lütfen Ayarlar → Yapay Zekâ & KVKK bölümünden aktif edin veya aşağıdaki manuel ekleme kutusunu kullanın.")
 				else:
 					ok, res, used_m = generate_calendar_events_with_ai(
 						api_key=ai_key,
@@ -2929,10 +2932,10 @@ def render_calendar_settings_tab(
 							except Exception:
 								pass
 						summary_txt = res.get("summary") or f"{added} kayıt takvime işlendi."
-						ui.session_state["_cal_settings_flash"] = f"✨ Gemini AI ({used_m}): {summary_txt} ({added} kayıt takvime eklendi)."
+						ui.session_state["_cal_settings_flash"] = f"✨ {ai_provider_lbl} ({used_m}): {summary_txt} ({added} kayıt takvime eklendi)."
 						ui.rerun()
 					else:
-						ui.error(f"Gemini hatası: {res.get('error')}")
+						ui.error(f"AI hatası: {res.get('error')}")
 		with ft_c2:
 			if ui.button("📅 Takvim & Planlama Sayfasına Git", key="cfg_btn_goto_calendar_page", type="secondary", use_container_width=True):
 				ui.session_state["target_page"] = "📅 Takvim & Planlama"

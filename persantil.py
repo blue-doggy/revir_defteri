@@ -126,7 +126,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.28.1"
+_DEFAULT_APP_VERSION = "1.29.0"
 
 
 def _load_app_version() -> str:
@@ -266,6 +266,7 @@ DEFAULT_APP_SETTINGS: dict[str, str] = {
 	"ui_density": "Standart",
 	"theme_name": "Klinik Turkuaz (Varsayılan)",
 	"dark_mode_adaptation": "Otomatik (Sistem Temasına ve Dark Mode'a Uyarla)",
+	"box_layout_enabled": "1",
 	"language": "Türkçe (TR)",
 	"default_country": "Türkiye",
 	"default_province": "Ankara",
@@ -24940,27 +24941,35 @@ def save_report_settings(new_settings: dict[str, Any]) -> None:
 	save_app_settings({"report_custom_settings": _json.dumps(cur, ensure_ascii=False)})
 
 
-@ui.dialog("⚙️ Rapor Çıktı ve Yazdırma Ayarları", width="large", mode="drawer")
-def open_report_settings_dialog() -> None:
-	ui.caption("Kişi ve sınıf raporu çıktılarında (Word .docx ve yazdırma) hangi bölümlerin ve alt bilgilerin yer alacağını buradan özelleştirebilirsiniz.")
+def render_report_settings_panel(*, key_prefix: str = "rep", in_dialog: bool = False) -> None:
+	"""Kişi ve sınıf raporu çıktılarının bölüm ve detay tercihlerini yönetir (diyalog + Merkezi Ayarlar ortak panel)."""
+	kp = str(key_prefix or "rep").strip() or "rep"
+	ui.markdown("### 🖨️ Rapor Çıktı & Yazdırma Ayarları")
+	ui.caption("Kişi ve sınıf raporu çıktılarında (Word `.docx` ve yazdırma) yer alacak bölümleri ve detay tercihlerini özelleştirin.")
 	cur_cfg = get_report_settings()
 
 	tab_sections, tab_fields, tab_presets = ui.tabs([
-		"📑 Rapora Eklenecek Bölümler",
-		"🔍 Detay Alan Tercihleri",
+		"📑 Rapor Bölümleri",
+		"🔍 Detay Alanları",
 		"⚡ Hızlı Şablonlar"
-	])
+	], orientation="segmented")
+
+	def _after_save(msg: str) -> None:
+		ui.success(msg)
+		if in_dialog:
+			ui.rerun(scope="fragment")
+		else:
+			ui.rerun()
 
 	with tab_presets:
 		ui.markdown("##### ⚡ Hazır Rapor Şablonları")
 		ui.caption("Tek tıkla ihtiyacınıza uygun bir rapor şablonu seçebilirsiniz:")
 		pr_c1, pr_c2 = ui.columns(2)
 		with pr_c1:
-			if ui.button("✅ Tam Kapsamlı Resmi Sağlık Raporu", use_container_width=True, help="Tüm bölümler ve geçmiş kayıtlar eksiksiz dahil edilir.", key="rep_preset_full"):
+			if ui.button("✅ Tam Kapsamlı Resmi Sağlık Raporu", use_container_width=True, help="Tüm bölümler ve geçmiş kayıtlar eksiksiz dahil edilir.", key=f"{kp}_preset_full"):
 				save_report_settings(dict(DEFAULT_REPORT_SETTINGS))
-				ui.success("Tam kapsamlı resmi rapor şablonu uygulandı!")
-				ui.rerun(scope="fragment")
-			if ui.button("🩺 Yalnızca Revir & Muayene Raporu", use_container_width=True, help="Sadece kimlik, uyarılar ve revir vizit geçmişi dahil edilir.", key="rep_preset_visits"):
+				_after_save("Tam kapsamlı resmi rapor şablonu uygulandı!")
+			if ui.button("🩺 Yalnızca Revir & Muayene Raporu", use_container_width=True, help="Sadece kimlik, uyarılar ve revir vizit geçmişi dahil edilir.", key=f"{kp}_preset_visits"):
 				custom_s = dict(DEFAULT_REPORT_SETTINGS)
 				custom_s.update({
 					"include_health_profile": False,
@@ -24971,10 +24980,9 @@ def open_report_settings_dialog() -> None:
 					"include_vaccinations": False,
 				})
 				save_report_settings(custom_s)
-				ui.success("Yalnızca revir muayene raporu şablonu uygulandı!")
-				ui.rerun(scope="fragment")
+				_after_save("Yalnızca revir muayene raporu şablonu uygulandı!")
 		with pr_c2:
-			if ui.button("📏 Yalnızca Büyüme & Persantil Raporu", use_container_width=True, help="DSÖ büyüme eğrileri, boy-kilo geçmişi ve persantil değerlendirmesi.", key="rep_preset_growth"):
+			if ui.button("📏 Yalnızca Büyüme & Persantil Raporu", use_container_width=True, help="DSÖ büyüme eğrileri, boy-kilo geçmişi ve persantil değerlendirmesi.", key=f"{kp}_preset_growth"):
 				custom_s = dict(DEFAULT_REPORT_SETTINGS)
 				custom_s.update({
 					"include_visits": False,
@@ -24983,9 +24991,8 @@ def open_report_settings_dialog() -> None:
 					"include_vaccinations": False,
 				})
 				save_report_settings(custom_s)
-				ui.success("Büyüme ve persantil raporu şablonu uygulandı!")
-				ui.rerun(scope="fragment")
-			if ui.button("📋 Özet Sağlık Künyesi (Vizitsiz Form)", use_container_width=True, help="Alerji, kronik durum, acil notu ve vital özetinden oluşan tek sayfalık form.", key="rep_preset_summary"):
+				_after_save("Büyüme ve persantil raporu şablonu uygulandı!")
+			if ui.button("📋 Özet Sağlık Künyesi (Vizitsiz Form)", use_container_width=True, help="Alerji, kronik durum, acil notu ve vital özetinden oluşan tek sayfalık form.", key=f"{kp}_preset_summary"):
 				custom_s = dict(DEFAULT_REPORT_SETTINGS)
 				custom_s.update({
 					"include_visits": False,
@@ -24994,43 +25001,42 @@ def open_report_settings_dialog() -> None:
 					"include_lab_results": False,
 				})
 				save_report_settings(custom_s)
-				ui.success("Özet sağlık künyesi şablonu uygulandı!")
-				ui.rerun(scope="fragment")
+				_after_save("Özet sağlık künyesi şablonu uygulandı!")
 
 	with tab_sections:
 		ui.markdown("##### 📑 Rapora Dahil Edilecek Ana Bölümler")
 		ui.caption("Rapor çıktısında yer almasını istemediğiniz bölümlerin işaretini kaldırabilirsiniz:")
 		sec_c1, sec_c2 = ui.columns(2)
 		with sec_c1:
-			chk_id = ui.checkbox("👤 Öğrenci Kimlik ve Temel Bilgileri", value=cur_cfg.get("include_id_box", True), key="rep_chk_id")
-			chk_alert = ui.checkbox("⚠️ Kritik Sağlık & Alerji Uyarı Kutusu", value=cur_cfg.get("include_alert_box", True), key="rep_chk_alert")
-			chk_hp = ui.checkbox("📋 Sağlık Profili & Tarama Bilgileri", value=cur_cfg.get("include_health_profile", True), key="rep_chk_hp")
-			chk_growth = ui.checkbox("📏 DSÖ Klinik Büyüme & Persantil Taraması", value=cur_cfg.get("include_growth_summary", True), key="rep_chk_growth")
-			chk_vitals = ui.checkbox("💓 Vital Bulgular Ölçüm Geçmişi", value=cur_cfg.get("include_vitals", True), key="rep_chk_vitals")
-			chk_labs = ui.checkbox("🧪 Laboratuvar Tahlil Sonuçları", value=cur_cfg.get("include_lab_results", True), key="rep_chk_labs")
+			chk_id = ui.checkbox("👤 Öğrenci Kimlik ve Temel Bilgileri", value=cur_cfg.get("include_id_box", True), key=f"{kp}_chk_id")
+			chk_alert = ui.checkbox("⚠️ Kritik Sağlık & Alerji Uyarı Kutusu", value=cur_cfg.get("include_alert_box", True), key=f"{kp}_chk_alert")
+			chk_hp = ui.checkbox("📋 Sağlık Profili & Tarama Bilgileri", value=cur_cfg.get("include_health_profile", True), key=f"{kp}_chk_hp")
+			chk_growth = ui.checkbox("📏 DSÖ Klinik Büyüme & Persantil Taraması", value=cur_cfg.get("include_growth_summary", True), key=f"{kp}_chk_growth")
+			chk_vitals = ui.checkbox("💓 Vital Bulgular Ölçüm Geçmişi", value=cur_cfg.get("include_vitals", True), key=f"{kp}_chk_vitals")
+			chk_labs = ui.checkbox("🧪 Laboratuvar Tahlil Sonuçları", value=cur_cfg.get("include_lab_results", True), key=f"{kp}_chk_labs")
 		with sec_c2:
-			chk_meas = ui.checkbox("⚖️ Boy, Kilo ve Baş Çevresi Ölçüm Geçmişi", value=cur_cfg.get("include_measurements_history", True), key="rep_chk_meas")
-			chk_visits = ui.checkbox("🩺 Revir Başvuru ve Muayene Kayıtları", value=cur_cfg.get("include_visits", True), key="rep_chk_visits")
-			chk_cp = ui.checkbox("📝 Hemşirelik Bakım Planları (NANDA-I)", value=cur_cfg.get("include_care_plans", True), key="rep_chk_cp")
-			chk_vac = ui.checkbox("💉 Aşı ve Bağışıklama Kayıtları", value=cur_cfg.get("include_vaccinations", True), key="rep_chk_vac")
-			chk_dis = ui.checkbox("♿ Engellilik / Özel Gereksinim Profili (Varsa)", value=cur_cfg.get("include_disability_profile", True), key="rep_chk_dis")
-			chk_ai = ui.checkbox("🤖 Gemini AI Klinik Analiz & Eksik Veri Bölümü (Varsayılan)", value=cur_cfg.get("include_ai_analysis", False), key="rep_chk_ai")
-			chk_sig = ui.checkbox("✍️ Yetkili ve Veli İmza / Kaşe Bölümü", value=cur_cfg.get("include_signatures", True), key="rep_chk_sig")
-			chk_foot = ui.checkbox("ℹ️ Yasal Sorumluluk Reddi / Dipnot", value=cur_cfg.get("include_footer_disclaimer", True), key="rep_chk_foot")
+			chk_meas = ui.checkbox("⚖️ Boy, Kilo ve Baş Çevresi Ölçüm Geçmişi", value=cur_cfg.get("include_measurements_history", True), key=f"{kp}_chk_meas")
+			chk_visits = ui.checkbox("🩺 Revir Başvuru ve Muayene Kayıtları", value=cur_cfg.get("include_visits", True), key=f"{kp}_chk_visits")
+			chk_cp = ui.checkbox("📝 Hemşirelik Bakım Planları (NANDA-I)", value=cur_cfg.get("include_care_plans", True), key=f"{kp}_chk_cp")
+			chk_vac = ui.checkbox("💉 Aşı ve Bağışıklama Kayıtları", value=cur_cfg.get("include_vaccinations", True), key=f"{kp}_chk_vac")
+			chk_dis = ui.checkbox("♿ Engellilik / Özel Gereksinim Profili (Varsa)", value=cur_cfg.get("include_disability_profile", True), key=f"{kp}_chk_dis")
+			chk_ai = ui.checkbox("🤖 AI Klinik Analiz & Eksik Veri Bölümü (Varsayılan)", value=cur_cfg.get("include_ai_analysis", False), key=f"{kp}_chk_ai")
+			chk_sig = ui.checkbox("✍️ Yetkili ve Veli İmza / Kaşe Bölümü", value=cur_cfg.get("include_signatures", True), key=f"{kp}_chk_sig")
+			chk_foot = ui.checkbox("ℹ️ Yasal Sorumluluk Reddi / Dipnot", value=cur_cfg.get("include_footer_disclaimer", True), key=f"{kp}_chk_foot")
 
 	with tab_fields:
 		ui.markdown("##### 🔍 Detay Bilgi ve Filtre Tercihleri")
 		fld_c1, fld_c2 = ui.columns(2)
 		with fld_c1:
-			chk_guard = ui.checkbox("📞 Veli Adı ve Telefon Bilgisini Göster", value=cur_cfg.get("show_guardian_contact", True), key="rep_chk_guard")
-			chk_bg = ui.checkbox("🩸 Kan Grubu Bilgisini Göster", value=cur_cfg.get("show_blood_group", True), key="rep_chk_bg")
-			chk_sym = ui.checkbox("🩺 Vizit Kayıtlarında Şikayet / Belirtileri Göster", value=cur_cfg.get("show_visit_complaint", True), key="rep_chk_sym")
-			chk_act = ui.checkbox("🛠️ Vizit Kayıtlarında Yapılan İşlemi Göster", value=cur_cfg.get("show_visit_action", True), key="rep_chk_act")
+			chk_guard = ui.checkbox("📞 Veli Adı ve Telefon Bilgisini Göster", value=cur_cfg.get("show_guardian_contact", True), key=f"{kp}_chk_guard")
+			chk_bg = ui.checkbox("🩸 Kan Grubu Bilgisini Göster", value=cur_cfg.get("show_blood_group", True), key=f"{kp}_chk_bg")
+			chk_sym = ui.checkbox("🩺 Vizit Kayıtlarında Şikayet / Belirtileri Göster", value=cur_cfg.get("show_visit_complaint", True), key=f"{kp}_chk_sym")
+			chk_act = ui.checkbox("🛠️ Vizit Kayıtlarında Yapılan İşlemi Göster", value=cur_cfg.get("show_visit_action", True), key=f"{kp}_chk_act")
 		with fld_c2:
-			chk_obs = ui.checkbox("🔍 Vizit Kayıtlarında Fizik Muayene / Gözlemi Göster", value=cur_cfg.get("show_visit_observation", True), key="rep_chk_obs")
-			chk_ref = ui.checkbox("🚑 Sevk ve Yönlendirme Durumunu Göster", value=cur_cfg.get("show_visit_referral", True), key="rep_chk_ref")
-			chk_z = ui.checkbox("📊 Ölçümlerde DSÖ Z-Skorlarını (SDS) Göster", value=cur_cfg.get("show_meas_zscores", True), key="rep_chk_z")
-			chk_p = ui.checkbox("📈 Ölçümlerde Persantil Dilimlerini (%p) Göster", value=cur_cfg.get("show_meas_percentiles", True), key="rep_chk_p")
+			chk_obs = ui.checkbox("🔍 Vizit Kayıtlarında Fizik Muayene / Gözlemi Göster", value=cur_cfg.get("show_visit_observation", True), key=f"{kp}_chk_obs")
+			chk_ref = ui.checkbox("🚑 Sevk ve Yönlendirme Durumunu Göster", value=cur_cfg.get("show_visit_referral", True), key=f"{kp}_chk_ref")
+			chk_z = ui.checkbox("📊 Ölçümlerde DSÖ Z-Skorlarını (SDS) Göster", value=cur_cfg.get("show_meas_zscores", True), key=f"{kp}_chk_z")
+			chk_p = ui.checkbox("📈 Ölçümlerde Persantil Dilimlerini (%p) Göster", value=cur_cfg.get("show_meas_percentiles", True), key=f"{kp}_chk_p")
 
 		ui.markdown("---")
 		ui.markdown("###### 🕒 Vizit Kayıt Limiti")
@@ -25042,11 +25048,11 @@ def open_report_settings_dialog() -> None:
 			limit_opts,
 			index=lim_idx,
 			format_func=lambda x: "Tüm Geçmiş Vizitler (Limitsiz)" if x == 0 else f"Son {x} Vizit Kaydı",
-			key="rep_sel_visits_limit"
+			key=f"{kp}_sel_visits_limit"
 		)
 
 	ui.markdown("---")
-	if ui.button("💾 Rapor Çıktı Ayarlarını Kaydet", type="primary", use_container_width=True, key="btn_save_report_settings_modal"):
+	if ui.button("💾 Rapor Çıktı Ayarlarını Kaydet", type="primary", use_container_width=True, key=f"btn_save_report_settings_{kp}"):
 		new_saved = {
 			"include_id_box": chk_id,
 			"include_alert_box": chk_alert,
@@ -25073,8 +25079,12 @@ def open_report_settings_dialog() -> None:
 			"visits_limit": sel_limit,
 		}
 		save_report_settings(new_saved)
-		ui.success("Rapor çıktı ayarları başarıyla kaydedildi!")
-		ui.rerun()
+		_after_save("Rapor çıktı ayarları başarıyla kaydedildi!")
+
+
+@ui.dialog("⚙️ Rapor Çıktı ve Yazdırma Ayarları", width="large", mode="drawer")
+def open_report_settings_dialog() -> None:
+	render_report_settings_panel(key_prefix="rep", in_dialog=True)
 
 
 # ==============================================================================
@@ -30189,8 +30199,8 @@ button {{ padding: 9px 18px; background: #176b68; color: white; border: none; bo
 
 
 def render_academic_year_settings() -> None:
-	ui.markdown("### 📅 Eğitim Öğretim Yılı ve Arşiv Yönetimi")
-	ui.caption("Eğitim öğretim yıllarını yönetebilir, arşive kaldırılan geçmiş yılların kayıtlarına tam bağımsız olarak göz atabilir ve yeni eğitim öğretim yılları başlatabilirsiniz. Her eğitim yılının öğrenci kadrosu ve revir kayıtları tamamen bağımsız klasör ve veritabanında saklanır; mezuniyet ve yeni öğrenci kayıtları yıllar arasında asla birbirine karışmaz.")
+	ui.markdown("### 📅 Eğitim Öğretim Yılı")
+	ui.caption("Eğitim öğretim yıllarını yönetin, geçmiş arşivleri inceleyin veya yeni eğitim yılı başlatın. Her yılın öğrenci kadrosu ve revir kayıtları bağımsız veritabanında saklanır.")
 
 	active_ay = get_active_academic_year()
 	all_years = get_all_academic_years() or [active_ay]
@@ -30436,7 +30446,7 @@ def render_academic_year_settings() -> None:
 						ui.rerun()
 
 	# 4. Edit Dates of Active Year + Mid-term Breaks (1. & 2. Ara Tatil) + Semester (Yarıyıl / Sömestr) & Calendar Sync
-	with ui.expander("🗓️ Seçili Eğitim Yılının Başlangıç-Bitiş, Ara Tatil ve Sömestr (Yarıyıl) Takvimi", expanded=True):
+	with ui.expander("🗓️ Başlangıç-Bitiş, Ara Tatil ve Sömestr Tarihleri", expanded=True):
 		ui.caption(
 			f"**'{active_ay['name']}'** eğitim öğretim yılı için okul açılış/kapanış günlerini, **1. Dönem Ara Tatili**, "
 			f"**Yarıyıl Tatili (Sömestr / 15 Tatil)** ve **2. Dönem Ara Tatili** tarihlerini aşağıdan belirleyip tek tıkla "
@@ -30473,7 +30483,8 @@ def render_academic_year_settings() -> None:
 				_filled_dates: dict[str, str] = {}
 				_ai_src_lbl = "MEB Resmi Takvim Motoru"
 				if _ai_on_ay and _ai_key_ay:
-					with ui.spinner(f"Gemini AI ({_ai_mod_ay}) '{active_ay['name']}' MEB çalışma takvimini ve tatil tarihlerini hazırlıyor..."):
+					_ay_prov_lbl = "EVREN AI" if gai.is_evren_key_or_model(_ai_key_ay, _ai_mod_ay) else "Gemini AI"
+					with ui.spinner(f"{_ay_prov_lbl} ({_ai_mod_ay}) '{active_ay['name']}' MEB çalışma takvimini ve tatil tarihlerini hazırlıyor..."):
 						_ok_ai_cal, _res_ai_cal, _used_m_cal = gai.generate_meb_academic_calendar_dates_with_ai(
 							api_key=_ai_key_ay,
 							model=_ai_mod_ay,
@@ -30481,7 +30492,7 @@ def render_academic_year_settings() -> None:
 						)
 					if _ok_ai_cal:
 						_filled_dates = _res_ai_cal
-						_ai_src_lbl = f"Gemini AI ({_used_m_cal})"
+						_ai_src_lbl = f"{_ay_prov_lbl} ({_used_m_cal})"
 				if not _filled_dates:
 					_filled_dates = dict(_def_breaks)
 
@@ -32049,52 +32060,60 @@ ie4uinit.exe -show
 
 SETTINGS_GROUPS_META: list[dict[str, str]] = [
 	{
-		"key": "🏫 Kurum, Yıl & Şube Yapısı",
-		"desc": "Okul anteti, eğitim öğretim yılı arşivi, şube yönetimi ve varsayılan konum",
-		"keywords": "okul kurum antet hemşire müdür eğitim yılı arşiv şube sınıf şablon konum il ilçe köy adres",
+		"key": "🏫 Kurum & Şube",
+		"desc": "Okul anteti, eğitim yılı/tatiller, şubeler ve varsayılan konum",
+		"keywords": "okul kurum antet hemşire müdür eğitim yılı arşiv şube sınıf şablon konum il ilçe köy adres tatil",
 	},
 	{
-		"key": "🎨 Görünüm & Çalışma Alanı",
-		"desc": "Görsel renk temaları, karanlık mod, yazı tipi, punto, yoğunluk ve dil",
-		"keywords": "tema renk dark mode karanlık mod aydınlık yazı tipi font punto boyut tablo yoğunluk dil görünüm",
+		"key": "🎨 Görünüm & Düzen",
+		"desc": "Tema, karanlık mod, yazı tipi, yoğunluk ve sayfa kutucuk yerleşimi",
+		"keywords": "tema renk dark mode karanlık mod aydınlık yazı tipi font punto boyut tablo yoğunluk kutucuk sürükle yerleşim",
 	},
 	{
-		"key": "🎛️ Modül & Form Görünürlüğü",
-		"desc": "Sayfa kartları, okul taraması ve ilaç takip form alanlarını sadeleştirin",
-		"keywords": "görünürlük sayfa ayarları tarama alanları ilaç takip gizle göster sadeleştir form kart",
+		"key": "📅 Takvim & Yemekhane",
+		"desc": "Takvim yaprağı, ezan vakti ili, tatil/sınav sihirbazı, yemek saatleri, Ramazan modu ve imzalar",
+		"keywords": "takvim ezan vakit hadis özlü söz sınav tatil yemekhane öğün ramazan iftar sahur imza logo ücret",
 	},
 	{
-		"key": "🩺 Klinik Kütüphane & WHO",
+		"key": "🎛️ Görünürlük & Rapor",
+		"desc": "Sayfa bölümleri, tarama ve ilaç form alanları ile rapor çıktı tercihleri",
+		"keywords": "görünürlük sayfa ayarları tarama alanları ilaç takip rapor çıktı yazdır word sadeleştir",
+	},
+	{
+		"key": "🩺 Klinik & WHO",
 		"desc": "Hızlı şikayet/işlem şablonları, NANDA-I bakım protokolleri ve WHO referansları",
 		"keywords": "klinik şablon şikayet müdahale nanda bakım planı protokol who lms persantil referans büyüme",
 	},
 	{
-		"key": "🤖 Yapay Zekâ (Gemini) & KVKK",
-		"desc": "Gemini API anahtarı, model seçimi, yüzen sohbet balonu, mikrofon ve KVKK maskeleme",
-		"keywords": "gemini ai yapay zeka api anahtar model sohbet balon ses mikrofon kvkk gizlilik maskeleme",
+		"key": "🤖 Yapay Zekâ & KVKK",
+		"desc": "Gemini ve EVREN AI anahtarları, model seçimi, sohbet balonu ve KVKK gizlilik",
+		"keywords": "gemini evren ai yapay zeka api anahtar model sohbet balon kvkk gizlilik maskeleme",
 	},
 	{
-		"key": "💾 Veri, İçe Aktar & Sistem",
-		"desc": "Otomatik/ZIP yedekleme, e-Okul PDF/Excel liste aktarımı, güncelleme ve sıfırlama",
+		"key": "💾 Veri & Sistem",
+		"desc": "Otomatik/ZIP yedekleme, e-Okul PDF/Excel aktarımı, güncelleme ve sıfırlama",
 		"keywords": "veritabanı yedek zip restore geri yükle e-okul excel pdf içe aktar sürüm güncelleme fabrika sıfırla",
 	},
 ]
 
 
 def render_settings() -> None:
-	ui.markdown("## ⚙️ Sistem, Kurum ve Uygulama Ayarları")
+	ui.markdown("## ⚙️ Sistem Ayarları")
 	current_cfg = get_app_settings()
 
 	# Üst Sistem Sağlık & Durum Panosu
 	active_ay = get_active_academic_year()
-	ai_on_cfg, _, ai_model_cfg = _get_active_gemini_config()
+	ai_on_cfg, ai_key_cfg, ai_model_cfg = _get_active_gemini_config()
+	is_ev_cfg = gai.is_evren_key_or_model(ai_key_cfg, ai_model_cfg)
+	ai_card_hdr = "🇹🇷 EVREN Klinik AI" if is_ev_cfg else "🤖 Gemini Klinik AI"
+	ai_model_disp = ai_model_cfg[6:] if str(ai_model_cfg).lower().startswith("evren:") else ai_model_cfg
 	auto_bkps = list_auto_backups()
 	last_bkp_txt = auto_bkps[0]["modified_at"] if auto_bkps else "Henüz yok"
 	with connect_db() as _sconn:
 		_lms_cnt = _sconn.execute("SELECT COUNT(*) FROM lms_reference").fetchone()[0]
 	is_arch_ay = active_ay["end_date"] < date.today().isoformat()
 	ay_pill_color = "#d97706" if is_arch_ay else "var(--teal)"
-	ai_pill_txt = f"Aktif ({ai_model_cfg})" if ai_on_cfg else "Kapalı"
+	ai_pill_txt = f"Aktif ({ai_model_disp})" if ai_on_cfg else "Kapalı"
 	ui.markdown(
 		f"""<div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:14px;">
 			<div class="revir-card" style="padding:10px 14px;margin:0;">
@@ -32102,7 +32121,7 @@ def render_settings() -> None:
 				<div style="font-size:14.5px;font-weight:800;color:{ay_pill_color};margin-top:2px;">{html.escape(active_ay['name'])}{' (Arşiv)' if is_arch_ay else ''}</div>
 			</div>
 			<div class="revir-card" style="padding:10px 14px;margin:0;">
-				<div style="font-size:11.5px;color:var(--text-muted);font-weight:600;">🤖 Gemini Klinik AI</div>
+				<div style="font-size:11.5px;color:var(--text-muted);font-weight:600;">{ai_card_hdr}</div>
 				<div style="font-size:14.5px;font-weight:800;color:var(--text-heading);margin-top:2px;">{html.escape(ai_pill_txt)}</div>
 			</div>
 			<div class="revir-card" style="padding:10px 14px;margin:0;">
@@ -32117,22 +32136,28 @@ def render_settings() -> None:
 		unsafe_allow_html=True,
 	)
 
-	# Eski kategori isimlerini yeni 6 gruba otomatik eşle (geriye uyumluluk)
+	# Eski kategori isimlerini yeni 7 sade gruba otomatik eşle (geriye uyumluluk)
 	legacy_map = {
-		"🤖 Yapay Zekâ (Gemini API) & KVKK": "🤖 Yapay Zekâ (Gemini) & KVKK",
-		"🏫 Okul Adı, Kurum & Rapor Anteti": "🏫 Kurum, Yıl & Şube Yapısı",
-		"📅 Eğitim Öğretim Yılı & Arşiv Yönetimi": "🏫 Kurum, Yıl & Şube Yapısı",
-		"📍 Varsayılan Konum & İl-İlçe-Köy": "🏫 Kurum, Yıl & Şube Yapısı",
-		"🗂️ Şube ayarları": "🏫 Kurum, Yıl & Şube Yapısı",
-		"🎨 Görünüm, Yazı Tipi & Dil": "🎨 Görünüm & Çalışma Alanı",
-		"📄 Sayfa Ayarları (Bölüm Görünürlüğü)": "🎛️ Modül & Form Görünürlüğü",
-		"🔍 Okul Taraması Alanları (Görünürlük)": "🎛️ Modül & Form Görünürlüğü",
-		"💊 İlaç Takip Alanları (Görünürlük)": "🎛️ Modül & Form Görünürlüğü",
-		"🩺 Klinik Şablonlar & WHO": "🩺 Klinik Kütüphane & WHO",
-		"📋 Bakım Planı Şablonları (NANDA-I)": "🩺 Klinik Kütüphane & WHO",
-		"📥 Liste İçe Aktar (Excel / PDF)": "💾 Veri, İçe Aktar & Sistem",
-		"💾 Veritabanı & Yedekleme": "💾 Veri, İçe Aktar & Sistem",
-		"🚀 Sürüm & Güncelleme Yönetimi": "💾 Veri, İçe Aktar & Sistem",
+		"🏫 Kurum, Yıl & Şube Yapısı": "🏫 Kurum & Şube",
+		"🎨 Görünüm & Çalışma Alanı": "🎨 Görünüm & Düzen",
+		"🎛️ Modül & Form Görünürlüğü": "🎛️ Görünürlük & Rapor",
+		"🩺 Klinik Kütüphane & WHO": "🩺 Klinik & WHO",
+		"🤖 Yapay Zekâ (Gemini) & KVKK": "🤖 Yapay Zekâ & KVKK",
+		"💾 Veri, İçe Aktar & Sistem": "💾 Veri & Sistem",
+		"🤖 Yapay Zekâ (Gemini API) & KVKK": "🤖 Yapay Zekâ & KVKK",
+		"🏫 Okul Adı, Kurum & Rapor Anteti": "🏫 Kurum & Şube",
+		"📅 Eğitim Öğretim Yılı & Arşiv Yönetimi": "🏫 Kurum & Şube",
+		"📍 Varsayılan Konum & İl-İlçe-Köy": "🏫 Kurum & Şube",
+		"🗂️ Şube ayarları": "🏫 Kurum & Şube",
+		"🎨 Görünüm, Yazı Tipi & Dil": "🎨 Görünüm & Düzen",
+		"📄 Sayfa Ayarları (Bölüm Görünürlüğü)": "🎛️ Görünürlük & Rapor",
+		"🔍 Okul Taraması Alanları (Görünürlük)": "🎛️ Görünürlük & Rapor",
+		"💊 İlaç Takip Alanları (Görünürlük)": "🎛️ Görünürlük & Rapor",
+		"🩺 Klinik Şablonlar & WHO": "🩺 Klinik & WHO",
+		"📋 Bakım Planı Şablonları (NANDA-I)": "🩺 Klinik & WHO",
+		"📥 Liste İçe Aktar (Excel / PDF)": "💾 Veri & Sistem",
+		"💾 Veritabanı & Yedekleme": "💾 Veri & Sistem",
+		"🚀 Sürüm & Güncelleme Yönetimi": "💾 Veri & Sistem",
 	}
 	cur_nav_v = ui.session_state.get("settings_vertical_nav")
 	if cur_nav_v in legacy_map:
@@ -32143,10 +32168,10 @@ def render_settings() -> None:
 
 	with nav_col:
 		with ui.container(border=True):
-			ui.markdown("#### ⚙️ Ayar Kategorileri")
+			ui.markdown("#### ⚙️ Ayarlar")
 			cfg_q_raw = ui.text_input(
 				"Ayarlarda Ara",
-				placeholder="🔍 Ara... (tema, yedek, api, şube)",
+				placeholder="🔍 Ara... (tema, takvim, yemekhane, api)",
 				key="settings_search_q",
 				label_visibility="collapsed",
 			).strip()
@@ -32178,19 +32203,19 @@ def render_settings() -> None:
 
 	with content_col:
 		# ======================================================================
-		# GRUP 1: KURUM, EĞİTİM YILI, ŞUBE & KONUM
+		# GRUP 1: KURUM & ŞUBE
 		# ======================================================================
-		if active_sec == "🏫 Kurum, Yıl & Şube Yapısı":
+		if active_sec == "🏫 Kurum & Şube":
 			t_inst, t_ay, t_cls, t_loc = ui.tabs([
-				"🏛️ Kurum & Rapor Anteti",
-				"📅 Eğitim Yılı & Arşiv",
-				"🗂️ Şubeler & Sınıf Şablonları",
-				"📍 Varsayılan Konum",
+				"🏛️ Kurum & Antet",
+				"📅 Eğitim Yılı & Tatiller",
+				"🗂️ Şubeler",
+				"📍 Konum",
 			], orientation="segmented")
 
 			with t_inst:
-				ui.markdown("### 🏫 Okul / Kurum Bilgileri, Revir Hemşiresi, Müdür ve Rapor Anteti")
-				ui.caption("Sol menüde, üst çubukta, sağlık profillerinde ve resmi yazdırılabilir raporlarda kullanılan kurum ve yetkili bilgilerini yönetin.")
+				ui.markdown("### 🏛️ Kurum & Rapor Anteti")
+				ui.caption("Yan menüde, üst çubukta, sağlık profillerinde ve resmi raporlarda kullanılan kurum ve yetkili bilgilerini yönetin.")
 				in_c1, in_c2 = ui.columns(2)
 				with in_c1:
 					inst_school = ui.text_input("🏫 Okul / Kurum Adı", value=current_cfg.get("school_name", "Okul / Kurum Reviri"), placeholder="Örn: Atatürk İlkokulu", key="cfg_school_name")
@@ -32428,153 +32453,188 @@ def render_settings() -> None:
 								ui.rerun()
 
 		# ======================================================================
-		# GRUP 2: GÖRÜNÜM & ÇALIŞMA ALANI (GÖRSEL TEMA KARTLARI + CANLI ÖNİZLEME)
+		# GRUP 2: GÖRÜNÜM & DÜZEN
 		# ======================================================================
-		elif active_sec == "🎨 Görünüm & Çalışma Alanı":
-			ui.markdown("### 🎨 Görsel Tema Seçici, Karanlık Mod, Tipografi ve Yoğunluk")
-			ui.caption("Aşağıdaki renk teması kartlarından birine tıklayarak anında uygulayın veya yazı tipi, punto ve tablo yüksekliğini özelleştirin.")
+		elif active_sec == "🎨 Görünüm & Düzen":
+			t_thm, t_lay = ui.tabs([
+				"🎨 Tema & Tipografi",
+				"🧩 Kutucuk & Pencere Düzeni",
+			], orientation="segmented")
 
-			theme_keys = list(THEME_PRESETS.keys())
-			cur_theme = current_cfg.get("theme_name", "Klinik Turkuaz (Varsayılan)")
-			if cur_theme not in THEME_PRESETS:
-				cur_theme = theme_keys[0]
+			with t_thm:
+				ui.markdown("### 🎨 Tema, Karanlık Mod & Tipografi")
+				ui.caption("Renk teması seçin veya yazı tipi, punto ve tablo yüksekliğini özelleştirin.")
 
-			# Görsel Tema Swatch Kartları (4'lü ızgara)
-			sw_cols = ui.columns(4)
-			for idx, t_name in enumerate(theme_keys):
-				tp = THEME_PRESETS[t_name]
-				is_sel_t = (t_name == cur_theme)
-				border_css = f"2px solid {tp['teal']}" if is_sel_t else "1px solid var(--line)"
-				chk_badge = "✓ Aktif" if is_sel_t else ""
-				with sw_cols[idx % 4]:
+				theme_keys = list(THEME_PRESETS.keys())
+				cur_theme = current_cfg.get("theme_name", "Klinik Turkuaz (Varsayılan)")
+				if cur_theme not in THEME_PRESETS:
+					cur_theme = theme_keys[0]
+
+				# Görsel Tema Swatch Kartları (4'lü ızgara)
+				sw_cols = ui.columns(4)
+				for idx, t_name in enumerate(theme_keys):
+					tp = THEME_PRESETS[t_name]
+					is_sel_t = (t_name == cur_theme)
+					border_css = f"2px solid {tp['teal']}" if is_sel_t else "1px solid var(--line)"
+					chk_badge = "✓ Aktif" if is_sel_t else ""
+					with sw_cols[idx % 4]:
+						ui.markdown(
+							f"""<div style="border:{border_css};border-radius:12px;overflow:hidden;margin-bottom:6px;background:{tp['card_bg']};box-shadow:0 2px 8px rgba(0,0,0,0.05);">
+								<div style="height:44px;background:{tp['bg_grad']};display:flex;align-items:center;padding:6px 8px;gap:6px;border-bottom:1px solid {tp['line']};">
+									<span style="width:18px;height:28px;border-radius:5px;background:{tp['sidebar']};border:1px solid {tp['line']};display:inline-block;"></span>
+									<span style="flex:1;height:28px;border-radius:5px;background:{tp['card_bg']};border:1px solid {tp['line']};display:flex;align-items:center;padding:0 6px;gap:4px;">
+										<span style="width:14px;height:14px;border-radius:50%;background:{tp['teal']};display:inline-block;"></span>
+										<span style="flex:1;height:5px;border-radius:3px;background:{tp['ink']};opacity:0.25;"></span>
+									</span>
+								</div>
+								<div style="padding:6px 8px;display:flex;align-items:center;justify-content:space-between;">
+									<span style="font-size:11.8px;font-weight:700;color:{tp['ink']};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{html.escape(t_name)}</span>
+									<span style="font-size:10.5px;font-weight:800;color:{tp['teal']};">{chk_badge}</span>
+								</div>
+							</div>""",
+							unsafe_allow_html=True,
+						)
+						if ui.button("✓ Seçili" if is_sel_t else "Uygula", key=f"btn_pick_theme_{idx}", type=("primary" if is_sel_t else "secondary"), use_container_width=True):
+							save_app_settings({"theme_name": t_name})
+							ui.success(f"🎨 '{t_name}' teması uygulandı!")
+							ui.rerun()
+
+				ui.divider()
+				with ui.container(border=True):
+					ui.markdown("#### 🔤 Yazı Tipi, Karanlık Mod ve Yoğunluk")
+					app_c1, app_c2, app_c3 = ui.columns(3)
+					font_keys = list(FONT_OPTIONS.keys())
+					cur_font = current_cfg.get("font_family", "DM Sans")
+					f_idx = font_keys.index(cur_font) if cur_font in font_keys else 0
+					with app_c1:
+						sel_font = ui.selectbox("🔤 Yazı Tipi (Font)", font_keys, index=f_idx, key="cfg_font_family")
+					cur_dark_mode = current_cfg.get("dark_mode_adaptation", "Otomatik (Sistem Temasına ve Dark Mode'a Uyarla)")
+					dm_idx = DARK_MODE_OPTIONS.index(cur_dark_mode) if cur_dark_mode in DARK_MODE_OPTIONS else 0
+					with app_c2:
+						sel_dark_mode = ui.selectbox("🌓 Karanlık Mod Uyumu", DARK_MODE_OPTIONS, index=dm_idx, key="cfg_dark_mode_adaptation")
+					cur_lang = current_cfg.get("language", "Türkçe (TR)")
+					l_idx = LANGUAGE_OPTIONS.index(cur_lang) if cur_lang in LANGUAGE_OPTIONS else 0
+					with app_c3:
+						sel_lang = ui.selectbox("🌐 Tarih & Rapor Yereli", LANGUAGE_OPTIONS, index=l_idx, key="cfg_language", help="Arayüz dili Türkçedir; bu tercih rapor başlığı ve tarih biçimi yereli için saklanır.")
+
+					ui_c1, ui_c2, ui_c3, ui_c4 = ui.columns(4)
+					fsize_opts = ["Küçük (13.5px)", "Normal (15px)", "Büyük (16.5px)"]
+					cur_fsize = current_cfg.get("font_size", "Normal (15px)")
+					fs_idx = fsize_opts.index(cur_fsize) if cur_fsize in fsize_opts else 1
+					with ui_c1:
+						sel_fsize = ui.selectbox("🔠 Yazı Boyutu", fsize_opts, index=fs_idx, key="cfg_font_size")
+					dens_opts = ["Kompakt", "Standart", "Geniş"]
+					cur_dens = current_cfg.get("ui_density", "Standart")
+					dn_idx = dens_opts.index(cur_dens) if cur_dens in dens_opts else 1
+					with ui_c2:
+						sel_dens = ui.selectbox("📐 Ekran Yoğunluğu", dens_opts, index=dn_idx, key="cfg_ui_density")
+					th_opts = ["320", "420", "550", "700"]
+					cur_th = current_cfg.get("default_table_height", "420")
+					th_idx = th_opts.index(cur_th) if cur_th in th_opts else 1
+					with ui_c3:
+						sel_th = ui.selectbox("📊 Tablo Yüksekliği (px)", th_opts, index=th_idx, key="cfg_tbl_height")
+					with ui_c4:
+						ui.write("")
+						sel_show_addr = ui.toggle("Özet kartta açık adres", value=(current_cfg.get("show_address_in_summary", "1") == "1"), key="cfg_show_addr")
+
+					# Canlı Mini Önizleme Kartı
+					prev_tp = THEME_PRESETS.get(cur_theme, THEME_PRESETS["Klinik Turkuaz (Varsayılan)"])
+					prev_font_css = FONT_OPTIONS.get(sel_font, FONT_OPTIONS["DM Sans"])[0]
+					prev_px = {"Küçük (13.5px)": "13.5px", "Normal (15px)": "15px", "Büyük (16.5px)": "16.5px"}.get(sel_fsize, "15px")
 					ui.markdown(
-						f"""<div style="border:{border_css};border-radius:12px;overflow:hidden;margin-bottom:6px;background:{tp['card_bg']};box-shadow:0 2px 8px rgba(0,0,0,0.05);">
-							<div style="height:44px;background:{tp['bg_grad']};display:flex;align-items:center;padding:6px 8px;gap:6px;border-bottom:1px solid {tp['line']};">
-								<span style="width:18px;height:28px;border-radius:5px;background:{tp['sidebar']};border:1px solid {tp['line']};display:inline-block;"></span>
-								<span style="flex:1;height:28px;border-radius:5px;background:{tp['card_bg']};border:1px solid {tp['line']};display:flex;align-items:center;padding:0 6px;gap:4px;">
-									<span style="width:14px;height:14px;border-radius:50%;background:{tp['teal']};display:inline-block;"></span>
-									<span style="flex:1;height:5px;border-radius:3px;background:{tp['ink']};opacity:0.25;"></span>
-								</span>
-							</div>
-							<div style="padding:6px 8px;display:flex;align-items:center;justify-content:space-between;">
-								<span style="font-size:11.8px;font-weight:700;color:{tp['ink']};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{html.escape(t_name)}</span>
-								<span style="font-size:10.5px;font-weight:800;color:{tp['teal']};">{chk_badge}</span>
+						f"""<div style="margin:8px 0 12px 0;padding:12px 16px;border-radius:11px;border:1px solid {prev_tp['line']};background:{prev_tp['bg_grad']};font-family:{prev_font_css};font-size:{prev_px};color:{prev_tp['ink']};">
+							<div style="font-size:11px;font-weight:700;opacity:0.65;margin-bottom:4px;">👁️ CANLI TIPOGRAFI & KART ÖNİZLEMESİ ({html.escape(cur_theme)} · {html.escape(sel_font)} · {html.escape(sel_fsize)})</div>
+							<div style="background:{prev_tp['card_bg']};border:1px solid {prev_tp['line']};border-radius:9px;padding:10px 14px;display:flex;align-items:center;justify-content:space-between;gap:10px;">
+								<div><strong>Ahmet Yılmaz</strong> · <span style="color:{prev_tp['teal']};font-weight:700;">3-A</span> · Ateş: 36.6 °C · SpO2: %99</div>
+								<span style="background:{prev_tp['teal']};color:#fff;padding:4px 10px;border-radius:7px;font-size:12px;font-weight:700;">Örnek Buton</span>
 							</div>
 						</div>""",
 						unsafe_allow_html=True,
 					)
-					if ui.button("✓ Seçili" if is_sel_t else "Uygula", key=f"btn_pick_theme_{idx}", type=("primary" if is_sel_t else "secondary"), use_container_width=True):
-						save_app_settings({"theme_name": t_name})
-						ui.success(f"🎨 '{t_name}' teması uygulandı!")
+
+					if ui.button("💾 Tipografi, Karanlık Mod ve Yoğunluk Ayarlarını Kaydet", type="primary", key="btn_save_ui_settings"):
+						save_app_settings({
+							"font_family": sel_font,
+							"font_size": sel_fsize,
+							"ui_density": sel_dens,
+							"dark_mode_adaptation": sel_dark_mode,
+							"language": sel_lang,
+							"default_table_height": sel_th,
+							"show_address_in_summary": "1" if sel_show_addr else "0",
+						})
+						ui.success("✅ Görünüm ve çalışma alanı ayarları kaydedildi.")
 						ui.rerun()
 
-			ui.divider()
-			with ui.container(border=True):
-				ui.markdown("#### 🔤 Yazı Tipi, Karanlık Mod ve Ekran Yoğunluğu")
-				app_c1, app_c2, app_c3 = ui.columns(3)
-				font_keys = list(FONT_OPTIONS.keys())
-				cur_font = current_cfg.get("font_family", "DM Sans")
-				f_idx = font_keys.index(cur_font) if cur_font in font_keys else 0
-				with app_c1:
-					sel_font = ui.selectbox("🔤 Yazı Tipi (Font)", font_keys, index=f_idx, key="cfg_font_family")
-				cur_dark_mode = current_cfg.get("dark_mode_adaptation", "Otomatik (Sistem Temasına ve Dark Mode'a Uyarla)")
-				dm_idx = DARK_MODE_OPTIONS.index(cur_dark_mode) if cur_dark_mode in DARK_MODE_OPTIONS else 0
-				with app_c2:
-					sel_dark_mode = ui.selectbox("🌓 Karanlık Mod Uyumu", DARK_MODE_OPTIONS, index=dm_idx, key="cfg_dark_mode_adaptation")
-				cur_lang = current_cfg.get("language", "Türkçe (TR)")
-				l_idx = LANGUAGE_OPTIONS.index(cur_lang) if cur_lang in LANGUAGE_OPTIONS else 0
-				with app_c3:
-					sel_lang = ui.selectbox("🌐 Tarih & Rapor Yereli", LANGUAGE_OPTIONS, index=l_idx, key="cfg_language", help="Arayüz dili Türkçedir; bu tercih rapor başlığı ve tarih biçimi yereli için saklanır.")
+			with t_lay:
+				ui.markdown("### 🧩 Kutucuk & Pencere Düzeni")
+				ui.caption(
+					"Takvim sayfası dışındaki tüm sayfalarda kart ve kutucukların yerini sürükle-bırak ile değiştirebilir, "
+					"sağ/alt kenar ve köşeden boyutlarını ayarlayabilirsiniz. Yaptığınız yerleşim otomatik olarak tarayıcı belleğinde saklanır."
+				)
+				with ui.container(border=True):
+					box_lay_val = ui.toggle(
+						"🧩 Sayfa kutucuklarını sürükle-bırak ile taşıma ve boyutlandırmayı etkinleştir (Takvim sayfası hariç)",
+						value=(str(current_cfg.get("box_layout_enabled", "1")).strip() != "0"),
+						key="cfg_box_layout_enabled_toggle",
+					)
+					ui.caption("💡 Üst çubuktaki **🧩 Düzen** düğmesine basarak kutucuk taşıma ve ok butonlarını açabilir; kenar ve sağ alt köşe tutamaçlarıyla boyut değiştirebilirsiniz.")
+					if ui.button("💾 Kutucuk Düzeni Tercihini Kaydet", type="primary", key="btn_save_box_layout_cfg"):
+						save_app_settings({"box_layout_enabled": "1" if box_lay_val else "0"})
+						ui.success("✅ Kutucuk ve pencere düzeni tercihi kaydedildi.")
+						ui.rerun()
+				with ui.container(border=True):
+					ui.markdown("#### ↺ Yerleşim ve Boyut Sıfırlama")
+					ui.caption("Özelleştirdiğiniz kutucuk sıralamalarını, kart boyutlarını veya açılır pencere/tablo genişliklerini tek tıkla varsayılana döndürün.")
+					ui.markdown(
+						'<div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:6px;">'
+						'<button type="button" class="revir-btn revir-btn-secondary" onclick="window.__revirToggleLayoutEdit()">🧩 Düzenleme Modunu Aç / Kapat</button>'
+						'<button type="button" class="revir-btn revir-btn-secondary" onclick="window.__revirResetAllBoxLayouts()">↺ Tüm Sayfa Kutucuklarını Sıfırla</button>'
+						'<button type="button" class="revir-btn revir-btn-secondary" onclick="window.__revirResetTableModalSizes()">↺ Tablo &amp; Pencere Boyutlarını Sıfırla</button>'
+						'</div>',
+						unsafe_allow_html=True,
+					)
 
-				ui_c1, ui_c2, ui_c3, ui_c4 = ui.columns(4)
-				fsize_opts = ["Küçük (13.5px)", "Normal (15px)", "Büyük (16.5px)"]
-				cur_fsize = current_cfg.get("font_size", "Normal (15px)")
-				fs_idx = fsize_opts.index(cur_fsize) if cur_fsize in fsize_opts else 1
-				with ui_c1:
-					sel_fsize = ui.selectbox("🔠 Yazı Boyutu", fsize_opts, index=fs_idx, key="cfg_font_size")
-				dens_opts = ["Kompakt", "Standart", "Geniş"]
-				cur_dens = current_cfg.get("ui_density", "Standart")
-				dn_idx = dens_opts.index(cur_dens) if cur_dens in dens_opts else 1
-				with ui_c2:
-					sel_dens = ui.selectbox("📐 Ekran Yoğunluğu", dens_opts, index=dn_idx, key="cfg_ui_density")
-				th_opts = ["320", "420", "550", "700"]
-				cur_th = current_cfg.get("default_table_height", "420")
-				th_idx = th_opts.index(cur_th) if cur_th in th_opts else 1
-				with ui_c3:
-					sel_th = ui.selectbox("📊 Tablo Yüksekliği (px)", th_opts, index=th_idx, key="cfg_tbl_height")
-				with ui_c4:
-					ui.write("")
-					sel_show_addr = ui.toggle("Özet kartta açık adres", value=(current_cfg.get("show_address_in_summary", "1") == "1"), key="cfg_show_addr")
-
-				# Canlı Mini Önizleme Kartı
-				prev_tp = THEME_PRESETS.get(cur_theme, THEME_PRESETS["Klinik Turkuaz (Varsayılan)"])
-				prev_font_css = FONT_OPTIONS.get(sel_font, FONT_OPTIONS["DM Sans"])[0]
-				prev_px = {"Küçük (13.5px)": "13.5px", "Normal (15px)": "15px", "Büyük (16.5px)": "16.5px"}.get(sel_fsize, "15px")
-				ui.markdown(
-					f"""<div style="margin:8px 0 12px 0;padding:12px 16px;border-radius:11px;border:1px solid {prev_tp['line']};background:{prev_tp['bg_grad']};font-family:{prev_font_css};font-size:{prev_px};color:{prev_tp['ink']};">
-						<div style="font-size:11px;font-weight:700;opacity:0.65;margin-bottom:4px;">👁️ CANLI TIPOGRAFI & KART ÖNİZLEMESİ ({html.escape(cur_theme)} · {html.escape(sel_font)} · {html.escape(sel_fsize)})</div>
-						<div style="background:{prev_tp['card_bg']};border:1px solid {prev_tp['line']};border-radius:9px;padding:10px 14px;display:flex;align-items:center;justify-content:space-between;gap:10px;">
-							<div><strong>Ahmet Yılmaz</strong> · <span style="color:{prev_tp['teal']};font-weight:700;">3-A</span> · Ateş: 36.6 °C · SpO2: %99</div>
-							<span style="background:{prev_tp['teal']};color:#fff;padding:4px 10px;border-radius:7px;font-size:12px;font-weight:700;">Örnek Buton</span>
-						</div>
-					</div>""",
-					unsafe_allow_html=True,
+		# ======================================================================
+		# GRUP 3: TAKVİM & YEMEKHANE
+		# ======================================================================
+		elif active_sec == "📅 Takvim & Yemekhane":
+			t_cal_cfg, t_caf_cfg = ui.tabs([
+				"🗓️ Takvim Ayarları",
+				"🍽️ Yemekhane Ayarları",
+			], orientation="segmented")
+			with t_cal_cfg:
+				import school_calendar as _scal
+				_scal.render_calendar_settings_tab(
+					connect_db_fn=connect_db,
+					current_cfg=current_cfg,
+					save_app_settings_fn=save_app_settings,
+					get_active_gemini_config_fn=_get_active_gemini_config,
+					get_tr_provinces_fn=get_tr_provinces,
+				)
+			with t_caf_cfg:
+				ui.markdown("### 🍽️ Yemekhane Ayarları")
+				ui.caption("Yemek çıkacak günler, günlük öğün sayısı, saatler, Ramazan modu, menü rengi, imzalar ve kurum logosunu buradan yönetin.")
+				caf.render_cafeteria_settings_panel(
+					{
+						"connect_db": connect_db,
+						"get_app_settings": get_app_settings,
+						"save_app_settings": save_app_settings,
+						"clear_all_data_caches": clear_all_data_caches,
+					},
+					current_cfg,
+					key_prefix="cfg_caf",
 				)
 
-				if ui.button("💾 Tipografi, Karanlık Mod ve Yoğunluk Ayarlarını Kaydet", type="primary", key="btn_save_ui_settings"):
-					save_app_settings({
-						"font_family": sel_font,
-						"font_size": sel_fsize,
-						"ui_density": sel_dens,
-						"dark_mode_adaptation": sel_dark_mode,
-						"language": sel_lang,
-						"default_table_height": sel_th,
-						"show_address_in_summary": "1" if sel_show_addr else "0",
-					})
-					ui.success("✅ Görünüm ve çalışma alanı ayarları kaydedildi.")
-					ui.rerun()
-
-			with ui.container(border=True):
-				from school_calendar import QUOTE_MODE_OPTIONS
-				ui.markdown("#### 📅 Takvim Yaprağı, Hadis-i Şerif / Özlü Söz ve Ezan Vakti Sayacı Tercihleri")
-				ui.caption("Gelişim & Plan → **Takvim & Planlama** sayfasındaki günlük takvim yaprağında gösterilecek söz/hadis türünü ve seçili ile göre ezan vakti geri sayım sayacını özelleştirin.")
-				cal_c1, cal_c2, cal_c3 = ui.columns([1.8, 1.1, 1.1])
-				cur_q_mode = current_cfg.get("calendar_quote_mode", QUOTE_MODE_OPTIONS[0])
-				qm_idx = QUOTE_MODE_OPTIONS.index(cur_q_mode) if cur_q_mode in QUOTE_MODE_OPTIONS else 0
-				with cal_c1:
-					sel_q_mode = ui.selectbox("📜 Takvim Yaprağı Günün Yazısı (Hadis / Özlü Söz)", QUOTE_MODE_OPTIONS, index=qm_idx, key="cfg_cal_quote_mode")
-				with cal_c2:
-					ui.write("")
-					sel_show_prayer = ui.toggle(
-						f"🕌 Ezan Vakitleri & Sayaç ({current_cfg.get('default_province', 'Ankara')})",
-						value=(str(current_cfg.get("calendar_show_prayer_times", "1")) != "0"),
-						key="cfg_cal_show_prayer",
-					)
-				with cal_c3:
-					ui.write("")
-					sel_auto_hol = ui.toggle(
-						"🇹🇷 Resmi & Dini Tatilleri Otomatik İşaretle",
-						value=(str(current_cfg.get("calendar_auto_load_holidays", "1")) != "0"),
-						key="cfg_cal_auto_holidays",
-					)
-				if ui.button("💾 Takvim Yaprağı ve Ezan Vakti Ayarlarını Kaydet", type="primary", key="btn_save_calendar_settings"):
-					save_app_settings({
-						"calendar_quote_mode": sel_q_mode,
-						"calendar_show_prayer_times": "1" if sel_show_prayer else "0",
-						"calendar_auto_load_holidays": "1" if sel_auto_hol else "0",
-					})
-					ui.success("✅ Takvim yaprağı, söz/hadis ve ezan vakti sayacı tercihleri kaydedildi.")
-					ui.rerun()
-
 		# ======================================================================
-		# GRUP 3: MODÜL & FORM GÖRÜNÜRLÜĞÜ (3 GÖRÜNÜRLÜK AYARI TEK ÇATIDA)
+		# GRUP 4: GÖRÜNÜRLÜK & RAPOR
 		# ======================================================================
-		elif active_sec == "🎛️ Modül & Form Görünürlüğü":
+		elif active_sec == "🎛️ Görünürlük & Rapor":
 			import json as _json
-			t_v_pages, t_v_scr, t_v_med = ui.tabs([
+			t_v_pages, t_v_scr, t_v_med, t_v_rep = ui.tabs([
 				"📄 Sayfa Bölümleri",
-				"🔍 Okul Taraması Alanları",
-				"💊 İlaç Takip Form Alanları",
+				"🔍 Tarama Alanları",
+				"💊 İlaç Alanları",
+				"🖨️ Rapor Çıktı Ayarları",
 			], orientation="segmented")
 
 			with t_v_pages:
@@ -32689,10 +32749,13 @@ def render_settings() -> None:
 						ui.success("✅ İlaç takip alanı tercihleri kaydedildi.")
 						ui.rerun()
 
+			with t_v_rep:
+				render_report_settings_panel(key_prefix="cfg_rep", in_dialog=False)
+
 		# ======================================================================
-		# GRUP 4: KLİNİK KÜTÜPHANE & WHO REFERANSLARI
+		# GRUP 5: KLİNİK & WHO
 		# ======================================================================
-		elif active_sec == "🩺 Klinik Kütüphane & WHO":
+		elif active_sec == "🩺 Klinik & WHO":
 			t_q_tpl, t_nanda, t_who = ui.tabs([
 				"⚡ Hızlı Şikayet & İşlem",
 				"📋 NANDA-I Bakım Protokolleri",
@@ -32917,9 +32980,9 @@ def render_settings() -> None:
 								ui.error(f"Dosya okunamadı: {error}")
 
 		# ======================================================================
-		# GRUP 5: YAPAY ZEKÂ (GEMINI) & KVKK GÜVENLİĞİ
+		# GRUP 6: YAPAY ZEKÂ & KVKK
 		# ======================================================================
-		elif active_sec == "🤖 Yapay Zekâ (Gemini) & KVKK":
+		elif active_sec == "🤖 Yapay Zekâ & KVKK":
 			render_gemini_ai_settings_panel(current_cfg)
 			with ui.container(border=True):
 				ui.markdown("#### 🛡️ KVKK Ekran Gizliliği Varsayılan Tercihi")
@@ -32935,14 +32998,14 @@ def render_settings() -> None:
 					ui.rerun()
 
 		# ======================================================================
-		# GRUP 6: VERİ, İÇE AKTAR & SİSTEM (ON-DEMAND ZIP + GÜVENLİ KURTARMA)
+		# GRUP 7: VERİ & SİSTEM
 		# ======================================================================
-		elif active_sec == "💾 Veri, İçe Aktar & Sistem":
+		elif active_sec == "💾 Veri & Sistem":
 			t_bkp, t_imp, t_upd, t_rst = ui.tabs([
-				"💾 Yedekleme & Kurtarma",
-				"📥 Liste İçe Aktar (e-Okul / Excel)",
-				"🚀 Sürüm & Güncelleme",
-				"🧨 Fabrika Sıfırlama",
+				"💾 Yedekleme",
+				"📥 İçe Aktar",
+				"🚀 Güncelleme",
+				"🧨 Sıfırlama",
 			], orientation="segmented")
 
 			with t_bkp:
@@ -33075,12 +33138,13 @@ def render_settings() -> None:
 			with t_imp:
 				ui.markdown("### 📥 Öğrenci, Şube ve Servis Listesi İçe Aktarma")
 				_imp_ai_on, _imp_ai_key, _imp_ai_model = _get_active_gemini_config()
+				_imp_ai_lbl = "EVREN AI" if gai.is_evren_key_or_model(_imp_ai_key, _imp_ai_model) else "Gemini"
 				imp_tab_labels = [
 					"📑 e-Okul Şube Doğum Tarihleri (PDF / Excel)",
 					"📋 Standart Excel / CSV Listesi",
 				]
 				if _imp_ai_on:
-					imp_tab_labels.append("✨ Gemini Akıllı Liste Okuyucu (PDF / Fotoğraf / Word)")
+					imp_tab_labels.append(f"✨ {_imp_ai_lbl} Akıllı Liste Okuyucu (PDF / Fotoğraf / Word)")
 				imp_tabs = ui.tabs(imp_tab_labels)
 				tab_eokul_import, tab_std_import = imp_tabs[0], imp_tabs[1]
 				tab_ai_import = imp_tabs[2] if _imp_ai_on else None
@@ -33391,7 +33455,7 @@ def _handle_topbar_action(act_key: str, act_val: Any) -> None:
 			ui.session_state["_ai_key_needed_warn"] = True
 			clear_all_data_caches()
 			ui.close_dialog(all_dialogs=True)
-			ui.session_state["settings_vertical_nav"] = "🤖 Yapay Zekâ (Gemini) & KVKK"
+			ui.session_state["settings_vertical_nav"] = "🤖 Yapay Zekâ & KVKK"
 			ui.session_state["target_page"] = "⚙️ Ayarlar"
 			ui.rerun()
 		else:
@@ -33440,7 +33504,8 @@ def _handle_cmd_search(query: str) -> list[dict[str, Any]]:
 	results: list[dict[str, Any]] = []
 
 	# 1. Hızlı İşlemler
-	_cmd_ai_on, _, _ = _get_active_gemini_config()
+	_cmd_ai_on, _cmd_ai_key, _cmd_ai_model = _get_active_gemini_config()
+	_cmd_ai_lbl = "EVREN" if gai.is_evren_key_or_model(_cmd_ai_key, _cmd_ai_model) else "Gemini"
 	quick_cmds = [
 		{"group": "⚡ Hızlı İşlemler", "kind": "page", "value": "🩺 Revir Kaydı", "icon": "🩺", "title": "Yeni Revir Kaydı Aç", "subtitle": "Öğrenci veya yetişkin revir başvurusu kaydet (Alt+V)", "tag": "Sayfa"},
 		{"group": "⚡ Hızlı İşlemler", "kind": "page", "value": "💉 İnsülin & Diyabet Yönetimi", "icon": "💉", "title": "İnsülin Dozu Hesapla & Yemek Menüsü", "subtitle": "Bolus hesaplayıcı ve aylık okul yemek menüsü yönetimi", "tag": "Diyabet"},
@@ -33453,8 +33518,8 @@ def _handle_cmd_search(query: str) -> list[dict[str, Any]]:
 	]
 	if _cmd_ai_on:
 		quick_cmds.extend([
-			{"group": "⚡ Hızlı İşlemler", "kind": "smart_doc_import", "value": "", "icon": "🤖", "title": "Belge Oku & Öğrenciye Otomatik İşle (Gemini)", "subtitle": "Sağlık raporu, tahlil, reçete veya ÇÖZGER belgesini okuyup öğrenci dosyasına işle", "tag": "AI"},
-			{"group": "⚡ Hızlı İşlemler", "kind": "open_chat", "value": "", "icon": "🤖", "title": "Gemini Klinik Asistanı Aç", "subtitle": "Soru sor, sınıf/etkinlik oluştur, Word/Excel ürettir veya tahlil/evrak yükle (⌘J)", "tag": "AI"},
+			{"group": "⚡ Hızlı İşlemler", "kind": "smart_doc_import", "value": "", "icon": "🤖", "title": f"Belge Oku & Öğrenciye Otomatik İşle ({_cmd_ai_lbl})", "subtitle": "Sağlık raporu, tahlil, reçete veya ÇÖZGER belgesini okuyup öğrenci dosyasına işle", "tag": "AI"},
+			{"group": "⚡ Hızlı İşlemler", "kind": "open_chat", "value": "", "icon": "🤖", "title": f"{_cmd_ai_lbl} Klinik Asistanı Aç", "subtitle": "Soru sor, sınıf/etkinlik oluştur, Word/Excel ürettir veya tahlil/evrak yükle (⌘J)", "tag": "AI"},
 		])
 	for cmd in quick_cmds:
 		if not q or q in _tr_fold(cmd["title"]) or q in _tr_fold(cmd["subtitle"]) or q in _tr_fold(cmd["tag"]):
@@ -33653,17 +33718,41 @@ def _build_topbar_html(cur_page: str, active_person: dict | sqlite3.Row | None, 
 	else:
 		ai_tip = "AI Modu Kapalı (API Anahtarı Yok) — Ayarlamak için tıklayın"
 
+	is_cal_pg = "takvim" in str(cur_page or "").lower()
+	box_lay_on = str(cfg_tb.get("box_layout_enabled", "1")).strip() != "0"
+	if is_cal_pg:
+		layout_btn_html = (
+			'<button id="revir-tb-layout-btn" type="button" class="revir-tb-pill" disabled '
+			'style="opacity:0.45;cursor:not-allowed;" '
+			'title="Takvim sayfası kutucuk düzenlemesinden hariçtir" '
+			'onclick="window.__revirToggleLayoutEdit()">🧩 Düzen</button>'
+		)
+	elif not box_lay_on:
+		layout_btn_html = (
+			'<button id="revir-tb-layout-btn" type="button" class="revir-tb-pill" disabled '
+			'style="opacity:0.55;" '
+			'title="Kutucuk düzeni Ayarlar → Görünüm & Düzen bölümünden kapalı" '
+			'onclick="window.__revirToggleLayoutEdit()">🧩 Düzen</button>'
+		)
+	else:
+		layout_btn_html = (
+			'<button id="revir-tb-layout-btn" type="button" class="revir-tb-pill" '
+			'title="Sayfa içindeki kutucukların yerini ve boyutunu değiştir (Takvim hariç)" '
+			'onclick="window.__revirToggleLayoutEdit()">🧩 Düzen</button>'
+		)
+
 	return (
 		f'<div class="revir-tb-left">'
 		f'<button type="button" class="revir-tb-icon-btn" title="Yan Menüyü Daralt / Genişlet (Alt+B)" onclick="window.__revirToggleSidebar()">☰</button>'
 		f'<div class="revir-tb-crumb">{html.escape(page_clean)} {person_crumb}</div>'
-		f'<button type="button" class="{ay_cls}" title="Eğitim Yılını Değiştir" onclick="window.__revirTopbarAction(\'goto_settings_group\', \'🏫 Kurum, Yıl & Şube Yapısı\')">{html.escape(ay_txt)}</button>'
+		f'<button type="button" class="{ay_cls}" title="Eğitim Yılını Değiştir" onclick="window.__revirTopbarAction(\'goto_settings_group\', \'🏫 Kurum & Şube\')">{html.escape(ay_txt)}</button>'
 		f'</div>'
 		f'<div class="revir-tb-center">'
 		f'<button type="button" class="revir-tb-search-btn" onclick="window.__revirOpenCmdPalette()">'
 		f'<span>🔍 Öğrenci, sayfa veya ayar ara...</span><span class="revir-kbd">⌘K</span></button>'
 		f'</div>'
 		f'<div class="revir-tb-right">'
+		f'{layout_btn_html}'
 		f'<button type="button" class="{kvkk_cls}" title="KVKK Ekran Maskelemesini Aç / Kapat" onclick="window.__revirTopbarAction(\'toggle_kvkk\', \'\')">{kvkk_lbl}</button>'
 		f'<button type="button" class="revir-tb-icon-btn" title="{dk_tip}" onclick="window.__revirTopbarAction(\'cycle_dark\', \'\')">{dk_ico}</button>'
 		f'<button type="button" class="{ai_cls}" title="{html.escape(ai_tip, quote=True)}" onclick="window.__revirTopbarAction(\'toggle_ai\', \'\')">{html.escape(ai_lbl)}</button>'
@@ -33755,6 +33844,7 @@ def main() -> None:
 	_sync_floating_chat_ui(cur_page_val)
 
 	# Üst Bağlam Çubuğu & Global Komut Paleti (Cmd/Ctrl+K)
+	ui.configure_box_layout(str(app_cfg.get("box_layout_enabled", "1")).strip() != "0")
 	ui.configure_topbar(_build_topbar_html(cur_page_val, active_person, is_dark, _ai_on, _ai_m, has_ai_key=bool(_ai_key)), action_handler=_handle_topbar_action)
 	ui.configure_command_palette(search_handler=_handle_cmd_search, exec_handler=_handle_cmd_exec)
 

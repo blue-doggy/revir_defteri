@@ -966,6 +966,7 @@ class _AppSession:
 		self.form_defs: dict[str, dict[str, Any]] = {}
 		self.page_title: str = "Revir Defteri"
 		self.last_html_payload: dict[str, Any] = {}
+		self.box_layout_enabled: bool = True
 		self.floating_chat_enabled: bool = False
 		self.floating_chat_title: str = "Gemini Klinik Asistan"
 		self.floating_chat_label: str = "KVKK Korumalı"
@@ -1379,6 +1380,7 @@ class _UIContainer:
 				f'<button type="button" class="{btn_cls}"{title_attr} onclick="window.__revirTogglePopover(\'{pop_id}\', event)">'
 				f'{_format_inline_md(label, escape_html=True)} <span class="revir-caret">▾</span></button>'
 				f'<div class="revir-popover-body" id="pop_{pop_id}">'
+				f'<button type="button" class="revir-pop-close" title="Kapat (ESC)" onclick="window.__revirClosePopovers(event)">✕</button>'
 			),
 			wrapper_close="</div></div>",
 		)
@@ -2721,6 +2723,11 @@ def configure_topbar(html_str: str, action_handler: Callable | None = None) -> N
 		ctx.session.topbar_action_handler = action_handler
 
 
+def configure_box_layout(enabled: bool = True) -> None:
+	ctx = _get_ctx()
+	ctx.session.box_layout_enabled = bool(enabled)
+
+
 def configure_command_palette(search_handler: Callable | None = None, exec_handler: Callable | None = None) -> None:
 	ctx = _get_ctx()
 	if search_handler is not None:
@@ -3078,6 +3085,7 @@ def _execute_render_cycle(app_fn: Callable[[], None], session: _AppSession, payl
 			"balloons": last_ctx.balloons_triggered,
 			"styles_html": "\n".join(last_ctx.styles_parts),
 			"scripts_html": "\n".join(last_ctx.scripts_parts),
+			"box_layout_enabled": session.box_layout_enabled,
 			"floating_chat_enabled": session.floating_chat_enabled,
 			"floating_chat_title": session.floating_chat_title,
 			"floating_chat_label": session.floating_chat_label,
@@ -3469,28 +3477,55 @@ html, body {
 
 /* Expander */
 .revir-expander {
-	border: 1px solid var(--line); border-radius: 10px;
+	border: 1px solid var(--line); border-radius: 11px;
 	background: var(--card-bg); margin: 8px 0 12px 0; overflow: visible;
+	transition: border-color 0.16s ease, box-shadow 0.16s ease;
 }
+.revir-expander:hover { border-color: rgba(13,148,136,0.45); }
+.revir-expander[open] { border-color: rgba(13,148,136,0.38); box-shadow: 0 4px 14px rgba(15,23,42,0.06); }
 .revir-expander-summary {
 	padding: 10px 14px; font-weight: 600; font-size: 0.93rem; cursor: pointer;
 	user-select: none; list-style: none; display: flex; align-items: center; justify-content: space-between;
-	border-radius: 10px;
+	border-radius: 10px; transition: background 0.14s ease, color 0.14s ease;
 }
-.revir-expander-summary::after { content: "▾"; font-size: 13px; color: var(--text-muted); transition: transform 0.18s; }
-.revir-expander[open] > .revir-expander-summary::after { transform: rotate(180deg); }
-.revir-expander-body { padding: 4px 14px 14px 14px; border-top: 1px solid var(--line); border-radius: 0 0 10px 10px; }
+.revir-expander-summary:hover { background: rgba(13,148,136,0.06); color: var(--text-heading); }
+.revir-expander-summary:focus-visible { outline: 2px solid var(--teal); outline-offset: -2px; }
+.revir-expander-summary::after {
+	content: "▾"; font-size: 12px; color: var(--text-muted); transition: transform 0.18s ease, background 0.14s ease;
+	width: 22px; height: 22px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center;
+	background: rgba(148,163,184,0.12); flex-shrink: 0;
+}
+.revir-expander[open] > .revir-expander-summary { border-radius: 10px 10px 0 0; }
+.revir-expander[open] > .revir-expander-summary::after { transform: rotate(180deg); background: rgba(13,148,136,0.14); color: var(--teal); }
+.revir-expander-body { padding: 6px 14px 14px 14px; border-top: 1px solid var(--line); border-radius: 0 0 10px 10px; }
+.revir-expander[open] > .revir-expander-body { animation: revirExpSlideIn 0.16s ease; }
+@keyframes revirExpSlideIn {
+	from { opacity: 0; transform: translateY(-4px); }
+	to { opacity: 1; transform: translateY(0); }
+}
 
 /* Popover */
 .revir-popover-wrap { position: relative; display: block; margin-bottom: 6px; }
 .revir-popover-body {
 	display: none; position: absolute; right: 0; top: calc(100% + 6px);
-	min-width: 280px; max-width: 350px; max-height: 75vh; overflow-y: auto;
+	min-width: 280px; max-width: min(370px, calc(100vw - 24px)); max-height: 75vh; overflow-y: auto;
 	background: var(--card-bg); border: 1px solid var(--line); border-radius: 12px;
-	padding: 14px; box-shadow: 0 12px 34px rgba(0,0,0,0.22); z-index: 9900;
+	padding: 16px 14px 14px 14px; box-shadow: 0 14px 36px rgba(15,23,42,0.22); z-index: 9900;
 }
+.revir-popover-body.align-left { right: auto; left: 0; }
 .revir-popover-body.flip-up { top: auto; bottom: calc(100% + 6px); }
-.revir-popover-body.open { display: block; }
+.revir-popover-body.open { display: block; animation: revirPopIn 0.14s ease; }
+@keyframes revirPopIn {
+	from { opacity: 0; transform: scale(0.97) translateY(-3px); }
+	to { opacity: 1; transform: scale(1) translateY(0); }
+}
+.revir-pop-close {
+	position: sticky; top: 0; float: right; margin: -6px -4px 4px 8px;
+	width: 24px; height: 24px; border-radius: 6px; border: 1px solid var(--line);
+	background: var(--sidebar-bg); color: var(--text-muted); font-size: 12px; font-weight: 700;
+	cursor: pointer; display: inline-flex; align-items: center; justify-content: center; z-index: 2;
+}
+.revir-pop-close:hover { background: #fee2e2; color: #b91c1c; border-color: #fca5a5; }
 
 /* Tablolar & Data Editor */
 .revir-table-outer {
@@ -3738,7 +3773,15 @@ body.revir-dark .revir-a4-stage, .dark .revir-a4-stage { background: #1e293b; }
 	background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(4px);
 	display: none; align-items: center; justify-content: center; padding: 20px;
 }
-.revir-modal-backdrop.open { display: flex; }
+.revir-modal-backdrop.open { display: flex; animation: revirFadeIn 0.15s ease; }
+@keyframes revirFadeIn {
+	from { opacity: 0; }
+	to { opacity: 1; }
+}
+@keyframes revirModalPop {
+	from { opacity: 0; transform: scale(0.97) translateY(6px); }
+	to { opacity: 1; transform: scale(1) translateY(0); }
+}
 .revir-modal-backdrop.drawer-mode { justify-content: flex-end; align-items: stretch; padding: 0; }
 .revir-modal-card {
 	position: relative;
@@ -3749,6 +3792,7 @@ body.revir-dark .revir-a4-stage, .dark .revir-a4-stage { background: #1e293b; }
 	display: flex; flex-direction: column; overflow: hidden;
 	transition: width 0.2s ease, max-width 0.2s ease, height 0.2s ease, max-height 0.2s ease;
 }
+.revir-modal-backdrop.open .revir-modal-card:not(.drawer) { animation: revirModalPop 0.16s ease; }
 .revir-modal-card.revir-modal-resizing {
 	transition: none !important; user-select: none !important;
 	border-color: var(--teal) !important;
@@ -3825,6 +3869,13 @@ body.revir-dark .revir-a4-stage, .dark .revir-a4-stage { background: #1e293b; }
 	cursor: pointer; display: flex; align-items: center; justify-content: center;
 }
 .revir-modal-hbtn:hover { background: var(--mint); color: var(--teal); border-color: var(--teal); }
+.revir-modal-hbtn.active { background: var(--teal); color: #ffffff; border-color: var(--teal); }
+.revir-modal-dirty-pill {
+	display: none; align-items: center; gap: 4px; padding: 2px 9px; border-radius: 999px;
+	background: #fef3c7; color: #92400e; border: 1px solid #f59e0b;
+	font-size: 11px; font-weight: 700; white-space: nowrap; flex-shrink: 0;
+}
+.revir-modal-dirty-pill.visible { display: inline-flex; }
 .revir-modal-close:hover { background: #fee2e2; color: #b91c1c; border-color: #fca5a5; }
 .revir-modal-body { padding: 16px 22px 68px 22px; overflow-y: auto; flex: 1; }
 body.modal-open #revir-fab-btn {
@@ -3839,14 +3890,21 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 	background: rgba(15, 23, 42, 0.52); backdrop-filter: blur(5px);
 	display: none; align-items: flex-start; justify-content: center; padding-top: 9vh;
 }
-#revir-cmd-backdrop.open { display: flex; }
+#revir-cmd-backdrop.open { display: flex; animation: revirFadeIn 0.12s ease; }
 #revir-cmd-card {
 	width: 620px; max-width: 94vw; max-height: 74vh;
 	background: var(--card-bg); color: var(--text-main);
 	border: 1px solid var(--line); border-radius: 16px;
 	box-shadow: 0 24px 64px rgba(15,23,42,0.38);
 	display: flex; flex-direction: column; overflow: hidden;
+	animation: revirModalPop 0.14s ease;
 }
+.revir-cmd-close {
+	width: 26px; height: 26px; border-radius: 7px; border: 1px solid var(--line);
+	background: var(--card-bg); color: var(--text-muted); font-size: 13px; font-weight: 700;
+	cursor: pointer; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.revir-cmd-close:hover { background: #fee2e2; color: #b91c1c; border-color: #fca5a5; }
 .revir-cmd-top {
 	display: flex; align-items: center; gap: 10px;
 	padding: 13px 16px; border-bottom: 1px solid var(--line);
@@ -3969,8 +4027,89 @@ body.revir-busy .revir-btn { pointer-events: none; }
 	display: none; flex-direction: column; overflow: hidden;
 	transition: width 0.22s ease, height 0.22s ease;
 }
-#revir-chat-bubble.open { display: flex; }
+#revir-chat-bubble.open { display: flex; animation: revirChatPop 0.16s ease; }
+#revir-chat-bubble.revir-chat-resizing { transition: none !important; user-select: none !important; border-color: var(--teal) !important; }
+@keyframes revirChatPop {
+	from { opacity: 0; transform: translateY(10px) scale(0.97); }
+	to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.revir-chat-resize-nw {
+	position: absolute; top: 2px; left: 2px; width: 15px; height: 15px;
+	cursor: nwse-resize; z-index: 15; touch-action: none; border-radius: 12px 0 6px 0;
+}
+.revir-chat-resize-nw::after {
+	content: ""; position: absolute; top: 4px; left: 4px; width: 7px; height: 7px;
+	border-top: 2px solid rgba(255,255,255,0.65); border-left: 2px solid rgba(255,255,255,0.65);
+	border-radius: 2px 0 0 0; opacity: 0.7;
+}
+.revir-chat-resize-nw:hover::after { opacity: 1; }
 #revir-chat-bubble.expanded { width: 550px; height: 675px; }
+
+/* Sayfa İçi Kutucuk Yerleşimi & Boyutlandırma Modu (Takvim Hariç) */
+.revir-box-host { position: relative; box-sizing: border-box; transition: border-color 0.15s ease, box-shadow 0.15s ease; }
+body.revir-layout-edit .revir-box-host {
+	outline: 1.5px dashed rgba(13,148,136,0.45); outline-offset: 2px; border-radius: 12px;
+}
+body.revir-layout-edit .revir-box-host:hover {
+	outline-color: var(--teal); box-shadow: 0 6px 20px rgba(13,148,136,0.12);
+}
+.revir-box-host.revir-box-dragging { opacity: 0.48; outline: 2px solid var(--teal) !important; }
+.revir-box-host.revir-box-drop-before { box-shadow: 0 -4px 0 0 var(--teal), 0 0 0 2px rgba(13,148,136,0.22) !important; }
+.revir-box-host.revir-box-drop-after { box-shadow: 0 4px 0 0 var(--teal), 0 0 0 2px rgba(13,148,136,0.22) !important; }
+.revir-box-host.revir-box-resizing {
+	transition: none !important; user-select: none !important;
+	outline: 2px dashed var(--teal) !important; box-shadow: 0 10px 26px rgba(13,148,136,0.18) !important;
+}
+.revir-box-toolbar {
+	display: none; position: absolute; top: 6px; right: 8px; z-index: 24;
+	align-items: center; gap: 3px; padding: 3px 5px; border-radius: 8px;
+	background: var(--card-bg); border: 1px solid rgba(13,148,136,0.45);
+	box-shadow: 0 4px 12px rgba(15,23,42,0.14);
+}
+body.revir-layout-edit .revir-box-host > .revir-box-toolbar { display: inline-flex; }
+.revir-box-tbtn {
+	border: none; background: transparent; color: var(--text-main);
+	width: 23px; height: 22px; border-radius: 5px; cursor: pointer;
+	font-size: 12px; font-weight: 800; display: inline-flex; align-items: center; justify-content: center;
+	padding: 0; line-height: 1;
+}
+.revir-box-tbtn:hover { background: var(--mint); color: var(--teal); }
+.revir-box-drag { cursor: grab; color: var(--teal); font-size: 13px; }
+.revir-box-drag:active { cursor: grabbing; }
+.revir-box-res-r {
+	position: absolute; top: 10px; right: -4px; bottom: 14px; width: 8px;
+	cursor: ew-resize; z-index: 21; touch-action: none; display: none;
+}
+.revir-box-res-b {
+	position: absolute; left: 12px; right: 14px; bottom: -4px; height: 8px;
+	cursor: ns-resize; z-index: 21; touch-action: none; display: none;
+}
+.revir-box-res-se {
+	position: absolute; right: 0; bottom: 0; width: 15px; height: 15px;
+	cursor: nwse-resize; z-index: 22; touch-action: none; border-radius: 0 0 10px 0;
+	background: linear-gradient(135deg, transparent 46%, rgba(13,148,136,0.45) 48%, transparent 56%, rgba(13,148,136,0.75) 76%);
+	opacity: 0; transition: opacity 0.14s ease; display: none;
+}
+body.revir-box-resize-on .revir-box-res-se { display: block; }
+body.revir-box-resize-on .revir-box-host:hover > .revir-box-res-se { opacity: 0.72; }
+body.revir-layout-edit .revir-box-res-r,
+body.revir-layout-edit .revir-box-res-b,
+body.revir-layout-edit .revir-box-res-se { display: block; opacity: 0.92; }
+#revir-layout-bar {
+	position: fixed; bottom: 18px; left: 24px; z-index: 3390;
+	display: none; align-items: center; gap: 8px; flex-wrap: wrap;
+	background: var(--card-bg); color: var(--text-heading);
+	border: 1.5px solid var(--teal); border-radius: 12px; padding: 7px 12px;
+	box-shadow: 0 12px 32px rgba(15,23,42,0.22); font-size: 12.5px; font-weight: 700;
+}
+body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revirPopIn 0.14s ease; }
+.revir-layout-bar-btn {
+	border: 1px solid var(--line); background: var(--sidebar-bg); color: var(--text-main);
+	border-radius: 7px; padding: 4px 10px; font-size: 12px; font-weight: 700; cursor: pointer; font-family: inherit;
+}
+.revir-layout-bar-btn:hover { border-color: var(--teal); color: var(--teal); background: var(--mint); }
+.revir-layout-bar-btn.primary { background: var(--teal); color: #ffffff; border-color: var(--teal); }
+.revir-layout-bar-btn.primary:hover { background: var(--teal-hover); color: #ffffff; }
 #revir-chat-bubble::after {
 	content: ""; position: absolute; bottom: -8px; right: 30px;
 	width: 16px; height: 16px; background: var(--card-bg, #ffffff);
@@ -4150,8 +4289,10 @@ body.revir-busy .revir-btn { pointer-events: none; }
 			<div class="revir-modal-hdr-left">
 				<button id="revir-modal-back" type="button" class="revir-modal-back" title="Önceki Pencereye Dön" onclick="window.__revirCloseDialog()">← Geri</button>
 				<h3 id="revir-modal-title" class="revir-modal-title"></h3>
+				<span id="revir-modal-dirty-pill" class="revir-modal-dirty-pill" title="Kaydedilmemiş değişiklikler var">● Kaydedilmemiş</span>
 			</div>
 			<div class="revir-modal-hdr-actions">
+				<button id="revir-modal-reset-sz" type="button" class="revir-modal-hbtn" title="Pencere Boyutunu Sıfırla" onclick="window.__revirResetModalSize()">↺</button>
 				<button id="revir-modal-fs-btn" type="button" class="revir-modal-hbtn" title="Tam Ekran Büyüt / Küçült" onclick="window.__revirToggleModalFullscreen()">⤢</button>
 				<button type="button" class="revir-modal-close" title="Kapat (ESC)" onclick="window.__revirCloseDialog(true)">✕</button>
 			</div>
@@ -4170,6 +4311,7 @@ body.revir-busy .revir-btn { pointer-events: none; }
 			<span style="font-size:17px;">🔍</span>
 			<input id="revir-cmd-input" type="text" placeholder="Öğrenci adı, okul no, sayfa veya ayar ara... (Örn: Ahmet, yedek, tema, aşı)" autocomplete="off" oninput="window.__revirCmdSearch(this.value)" onkeydown="window.__revirCmdKey(event)"/>
 			<span class="revir-kbd">ESC</span>
+			<button type="button" class="revir-cmd-close" title="Kapat (ESC)" onclick="window.__revirCloseCmdPalette()">✕</button>
 		</div>
 		<div id="revir-cmd-results"></div>
 		<div class="revir-cmd-footer">
@@ -4181,6 +4323,11 @@ body.revir-busy .revir-btn { pointer-events: none; }
 <div id="revir-chart-tooltip"></div>
 <div id="revir-resize-badge"></div>
 <div id="revir-toast" onclick="this.style.display='none'" title="Kapatmak için tıklayın"></div>
+<div id="revir-layout-bar">
+	<span>🧩 Kutucuk Düzeni (Takvim Hariç) — Sürükle veya Kenardan Boyutlandır</span>
+	<button type="button" class="revir-layout-bar-btn" onclick="window.__revirResetPageBoxLayout()" title="Bu sayfadaki tüm kutucuk konum ve boyutlarını varsayılana döndür">↺ Sayfayı Sıfırla</button>
+	<button type="button" class="revir-layout-bar-btn primary" onclick="window.__revirToggleLayoutEdit(false)">✓ Bitir</button>
+</div>
 
 <!-- Yüzen Gemini Sohbet Butonu ve Konuşma Balonu -->
 <button id="revir-fab-btn" type="button" title="Gemini Klinik Asistan ile Konuş (⌘J / Alt+A)" aria-label="Gemini Klinik Asistan" onclick="window.__revirToggleChatBubble()">
@@ -4191,6 +4338,7 @@ body.revir-busy .revir-btn { pointer-events: none; }
 </button>
 
 <div id="revir-chat-bubble" ondragover="event.preventDefault()" ondrop="window.__revirChatDropFiles(event)">
+	<div id="revir-chat-resize-nw" class="revir-chat-resize-nw" title="Sohbet penceresini sürükleyerek boyutlandırın · Sıfırlamak için çift tıklayın"></div>
 	<div class="revir-chat-hdr">
 		<div class="revir-chat-hdr-left">
 			<div class="revir-chat-avatar">
@@ -4204,6 +4352,7 @@ body.revir-busy .revir-btn { pointer-events: none; }
 			</div>
 		</div>
 		<div class="revir-chat-hdr-btns">
+			<button id="revir-chat-pin-btn" type="button" class="revir-chat-hbtn" title="Sohbeti Sabitle (Dışarı Tıklayınca Kapanmaz)" onclick="window.__revirToggleChatPin()">📌</button>
 			<button type="button" class="revir-chat-hbtn" title="Sohbeti Temizle" onclick="window.__revirClearChat()">🗑️</button>
 			<button type="button" class="revir-chat-hbtn" title="Pencereyi Büyüt / Küçült" onclick="window.__revirExpandChat()">⤢</button>
 			<button type="button" class="revir-chat-hbtn" title="Küçült" onclick="window.__revirToggleChatBubble()">✕</button>
@@ -4218,7 +4367,7 @@ body.revir-busy .revir-btn { pointer-events: none; }
 	</div>
 	<div id="revir-chat-messages" class="revir-chat-msgs">
 		<div class="revir-cmsg revir-cmsg-ai">
-			<p>Merhaba! Ben <strong>Gemini Klinik Asistan</strong>. 🩺</p>
+			<p>Merhaba! Ben <strong id="revir-chat-welcome-name">Gemini Klinik Asistan</strong>. 🩺</p>
 			<p>Bana yazılı soru sorabilir, <strong>📎 dosya / PDF</strong> ekleyebilir veya <em>"Bu öğrencinin raporunu Word yap"</em> / <em>"Ekli PDF'den sınıfları ve öğrencileri oluştur"</em> diyerek işlem başlatabilirsiniz.</p>
 		</div>
 	</div>
@@ -4251,6 +4400,18 @@ body.revir-busy .revir-btn { pointer-events: none; }
 	var cmdActiveIdx = 0;
 	var cmdTimer = null;
 	var hypoTimers = {};
+	var chatPinned = false;
+	var boxLayoutEnabled = true;
+
+	function setModalDirty(dirty) {
+		modalDirty = !!dirty;
+		var pill = document.getElementById("revir-modal-dirty-pill");
+		if (pill) pill.classList.toggle("visible", modalDirty);
+	}
+
+	function isCalendarPageName(pg) {
+		return String(pg || "").toLocaleLowerCase("tr-TR").indexOf("takvim") !== -1;
+	}
 
 	function showToast(msg, kind) {
 		var el = document.getElementById("revir-toast");
@@ -4424,8 +4585,9 @@ body.revir-busy .revir-btn { pointer-events: none; }
 		var mFs = document.getElementById("revir-modal-fs-btn");
 		if (data.dialog_html !== null && data.dialog_html !== undefined) {
 			var curSig = String(data.dialog_title || "") + "|" + String(data.dialog_depth || 1) + "|" + String(data.dialog_mode || "modal");
-			if (curSig !== lastDialogSig) {
-				modalDirty = false;
+			var isNewSig = (curSig !== lastDialogSig);
+			if (isNewSig) {
+				setModalDirty(false);
 				modalBackdropWarned = false;
 				if (card) card.classList.remove("fullscreen");
 				lastDialogSig = curSig;
@@ -4447,8 +4609,21 @@ body.revir-busy .revir-btn { pointer-events: none; }
 				applySavedModalSize(card, lastDialogTitle, isDrawer);
 			}
 			if (mBack) mBack.classList.toggle("visible", Number(data.dialog_depth || 0) > 1);
-			if (mFs) mFs.style.display = isDrawer ? "none" : "flex";
+			if (mFs) {
+				mFs.style.display = isDrawer ? "none" : "flex";
+				var isFsNow = !!(card && card.classList.contains("fullscreen"));
+				mFs.classList.toggle("active", isFsNow);
+				mFs.textContent = isFsNow ? "⤡" : "⤢";
+			}
 			document.body.classList.add("modal-open");
+			if (isNewSig && mBody && !refocusId) {
+				setTimeout(function() {
+					var firstInp = mBody.querySelector("input:not([type=hidden]):not([type=file]):not([disabled]), textarea:not([disabled]), select:not([disabled])");
+					if (firstInp && firstInp.focus) {
+						try { firstInp.focus({ preventScroll: true }); } catch (_fe) {}
+					}
+				}, 40);
+			}
 		} else {
 			lastDialogTitle = "";
 			if (backdrop) {
@@ -4464,14 +4639,20 @@ body.revir-busy .revir-btn { pointer-events: none; }
 				card.style.maxHeight = "";
 			}
 			if (mBody) mBody.innerHTML = "";
-			modalDirty = false;
+			setModalDirty(false);
 			modalBackdropWarned = false;
 			lastDialogSig = "";
+			if (mFs) {
+				mFs.classList.remove("active");
+				mFs.textContent = "⤢";
+			}
 			document.body.classList.remove("modal-open");
 		}
 
 		// Expander durumlarını dinle
 		document.querySelectorAll("details.revir-expander").forEach(function(det) {
+			if (det.dataset.expBound === "1") return;
+			det.dataset.expBound = "1";
 			det.addEventListener("toggle", function() {
 				fetch("/api/ui_state", {
 					method: "POST",
@@ -4493,7 +4674,17 @@ body.revir-busy .revir-btn { pointer-events: none; }
 			});
 		}
 
+		if (data.box_layout_enabled !== undefined) {
+			boxLayoutEnabled = !!data.box_layout_enabled;
+		}
+		if (isCalendarPageName(lastRenderedPage) || !boxLayoutEnabled) {
+			document.body.classList.remove("revir-layout-edit");
+		}
+		document.body.classList.toggle("revir-box-resize-on", !!(boxLayoutEnabled && !isCalendarPageName(lastRenderedPage)));
+		if (window.__revirSyncLayoutBtn) window.__revirSyncLayoutBtn();
+
 		if (window.__revirInitResizableTables) window.__revirInitResizableTables();
+		if (window.__revirInitBoxLayout) window.__revirInitBoxLayout();
 
 		// Konfeti animasyonu
 		if (data.balloons) launchConfetti();
@@ -4503,6 +4694,7 @@ body.revir-busy .revir-btn { pointer-events: none; }
 		var chatBubble = document.getElementById("revir-chat-bubble");
 		var chatSub = document.getElementById("revir-chat-sub");
 		var chatTitleEl = document.getElementById("revir-chat-title");
+		var chatWelcomeEl = document.getElementById("revir-chat-welcome-name");
 		if (fabBtn) {
 			if (data.floating_chat_enabled) {
 				fabBtn.classList.add("visible");
@@ -4513,6 +4705,7 @@ body.revir-busy .revir-btn { pointer-events: none; }
 		}
 		if (chatTitleEl && data.floating_chat_title) {
 			chatTitleEl.textContent = data.floating_chat_title;
+			if (chatWelcomeEl) chatWelcomeEl.textContent = data.floating_chat_title;
 			if (fabBtn) {
 				fabBtn.title = data.floating_chat_title + " ile Konuş (⌘J / Alt+A)";
 				fabBtn.setAttribute("aria-label", data.floating_chat_title);
@@ -4585,7 +4778,7 @@ body.revir-busy .revir-btn { pointer-events: none; }
 	};
 
 	window.__revirSubmitForm = function(formId) {
-		modalDirty = false;
+		setModalDirty(false);
 		modalBackdropWarned = false;
 		var form = document.querySelector('form[data-form-id="' + CSS.escape(formId) + '"]');
 		var vals = {};
@@ -4922,7 +5115,14 @@ body.revir-busy .revir-btn { pointer-events: none; }
 		}).catch(function(){});
 	};
 
-	// Popover (Ekran alt kenarında otomatik yukarı açılma destekli)
+	// Popover (Ekran kenarlarında otomatik yukarı/sağa-sola hizalama destekli)
+	window.__revirClosePopovers = function(ev) {
+		if (ev) ev.stopPropagation();
+		document.querySelectorAll(".revir-popover-body.open").forEach(function(m) {
+			m.classList.remove("open", "flip-up", "align-left");
+		});
+	};
+
 	window.__revirTogglePopover = function(popId, ev) {
 		if (ev) ev.stopPropagation();
 		var el = document.getElementById("pop_" + popId);
@@ -4930,12 +5130,29 @@ body.revir-busy .revir-btn { pointer-events: none; }
 		var wasOpen = el.classList.contains("open");
 		closeAllMenus();
 		if (!wasOpen) {
-			el.classList.remove("flip-up");
+			el.classList.remove("flip-up", "align-left");
+			el.style.maxHeight = "";
 			el.classList.add("open");
 			try {
+				var vw = window.innerWidth || document.documentElement.clientWidth || 1200;
+				var vh = window.innerHeight || document.documentElement.clientHeight || 800;
 				var rect = el.getBoundingClientRect();
-				if (rect.bottom > window.innerHeight - 16) {
-					el.classList.add("flip-up");
+				if (rect.left < 12) {
+					el.classList.add("align-left");
+					rect = el.getBoundingClientRect();
+					if (rect.right > vw - 12) el.classList.remove("align-left");
+				}
+				rect = el.getBoundingClientRect();
+				if (rect.bottom > vh - 16) {
+					var wrapRect = el.parentElement ? el.parentElement.getBoundingClientRect() : rect;
+					var spaceAbove = wrapRect.top - 16;
+					var spaceBelow = vh - wrapRect.bottom - 16;
+					if (spaceAbove > spaceBelow) {
+						el.classList.add("flip-up");
+						el.style.maxHeight = Math.max(180, Math.min(Math.round(vh * 0.72), Math.round(spaceAbove))) + "px";
+					} else {
+						el.style.maxHeight = Math.max(180, Math.min(Math.round(vh * 0.72), Math.round(spaceBelow))) + "px";
+					}
 				}
 			} catch (e) {}
 		}
@@ -5119,10 +5336,10 @@ body.revir-busy .revir-btn { pointer-events: none; }
 	};
 
 	// Diyalog, Üst Bar, Komut Paleti & Yan Menü
-	window.__revirCloseDialog = function(force) {
-		modalDirty = false;
+	window.__revirCloseDialog = function(closeAll) {
+		setModalDirty(false);
 		modalBackdropWarned = false;
-		sendAction({ action: "close_dialog", all: false });
+		sendAction({ action: "close_dialog", all: !!closeAll });
 	};
 
 	window.__revirTryBackdropClose = function() {
@@ -5134,13 +5351,40 @@ body.revir-busy .revir-btn { pointer-events: none; }
 			showToast("⚠️ Kaydedilmemiş değişiklikler var — kapatmak için ✕ tuşuna veya dışarı tekrar tıklayın.");
 			return;
 		}
-		window.__revirCloseDialog(true);
+		window.__revirCloseDialog(false);
 	};
 
 	window.__revirToggleModalFullscreen = function() {
 		var card = document.getElementById("revir-modal-card");
+		var fsBtn = document.getElementById("revir-modal-fs-btn");
 		if (!card) return;
 		card.classList.toggle("fullscreen");
+		var isFs = card.classList.contains("fullscreen");
+		if (fsBtn) {
+			fsBtn.classList.toggle("active", isFs);
+			fsBtn.textContent = isFs ? "⤡" : "⤢";
+		}
+	};
+
+	window.__revirResetModalSize = function() {
+		var card = document.getElementById("revir-modal-card");
+		if (!card) return;
+		var isDrawer = card.classList.contains("drawer");
+		var store = loadResizeStore(MODAL_STORE_KEY);
+		var mKey = (isDrawer ? "drawer:" : "modal:") + String(lastDialogTitle || "");
+		delete store[mKey];
+		saveResizeStore(MODAL_STORE_KEY, store);
+		card.classList.remove("fullscreen");
+		card.style.width = "";
+		card.style.maxWidth = "";
+		card.style.height = "";
+		card.style.maxHeight = "";
+		var fsBtn = document.getElementById("revir-modal-fs-btn");
+		if (fsBtn) {
+			fsBtn.classList.remove("active");
+			fsBtn.textContent = "⤢";
+		}
+		showToast("↺ Pencere boyutu varsayılana döndürüldü");
 	};
 
 	window.__revirTopbarAction = function(actKey, actVal) {
@@ -5230,7 +5474,8 @@ body.revir-busy .revir-btn { pointer-events: none; }
 		if (!it) return;
 		window.__revirCloseCmdPalette();
 		if (it.kind === "open_chat") {
-			window.__revirToggleChatBubble();
+			if (window.__revirOpenChatBubble) window.__revirOpenChatBubble();
+			else window.__revirToggleChatBubble();
 			return;
 		}
 		sendAction({ action: "cmd_exec", item: it });
@@ -5280,7 +5525,7 @@ body.revir-busy .revir-btn { pointer-events: none; }
 	// Modal içi kirli form takibi
 	document.addEventListener("input", function(ev) {
 		if (ev.target && ev.target.closest && ev.target.closest("#revir-modal-body")) {
-			modalDirty = true;
+			setModalDirty(true);
 			modalBackdropWarned = false;
 		}
 	});
@@ -5295,7 +5540,7 @@ body.revir-busy .revir-btn { pointer-events: none; }
 		var chatBubble = document.getElementById("revir-chat-bubble");
 		if (chatBubble && chatBubble.classList.contains("open") && ev.target && document.contains(ev.target)) {
 			var insideChat = ev.target.closest && ev.target.closest("#revir-chat-bubble, #revir-fab-btn");
-			if (!insideChat) {
+			if (!insideChat && !chatPinned) {
 				chatBubble.classList.remove("open");
 			}
 		}
@@ -5379,7 +5624,24 @@ body.revir-busy .revir-btn { pointer-events: none; }
 
 	window.__revirExpandChat = function() {
 		var b = document.getElementById("revir-chat-bubble");
-		if (b) b.classList.toggle("expanded");
+		if (!b) return;
+		b.classList.toggle("expanded");
+		if (b.classList.contains("expanded")) {
+			b.style.width = "";
+			b.style.height = "";
+		} else {
+			applySavedChatSize();
+		}
+	};
+
+	window.__revirToggleChatPin = function(forceVal) {
+		chatPinned = (forceVal !== undefined) ? !!forceVal : !chatPinned;
+		var pinBtn = document.getElementById("revir-chat-pin-btn");
+		if (pinBtn) {
+			pinBtn.classList.toggle("active", chatPinned);
+			pinBtn.title = chatPinned ? "Sabitlemeyi Kaldır (Dışarı tıklayınca kapanır)" : "Sohbeti Sabitle (Dışarı Tıklayınca Kapanmaz)";
+		}
+		showToast(chatPinned ? "📌 Sohbet penceresi sabitlendi" : "📌 Sohbet sabitlemesi kaldırıldı");
 	};
 
 	window.__revirExportChatMsg = function(plainText, fmt) {
@@ -5620,8 +5882,9 @@ body.revir-busy .revir-btn { pointer-events: none; }
 		if (msgTxt) {
 			userHtml += "<p>" + escHtml(msgTxt) + "</p>";
 		}
+		var chatTitleNow = (document.getElementById("revir-chat-title") || {}).textContent || "Klinik Asistan";
 		appendChatMsg("user", userHtml, "");
-		var waitBubble = appendChatMsg("ai", '<p style="color:var(--text-muted);">⏳ <em>Gemini yanıt hazırlıyor...</em></p>', "");
+		var waitBubble = appendChatMsg("ai", '<p style="color:var(--text-muted);">⏳ <em>' + escHtml(chatTitleNow) + ' yanıt hazırlıyor...</em></p>', "");
 		chatBusy = true;
 
 		fetch("/api/gemini_chat", {
@@ -6086,6 +6349,426 @@ body.revir-busy .revir-btn { pointer-events: none; }
 
 	window.__revirInitResizableTables = initResizableTables;
 	initResizableModal();
+
+	// Yüzen AI Sohbet Penceresi Sol Üst Köşeden Boyutlandırma
+	var CHAT_STORE_KEY = "revir_chat_size_v1";
+	function applySavedChatSize() {
+		var b = document.getElementById("revir-chat-bubble");
+		if (!b || b.classList.contains("expanded")) return;
+		var sv = loadResizeStore(CHAT_STORE_KEY);
+		if (sv && sv.w) b.style.width = Math.max(320, Math.min((window.innerWidth || 1200) - 36, sv.w)) + "px";
+		if (sv && sv.h) b.style.height = Math.max(360, Math.min((window.innerHeight || 800) - 110, sv.h)) + "px";
+	}
+	(function initChatResize() {
+		var b = document.getElementById("revir-chat-bubble");
+		var h = document.getElementById("revir-chat-resize-nw");
+		if (!b || !h || h.dataset.init === "1") return;
+		h.dataset.init = "1";
+		applySavedChatSize();
+		h.addEventListener("pointerdown", function(e) {
+			if (e.button !== 0) return;
+			e.preventDefault();
+			e.stopPropagation();
+			b.classList.remove("expanded");
+			b.classList.add("revir-chat-resizing");
+			var rect = b.getBoundingClientRect();
+			var startX = e.clientX, startY = e.clientY, startW = rect.width, startH = rect.height;
+			var vw = window.innerWidth || 1200, vh = window.innerHeight || 800;
+			function onMove(mv) {
+				var newW = Math.round(Math.max(320, Math.min(vw - 36, startW - (mv.clientX - startX))));
+				var newH = Math.round(Math.max(360, Math.min(vh - 110, startH - (mv.clientY - startY))));
+				b.style.width = newW + "px";
+				b.style.height = newH + "px";
+				showResizeBadge(newW + " × " + newH + " px", mv.clientX, mv.clientY);
+			}
+			function onUp() {
+				b.classList.remove("revir-chat-resizing");
+				hideResizeBadge();
+				var rNow = b.getBoundingClientRect();
+				saveResizeStore(CHAT_STORE_KEY, { w: Math.round(rNow.width), h: Math.round(rNow.height) });
+				window.removeEventListener("pointermove", onMove);
+				window.removeEventListener("pointerup", onUp);
+				window.removeEventListener("pointercancel", onUp);
+			}
+			window.addEventListener("pointermove", onMove);
+			window.addEventListener("pointerup", onUp);
+			window.addEventListener("pointercancel", onUp);
+		});
+		h.addEventListener("dblclick", function(e) {
+			e.preventDefault();
+			e.stopPropagation();
+			try { localStorage.removeItem(CHAT_STORE_KEY); } catch (_e) {}
+			b.style.width = "";
+			b.style.height = "";
+		});
+	})();
+
+	// Sayfa İçi Kutucuk Yer Değiştirme & Boyutlandırma Motoru (TAKVİM HARİÇ)
+	var BOX_STORE_KEY = "revir_box_layout_v1";
+	function loadBoxStore() {
+		var obj = loadResizeStore(BOX_STORE_KEY);
+		if (!obj || typeof obj !== "object") obj = {};
+		if (!obj.pages || typeof obj.pages !== "object") obj.pages = {};
+		return obj;
+	}
+	function saveBoxStore(obj) {
+		saveResizeStore(BOX_STORE_KEY, obj);
+	}
+	function getPageBoxData(store, pg) {
+		store.pages[pg] = store.pages[pg] || {};
+		store.pages[pg].orders = store.pages[pg].orders || {};
+		store.pages[pg].sizes = store.pages[pg].sizes || {};
+		return store.pages[pg];
+	}
+	function boxTextFingerprint(el) {
+		var hdr = el.querySelector("h1, h2, h3, h4, h5, h6, summary, .revir-metric-label, .revir-caption, strong");
+		var raw = (hdr ? hdr.textContent : el.textContent) || "kutu";
+		return raw.replace(/\s+/g, " ").trim().slice(0, 40) || "kutu";
+	}
+	function isEligibleBoxNode(el) {
+		if (!el || el.nodeType !== 1) return false;
+		if (el.closest(".cal-leaf, .cal-grid, [data-no-box-layout='1'], .revir-a4-sheet, .revir-a4-sheet-landscape, #revir-modal-body, #revir-sidebar, #revir-chat-bubble")) return false;
+		if (el.classList.contains("revir-card") || el.classList.contains("revir-chart-card") || el.classList.contains("revir-metric")) return true;
+		if (el.tagName === "DETAILS" && el.classList.contains("revir-expander")) return true;
+		if (el.classList.contains("revir-cols") && !el.querySelector(":scope > .revir-sticky-col")) {
+			if (el.querySelector(".revir-card, .revir-metric, .revir-chart-card, details.revir-expander")) return true;
+		}
+		return false;
+	}
+	function isEligibleGridCol(colEl) {
+		if (!colEl || !colEl.classList || !colEl.classList.contains("revir-col")) return false;
+		if (colEl.classList.contains("revir-sticky-col")) return false;
+		return !!colEl.querySelector(".revir-card, .revir-metric, .revir-chart-card, details.revir-expander, .revir-btn");
+	}
+	function clearBoxDrops() {
+		document.querySelectorAll(".revir-box-drop-before, .revir-box-drop-after").forEach(function(n) {
+			n.classList.remove("revir-box-drop-before", "revir-box-drop-after");
+		});
+	}
+	function syncLayoutBtnState() {
+		var btn = document.getElementById("revir-tb-layout-btn");
+		if (!btn) return;
+		var isCal = isCalendarPageName(lastRenderedPage);
+		btn.disabled = (isCal || !boxLayoutEnabled);
+		btn.classList.toggle("active", document.body.classList.contains("revir-layout-edit"));
+		if (isCal) btn.title = "Takvim sayfası kutucuk düzenlemesinden hariçtir";
+		else if (!boxLayoutEnabled) btn.title = "Kutucuk düzeni Ayarlar bölümünden kapalı";
+		else btn.title = "Sayfa içindeki kutucukların yerini ve boyutunu değiştir (Takvim hariç)";
+	}
+	window.__revirSyncLayoutBtn = syncLayoutBtnState;
+
+	window.__revirToggleLayoutEdit = function(forceVal) {
+		if (isCalendarPageName(lastRenderedPage)) {
+			document.body.classList.remove("revir-layout-edit");
+			syncLayoutBtnState();
+			showToast("ℹ️ Takvim sayfası kutucuk düzenlemesinden hariçtir.", "warn");
+			return;
+		}
+		if (!boxLayoutEnabled) {
+			document.body.classList.remove("revir-layout-edit");
+			syncLayoutBtnState();
+			showToast("ℹ️ Kutucuk düzenleme Ayarlar → Görünüm & Düzen bölümünden etkinleştirilebilir.", "warn");
+			return;
+		}
+		var nxt = (forceVal !== undefined) ? !!forceVal : !document.body.classList.contains("revir-layout-edit");
+		document.body.classList.toggle("revir-layout-edit", nxt);
+		syncLayoutBtnState();
+		if (nxt) {
+			showToast("🧩 Kutucuk düzenleme modu açıldı — sürükleyerek yer değiştirin veya kenarlardan boyutlandırın");
+		}
+	};
+
+	window.__revirResetPageBoxLayout = function(pageName) {
+		var pg = String(pageName || lastRenderedPage || "");
+		if (!pg || isCalendarPageName(pg)) return;
+		var store = loadBoxStore();
+		if (store.pages && store.pages[pg]) {
+			delete store.pages[pg];
+			saveBoxStore(store);
+		}
+		showToast("↺ Bu sayfanın kutucuk yerleşimi ve boyutları sıfırlandı");
+		sendAction({ action: "refresh" });
+	};
+
+	window.__revirResetAllBoxLayouts = function() {
+		try { localStorage.removeItem(BOX_STORE_KEY); } catch (_e) {}
+		document.body.classList.remove("revir-layout-edit");
+		syncLayoutBtnState();
+		showToast("↺ Tüm sayfa kutucuk yerleşimleri ve boyutları sıfırlandı");
+		sendAction({ action: "refresh" });
+	};
+
+	window.__revirResetTableModalSizes = function() {
+		try {
+			localStorage.removeItem(TBL_STORE_KEY);
+			localStorage.removeItem(MODAL_STORE_KEY);
+			localStorage.removeItem(CHAT_STORE_KEY);
+		} catch (_e) {}
+		showToast("↺ Tablo, pencere ve sohbet balonu boyutları sıfırlandı");
+		sendAction({ action: "refresh" });
+	};
+
+	function persistZoneOrder(pg, zoneId, hostEls) {
+		var store = loadBoxStore();
+		var pData = getPageBoxData(store, pg);
+		pData.orders[zoneId] = hostEls.map(function(h) { return h.dataset.boxId; }).filter(Boolean);
+		saveBoxStore(store);
+	}
+
+	function attachBoxDecorators(hostEl, zoneEl, zoneId, pg, isHoriz) {
+		var boxId = hostEl.dataset.boxId;
+		if (!boxId) return;
+		hostEl.classList.add("revir-box-host");
+		var store = loadBoxStore();
+		var pData = getPageBoxData(store, pg);
+		var sv = pData.sizes[boxId];
+		if (sv) {
+			if (sv.w) {
+				hostEl.style.width = sv.w + "px";
+				hostEl.style.maxWidth = "none";
+			}
+			if (sv.h) {
+				hostEl.style.height = sv.h + "px";
+				hostEl.style.overflow = "auto";
+			}
+		}
+		if (hostEl.dataset.boxDecorated === "1") return;
+		hostEl.dataset.boxDecorated = "1";
+
+		// Araç çubuğu (Düzenleme modunda görünür)
+		var tb = document.createElement("div");
+		tb.className = "revir-box-toolbar";
+		tb.addEventListener("click", function(e) { e.stopPropagation(); });
+
+		var dragBtn = document.createElement("button");
+		dragBtn.type = "button";
+		dragBtn.className = "revir-box-tbtn revir-box-drag";
+		dragBtn.title = "Sürükleyip diğer kutucuğun üzerine bırakın";
+		dragBtn.textContent = "⋮⋮";
+		dragBtn.draggable = true;
+		dragBtn.addEventListener("dragstart", function(e) {
+			window.__revirDragBox = { el: hostEl, zone: zoneEl, zoneId: zoneId, isHoriz: isHoriz };
+			hostEl.classList.add("revir-box-dragging");
+			if (e.dataTransfer) {
+				e.dataTransfer.effectAllowed = "move";
+				try { e.dataTransfer.setData("text/plain", boxId); } catch (_de) {}
+			}
+		});
+		dragBtn.addEventListener("dragend", function() {
+			hostEl.classList.remove("revir-box-dragging");
+			clearBoxDrops();
+			window.__revirDragBox = null;
+		});
+
+		function moveSibling(dir) {
+			var sibs = Array.prototype.slice.call(zoneEl.children).filter(function(ch) { return ch.dataset && ch.dataset.boxZone === zoneId; });
+			var idx = sibs.indexOf(hostEl);
+			if (idx === -1) return;
+			var nxtIdx = idx + dir;
+			if (nxtIdx < 0 || nxtIdx >= sibs.length) return;
+			var targetSib = sibs[nxtIdx];
+			if (dir < 0) zoneEl.insertBefore(hostEl, targetSib);
+			else zoneEl.insertBefore(hostEl, targetSib.nextSibling);
+			var newOrder = Array.prototype.slice.call(zoneEl.children).filter(function(ch) { return ch.dataset && ch.dataset.boxZone === zoneId; });
+			persistZoneOrder(pg, zoneId, newOrder);
+		}
+
+		var prevBtn = document.createElement("button");
+		prevBtn.type = "button";
+		prevBtn.className = "revir-box-tbtn revir-box-mv-prev";
+		prevBtn.title = isHoriz ? "Sola Taşı" : "Yukarı Taşı";
+		prevBtn.textContent = isHoriz ? "◀" : "▲";
+		prevBtn.addEventListener("click", function(e) { e.preventDefault(); e.stopPropagation(); moveSibling(-1); });
+
+		var nextBtn = document.createElement("button");
+		nextBtn.type = "button";
+		nextBtn.className = "revir-box-tbtn revir-box-mv-next";
+		nextBtn.title = isHoriz ? "Sağa Taşı" : "Aşağı Taşı";
+		nextBtn.textContent = isHoriz ? "▶" : "▼";
+		nextBtn.addEventListener("click", function(e) { e.preventDefault(); e.stopPropagation(); moveSibling(1); });
+
+		var rstBtn = document.createElement("button");
+		rstBtn.type = "button";
+		rstBtn.className = "revir-box-tbtn revir-box-reset";
+		rstBtn.title = "Bu kutucuğun boyutunu sıfırla";
+		rstBtn.textContent = "↺";
+		rstBtn.addEventListener("click", function(e) {
+			e.preventDefault();
+			e.stopPropagation();
+			hostEl.style.width = "";
+			hostEl.style.maxWidth = "";
+			hostEl.style.height = "";
+			hostEl.style.overflow = "";
+			var stNow = loadBoxStore();
+			var pd = getPageBoxData(stNow, pg);
+			delete pd.sizes[boxId];
+			saveBoxStore(stNow);
+			showToast("↺ Kutucuk boyutu sıfırlandı");
+		});
+
+		tb.appendChild(dragBtn);
+		tb.appendChild(prevBtn);
+		tb.appendChild(nextBtn);
+		tb.appendChild(rstBtn);
+		hostEl.appendChild(tb);
+
+		hostEl.addEventListener("dragover", function(e) {
+			var cur = window.__revirDragBox;
+			if (!cur || cur.el === hostEl || cur.zone !== zoneEl || cur.zoneId !== zoneId) return;
+			e.preventDefault();
+			clearBoxDrops();
+			var r = hostEl.getBoundingClientRect();
+			var before = isHoriz ? (e.clientX < r.left + r.width / 2) : (e.clientY < r.top + r.height / 2);
+			hostEl.classList.add(before ? "revir-box-drop-before" : "revir-box-drop-after");
+		});
+		hostEl.addEventListener("dragleave", function() {
+			hostEl.classList.remove("revir-box-drop-before", "revir-box-drop-after");
+		});
+		hostEl.addEventListener("drop", function(e) {
+			var cur = window.__revirDragBox;
+			if (!cur || cur.el === hostEl || cur.zone !== zoneEl || cur.zoneId !== zoneId) return;
+			e.preventDefault();
+			e.stopPropagation();
+			var r = hostEl.getBoundingClientRect();
+			var before = isHoriz ? (e.clientX < r.left + r.width / 2) : (e.clientY < r.top + r.height / 2);
+			clearBoxDrops();
+			if (before) zoneEl.insertBefore(cur.el, hostEl);
+			else zoneEl.insertBefore(cur.el, hostEl.nextSibling);
+			var newOrder = Array.prototype.slice.call(zoneEl.children).filter(function(ch) { return ch.dataset && ch.dataset.boxZone === zoneId; });
+			persistZoneOrder(pg, zoneId, newOrder);
+		});
+
+		// Kenar & Köşe Boyutlandırma Tutamaçları
+		[
+			["r", "revir-box-res-r", "Genişliği ayarlamak için sürükleyin · Sıfırlamak için çift tıklayın"],
+			["b", "revir-box-res-b", "Yüksekliği ayarlamak için sürükleyin · Sıfırlamak için çift tıklayın"],
+			["se", "revir-box-res-se", "Kutucuğu köşeden sürükleyerek boyutlandırın · Sıfırlamak için çift tıklayın"]
+		].forEach(function(hcfg) {
+			var hEl = document.createElement("div");
+			hEl.className = hcfg[1];
+			hEl.title = hcfg[2];
+			hEl.addEventListener("click", function(e) { e.stopPropagation(); });
+			hEl.addEventListener("pointerdown", function(e) {
+				if (e.button !== 0 || !boxLayoutEnabled || isCalendarPageName(lastRenderedPage)) return;
+				e.preventDefault();
+				e.stopPropagation();
+				var rect = hostEl.getBoundingClientRect();
+				var startX = e.clientX, startY = e.clientY, startW = rect.width, startH = rect.height;
+				var live = Object.assign({}, (getPageBoxData(loadBoxStore(), pg).sizes[boxId] || {}));
+				hostEl.classList.add("revir-box-resizing");
+				function onMove(mv) {
+					if (hcfg[0] === "r" || hcfg[0] === "se") {
+						var nw = Math.round(Math.max(180, Math.min(1800, startW + (mv.clientX - startX))));
+						hostEl.style.width = nw + "px";
+						hostEl.style.maxWidth = "none";
+						live.w = nw;
+					}
+					if (hcfg[0] === "b" || hcfg[0] === "se") {
+						var nh = Math.round(Math.max(72, Math.min(1600, startH + (mv.clientY - startY))));
+						hostEl.style.height = nh + "px";
+						hostEl.style.overflow = "auto";
+						live.h = nh;
+					}
+					var cr = hostEl.getBoundingClientRect();
+					showResizeBadge(Math.round(cr.width) + " × " + Math.round(cr.height) + " px", mv.clientX, mv.clientY);
+				}
+				function onUp() {
+					hostEl.classList.remove("revir-box-resizing");
+					hideResizeBadge();
+					var stNow = loadBoxStore();
+					var pd = getPageBoxData(stNow, pg);
+					if (live.w || live.h) pd.sizes[boxId] = live;
+					else delete pd.sizes[boxId];
+					saveBoxStore(stNow);
+					window.removeEventListener("pointermove", onMove);
+					window.removeEventListener("pointerup", onUp);
+					window.removeEventListener("pointercancel", onUp);
+				}
+				window.addEventListener("pointermove", onMove);
+				window.addEventListener("pointerup", onUp);
+				window.addEventListener("pointercancel", onUp);
+			});
+			hEl.addEventListener("dblclick", function(e) {
+				e.preventDefault();
+				e.stopPropagation();
+				var stNow = loadBoxStore();
+				var pd = getPageBoxData(stNow, pg);
+				pd.sizes[boxId] = pd.sizes[boxId] || {};
+				if (hcfg[0] === "r" || hcfg[0] === "se") {
+					hostEl.style.width = "";
+					hostEl.style.maxWidth = "";
+					delete pd.sizes[boxId].w;
+				}
+				if (hcfg[0] === "b" || hcfg[0] === "se") {
+					hostEl.style.height = "";
+					hostEl.style.overflow = "";
+					delete pd.sizes[boxId].h;
+				}
+				if (!pd.sizes[boxId].w && !pd.sizes[boxId].h) delete pd.sizes[boxId];
+				saveBoxStore(stNow);
+			});
+			hostEl.appendChild(hEl);
+		});
+	}
+
+	function initBoxLayout() {
+		var mainInner = document.getElementById("revir-main-inner");
+		if (!mainInner) return;
+		var pg = String(lastRenderedPage || "main");
+		syncLayoutBtnState();
+		if (isCalendarPageName(pg) || !boxLayoutEnabled) return;
+
+		var store = loadBoxStore();
+		var pData = getPageBoxData(store, pg);
+
+		function setupZone(zoneEl, zoneId, items, isHoriz) {
+			if (!zoneEl || items.length === 0) return;
+			var seen = {};
+			items.forEach(function(item) {
+				var fp = boxTextFingerprint(item);
+				seen[fp] = (seen[fp] || 0) + 1;
+				item.dataset.boxId = zoneId + "::" + fp + "#" + seen[fp];
+				item.dataset.boxZone = zoneId;
+			});
+			var savedOrd = pData.orders[zoneId];
+			if (Array.isArray(savedOrd) && savedOrd.length > 1 && items.length > 1) {
+				var byId = {};
+				items.forEach(function(it) { byId[it.dataset.boxId] = it; });
+				var ordered = [];
+				savedOrd.forEach(function(bid) { if (byId[bid]) { ordered.push(byId[bid]); delete byId[bid]; } });
+				items.forEach(function(it) { if (byId[it.dataset.boxId]) ordered.push(it); });
+				if (isHoriz) {
+					ordered.forEach(function(it) { zoneEl.appendChild(it); });
+				} else {
+					var anchor = items[items.length - 1].nextSibling;
+					ordered.forEach(function(it) { zoneEl.insertBefore(it, anchor); });
+				}
+			}
+			items.forEach(function(item) {
+				attachBoxDecorators(item, zoneEl, zoneId, pg, isHoriz);
+			});
+		}
+
+		// 1. Dikey kutucuk bölgeleri (ana sayfa, sekme panelleri, dikey sütunlar)
+		var vZones = [mainInner].concat(
+			Array.prototype.slice.call(mainInner.querySelectorAll(".revir-tab-pane, .revir-col"))
+		);
+		vZones.forEach(function(zEl, zIdx) {
+			if (zEl.closest(".cal-leaf, .cal-grid, [data-no-box-layout='1'], #revir-modal-body")) return;
+			var ch = Array.prototype.slice.call(zEl.children).filter(isEligibleBoxNode);
+			if (ch.length >= 1) setupZone(zEl, "vz:" + zIdx, ch, false);
+		});
+
+		// 2. Yatay sütun kutucuk bölgeleri (yan yana duran 2-4 kart/metrik sütunları)
+		var hZones = Array.prototype.slice.call(mainInner.querySelectorAll(".revir-cols"));
+		hZones.forEach(function(colsEl, hIdx) {
+			if (colsEl.closest(".cal-leaf, .cal-grid, [data-no-box-layout='1'], #revir-modal-body")) return;
+			if (colsEl.querySelector(":scope > .revir-sticky-col")) return;
+			var cols = Array.prototype.slice.call(colsEl.children).filter(isEligibleGridCol);
+			if (cols.length >= 2) setupZone(colsEl, "hz:" + hIdx, cols, true);
+		});
+	}
+	window.__revirInitBoxLayout = initBoxLayout;
 
 	var INITIAL_DATA = __REVIR_INITIAL_JSON__;
 	function bootInitial() {
