@@ -651,19 +651,51 @@ class TestGeminiAssistant(unittest.TestCase):
             self.assertEqual(mod_ev, "qwen3-vl-30b")
 
             revir_ui.reset_session()
-            cfg_ev = persantil.get_app_settings()
+            out_ev_sync = revir_ui.run_action_headless(
+                lambda: persantil._sync_floating_chat_ui(),
+                {"action": "render"},
+            )
+            self.assertTrue(out_ev_sync["floating_chat_enabled"])
+            self.assertEqual(out_ev_sync["floating_chat_title"], "🇹🇷 EVREN Klinik Asistan")
+            self.assertIn("EVREN", out_ev_sync["floating_chat_label"])
+
+            tb_ev_html = persantil._build_topbar_html("📊 Genel Bakış", None, False, True, "qwen3-vl-30b", has_ai_key=True)
+            self.assertIn("🇹🇷 EVREN · qwen3-vl-30b", tb_ev_html)
+
+            # Topbar toggle_ai must work cleanly with EVREN-only key without redirecting to Settings
+            revir_ui.session_state.pop("target_page", None)
+            try:
+                persantil._handle_topbar_action("toggle_ai", "")
+            except revir_ui._RerunException:
+                pass
+            self.assertIsNone(revir_ui.session_state.get("target_page"))
+            self.assertEqual(persantil.get_app_settings().get("gemini_enabled"), "0")
+            out_off_sync = revir_ui.run_action_headless(lambda: persantil._sync_floating_chat_ui(), {"action": "render"})
+            self.assertFalse(out_off_sync["floating_chat_enabled"])
+
+            try:
+                persantil._handle_topbar_action("toggle_ai", "")
+            except revir_ui._RerunException:
+                pass
+            self.assertEqual(persantil.get_app_settings().get("gemini_enabled"), "1")
+            out_on_sync = revir_ui.run_action_headless(lambda: persantil._sync_floating_chat_ui(), {"action": "render"})
+            self.assertTrue(out_on_sync["floating_chat_enabled"])
+
+            revir_ui.reset_session()
             out_ev_ui = revir_ui.run_action_headless(
-                lambda: persantil.render_gemini_ai_settings_panel(cfg_ev),
+                lambda: persantil.render_gemini_ai_settings_panel(persantil.get_app_settings()),
                 {"action": "render"},
             )
             self.assertNotIn("Çalışma Zamanı Hatası", out_ev_ui["main_html"])
             self.assertIn("cfg_evren_api_key_inp", out_ev_ui["main_html"])
             self.assertIn("btn_accept_evren_terms", out_ev_ui["main_html"])
             self.assertIn("evren.ssyz.org.tr", out_ev_ui["main_html"])
+            self.assertIn("__revirOpenChatBubble", out_ev_ui["main_html"])
+            self.assertIn("Sohbet Penceresini Şimdi Aç", out_ev_ui["main_html"])
 
             out_gm_switch = revir_ui.run_action_headless(
                 lambda: persantil.render_gemini_ai_settings_panel(persantil.get_app_settings()),
-                {"action": "change", "key": "cfg_ai_provider_sel", "value": "gemini"},
+                {"action": "change", "key": "cfg_ai_provider_sel", "value": 0},
             )
             self.assertNotIn("Çalışma Zamanı Hatası", out_gm_switch["main_html"])
             self.assertEqual(persantil.get_app_settings().get("ai_provider"), "gemini")

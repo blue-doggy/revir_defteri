@@ -967,6 +967,7 @@ class _AppSession:
 		self.page_title: str = "Revir Defteri"
 		self.last_html_payload: dict[str, Any] = {}
 		self.floating_chat_enabled: bool = False
+		self.floating_chat_title: str = "Gemini Klinik Asistan"
 		self.floating_chat_label: str = "KVKK Korumalı"
 		self.floating_chat_chips: list[dict[str, str]] | None = None
 		self.floating_chat_handler: Callable | None = None
@@ -2668,10 +2669,13 @@ def configure_floating_chat(
 	export_handler: Callable | None = None,
 	write_handler: Callable | None = None,
 	chips: list[dict[str, str]] | None = None,
+	title: str | None = None,
 ) -> None:
 	ctx = _get_ctx()
 	ctx.session.floating_chat_enabled = bool(enabled)
 	ctx.session.floating_chat_label = str(label or "KVKK Korumalı")
+	if title is not None:
+		ctx.session.floating_chat_title = str(title or "Gemini Klinik Asistan")
 	if chips is not None:
 		ctx.session.floating_chat_chips = list(chips)
 	if handler is not None:
@@ -3075,6 +3079,7 @@ def _execute_render_cycle(app_fn: Callable[[], None], session: _AppSession, payl
 			"styles_html": "\n".join(last_ctx.styles_parts),
 			"scripts_html": "\n".join(last_ctx.scripts_parts),
 			"floating_chat_enabled": session.floating_chat_enabled,
+			"floating_chat_title": session.floating_chat_title,
 			"floating_chat_label": session.floating_chat_label,
 			"floating_chat_chips": session.floating_chat_chips,
 		}
@@ -4194,7 +4199,7 @@ body.revir-busy .revir-btn { pointer-events: none; }
 				</svg>
 			</div>
 			<div class="revir-chat-title-wrap">
-				<div class="revir-chat-title">Gemini Klinik Asistan</div>
+				<div id="revir-chat-title" class="revir-chat-title">Gemini Klinik Asistan</div>
 				<div id="revir-chat-sub" class="revir-chat-sub">🛡️ KVKK Korumalı · Akıllı Asistan &amp; Dosya Destekli</div>
 			</div>
 		</div>
@@ -4497,12 +4502,20 @@ body.revir-busy .revir-btn { pointer-events: none; }
 		var fabBtn = document.getElementById("revir-fab-btn");
 		var chatBubble = document.getElementById("revir-chat-bubble");
 		var chatSub = document.getElementById("revir-chat-sub");
+		var chatTitleEl = document.getElementById("revir-chat-title");
 		if (fabBtn) {
 			if (data.floating_chat_enabled) {
 				fabBtn.classList.add("visible");
 			} else {
 				fabBtn.classList.remove("visible");
 				if (chatBubble) chatBubble.classList.remove("open");
+			}
+		}
+		if (chatTitleEl && data.floating_chat_title) {
+			chatTitleEl.textContent = data.floating_chat_title;
+			if (fabBtn) {
+				fabBtn.title = data.floating_chat_title + " ile Konuş (⌘J / Alt+A)";
+				fabBtn.setAttribute("aria-label", data.floating_chat_title);
 			}
 		}
 		if (chatSub && data.floating_chat_label) {
@@ -5354,6 +5367,14 @@ body.revir-busy .revir-btn { pointer-events: none; }
 			var inp = document.getElementById("revir-chat-inp");
 			if (inp) setTimeout(function() { inp.focus(); }, 60);
 		}
+	};
+
+	window.__revirOpenChatBubble = function() {
+		var b = document.getElementById("revir-chat-bubble");
+		if (!b) return;
+		b.classList.add("open");
+		var inp = document.getElementById("revir-chat-inp");
+		if (inp) setTimeout(function() { inp.focus(); }, 60);
 	};
 
 	window.__revirExpandChat = function() {

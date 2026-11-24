@@ -126,7 +126,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.28.0"
+_DEFAULT_APP_VERSION = "1.28.1"
 
 
 def _load_app_version() -> str:
@@ -13201,7 +13201,7 @@ def _handle_floating_gemini_apply_write(payload: dict[str, Any]) -> dict[str, An
 def _handle_floating_gemini_chat(payload: dict[str, Any], chat_history: list[dict[str, str]]) -> dict[str, Any]:
 	is_on, api_key, model = _get_active_gemini_config()
 	if not is_on:
-		return {"ok": False, "error": "Gemini AI kapalı veya API anahtarı tanımlı değil."}
+		return {"ok": False, "error": "Yapay Zekâ (Gemini / EVREN) kapalı veya API anahtarı tanımlı değil."}
 
 	raw_msg = str(payload.get("message") or "")
 	raw_atts = payload.get("attachments") if isinstance(payload.get("attachments"), list) else []
@@ -13503,14 +13503,17 @@ def _sync_floating_chat_ui(cur_page: str = "") -> None:
 	cfg = get_app_settings()
 	is_on, _, model = _get_active_gemini_config()
 	float_on = is_on and (str(cfg.get("gemini_floating_chat", "1")).strip() != "0")
+	provider = str(cfg.get("ai_provider") or "gemini").strip().lower()
+	is_evren_active = (provider == "evren") or gai.is_evren_key_or_model("", model)
+	chat_title = "🇹🇷 EVREN Klinik Asistan" if is_evren_active else "Gemini Klinik Asistan"
 	active_pid = ui.session_state.get("active_person_id")
 	active_p = get_person_by_id(active_pid) if active_pid else None
 	if active_p:
-		sub_lbl = f"📌 Aktif Kişi Bağlamı ({active_p['class_name']}) · 🛡️ KVKK"
+		prov_prefix = "🇹🇷 EVREN · " if is_evren_active else ""
+		sub_lbl = f"{prov_prefix}📌 Aktif Kişi Bağlamı ({active_p['class_name']}) · 🛡️ KVKK"
 	else:
-		provider = str(cfg.get("ai_provider") or "gemini").strip().lower()
 		m_disp = model[6:] if str(model).lower().startswith("evren:") else model
-		if provider == "evren" or gai.is_evren_key_or_model("", model):
+		if is_evren_active:
 			sub_lbl = f"🇹🇷 EVREN · {m_disp} · 🛡️ KVKK"
 		else:
 			sub_lbl = f"🛡️ KVKK Korumalı · {m_disp}"
@@ -13518,6 +13521,7 @@ def _sync_floating_chat_ui(cur_page: str = "") -> None:
 	ui.configure_floating_chat(
 		enabled=float_on,
 		label=sub_lbl,
+		title=chat_title,
 		handler=_handle_floating_gemini_chat,
 		export_handler=_handle_floating_gemini_export_msg,
 		write_handler=_handle_floating_gemini_apply_write,
@@ -13889,6 +13893,9 @@ def open_gemini_api_guide_dialog() -> None:
 
 def render_gemini_ai_settings_panel(current_cfg: dict[str, str]) -> None:
 	ui.markdown("### 🤖 Yapay Zekâ (Google Gemini / 🇹🇷 EVREN Platformu) & KVKK Ayarları")
+	ai_cfg_flash = ui.session_state.pop("_ai_cfg_flash_msg", None)
+	if ai_cfg_flash:
+		ui.success(ai_cfg_flash)
 	if ui.session_state.pop("_ai_key_needed_warn", False):
 		ui.warning("⚠️ AI modunu aktif edebilmek için lütfen aşağıya geçerli bir Google Gemini veya EVREN Platformu API anahtarı girip kaydedin.")
 	ui.caption(
@@ -13919,6 +13926,7 @@ def render_gemini_ai_settings_panel(current_cfg: dict[str, str]) -> None:
 			"gemini_strict_kvkk_pdf": "1" if sk_v else "0",
 		})
 		clear_all_data_caches()
+		_sync_floating_chat_ui()
 
 	def _on_provider_change() -> None:
 		pv = str(ui.session_state.get("cfg_ai_provider_sel") or "gemini").strip().lower()
@@ -14007,19 +14015,25 @@ def render_gemini_ai_settings_panel(current_cfg: dict[str, str]) -> None:
 			eb_c1, eb_c2 = ui.columns(2)
 			with eb_c1:
 				if ui.button("💾 EVREN & Yapay Zekâ Ayarlarını Kaydet", type="primary", use_container_width=True, key="btn_save_evren_cfg"):
+					clean_ev_k = evren_key_inp.strip()
+					eff_en = True if (clean_ev_k and not cur_evren_key) else bool(en_val)
+					eff_flt = True if (clean_ev_k and not cur_evren_key) else bool(float_val)
+					ui.session_state["cfg_gemini_enabled_toggle"] = eff_en
+					ui.session_state["cfg_gemini_floating_toggle"] = eff_flt
 					save_app_settings({
 						"ai_provider": "evren",
-						"gemini_enabled": "1" if en_val else "0",
-						"gemini_floating_chat": "1" if float_val else "0",
+						"gemini_enabled": "1" if eff_en else "0",
+						"gemini_floating_chat": "1" if eff_flt else "0",
 						"gemini_strict_kvkk_pdf": "1" if strict_pdf_val else "0",
 						"evren_model": eff_evren_model,
-						"evren_api_key": evren_key_inp.strip(),
+						"evren_api_key": clean_ev_k,
 						"evren_base_url": eff_evren_base,
 					})
-					gai.save_local_evren_api_key(evren_key_inp.strip(), APP_DIR)
+					gai.save_local_evren_api_key(clean_ev_k, APP_DIR)
 					clear_all_data_caches()
 					_sync_floating_chat_ui()
-					ui.success(f"✅ EVREN Platformu ayarları kaydedildi (Model: {eff_evren_model}).")
+					ui.session_state["_ai_cfg_flash_msg"] = f"✅ EVREN Platformu ayarları kaydedildi (Model: {eff_evren_model})."
+					ui.rerun()
 			with eb_c2:
 				if ui.button("🔌 EVREN Bağlantısını Test Et", type="secondary", use_container_width=True, key="btn_test_evren_conn"):
 					ok_ev, msg_ev, used_ev = gai.test_gemini_connection(
@@ -14073,18 +14087,24 @@ def render_gemini_ai_settings_panel(current_cfg: dict[str, str]) -> None:
 			b_c1, b_c2 = ui.columns(2)
 			with b_c1:
 				if ui.button("💾 Gemini AI Ayarlarını Kaydet", type="primary", use_container_width=True, key="btn_save_gemini_cfg"):
+					clean_gm_k = api_key_inp.strip()
+					eff_en = True if (clean_gm_k and not cur_key) else bool(en_val)
+					eff_flt = True if (clean_gm_k and not cur_key) else bool(float_val)
+					ui.session_state["cfg_gemini_enabled_toggle"] = eff_en
+					ui.session_state["cfg_gemini_floating_toggle"] = eff_flt
 					save_app_settings({
 						"ai_provider": "gemini",
-						"gemini_enabled": "1" if en_val else "0",
-						"gemini_floating_chat": "1" if float_val else "0",
+						"gemini_enabled": "1" if eff_en else "0",
+						"gemini_floating_chat": "1" if eff_flt else "0",
 						"gemini_strict_kvkk_pdf": "1" if strict_pdf_val else "0",
 						"gemini_model": sel_model,
-						"gemini_api_key": api_key_inp.strip(),
+						"gemini_api_key": clean_gm_k,
 					})
-					gai.save_local_api_key(api_key_inp.strip(), APP_DIR)
+					gai.save_local_api_key(clean_gm_k, APP_DIR)
 					clear_all_data_caches()
 					_sync_floating_chat_ui()
-					ui.success("✅ Gemini AI ve yüzen sohbet balonu ayarları kaydedildi.")
+					ui.session_state["_ai_cfg_flash_msg"] = "✅ Gemini AI ve yüzen sohbet balonu ayarları kaydedildi."
+					ui.rerun()
 			with b_c2:
 				if ui.button("🔌 Bağlantıyı Şimdi Test Et", type="secondary", use_container_width=True, key="btn_test_gemini_conn"):
 					ok, msg, used_m = gai.test_gemini_connection(api_key_inp.strip(), sel_model)
@@ -14092,6 +14112,22 @@ def render_gemini_ai_settings_panel(current_cfg: dict[str, str]) -> None:
 						ui.success(f"✅ Bağlantı Başarılı ({used_m}): {msg}")
 					else:
 						ui.error(f"❌ Bağlantı Hatası: {msg}")
+
+		active_key_now = cur_evren_key if sel_provider == "evren" else cur_key
+		if active_key_now and en_val and float_val:
+			open_lbl = (
+				"💬 🇹🇷 EVREN Sohbet Penceresini Şimdi Aç (Ctrl+J)"
+				if sel_provider == "evren"
+				else "💬 Gemini Sohbet Penceresini Şimdi Aç (Ctrl+J)"
+			)
+			ui.markdown(
+				f"""<div style="margin-top:8px;">
+					<button type="button" class="revir-btn revir-btn-primary revir-w-full" onclick="event.stopPropagation();if(window.__revirOpenChatBubble)window.__revirOpenChatBubble();">{open_lbl}</button>
+				</div>""",
+				unsafe_allow_html=True,
+			)
+		elif sel_provider == "evren" and not cur_evren_key:
+			ui.caption("💡 EVREN sohbet penceresinin açılması için yukarıya `evren_llm_...` anahtarınızı girip **💾 EVREN & Yapay Zekâ Ayarlarını Kaydet** butonuna basın.")
 
 	# API Anahtarı Alma & Görsel PDF Kılavuz Bölümü
 	guide_pdf_path = _resolve_bundled_asset("gemini_api_anahtari_kilavuzu.pdf")
@@ -33343,7 +33379,12 @@ def _handle_topbar_action(act_key: str, act_val: Any) -> None:
 	elif act_key == "toggle_ai":
 		cfg = get_app_settings()
 		cur_en = str(cfg.get("gemini_enabled", "1")).strip() != "0"
-		has_key = bool(gai.get_api_key(cfg, APP_DIR))
+		provider = str(cfg.get("ai_provider") or "gemini").strip().lower()
+		has_key = (
+			bool(gai.get_evren_api_key(cfg, APP_DIR))
+			if provider == "evren"
+			else bool(gai.get_api_key(cfg, APP_DIR))
+		)
 		if not has_key:
 			save_app_settings({"gemini_enabled": "1"})
 			ui.session_state["cfg_gemini_enabled_toggle"] = True
@@ -33591,9 +33632,20 @@ def _build_topbar_html(cur_page: str, active_person: dict | sqlite3.Row | None, 
 	kvkk_lbl = "🛡️ KVKK Açık" if kvkk_on else "🛡️ KVKK"
 	dk_ico = "☀️" if is_dark else "🌙"
 	dk_tip = "Aydınlık Moda Geç" if is_dark else "Karanlık Moda Geç"
-	has_key_flag = bool(gai.get_api_key(get_app_settings(), APP_DIR)) if has_ai_key is None else bool(has_ai_key)
+	cfg_tb = get_app_settings()
+	provider_tb = str(cfg_tb.get("ai_provider") or "gemini").strip().lower()
+	has_key_flag = (
+		(bool(gai.get_evren_api_key(cfg_tb, APP_DIR)) if provider_tb == "evren" else bool(gai.get_api_key(cfg_tb, APP_DIR)))
+		if has_ai_key is None
+		else bool(has_ai_key)
+	)
 	ai_cls = "revir-tb-pill kvkk-on" if ai_on else "revir-tb-pill"
-	ai_lbl = f"🤖 AI · {ai_model.replace('gemini-', '')}" if ai_on else "⚪ AI Kapalı"
+	if ai_on:
+		is_ev_m = (provider_tb == "evren") or gai.is_evren_key_or_model("", ai_model)
+		m_short = ai_model[6:] if str(ai_model).lower().startswith("evren:") else ai_model
+		ai_lbl = f"🇹🇷 EVREN · {m_short}" if is_ev_m else f"🤖 AI · {m_short.replace('gemini-', '')}"
+	else:
+		ai_lbl = "⚪ AI Kapalı"
 	if ai_on:
 		ai_tip = "AI Modu Açık — Kapatmak için tıklayın"
 	elif has_key_flag:
