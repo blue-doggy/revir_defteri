@@ -166,6 +166,118 @@ class TestPersantilCoreAndUI(unittest.TestCase):
             self.assertEqual(export_xlsx.call_count, 1)
             self.assertEqual(export_html.call_count, 1)
 
+    def test_meb_report_wizard_defers_word_generation_until_export(self):
+        stats = {
+            "students_total": 12,
+            "screened_cohort_cnt": 9,
+            "bmi_eval_total": 8,
+            "vax_students_cnt": 7,
+            "fridge_logs_cnt": 2,
+            "special_needs_cnt": 1,
+            "care_plans_total": 1,
+            "visits_total": 14,
+            "referral_cnt": 2,
+        }
+        with (
+            mock.patch.object(
+                persantil,
+                "get_active_academic_year",
+                return_value={"start_date": "2026-09-01", "end_date": "2027-06-30"},
+            ),
+            mock.patch.object(persantil, "collect_meb_annual_activity_stats", return_value=stats),
+            mock.patch.object(persantil, "_get_active_gemini_config", return_value=(False, "", "test-model")),
+            mock.patch.object(persantil, "build_meb_annual_activity_report_docx", return_value=b"docx") as build_docx,
+        ):
+            scope_output = revir_ui.run_action_headless(
+                persantil._render_meb_activity_report_tab,
+                {"action": "render"},
+            )
+            self.assertIn("Adım 1/3", scope_output["main_html"])
+            self.assertIn("MEB rapor önizlemesine geç", scope_output["main_html"])
+            build_docx.assert_not_called()
+
+            preview_output = revir_ui.run_action_headless(
+                persantil._render_meb_activity_report_tab,
+                {"action": "click", "key": "meb_rep_wizard_next_preview"},
+            )
+            self.assertIn("Adım 2/3", preview_output["main_html"])
+            self.assertIn("Kayıtlı Öğrenci", preview_output["main_html"])
+            build_docx.assert_not_called()
+
+            export_output = revir_ui.run_action_headless(
+                persantil._render_meb_activity_report_tab,
+                {"action": "click", "key": "meb_rep_wizard_next_export"},
+            )
+            self.assertIn("Adım 3/3", export_output["main_html"])
+            self.assertIn("MEB Dönem / Yıl Sonu Resmi Faaliyet Raporunu İndir", export_output["main_html"])
+            build_docx.assert_called_once()
+
+    def test_classic_report_wizard_gates_person_and_class_exports(self):
+        with self.connect() as connection:
+            class_id = connection.execute("INSERT INTO classes(name) VALUES ('Wizard 1-A')").lastrowid
+            person_id = connection.execute(
+                "INSERT INTO students(class_id, full_name, sex, birth_date, person_type) VALUES (?, 'Wizard Öğrenci', 'K', '2016-02-03', 'Öğrenci')",
+                (class_id,),
+            ).lastrowid
+        report_cfg = persantil.get_report_settings()
+
+        with (
+            mock.patch.object(persantil, "build_student_report_section_html", return_value="<section></section>"),
+            mock.patch.object(persantil, "build_class_batch_report_docx", return_value=b"class-docx") as build_class_docx,
+            mock.patch.object(persantil, "build_student_report_docx", return_value=b"person-docx") as build_person_docx,
+            mock.patch.object(persantil, "_render_student_ai_report_editor", return_value=(False, "")),
+        ):
+            revir_ui.session_state["report_scope_mode"] = "🏫 Tüm Sınıf Raporu (Toplu)"
+            class_scope = revir_ui.run_action_headless(
+                lambda: persantil._render_classic_reports_content(["Wizard 1-A"], report_cfg),
+                {"action": "render"},
+            )
+            self.assertIn("Adım 1/3", class_scope["main_html"])
+            self.assertIn("Sınıf raporu önizlemesine geç", class_scope["main_html"])
+            build_class_docx.assert_not_called()
+
+            class_preview = revir_ui.run_action_headless(
+                lambda: persantil._render_classic_reports_content(["Wizard 1-A"], report_cfg),
+                {"action": "click", "key": "classic_rep_wizard_next_preview"},
+            )
+            self.assertIn("Adım 2/3", class_preview["main_html"])
+            self.assertIn("Yazdırılabilir Sınıf Raporu Önizleme", class_preview["main_html"])
+            self.assertNotIn("Tüm Sınıfın Word Raporunu İndir", class_preview["main_html"])
+            build_class_docx.assert_not_called()
+
+            class_export = revir_ui.run_action_headless(
+                lambda: persantil._render_classic_reports_content(["Wizard 1-A"], report_cfg),
+                {"action": "click", "key": "classic_rep_wizard_next_export_class"},
+            )
+            self.assertIn("Adım 3/3", class_export["main_html"])
+            self.assertIn("Tüm Sınıfın Word Raporunu İndir", class_export["main_html"])
+            build_class_docx.assert_not_called()
+
+            revir_ui.reset_session()
+            revir_ui.session_state["active_person_id"] = person_id
+            person_scope = revir_ui.run_action_headless(
+                lambda: persantil._render_classic_reports_content(["Wizard 1-A"], report_cfg),
+                {"action": "render"},
+            )
+            self.assertIn("Kişi raporu önizlemesine geç", person_scope["main_html"])
+
+            person_preview = revir_ui.run_action_headless(
+                lambda: persantil._render_classic_reports_content(["Wizard 1-A"], report_cfg),
+                {"action": "click", "key": "classic_rep_wizard_next_preview"},
+            )
+            self.assertIn("Adım 2/3", person_preview["main_html"])
+            self.assertIn("Yazdırılabilir Kişi Raporu Önizleme", person_preview["main_html"])
+            self.assertNotIn("Kişi Sağlık Raporunu İndir", person_preview["main_html"])
+            build_person_docx.assert_not_called()
+
+            person_export = revir_ui.run_action_headless(
+                lambda: persantil._render_classic_reports_content(["Wizard 1-A"], report_cfg),
+                {"action": "click", "key": "classic_rep_wizard_next_export_person"},
+            )
+            self.assertIn("Adım 3/3", person_export["main_html"])
+            self.assertIn("Kişi Sağlık Raporunu İndir", person_export["main_html"])
+            build_person_docx.assert_not_called()
+
     def test_dashboard_distinguishes_failed_checks_from_clear_status(self):
         failures = (
             mock.patch.object(persantil, "get_scheduled_doses_for_date", side_effect=RuntimeError("test")),

@@ -131,7 +131,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.33.0"
+_DEFAULT_APP_VERSION = "1.34.0"
 
 
 def _load_app_version() -> str:
@@ -30274,6 +30274,12 @@ def _render_meb_activity_report_tab() -> None:
 	ui.caption(
 		"Seçilen tarih aralığı için tüm kurum sağlık profili, revir başvuru/sevk dağılımı, sınıf tarama tamamlanma oranları, WHO persantil gelişim istatistikleri, bakım planları ve stok/soğuk zincir özetini tek A4 Word (.docx) faaliyet raporuna dönüştürür."
 	)
+	wizard_step_key = "meb_rep_wizard_step"
+	raw_step = ui.session_state.get(wizard_step_key, 0)
+	wizard_step = raw_step if isinstance(raw_step, int) and not isinstance(raw_step, bool) and raw_step in (0, 1, 2) else 0
+	step_labels = ["Dönem ve Notlar", "Önizleme", "Dışa Aktarma"]
+	ui.progress((wizard_step + 1) / len(step_labels))
+	ui.markdown(f"##### Adım {wizard_step + 1}/3 · {step_labels[wizard_step]}")
 
 	active_ay = get_active_academic_year()
 	try:
@@ -30288,11 +30294,32 @@ def _render_meb_activity_report_tab() -> None:
 	if def_start > def_end:
 		def_start = def_end - timedelta(days=90)
 
-	dc1, dc2 = ui.columns(2)
-	with dc1:
-		meb_start = ui.date_input("Rapor Başlangıç Tarihi", value=def_start, key="meb_rep_start_date")
-	with dc2:
-		meb_end = ui.date_input("Rapor Bitiş Tarihi", value=def_end, key="meb_rep_end_date")
+	if wizard_step == 0:
+		dc1, dc2 = ui.columns(2)
+		with dc1:
+			meb_start = ui.date_input("Rapor Başlangıç Tarihi", value=def_start, key="meb_rep_start_date")
+		with dc2:
+			meb_end = ui.date_input("Rapor Bitiş Tarihi", value=def_end, key="meb_rep_end_date")
+	else:
+		def _stored_meb_date(key: str, fallback: date) -> date:
+			value = ui.session_state.get(key, fallback)
+			if isinstance(value, datetime):
+				return value.date()
+			if isinstance(value, date):
+				return value
+			try:
+				return date.fromisoformat(str(value))
+			except ValueError:
+				return fallback
+
+		meb_start = _stored_meb_date("meb_rep_start_date", def_start)
+		meb_end = _stored_meb_date("meb_rep_end_date", def_end)
+	if meb_start > meb_end:
+		ui.error("Rapor başlangıç tarihi bitiş tarihinden büyük olamaz.")
+		if wizard_step > 0 and ui.button("↩️ Dönem ayarlarına dön", key="meb_rep_wizard_invalid_back"):
+			ui.session_state[wizard_step_key] = 0
+			ui.rerun()
+		return
 
 	stats = collect_meb_annual_activity_stats(meb_start, meb_end)
 	is_gai_on, gai_key, gai_model = _get_active_gemini_config()
@@ -30413,13 +30440,38 @@ def _render_meb_activity_report_tab() -> None:
 			ui.caption("🔕 Gemini AI / özel değerlendirme bölümü kapalı; MEB raporunda standart kurum değerlendirme metni kullanılacak.")
 			meb_notes = ""
 
-	mc1, mc2, mc3, mc4, mc5 = ui.columns(5)
-	mc1.metric("Kayıtlı Öğrenci", stats["students_total"])
-	mc2.metric("Dönem Başvurusu", stats["visits_total"])
-	mc3.metric("Kurum/112 Sevk", stats["referral_cnt"])
-	mc4.metric("WHO Değerlendirilen", stats["bmi_eval_total"])
-	mc5.metric("Özel Gereksinim / Bakım", f"{stats['special_needs_cnt']} / {stats['care_plans_total']}")
+	if wizard_step > 0:
+		ui.caption(f"Rapor dönemi: **{meb_start:%d.%m.%Y} – {meb_end:%d.%m.%Y}**")
+		if meb_missing_notes:
+			ui.warning("Eksik kayıt denetimi: " + " · ".join(meb_missing_notes))
+		mc1, mc2, mc3, mc4, mc5 = ui.columns(5)
+		mc1.metric("Kayıtlı Öğrenci", stats["students_total"])
+		mc2.metric("Dönem Başvurusu", stats["visits_total"])
+		mc3.metric("Kurum/112 Sevk", stats["referral_cnt"])
+		mc4.metric("WHO Değerlendirilen", stats["bmi_eval_total"])
+		mc5.metric("Özel Gereksinim / Bakım", f"{stats['special_needs_cnt']} / {stats['care_plans_total']}")
 
+	if wizard_step == 0:
+		if ui.button("➡️ MEB rapor önizlemesine geç", type="primary", use_container_width=True, key="meb_rep_wizard_next_preview"):
+			ui.session_state[wizard_step_key] = 1
+			ui.rerun()
+		return
+
+	if wizard_step == 1:
+		back_col, next_col = ui.columns(2)
+		with back_col:
+			if ui.button("↩️ Dönem ve notları düzenle", use_container_width=True, key="meb_rep_wizard_back_period"):
+				ui.session_state[wizard_step_key] = 0
+				ui.rerun()
+		with next_col:
+			if ui.button("➡️ MEB raporunu oluşturmaya geç", type="primary", use_container_width=True, key="meb_rep_wizard_next_export"):
+				ui.session_state[wizard_step_key] = 2
+				ui.rerun()
+		return
+
+	if ui.button("↩️ Önizlemeye dön", key="meb_rep_wizard_back_preview"):
+		ui.session_state[wizard_step_key] = 1
+		ui.rerun()
 	ui.download_button(
 		"📥 MEB Dönem / Yıl Sonu Resmi Faaliyet Raporunu İndir (.docx)",
 		data=build_meb_annual_activity_report_docx(meb_start, meb_end, extra_notes=meb_notes),
@@ -30571,15 +30623,26 @@ def render_reports() -> None:
 
 
 def _render_classic_reports_content(all_classes: list[str], report_cfg: dict) -> None:
-	# Report mode selection: Single Person or Whole Class
+	wizard_step_key = "classic_rep_wizard_step"
+	raw_step = ui.session_state.get(wizard_step_key, 0)
+	wizard_step = raw_step if isinstance(raw_step, int) and not isinstance(raw_step, bool) and raw_step in (0, 1, 2) else 0
+	step_labels = ["Rapor kapsamı", "Önizleme", "Dışa Aktarma"]
+	ui.progress((wizard_step + 1) / len(step_labels))
+	ui.markdown(f"##### Adım {wizard_step + 1}/3 · {step_labels[wizard_step]}")
+
 	col_m1, col_m2 = ui.columns([1.2, 2.5])
-	with col_m1:
-		report_mode = ui.radio(
-			"Yazdırma Kapsamı",
-			["👤 Tek Kişi Raporu", "🏫 Tüm Sınıf Raporu (Toplu)"],
-			horizontal=True,
-			key="report_scope_mode",
-		)
+	if wizard_step == 0:
+		with col_m1:
+			report_mode = ui.radio(
+				"Yazdırma Kapsamı",
+				["👤 Tek Kişi Raporu", "🏫 Tüm Sınıf Raporu (Toplu)"],
+				horizontal=True,
+				key="report_scope_mode",
+			)
+	else:
+		report_mode = ui.session_state.get("report_scope_mode", "👤 Tek Kişi Raporu")
+		if report_mode not in ("👤 Tek Kişi Raporu", "🏫 Tüm Sınıf Raporu (Toplu)"):
+			report_mode = "👤 Tek Kişi Raporu"
 
 	app_cfg = get_app_settings()
 	inst_top = html.escape(app_cfg.get("institution_top_header") or "T.C. MİLLÎ EĞİTİM BAKANLIĞI")
@@ -30634,19 +30697,54 @@ button {{ padding: 9px 18px; background: #176b68; color: white; border: none; bo
 		if not all_classes:
 			ui.info("Henüz kayıtlı öğrenci sınıfı bulunmuyor.")
 			return
-		with col_m2:
-			sel_cls_for_report = ui.selectbox(
-				"Raporu Yazdırılacak Sınıfı Seçin",
-				all_classes,
-				key="report_chosen_class",
-			)
+		if wizard_step == 0:
+			with col_m2:
+				sel_cls_for_report = ui.selectbox(
+					"Raporu Yazdırılacak Sınıfı Seçin",
+					all_classes,
+					key="report_chosen_class",
+				)
+		else:
+			sel_cls_for_report = ui.session_state.get("report_chosen_class")
 		if not sel_cls_for_report:
 			ui.info("Lütfen raporu yazdırılacak bir sınıf seçin.")
+			if wizard_step > 0 and ui.button("↩️ Kapsamı düzenle", key="classic_rep_wizard_back_missing_class"):
+				ui.session_state[wizard_step_key] = 0
+				ui.rerun()
 			return
 
 		class_students = student_options(sel_cls_for_report, person_type="Öğrenci")
+		if wizard_step == 0:
+			if class_students:
+				ui.success(f"**{sel_cls_for_report}** sınıfında toplam **{len(class_students)} öğrenci** için rapor hazırlanabilir.")
+				ui.dataframe(pd.DataFrame([
+					{
+						"No": row["student_no"] or "—",
+						"Öğrenci Adı": row["full_name"],
+						"Cinsiyet": row["sex"] or "—",
+						"Doğum Tarihi": row["birth_date"] or "—",
+					}
+					for row in class_students
+				]), width="stretch", hide_index=True)
+			else:
+				ui.warning(f"**{sel_cls_for_report}** sınıfında kayıtlı öğrenci bulunamadı.")
+			if ui.button(
+				"➡️ Sınıf raporu önizlemesine geç",
+				type="primary",
+				disabled=not class_students,
+				use_container_width=True,
+				key="classic_rep_wizard_next_preview",
+			):
+				ui.session_state[wizard_step_key] = 1
+				ui.rerun()
+			return
+
 		if not class_students:
 			ui.warning(f"**{sel_cls_for_report}** sınıfında kayıtlı öğrenci bulunamadı.")
+			if wizard_step > 0 and ui.button("↩️ Kapsamı düzenle", key="classic_rep_wizard_back_empty_class"):
+				ui.session_state[wizard_step_key] = 0
+				ui.rerun()
+			return
 		else:
 			ui.success(f"**{sel_cls_for_report}** sınıfında toplam **{len(class_students)} öğrenci** için rapor hazırlandı. Her öğrencinin raporu yazdırma sırasında ayrı bir sayfa olarak başlar.")
 
@@ -30686,26 +30784,59 @@ button {{ padding: 9px 18px; background: #176b68; color: white; border: none; bo
 			class_print_html = css_header + "\n".join(sections) + "</body>\n</html>"
 			clean_cls_slug = re.sub(r"[^A-Za-z0-9_-]+", "_", sel_cls_for_report).strip("_")
 
-			down_c1, down_c2 = ui.columns([2, 1])
-			with down_c1:
-				ui.download_button(
-					f"📝 {sel_cls_for_report} - Tüm Sınıfın Word Raporunu İndir ({len(class_students)} Öğrenci, .docx)",
-					data=lambda _cls=sel_cls_for_report, _rc=dict(cls_rep_cfg): build_class_batch_report_docx(_cls, report_cfg=_rc),
-					file_name=f"{clean_cls_slug}_tum_sinif_saglik_raporu.docx",
-					mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-					type="primary",
-					use_container_width=True,
-				)
-			with down_c2:
-				ui.caption("İndirilen Microsoft Word (.docx) dosyasında her öğrencinin sağlık ve revir dosyası ayrı bir sayfa olarak başlar; doğrudan Word'de düzenleyebilir ve yazdırabilirsiniz.")
+			if wizard_step == 2:
+				if ui.button("↩️ Önizlemeye dön", key="classic_rep_wizard_back_preview"):
+					ui.session_state[wizard_step_key] = 1
+					ui.rerun()
+				down_c1, down_c2 = ui.columns([2, 1])
+				with down_c1:
+					ui.download_button(
+						f"📝 {sel_cls_for_report} - Tüm Sınıfın Word Raporunu İndir ({len(class_students)} Öğrenci, .docx)",
+						data=lambda _cls=sel_cls_for_report, _rc=dict(cls_rep_cfg): build_class_batch_report_docx(_cls, report_cfg=_rc),
+						file_name=f"{clean_cls_slug}_tum_sinif_saglik_raporu.docx",
+						mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+						type="primary",
+						use_container_width=True,
+					)
+				with down_c2:
+					ui.caption("İndirilen Microsoft Word (.docx) dosyasında her öğrencinin sağlık ve revir dosyası ayrı bir sayfa olarak başlar; doğrudan Word'de düzenleyebilir ve yazdırabilirsiniz.")
 
 			with ui.expander("🖨️ Yazdırılabilir Sınıf Raporu Önizleme (Tarayıcıdan Yazdır / PDF)", expanded=False):
 				ui.components.v1.html(class_print_html, height=750, scrolling=True)
 
+			if wizard_step == 1:
+				back_col, next_col = ui.columns(2)
+				with back_col:
+					if ui.button("↩️ Sınıf kapsamını düzenle", use_container_width=True, key="classic_rep_wizard_back_scope_class"):
+						ui.session_state[wizard_step_key] = 0
+						ui.rerun()
+				with next_col:
+					if ui.button("➡️ Sınıf raporunu dışa aktarmaya geç", type="primary", use_container_width=True, key="classic_rep_wizard_next_export_class"):
+						ui.session_state[wizard_step_key] = 2
+						ui.rerun()
+				return
 	else:
 		# Single person report
-		with col_m2:
-			student = select_shared_person("rep", label="Kişi raporu seçin")
+		if wizard_step == 0:
+			with col_m2:
+				student = select_shared_person("rep", label="Kişi raporu seçin")
+			if student:
+				ui.info(
+					f"Seçili kişi: **{mask_kvkk_value(student['full_name'], 'name')}** · "
+					f"{student['class_name'] or 'Sınıf belirtilmedi'}"
+				)
+			if ui.button(
+				"➡️ Kişi raporu önizlemesine geç",
+				type="primary",
+				disabled=student is None,
+				use_container_width=True,
+				key="classic_rep_wizard_next_preview",
+			):
+				ui.session_state[wizard_step_key] = 1
+				ui.rerun()
+			return
+		active_person_id = ui.session_state.get("active_person_id")
+		student = get_person_by_id(active_person_id) if active_person_id is not None else None
 
 		if student:
 			stu_sex = student["sex"] if student else None
@@ -30836,20 +30967,39 @@ button {{ padding: 9px 18px; background: #176b68; color: white; border: none; bo
 			single_body = build_student_report_section_html(student, inst_top, inst_school, inst_nurse, inst_princ, is_multi=False, report_cfg=single_rep_cfg)
 			print_html = css_header + single_body + "</body>\n</html>"
 			print_name = re.sub(r"[^A-Za-z0-9_-]+", "_", student["full_name"]).strip("_") or "kisi"
-			ui.download_button(
-				"📝 Kişi Sağlık Raporunu İndir (.docx)",
-				data=lambda _stu=dict(student), _rc=dict(single_rep_cfg): build_student_report_docx(_stu, report_cfg=_rc),
-				file_name=f"{print_name}_saglik_raporu.docx",
-				mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-				type="primary",
-				use_container_width=True,
-			)
-			ui.caption("İndirilen Microsoft Word (.docx) dosyasını Microsoft Office Word uygulamasında açıp doğrudan düzenleyebilir veya yazdırabilirsiniz.")
+			if wizard_step == 2:
+				if ui.button("↩️ Önizlemeye dön", key="classic_rep_wizard_back_preview_person"):
+					ui.session_state[wizard_step_key] = 1
+					ui.rerun()
+				ui.download_button(
+					"📝 Kişi Sağlık Raporunu İndir (.docx)",
+					data=lambda _stu=dict(student), _rc=dict(single_rep_cfg): build_student_report_docx(_stu, report_cfg=_rc),
+					file_name=f"{print_name}_saglik_raporu.docx",
+					mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+					type="primary",
+					use_container_width=True,
+				)
+				ui.caption("İndirilen Microsoft Word (.docx) dosyasını Microsoft Office Word uygulamasında açıp doğrudan düzenleyebilir veya yazdırabilirsiniz.")
 
 			with ui.expander("🖨️ Yazdırılabilir Kişi Raporu Önizleme (Tarayıcıdan Yazdır / PDF)", expanded=False):
 				ui.components.v1.html(print_html, height=750, scrolling=True)
+			if wizard_step == 1:
+				back_col, next_col = ui.columns(2)
+				with back_col:
+					if ui.button("↩️ Kişi seçimini düzenle", use_container_width=True, key="classic_rep_wizard_back_scope_person"):
+						ui.session_state[wizard_step_key] = 0
+						ui.rerun()
+				with next_col:
+					if ui.button("➡️ Kişi raporunu dışa aktarmaya geç", type="primary", use_container_width=True, key="classic_rep_wizard_next_export_person"):
+						ui.session_state[wizard_step_key] = 2
+						ui.rerun()
+				return
 		else:
 			ui.info("💡 Raporunu görüntülemek ve Word (.docx) olarak indirmek istediğiniz kişiyi yukarıdaki kutudan seçin.")
+			if wizard_step > 0 and ui.button("↩️ Kişi seçimini düzenle", key="classic_rep_wizard_back_missing_person"):
+				ui.session_state[wizard_step_key] = 0
+				ui.rerun()
+			return
 
 	def _build_full_school_workbook_lazy() -> bytes:
 		with connect_db() as connection:
@@ -30912,13 +31062,14 @@ button {{ padding: 9px 18px; background: #176b68; color: white; border: none; bo
 		all_measurements = pd.DataFrame(meas_export_rows) if meas_export_rows else raw_all_meas
 		return workbook_download(all_students, all_visits, all_measurements, all_vitals, all_labs, all_profiles, all_plans)
 
-	ui.download_button(
-		"📊 Tüm kişi, persantil, revir, vital, tahlil ve bakım planlarını Excel indir",
-		_build_full_school_workbook_lazy,
-		"revir_raporu.xlsx",
-		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-		key="btn_dl_full_school_xlsx_lazy",
-	)
+	if wizard_step == 2:
+		ui.download_button(
+			"📊 Tüm kişi, persantil, revir, vital, tahlil ve bakım planlarını Excel indir",
+			_build_full_school_workbook_lazy,
+			"revir_raporu.xlsx",
+			"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+			key="btn_dl_full_school_xlsx_lazy",
+		)
 
 
 
