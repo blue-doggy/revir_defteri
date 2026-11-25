@@ -125,14 +125,19 @@ else:
 
 def _resolve_bundled_asset(rel_name: str) -> Path:
 	"""Paketli (.exe) modda sabit varlıkları önce uygulama klasöründe, yoksa PyInstaller kaynak dizininde bulur."""
-	for base_dir in (_RESOLVED_APP_DIR, _BUNDLE_DIR, _SCRIPT_DIR):
+	meipass_raw = getattr(sys, "_MEIPASS", None) if getattr(sys, "frozen", False) else None
+	search_dirs: list[Path] = [_RESOLVED_APP_DIR]
+	if meipass_raw:
+		search_dirs.append(Path(meipass_raw))
+	search_dirs.extend([_BUNDLE_DIR, _SCRIPT_DIR])
+	for base_dir in search_dirs:
 		candidate = base_dir / rel_name
 		if candidate.exists():
 			return candidate
-	return _BUNDLE_DIR / rel_name
+	return (Path(meipass_raw) if meipass_raw else _BUNDLE_DIR) / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.35.0"
+_DEFAULT_APP_VERSION = "1.35.1"
 
 
 def _load_app_version() -> str:
@@ -2146,6 +2151,64 @@ def set_active_academic_year(year_id: int) -> None:
 	clear_all_data_caches()
 
 
+def _clear_tables_safe(conn: sqlite3.Connection, tables: list[str] | tuple[str, ...]) -> None:
+	"""Veritabanında mevcut olan belirtilen tabloların satırlarını güvenli sırayla temizler."""
+	for tbl in tables:
+		try:
+			exists = conn.execute(
+				"SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+				(tbl,),
+			).fetchone()
+			if exists:
+				conn.execute(f"DELETE FROM {tbl}")
+		except Exception:
+			pass
+
+
+_YEAR_EPISODIC_TABLES: tuple[str, ...] = (
+	"medication_logs",
+	"school_screenings",
+	"vital_readings",
+	"measurements",
+	"visits",
+	"seizure_logs",
+	"isolation_records",
+	"insulin_bolus_logs",
+)
+
+_YEAR_FRESH_TABLES: tuple[str, ...] = (
+	"insulin_bolus_logs",
+	"diabetes_profiles",
+	"school_meal_menus",
+	"isolation_records",
+	"seizure_logs",
+	"medication_logs",
+	"student_medications",
+	"student_vaccinations",
+	"school_screenings",
+	"care_plans",
+	"health_forms",
+	"health_profiles",
+	"lab_results",
+	"lab_reports",
+	"vital_readings",
+	"measurements",
+	"visits",
+	"cafeteria_cash_ledger",
+	"cafeteria_monthly_fees",
+	"cafeteria_purchase_items",
+	"cafeteria_purchases",
+	"cafeteria_menu_plans",
+	"cafeteria_diners",
+	"infirmary_inventory",
+	"fridge_temp_logs",
+	"calendar_events",
+	"calendar_daily_notes",
+	"students",
+	"classes",
+)
+
+
 def create_academic_year(
 	name: str,
 	start_date: str,
@@ -2171,9 +2234,12 @@ def create_academic_year(
 	kisi_dir.mkdir(parents=True, exist_ok=True)
 	year_db = year_dir / "revir_defteri.db"
 
-	# Copy template from master DB to inherit schemas, WHO tables, TR locations, app settings
-	if DB_PATH.exists():
-		shutil.copy2(DB_PATH, year_db)
+	# Copy template from active year DB (or master DB fallback) to inherit schemas, roster, settings
+	src_db = get_current_db_path()
+	if not src_db.exists():
+		src_db = DB_PATH
+	if src_db.exists():
+		shutil.copy2(src_db, year_db)
 
 	# Configure year_db according to the chosen student policy
 	conn = sqlite3.connect(year_db)
@@ -2181,26 +2247,10 @@ def create_academic_year(
 	try:
 		if student_policy == "fresh":
 			# Sıfırdan Temiz Sayfa: Yeni öğrenciler için sıfır kilometre başlangıç
-			for tbl in [
-				"medication_logs", "student_medications", "student_vaccinations",
-				"school_screenings", "care_plans", "health_forms", "health_profiles",
-				"lab_results", "lab_reports", "vital_readings", "measurements",
-				"visits", "students", "classes"
-			]:
-				try:
-					conn.execute(f"DELETE FROM {tbl}")
-				except Exception:
-					pass
+			_clear_tables_safe(conn, _YEAR_FRESH_TABLES)
 		elif student_policy == "clone":
-			# Öğrenci ve sınıf kadrosunu koru, revir ve ölçüm kayıtlarını sıfırla
-			for tbl in [
-				"medication_logs", "school_screenings", "vital_readings",
-				"measurements", "visits"
-			]:
-				try:
-					conn.execute(f"DELETE FROM {tbl}")
-				except Exception:
-					pass
+			# Öğrenci ve sınıf kadrosunu koru, revir ve episodik kayıtları sıfırla
+			_clear_tables_safe(conn, _YEAR_EPISODIC_TABLES)
 			src_kisi = get_current_person_data_dir()
 			if src_kisi.exists():
 				for jf in src_kisi.glob("kisi_*.json"):
@@ -2219,14 +2269,7 @@ def create_academic_year(
 				grad_grade = int(graduation_grade)
 			grad_grade = max(1, min(12, grad_grade))
 
-			for tbl in [
-				"medication_logs", "school_screenings", "vital_readings",
-				"measurements", "visits"
-			]:
-				try:
-					conn.execute(f"DELETE FROM {tbl}")
-				except Exception:
-					pass
+			_clear_tables_safe(conn, _YEAR_EPISODIC_TABLES)
 
 			classes = conn.execute("SELECT id, name FROM classes").fetchall()
 			graduating_ids: list[int] = []
@@ -2242,8 +2285,16 @@ def create_academic_year(
 				else:
 					to_promote.append((cid, g, sfx))
 
+			has_diners_tbl = conn.execute(
+				"SELECT 1 FROM sqlite_master WHERE type='table' AND name='cafeteria_diners'"
+			).fetchone()
 			for cid in graduating_ids:
 				try:
+					if has_diners_tbl:
+						conn.execute(
+							"DELETE FROM cafeteria_diners WHERE student_id IN (SELECT id FROM students WHERE class_id=?)",
+							(cid,),
+						)
 					conn.execute("DELETE FROM classes WHERE id=?", (cid,))
 				except Exception:
 					pass
@@ -2352,16 +2403,7 @@ def get_current_person_data_dir() -> Path:
 def reset_current_year_students_and_records() -> None:
 	"""Reset students, classes, visits, measurements, screenings for CURRENT academic year only."""
 	with connect_db() as conn:
-		for tbl in [
-			"medication_logs", "student_medications", "student_vaccinations",
-			"school_screenings", "care_plans", "health_forms", "health_profiles",
-			"lab_results", "lab_reports", "vital_readings", "measurements",
-			"visits", "students", "classes"
-		]:
-			try:
-				conn.execute(f"DELETE FROM {tbl}")
-			except Exception:
-				pass
+		_clear_tables_safe(conn, _YEAR_FRESH_TABLES)
 	pdir = get_current_person_data_dir()
 	if pdir.exists():
 		for f in pdir.glob("kisi_*.json"):
@@ -2384,15 +2426,10 @@ def perform_factory_reset() -> tuple[bool, str]:
 			for ydb in EGITIM_YILLARI_DIR.glob("**/revir_defteri.db"):
 				target_dbs.add(ydb)
 
-		tables_to_clear = [
-			"medication_logs", "student_medications", "student_vaccinations",
-			"school_screenings", "care_plans", "health_forms", "health_profiles",
-			"lab_results", "lab_reports", "vital_readings", "vital_reference",
-			"measurements", "visits", "students", "classes",
-			"calendar_events", "calendar_daily_notes",
-			"cafeteria_dish_ingredients", "cafeteria_dishes", "cafeteria_menu_plans",
-			"cafeteria_purchase_items", "cafeteria_purchases", "cafeteria_monthly_fees",
-			"cafeteria_cash_ledger", "cafeteria_diners",
+		tables_to_clear = list(_YEAR_FRESH_TABLES) + [
+			"vital_reference",
+			"cafeteria_dish_ingredients",
+			"cafeteria_dishes",
 		]
 
 		for db_file in target_dbs:
@@ -4372,7 +4409,7 @@ def log_medication_dose(
 	now_iso = datetime.now().isoformat(timespec="seconds")
 	with connect_db() as connection:
 		prev = connection.execute(
-			"SELECT id, status FROM medication_logs WHERE medication_id=? AND log_date=? AND scheduled_time=?",
+			"SELECT id, status, dose_given FROM medication_logs WHERE medication_id=? AND log_date=? AND scheduled_time=?",
 			(medication_id, log_date, scheduled_time),
 		).fetchone()
 
@@ -4394,10 +4431,18 @@ def log_medication_dose(
 				dose_given, dose_unit, status, administered_by, notes.strip(), now_iso
 			),
 		)
-		if status == "Verildi" and (not prev or prev["status"] != "Verildi"):
-			med_row = connection.execute("SELECT remaining_volume FROM student_medications WHERE id=?", (medication_id,)).fetchone()
+		old_given = float(prev["dose_given"] or 0.0) if (prev and prev["status"] == "Verildi") else 0.0
+		new_given = float(dose_given or 0.0) if status == "Verildi" else 0.0
+		delta = old_given - new_given
+		if abs(delta) > 1e-9:
+			med_row = connection.execute(
+				"SELECT remaining_volume, total_volume FROM student_medications WHERE id=?",
+				(medication_id,),
+			).fetchone()
 			if med_row and med_row["remaining_volume"] is not None:
-				new_rem = max(0.0, float(med_row["remaining_volume"]) - float(dose_given))
+				new_rem = max(0.0, float(med_row["remaining_volume"]) + delta)
+				if med_row["total_volume"] is not None:
+					new_rem = min(float(med_row["total_volume"]), new_rem)
 				connection.execute("UPDATE student_medications SET remaining_volume=? WHERE id=?", (new_rem, medication_id))
 	sync_after_person_mutation(student_id)
 
@@ -4582,6 +4627,11 @@ def save_school_screening(
 	p_clean = float(p_clean_int) if p_clean_int is not None else None
 	s_clean_int = normalize_spo2(spo2_pct)
 	s_clean = float(s_clean_int) if s_clean_int is not None else None
+
+	try:
+		_ensure_lms_cache()
+	except Exception:
+		pass
 
 	upserted_meas_id: int | None = None
 	with connect_db() as connection:
@@ -4782,9 +4832,11 @@ def save_student_vaccination(
 	lot_number: str | None = None,
 	notes: str | None = None,
 ) -> None:
-	vac_meta = next((v for v in MOH_VACCINE_SCHEDULE if v["code"] == vaccine_code), None)
+	norm_code = str(vaccine_code or "").strip().lower()
+	vac_meta = next((v for v in MOH_VACCINE_SCHEDULE if v["code"].lower() == norm_code), None)
 	if not vac_meta:
 		return
+	canon_code = vac_meta["code"]
 	now_iso = datetime.now().isoformat(timespec="seconds")
 	with connect_db() as connection:
 		connection.execute(
@@ -4801,7 +4853,7 @@ def save_student_vaccination(
 				updated_at=excluded.updated_at""",
 			(
 				int(student_id),
-				vaccine_code,
+				canon_code,
 				vac_meta["vaccine"],
 				vac_meta["dose"],
 				vac_meta["period_label"],
@@ -4821,10 +4873,11 @@ def save_bulk_student_vaccinations(student_id: int, records: list[dict[str, Any]
 	now_iso = datetime.now().isoformat(timespec="seconds")
 	with connect_db() as connection:
 		for rec in records:
-			v_code = rec.get("vaccine_code")
-			vac_meta = next((v for v in MOH_VACCINE_SCHEDULE if v["code"] == v_code), None)
+			v_code = str(rec.get("vaccine_code") or "").strip().lower()
+			vac_meta = next((v for v in MOH_VACCINE_SCHEDULE if v["code"].lower() == v_code), None)
 			if not vac_meta:
 				continue
+			canon_code = vac_meta["code"]
 			connection.execute(
 				"""INSERT INTO student_vaccinations(
 					student_id, vaccine_code, vaccine_name, dose_name, period_label,
@@ -4839,7 +4892,7 @@ def save_bulk_student_vaccinations(student_id: int, records: list[dict[str, Any]
 					updated_at=excluded.updated_at""",
 				(
 					int(student_id),
-					v_code,
+					canon_code,
 					vac_meta["vaccine"],
 					vac_meta["dose"],
 					vac_meta["period_label"],
@@ -5678,6 +5731,9 @@ def delete_student(student_id: int) -> None:
 		connection.execute("DELETE FROM lab_reports WHERE student_id = ?", (sid,))
 		connection.execute("DELETE FROM seizure_logs WHERE student_id = ?", (sid,))
 		connection.execute("DELETE FROM isolation_records WHERE student_id = ?", (sid,))
+		for opt_tbl in ("insulin_bolus_logs", "diabetes_profiles", "cafeteria_diners"):
+			if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (opt_tbl,)).fetchone():
+				connection.execute(f"DELETE FROM {opt_tbl} WHERE student_id = ?", (sid,))
 		connection.execute("DELETE FROM students WHERE id = ?", (sid,))
 	delete_person_data_file(sid)
 	sync_after_person_mutation(None)
@@ -6670,7 +6726,7 @@ def numeric_value(value: object) -> float | None:
 	if not txt or txt.lower() in {"nan", "none", "null", "na", "n/a", "<na>", "-", "—", "inf", "-inf"}:
 		return None
 	txt_clean = re.sub(
-		r"(?:°\s*[cC]?|%|(?:\b(?:cm|kg|gr|g|mmhg|bpm|mg/dl)\b)|/dk|/min)",
+		r"(?:°\s*[cC]?|%|(?:\b(?:cm|kg|gr|g|mmhg|bpm|mg/dl|c)\b)|(?<=\d)[cC]\b|/dk|/min)",
 		"",
 		txt,
 		flags=re.IGNORECASE,
@@ -6696,7 +6752,7 @@ def normalize_temperature(val: object) -> float | None:
 		num = num / 10.0
 	elif 3000.0 <= num <= 4400.0:
 		num = num / 100.0
-	num = round(num, 1)
+	num = math.floor(num * 10.0 + 0.5 + 1e-9) / 10.0
 	if 30.0 <= num <= 44.0:
 		return num
 	return None
@@ -6858,7 +6914,14 @@ def normalize_bp(sys_val: object, dia_val: object = None) -> tuple[int | None, i
 		s_num = None
 	if d_num == 0:
 		d_num = None
-	return (_scale_single_bp_component(s_num, is_sys=True), _scale_single_bp_component(d_num, is_sys=False))
+	s_out = _scale_single_bp_component(s_num, is_sys=True)
+	d_out = _scale_single_bp_component(d_num, is_sys=False)
+	if s_out is not None and d_out is not None and s_out < d_out:
+		sw_s = _scale_single_bp_component(d_num, is_sys=True)
+		sw_d = _scale_single_bp_component(s_num, is_sys=False)
+		if sw_s is not None and sw_d is not None and sw_s > sw_d:
+			return (sw_s, sw_d)
+	return (s_out, d_out)
 
 
 def normalize_spo2(val: object) -> int | None:
@@ -6868,7 +6931,7 @@ def normalize_spo2(val: object) -> int | None:
 	if 500.0 <= num <= 999.0:
 		res = int(num // 10)
 	elif num > 100.0:
-		res = 100
+		return None
 	else:
 		res = int(round(num))
 	return res if 30 <= res <= 100 else None
@@ -7766,11 +7829,12 @@ def _load_lms_reference_cache(db_key: str) -> dict[tuple[str, str, int], dict]:
 	with connect_db() as connection:
 		cnt_row = connection.execute("SELECT COUNT(*) FROM lms_reference").fetchone()
 		ref_cnt = int(cnt_row[0]) if cnt_row else 0
-		if ref_cnt <= 1000:
-			try:
-				import_builtin_who_references()
-			except Exception:
-				pass
+	if ref_cnt <= 1000:
+		try:
+			import_builtin_who_references()
+		except Exception:
+			pass
+	with connect_db() as connection:
 		rows = connection.execute(
 			"SELECT indicator, sex, age_months, l, m, s FROM lms_reference"
 		).fetchall()
@@ -7781,6 +7845,9 @@ def _load_lms_reference_cache(db_key: str) -> dict[tuple[str, str, int], dict]:
 			"s": float(r["s"]),
 			"age_months": int(r["age_months"]),
 		}
+	if len(cache) <= 1000:
+		for ind, sex, mo, l_v, m_v, s_v in _get_builtin_who_lms_rows():
+			cache.setdefault((ind, sex, mo), {"l": l_v, "m": m_v, "s": s_v, "age_months": mo})
 	for ind, sex, mo, l_v, m_v, s_v in get_builtin_hcfa_lms_rows():
 		cache.setdefault((ind, sex, mo), {"l": l_v, "m": m_v, "s": s_v, "age_months": mo})
 	return cache
@@ -8270,25 +8337,32 @@ def enrich_measurements_with_percentiles(records: pd.DataFrame, sex: str | None,
 	if records.empty:
 		return records.copy()
 	df = records.copy()
-	sort_cols = ["Tarih", "id"] if "id" in df.columns else ["Tarih"]
-	df = df.sort_values(by=sort_cols, ascending=True, kind="mergesort").reset_index(drop=True)
+	date_col = "Tarih" if "Tarih" in df.columns else ("measured_on" if "measured_on" in df.columns else None)
+	if date_col:
+		sort_cols = [date_col, "id"] if "id" in df.columns else [date_col]
+		df = df.sort_values(by=sort_cols, ascending=True, kind="mergesort").reset_index(drop=True)
 
 	out_rows = []
 	prev_h, prev_w = None, None
 	for _, row in df.iterrows():
-		raw_date = str(row.get("Tarih", ""))[:10]
-		months = int(row["Yas_ay"]) if (row.get("Yas_ay") is not None and not pd.isna(row.get("Yas_ay"))) else None
+		raw_date_obj = row.get("Tarih") if "Tarih" in row else row.get("measured_on", "")
+		raw_date = str(raw_date_obj or "")[:10]
+		age_raw = row.get("Yas_ay") if "Yas_ay" in row else row.get("age_months")
+		months = int(age_raw) if (age_raw is not None and not pd.isna(age_raw)) else None
 		if months is None and birth_date and raw_date:
 			try:
 				months = age_in_months(birth_date, date.fromisoformat(raw_date))
 			except Exception:
 				months = None
 
-		h_val = round(float(row["Boy_cm"]), 1) if (row.get("Boy_cm") is not None and not pd.isna(row.get("Boy_cm"))) else None
-		w_val = round(float(row["Kilo_kg"]), 1) if (row.get("Kilo_kg") is not None and not pd.isna(row.get("Kilo_kg"))) else None
+		h_raw = row.get("Boy_cm") if "Boy_cm" in row else row.get("height_cm")
+		w_raw = row.get("Kilo_kg") if "Kilo_kg" in row else row.get("weight_kg")
+		h_val = round(float(h_raw), 1) if (h_raw is not None and not pd.isna(h_raw)) else None
+		w_val = round(float(w_raw), 1) if (w_raw is not None and not pd.isna(w_raw)) else None
 		hc_raw = row.get("Bas_Cevresi_cm") if "Bas_Cevresi_cm" in row else row.get("head_circ_cm")
 		hc_val = round(float(hc_raw), 1) if (hc_raw is not None and not pd.isna(hc_raw) and float(hc_raw) > 0) else None
-		b_val = round(float(row["BMI"]), 1) if (row.get("BMI") is not None and not pd.isna(row.get("BMI"))) else None
+		b_raw = row.get("BMI") if "BMI" in row else row.get("bmi")
+		b_val = round(float(b_raw), 1) if (b_raw is not None and not pd.isna(b_raw)) else None
 		if b_val is None and h_val and w_val and h_val > 0 and w_val > 0:
 			b_val = round(w_val / ((h_val / 100.0) ** 2), 1)
 
@@ -8459,15 +8533,22 @@ def parse_lms_file(uploaded_file) -> tuple[int, list[str]]:
 	return inserted, issues
 
 
-def import_who_wfa_reference_files() -> int:
+_BUILTIN_WHO_WFA_CACHE: dict[str, list[tuple[str, int, float, float, float, str]]] = {}
+_BUILTIN_WHO_LMS_CACHE: dict[str, list[tuple[str, str, int, float, float, float]]] = {}
+
+
+def _get_builtin_who_wfa_rows() -> list[tuple[str, int, float, float, float, str]]:
 	sources = {
 		"E": "wfa-boys-zscore-expanded-tables.xlsx",
 		"K": "wfa-girls-zscore-expanded-tables.xlsx",
 	}
 	folder = PERSANTIL_DATA_DIR if PERSANTIL_DATA_DIR.exists() else (APP_DIR / "persantil veriler")
 	if not all((folder / filename).is_file() for filename in sources.values()):
-		return 0
-	rows = []
+		return []
+	cache_k = str(folder.resolve())
+	if cache_k in _BUILTIN_WHO_WFA_CACHE:
+		return _BUILTIN_WHO_WFA_CACHE[cache_k]
+	rows: list[tuple[str, int, float, float, float, str]] = []
 	for sex, filename in sources.items():
 		frame = pd.read_excel(folder / filename)
 		columns = {normalize_header(column): column for column in frame.columns}
@@ -8485,6 +8566,14 @@ def import_who_wfa_reference_files() -> int:
 			raise ValueError(f"WHO WFA yaş veya LMS satırları eksik/geçersiz: {filename}")
 		rows.extend((sex, int(row.age_days), float(row.l), float(row.m), float(row.s), filename)
 					for row in selected.itertuples(index=False))
+	_BUILTIN_WHO_WFA_CACHE[cache_k] = rows
+	return rows
+
+
+def import_who_wfa_reference_files() -> int:
+	rows = _get_builtin_who_wfa_rows()
+	if not rows:
+		return 0
 	with connect_db() as connection:
 		connection.executemany(
 			"""INSERT INTO wfa_reference(sex, age_days, l, m, s, source) VALUES (?, ?, ?, ?, ?, ?)
@@ -8494,9 +8583,11 @@ def import_who_wfa_reference_files() -> int:
 	return len(rows)
 
 
-def import_builtin_who_references() -> tuple[int, int]:
+def _get_builtin_who_lms_rows() -> list[tuple[str, str, int, float, float, float]]:
 	folder = PERSANTIL_DATA_DIR if PERSANTIL_DATA_DIR.exists() else (APP_DIR / "persantil veriler")
-	inserted_lms = 0
+	cache_k = str(folder.resolve())
+	if cache_k in _BUILTIN_WHO_LMS_CACHE:
+		return _BUILTIN_WHO_LMS_CACHE[cache_k]
 	sources = [
 		("tab_wfa_boys_p_0_5.xlsx", "weight", "E"),
 		("tab_wfa_girls_p_0_5.xlsx", "weight", "K"),
@@ -8515,45 +8606,48 @@ def import_builtin_who_references() -> tuple[int, int]:
 		("bmi_boys_5_19.xlsx", "bmi", "E"),
 		("bmi_girls_5_19.xlsx", "bmi", "K"),
 	]
-	with connect_db() as connection:
-		for filename, indicator, sex in sources:
-			file_path = folder / filename
-			if not file_path.is_file():
+	all_rows: list[tuple[str, str, int, float, float, float]] = []
+	for filename, indicator, sex in sources:
+		file_path = folder / filename
+		if not file_path.is_file():
+			continue
+		try:
+			df = pd.read_excel(file_path)
+			cols = {str(c).strip().lower(): c for c in df.columns}
+			m_col = cols.get("month")
+			l_col = cols.get("l")
+			m_val_col = cols.get("m")
+			s_col = cols.get("s")
+			if not (m_col and l_col and m_val_col and s_col):
 				continue
-			try:
-				df = pd.read_excel(file_path)
-				cols = {str(c).strip().lower(): c for c in df.columns}
-				m_col = cols.get("month")
-				l_col = cols.get("l")
-				m_val_col = cols.get("m")
-				s_col = cols.get("s")
-				if not (m_col and l_col and m_val_col and s_col):
+			for _, r in df.iterrows():
+				try:
+					mo = int(r[m_col])
+					l_v = float(r[l_col])
+					m_v = float(r[m_val_col])
+					s_v = float(r[s_col])
+					all_rows.append((indicator, sex, mo, l_v, m_v, s_v))
+				except Exception:
 					continue
-				rows = []
-				for _, r in df.iterrows():
-					try:
-						mo = int(r[m_col])
-						l_v = float(r[l_col])
-						m_v = float(r[m_val_col])
-						s_v = float(r[s_col])
-						rows.append((indicator, sex, mo, l_v, m_v, s_v))
-					except Exception:
-						continue
-				connection.executemany(
-					"""INSERT INTO lms_reference(indicator, sex, age_months, l, m, s) VALUES (?, ?, ?, ?, ?, ?)
-					   ON CONFLICT(indicator, sex, age_months) DO UPDATE SET l=excluded.l, m=excluded.m, s=excluded.s""",
-					rows,
-				)
-				inserted_lms += len(rows)
-			except Exception:
-				continue
-		hc_rows = get_builtin_hcfa_lms_rows()
-		connection.executemany(
-			"""INSERT INTO lms_reference(indicator, sex, age_months, l, m, s) VALUES (?, ?, ?, ?, ?, ?)
-			   ON CONFLICT(indicator, sex, age_months) DO UPDATE SET l=excluded.l, m=excluded.m, s=excluded.s""",
-			hc_rows,
-		)
-		inserted_lms += len(hc_rows)
+		except Exception:
+			continue
+	all_rows.extend(get_builtin_hcfa_lms_rows())
+	if all_rows:
+		_BUILTIN_WHO_LMS_CACHE[cache_k] = all_rows
+	return all_rows
+
+
+def import_builtin_who_references() -> tuple[int, int]:
+	lms_rows = _get_builtin_who_lms_rows()
+	inserted_lms = 0
+	if lms_rows:
+		with connect_db() as connection:
+			connection.executemany(
+				"""INSERT INTO lms_reference(indicator, sex, age_months, l, m, s) VALUES (?, ?, ?, ?, ?, ?)
+				   ON CONFLICT(indicator, sex, age_months) DO UPDATE SET l=excluded.l, m=excluded.m, s=excluded.s""",
+				lms_rows,
+			)
+			inserted_lms = len(lms_rows)
 	_LMS_CACHE.clear()
 	try:
 		_load_lms_reference_cache.clear()
@@ -9450,6 +9544,10 @@ def _upsert_measurement_conn(
 def record_linked_measurement(student_id: int, measured_on: date, height_cm: float | None, weight_kg: float | None,
 							  birth_date: str | None = None, sex: str | None = None,
 							  head_circ_cm: float | None = None) -> str:
+	try:
+		_ensure_lms_cache()
+	except Exception:
+		pass
 	with connect_db() as connection:
 		meas_id, summary_txt = _upsert_measurement_conn(
 			connection,

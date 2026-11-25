@@ -3274,10 +3274,11 @@ def parse_cafeteria_invoice_with_gemini(
 			if txt_b:
 				doc_txt = (doc_txt + "\n" + txt_b).strip()[:18000]
 
+	doc_block = f"[BELGE METNİ]:\n{doc_txt}" if doc_txt else ""
 	prompt = f"""Aşağıdaki yemekhane alım faturası / sipariş fişi / irsaliye / market fişinden (el yazısı ve çok sayfalı taramalar dahil) fatura başlık bilgilerini ve TÜM ürün satırlarını eksiksiz çıkar.
 
 [DOSYA ADI]: {file_name or 'Metin'}
-{('[BELGE METNİ]:\n' + doc_txt) if doc_txt else ''}
+{doc_block}
 
 Önemli Okuma Kuralları:
 1. Türkçe sayılarda nokta çoğu zaman binlik ayracıdır (ör. `4.480` -> `4480`, `11.600` -> `11600`, `1.450` -> `1450`, `21.425` -> `21425`); miktar sütunundaki `7.5`, `1.5`, `6.5`, `8.5`, `0.300` ise ondalıktır. `quantity * unit_price = line_total` eşitliğini kontrol et.
@@ -3605,6 +3606,8 @@ SADECE şu JSON şemasını döndür (ekstra açıklama veya markdown ekleme):
 [ÖDEME METNİ]:
 {doc_txt[:18000]}"""
 	else:
+		menu_doc_block = f"[DOSYA / METİN]:\n{doc_txt}" if doc_txt else ""
+		retry_doc_block = f"[METİN]:\n{doc_txt[:18000]}" if doc_txt else ""
 		prompt = f"""Aşağıdaki okul yemek menüsü belgesinden veya tablosundan tarih ve öğünlere göre yemekleri eksiksiz çıkar.
 Öğün seçenekleri: {json.dumps(slots_hint, ensure_ascii=False)}
 Tarih yoksa `[İŞ GÜNLERİ]` listesinden sırayla eşle: {json.dumps(workdays_list or [], ensure_ascii=False)}
@@ -3615,7 +3618,7 @@ Kurallar:
 - Çıktıyı kısa ve sıkı geçerli JSON olarak ver (açıklama veya yorum yazma).
 
 [DOSYA ADI]: {file_name or 'Metin'}
-{('[DOSYA / METİN]:\n' + doc_txt) if doc_txt else ''}
+{menu_doc_block}
 
 SADECE şu JSON şemasını döndür:
 {{
@@ -3632,7 +3635,7 @@ SADECE şu JSON şemasını döndür:
 		retry_prompt = f"""Önceki yanıt geçerli menü JSON'u üretmedi. Belgedeki her günün yemeğini YALNIZCA şu en sade JSON şemasıyla döndür (açıklama/markdown yok):
 {{"plans":[{{"plan_date":"YYYY-MM-DD","meal_slot":"{slots_hint[0]}","dishes":[{{"name":"Yemek Adı"}}]}}]}}
 [İŞ GÜNLERİ]: {json.dumps((workdays_list or [])[:25], ensure_ascii=False)}
-{('[METİN]:\n' + doc_txt[:18000]) if doc_txt else ''}"""
+{retry_doc_block}"""
 
 	ok, raw, used_m = call_gemini(
 		prompt,
