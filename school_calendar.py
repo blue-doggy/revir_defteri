@@ -1300,6 +1300,7 @@ def _handle_calendar_event_inline_click(connect_db_fn: Callable, *, set_flash: b
 				conn.commit()
 				if set_flash:
 					if new_done == 1:
+						ui.session_state["_cal_expand_completed"] = True
 						ui.session_state["_cal_flash_msg"] = f"✅ '{row['title']}' tamamlandı olarak işaretlendi ve Tamamlanan Etkinlikler bölümüne taşındı."
 					else:
 						ui.session_state["_cal_flash_msg"] = f"↩️ '{row['title']}' tekrar Günlük Takvim Yaprağı'na geri alındı."
@@ -1384,10 +1385,18 @@ def render_calendar_and_planning_page(
 		sel_date_obj = date.fromisoformat(str(ui.session_state["cal_selected_date"])[:10])
 
 	# Yılın temel resmi ve dini tatillerini ilk açılışta otomatik hazırla
+	# (Silinen tatillerin sonraki oturumlarda geri gelmemesi için yıl kalıcı olarak işaretlenir)
+	seeded_years = {y.strip() for y in str(cfg.get("_cal_auto_seeded_years") or "").split(",") if y.strip()}
 	seed_flag_key = f"_cal_seeded_{view_year}"
-	if not ui.session_state.get(seed_flag_key) and str(cfg.get("calendar_auto_load_holidays", "1")) != "0":
+	if (
+		not ui.session_state.get(seed_flag_key)
+		and str(view_year) not in seeded_years
+		and str(cfg.get("calendar_auto_load_holidays", "1")) != "0"
+	):
 		ensure_year_builtin_holidays_seeded(view_year, connect_db_fn, include_special_days=False)
 		ui.session_state[seed_flag_key] = True
+		seeded_years.add(str(view_year))
+		save_app_settings_fn({"_cal_auto_seeded_years": ",".join(sorted(seeded_years))})
 
 	top_h1, top_h2 = ui.columns([2.7, 1.15])
 	with top_h1:
@@ -1610,9 +1619,42 @@ def render_calendar_and_planning_page(
 				save_app_settings_fn({"page_sections_visibility": json.dumps(vis_map, ensure_ascii=False)})
 				ui.rerun()
 
+	ui.markdown(
+		"""<style>
+		.revir-cal-split-anchor { display: none; }
+		.revir-cal-split-anchor + .revir-cols {
+			grid-template-columns: minmax(520px, 1.48fr) minmax(350px, 1fr) !important;
+			align-items: start !important;
+			gap: 18px !important;
+		}
+		.revir-cal-split-anchor + .revir-cols > .revir-col:nth-child(2) {
+			position: sticky;
+			top: 8px;
+		}
+		.revir-cal-grid-wrap {
+			width: 100%;
+			overflow-x: auto;
+			padding-bottom: 2px;
+		}
+		.revir-cal-grid-wrap .revir-cols-7 {
+			gap: 6px !important;
+			margin-bottom: 0 !important;
+		}
+		@media (max-width: 1100px) {
+			.revir-cal-split-anchor + .revir-cols {
+				grid-template-columns: minmax(0, 1fr) !important;
+			}
+			.revir-cal-split-anchor + .revir-cols > .revir-col:nth-child(2) {
+				position: static;
+			}
+		}
+		</style>""",
+		unsafe_allow_html=True,
+	)
+
 	if show_grid_sec and show_leaf_sec:
-		cal_col = ui.container()
-		leaf_col = ui.container()
+		ui.markdown('<div class="revir-cal-split-anchor"></div>', unsafe_allow_html=True)
+		cal_col, leaf_col = ui.columns([1.48, 1.0], gap="medium")
 	elif show_grid_sec:
 		cal_col = ui.container()
 		leaf_col = None
@@ -1627,15 +1669,16 @@ def render_calendar_and_planning_page(
 	# -----------------------------------------------------------------------
 	if cal_col is not None:
 		with cal_col:
-			hdr_cols = ui.columns(7)
+			ui.markdown('<div class="revir-cal-grid-wrap">', unsafe_allow_html=True)
+			hdr_cols = ui.columns(7, gap="small")
 			for w_idx, w_short in enumerate(TR_WEEKDAY_SHORT):
 				is_wk = w_idx >= 5
 				hdr_bg = "#fee2e2" if w_idx == 6 else ("#e2e8f0" if is_wk else "var(--bg-card)")
 				hdr_fg = "#dc2626" if w_idx == 6 else ("#334155" if is_wk else "var(--text-heading)")
 				with hdr_cols[w_idx]:
 					ui.markdown(
-						f"""<div style="text-align:center;padding:6px 4px;border-radius:8px;background:{hdr_bg};
-						border:1px solid var(--line);font-size:12.5px;font-weight:800;color:{hdr_fg};margin-bottom:4px;">
+						f"""<div style="text-align:center;padding:5px 3px;border-radius:8px;background:{hdr_bg};
+						border:1px solid var(--line);font-size:11.5px;font-weight:800;color:{hdr_fg};margin-bottom:4px;">
 							{w_short}
 						</div>""",
 						unsafe_allow_html=True,
@@ -1643,13 +1686,13 @@ def render_calendar_and_planning_page(
 
 			cal_matrix = calendar.Calendar(firstweekday=0).monthdayscalendar(view_year, view_month)
 			for week_idx, week_days in enumerate(cal_matrix):
-				w_cols = ui.columns(7)
+				w_cols = ui.columns(7, gap="small")
 				for wd_idx, day_num in enumerate(week_days):
 					with w_cols[wd_idx]:
 						if day_num == 0:
 							ui.markdown(
-								'<div style="min-height:98px;border-radius:10px;background:rgba(148,163,184,0.06);'
-								'border:1px dashed rgba(148,163,184,0.22);margin-bottom:6px;"></div>',
+								'<div style="min-height:82px;border-radius:9px;background:rgba(148,163,184,0.06);'
+								'border:1px dashed rgba(148,163,184,0.22);margin-bottom:5px;"></div>',
 								unsafe_allow_html=True,
 							)
 							continue
@@ -1679,32 +1722,32 @@ def render_calendar_and_planning_page(
 							cell_bg = "linear-gradient(180deg, #fef2f2 0%, #fee2e2 100%)"
 							cell_border = "2.5px solid #dc2626" if is_selected else "1.5px solid #fca5a5"
 							num_color = "#dc2626"
-							status_tag = '<span style="font-size:9.5px;font-weight:800;color:#ffffff;background:#dc2626;padding:1px 5px;border-radius:4px;">TATİL</span>'
+							status_tag = '<span style="font-size:9px;font-weight:800;color:#ffffff;background:#dc2626;padding:1px 4px;border-radius:4px;">TATİL</span>'
 						elif has_half_day and is_weekend:
 							cell_bg = "linear-gradient(180deg, #fef2f2 0%, #fee2e2 100%)"
 							cell_border = "2.5px solid #dc2626" if is_selected else "1.5px solid #fca5a5"
 							num_color = "#dc2626"
-							status_tag = '<span style="font-size:9px;font-weight:800;color:#b91c1c;background:#fecaca;padding:1px 5px;border-radius:4px;">ARİFE · TATİL</span>'
+							status_tag = '<span style="font-size:8.5px;font-weight:800;color:#b91c1c;background:#fecaca;padding:1px 4px;border-radius:4px;">ARİFE · TATİL</span>'
 						elif has_half_day:
 							cell_bg = "linear-gradient(180deg, #fff7ed 0%, #ffedd5 100%)"
 							cell_border = "2.5px solid #ea580c" if is_selected else "1.5px solid #fdba74"
 							num_color = "#dc2626"
-							status_tag = '<span style="font-size:9.5px;font-weight:800;color:#9a3412;background:#fed7aa;padding:1px 5px;border-radius:4px;">½ YARIM GÜN</span>'
+							status_tag = '<span style="font-size:9px;font-weight:800;color:#9a3412;background:#fed7aa;padding:1px 4px;border-radius:4px;">½ YARIM GÜN</span>'
 						elif has_ballot:
 							cell_bg = "linear-gradient(180deg, #f5f3ff 0%, #ede9fe 100%)"
 							cell_border = "2.5px solid #7c3aed" if is_selected else "1.5px solid #c4b5fd"
 							num_color = "#6d28d9"
-							status_tag = '<span style="font-size:9.5px;font-weight:800;color:#5b21b6;background:#ddd6fe;padding:1px 5px;border-radius:4px;">İDARİ İZİN</span>'
+							status_tag = '<span style="font-size:9px;font-weight:800;color:#5b21b6;background:#ddd6fe;padding:1px 4px;border-radius:4px;">İDARİ İZİN</span>'
 						elif is_weekend:
 							cell_bg = "linear-gradient(180deg, #f1f5f9 0%, #e2e8f0 100%)"
 							cell_border = "2.5px solid var(--teal)" if is_selected else "1px solid #cbd5e1"
 							num_color = "#dc2626" if is_sunday else "#334155"
-							status_tag = '<span style="font-size:9px;font-weight:700;color:#64748b;">H.Sonu</span>'
+							status_tag = '<span style="font-size:8.8px;font-weight:700;color:#64748b;">H.Sonu</span>'
 						else:
 							cell_bg = "var(--bg-card)"
 							cell_border = "2.5px solid var(--teal)" if is_selected else "1px solid var(--line)"
 							num_color = "var(--text-heading)"
-							status_tag = '<span style="font-size:9px;font-weight:600;color:#059669;">İş Günü</span>'
+							status_tag = '<span style="font-size:8.8px;font-weight:600;color:#059669;">İş Günü</span>'
 
 						if is_today and not is_selected:
 							cell_border = "2px solid #0284c7"
@@ -1715,24 +1758,30 @@ def render_calendar_and_planning_page(
 						if has_crescent:
 							top_symbols.append(SVG_CRESCENT_MINI)
 						if has_exam:
-							top_symbols.append('<span title="ÖSYM / MEB Sınavı" style="font-size:12px;">📝</span>')
+							top_symbols.append('<span title="ÖSYM / MEB Sınavı" style="font-size:11px;">📝</span>')
 						if has_prof and not has_tr_flag:
-							top_symbols.append('<span title="MEB Belirli Gün / Meslek Günü" style="font-size:11.5px;">👩‍⚕️</span>')
+							top_symbols.append('<span title="MEB Belirli Gün / Meslek Günü" style="font-size:11px;">👩‍⚕️</span>')
 						symbols_html = "".join(top_symbols)
 
+						shown_events = cell_events[:2]
+						done_in_cell = sum(1 for e in cell_events if bool(e.get("is_completed")))
+						done_hidden = sum(1 for e in cell_events[2:] if bool(e.get("is_completed")))
+
 						pills_html_list: list[str] = []
-						for ev in cell_events[:2]:
+						for ev in shown_events:
 							ev_done = bool(ev.get("is_completed"))
 							ev_title = html.escape(str(ev.get("title") or ""))
 							ev_hol = bool(ev.get("is_civil_holiday"))
 							ev_cat = str(ev.get("category") or "belirli_gun")
 							if ev_done:
-								p_bg, p_fg, p_bd = "#ecfdf5", "#047857", "#6ee7b7"
-								title_done_css = "text-decoration:line-through;opacity:0.75;"
+								p_bg, p_fg, p_bd = "#dcfce7", "#047857", "#34d399"
+								title_done_css = "text-decoration:line-through;opacity:0.86;"
 								pill_txt = f"✓ {ev_title}"
+								ev_tooltip = f"{ev_title} (Tamamlandı)"
 							else:
 								title_done_css = ""
 								pill_txt = ev_title
+								ev_tooltip = ev_title
 								if ev_hol:
 									p_bg, p_fg, p_bd = "#fee2e2", "#b91c1c", "#fca5a5"
 								elif ev_cat == "dini_bayram":
@@ -1746,9 +1795,9 @@ def render_calendar_and_planning_page(
 								else:
 									p_bg, p_fg, p_bd = "#f1f5f9", "#334155", "#cbd5e1"
 							pills_html_list.append(
-								f'<div style="font-size:10px;font-weight:700;color:{p_fg};background:{p_bg};'
-								f'border:1px solid {p_bd};border-radius:4px;padding:1.5px 4px;margin-top:2px;'
-								f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;{title_done_css}" title="{ev_title}">'
+								f'<div style="font-size:9.3px;font-weight:700;color:{p_fg};background:{p_bg};'
+								f'border:1px solid {p_bd};border-radius:4px;padding:1px 4px;margin-top:2px;'
+								f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;{title_done_css}" title="{ev_tooltip}">'
 								f'{pill_txt}</div>'
 							)
 
@@ -1757,31 +1806,37 @@ def render_calendar_and_planning_page(
 							if sp_builtin["title"].lower() not in existing_titles_low:
 								sp_t = html.escape(sp_builtin["title"])
 								pills_html_list.append(
-									f'<div style="font-size:9.5px;font-weight:600;color:#0f766e;background:#f0fdfa;'
+									f'<div style="font-size:9px;font-weight:600;color:#0f766e;background:#f0fdfa;'
 									f'border:1px solid #99f6e4;border-radius:4px;padding:1px 4px;margin-top:2px;'
 									f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="{sp_t}">'
 									f'{sp_t}</div>'
 								)
 
 						if len(cell_events) > 2:
+							extra_cnt = len(cell_events) - 2
+							done_extra_note = f" · ✅ {done_hidden} bitti" if done_hidden > 0 else ""
 							pills_html_list.append(
-								f'<div style="font-size:9.5px;font-weight:800;color:#475569;margin-top:1px;">+{len(cell_events) - 2} kayıt daha</div>'
+								f'<div style="font-size:9px;font-weight:800;color:#475569;margin-top:1px;">+{extra_cnt} kayıt{done_extra_note}</div>'
 							)
 						elif revir_v_cnt > 0:
 							pills_html_list.append(
-								f'<div style="font-size:9.5px;font-weight:700;color:#0369a1;margin-top:1px;">🩺 {revir_v_cnt} revir kaydı</div>'
+								f'<div style="font-size:9px;font-weight:700;color:#0369a1;margin-top:1px;">🩺 {revir_v_cnt} revir</div>'
+							)
+						elif done_in_cell > 0:
+							pills_html_list.append(
+								f'<div style="font-size:8.8px;font-weight:800;color:#047857;margin-top:1px;">✅ {done_in_cell} tamamlandı</div>'
 							)
 
 						pills_joined = "".join(pills_html_list)
 						today_dot = (
-							'<span style="background:#0284c7;color:#fff;font-size:8.5px;font-weight:800;padding:1px 4px;border-radius:4px;margin-left:3px;">BUGÜN</span>'
+							'<span style="background:#0284c7;color:#fff;font-size:8px;font-weight:800;padding:1px 4px;border-radius:4px;margin-left:2px;">BUGÜN</span>'
 							if is_today else ""
 						)
 						sel_badge = (
-							'<span style="background:var(--teal);color:#fff;font-size:8.5px;font-weight:800;padding:1px 4px;border-radius:4px;margin-left:3px;">SEÇİLİ</span>'
+							'<span style="background:var(--teal);color:#fff;font-size:8px;font-weight:800;padding:1px 4px;border-radius:4px;margin-left:2px;">SEÇİLİ</span>'
 							if is_selected and not is_today else ""
 						)
-						sel_shadow = "0 0 0 3px rgba(13,148,136,0.28)" if is_selected else "0 1px 3px rgba(0,0,0,0.05)"
+						sel_shadow = "0 0 0 2.5px rgba(13,148,136,0.3)" if is_selected else "0 1px 3px rgba(0,0,0,0.05)"
 
 						# SADECE TEK KUTUCUK: Doğrudan bu kutucuğa tıklandığında o gün seçilir (altında ikinci buton yok!)
 						ui.markdown(
@@ -1789,68 +1844,71 @@ def render_calendar_and_planning_page(
 							onclick="window.__revirClick('btn_cal_day_{cell_iso}')"
 							onkeydown="if(event.key==='Enter'||event.key===' '){{event.preventDefault();window.__revirClick('btn_cal_day_{cell_iso}');}}"
 							title="{day_num} {TR_MONTH_NAMES[view_month]} {view_year} takvim yaprağını açmak için tıklayın"
-							style="min-height:98px;padding:7px 8px;border-radius:10px;background:{cell_bg};
+							style="min-height:82px;padding:5px 6px;border-radius:9px;background:{cell_bg};
 							border:{cell_border};box-shadow:{sel_shadow};cursor:pointer;user-select:none;
-							transition:transform 0.1s ease,box-shadow 0.1s ease;margin-bottom:6px;
+							transition:transform 0.1s ease,box-shadow 0.1s ease;margin-bottom:5px;
 							display:flex;flex-direction:column;justify-content:space-between;">
 								<div>
 									<div style="display:flex;align-items:center;justify-content:space-between;gap:2px;">
-										<span style="font-size:16px;font-weight:900;color:{num_color};line-height:1.1;">{day_num}{today_dot}{sel_badge}</span>
-										<span style="display:flex;align-items:center;gap:3px;">{symbols_html}</span>
+										<span style="font-size:14.5px;font-weight:900;color:{num_color};line-height:1.1;">{day_num}{today_dot}{sel_badge}</span>
+										<span style="display:flex;align-items:center;gap:2px;">{symbols_html}</span>
 									</div>
-									<div style="margin-top:3px;">{status_tag}</div>
-									<div style="margin-top:4px;">{pills_joined}</div>
+									<div style="margin-top:2px;">{status_tag}</div>
+									<div style="margin-top:3px;">{pills_joined}</div>
 								</div>
 							</div>""",
 							unsafe_allow_html=True,
 						)
+			ui.markdown('</div>', unsafe_allow_html=True)
 
-	# Sol Panel Altı: Bu Ayın Etkinlik Özeti & Hızlı Kategori Filtresi
-	with connect_db_fn() as _mconn:
-		_ym_prefix = f"{view_year:04d}-{view_month:02d}-"
-		_month_ev_rows = [
-			dict(r)
-			for r in _mconn.execute(
-				"""SELECT id, event_date, title, category, is_civil_holiday, is_half_day, start_time, is_completed
-				   FROM calendar_events WHERE event_date LIKE ?
-				   ORDER BY event_date ASC, start_time ASC, id ASC""",
-				(f"{_ym_prefix}%",),
-			).fetchall()
-		]
-	with ui.expander(f"🔎 {TR_MONTH_NAMES[view_month]} {view_year} Etkinlik Özeti & Kategori Filtresi ({len(_month_ev_rows)})", expanded=False):
-		_cat_f = ui.radio(
-			"Kategori Filtresi",
-			["🌐 Tümü", "🇹🇷 Resmi Tatil", "📝 Sınav", "🩺 Revir / Tarama", "🎗️ Belirli Gün"],
-			horizontal=True,
-			key=f"cal_month_cat_filter_{view_year}_{view_month}",
-			label_visibility="collapsed",
-		)
-		_f_evs = []
-		for _mev in _month_ev_rows:
-			_mc = str(_mev.get("category") or "")
-			if _cat_f == "🇹🇷 Resmi Tatil" and not (_mev.get("is_civil_holiday") or _mc in ("milli_bayram", "resmi_tatil", "yarim_gun", "secim_idari_tatil")):
-				continue
-			if _cat_f == "📝 Sınav" and "sinav" not in _mc:
-				continue
-			if _cat_f == "🩺 Revir / Tarama" and "revir" not in _mc:
-				continue
-			if _cat_f == "🎗️ Belirli Gün" and _mc not in ("meb_belirli_gun", "meslek_gunu"):
-				continue
-			_f_evs.append(_mev)
-		if not _f_evs:
-			ui.caption("Seçili kategoride bu ay için kayıtlı etkinlik bulunmuyor.")
-		else:
-			for _mev in _f_evs[:25]:
-				_ed = str(_mev["event_date"])[:10]
-				_st_ico = "✅" if _mev.get("is_completed") else ("🔴" if _mev.get("is_civil_holiday") else "📌")
-				_tm_s = f" · {_mev['start_time']}" if _mev.get("start_time") else ""
-				_mc1, _mc2 = ui.columns([4.2, 1.0], vertical_alignment="center")
-				with _mc1:
-					ui.caption(f"{_st_ico} **{_ed}**{_tm_s} — {_mev['title']}")
-				with _mc2:
-					if ui.button("Güne Git", key=f"cal_jump_ev_{_mev['id']}", use_container_width=True):
-						ui.session_state["cal_selected_date"] = _ed
-						ui.rerun()
+			# Sol Panel Altı: Bu Ayın Etkinlik Özeti & Hızlı Kategori Filtresi
+			with connect_db_fn() as _mconn:
+				_ym_prefix = f"{view_year:04d}-{view_month:02d}-"
+				_month_ev_rows = [
+					dict(r)
+					for r in _mconn.execute(
+						"""SELECT id, event_date, title, category, is_civil_holiday, is_half_day, start_time, is_completed
+						   FROM calendar_events WHERE event_date LIKE ?
+						   ORDER BY event_date ASC, start_time ASC, id ASC""",
+						(f"{_ym_prefix}%",),
+					).fetchall()
+				]
+			with ui.expander(f"🔎 {TR_MONTH_NAMES[view_month]} {view_year} Etkinlik Özeti & Kategori Filtresi ({len(_month_ev_rows)})", expanded=False):
+				_cat_f = ui.radio(
+					"Kategori Filtresi",
+					["🌐 Tümü", "🇹🇷 Resmi Tatil", "📝 Sınav", "🩺 Revir / Tarama", "🎗️ Belirli Gün"],
+					horizontal=True,
+					key=f"cal_month_cat_filter_{view_year}_{view_month}",
+					label_visibility="collapsed",
+				)
+				_f_evs = []
+				for _mev in _month_ev_rows:
+					_mc = str(_mev.get("category") or "")
+					if _cat_f == "🇹🇷 Resmi Tatil" and not (_mev.get("is_civil_holiday") or _mc in ("milli_bayram", "resmi_tatil", "yarim_gun", "secim_idari_tatil")):
+						continue
+					if _cat_f == "📝 Sınav" and "sinav" not in _mc:
+						continue
+					if _cat_f == "🩺 Revir / Tarama" and "revir" not in _mc:
+						continue
+					if _cat_f == "🎗️ Belirli Gün" and _mc not in ("meb_belirli_gun", "meslek_gunu"):
+						continue
+					_f_evs.append(_mev)
+				if not _f_evs:
+					ui.caption("Seçili kategoride bu ay için kayıtlı etkinlik bulunmuyor.")
+				else:
+					for _mev in _f_evs[:25]:
+						_ed = str(_mev["event_date"])[:10]
+						_is_mev_done = bool(_mev.get("is_completed"))
+						_st_ico = "✅" if _is_mev_done else ("🔴" if _mev.get("is_civil_holiday") else "📌")
+						_done_lbl_s = " · `(Tamamlandı)`" if _is_mev_done else ""
+						_tm_s = f" · {_mev['start_time']}" if _mev.get("start_time") else ""
+						_mc1, _mc2 = ui.columns([4.2, 1.0], vertical_alignment="center")
+						with _mc1:
+							ui.caption(f"{_st_ico} **{_ed}**{_tm_s} — {_mev['title']}{_done_lbl_s}")
+						with _mc2:
+							if ui.button("Güne Git", key=f"cal_jump_ev_{_mev['id']}", use_container_width=True):
+								ui.session_state["cal_selected_date"] = _ed
+								ui.rerun()
 
 	# -----------------------------------------------------------------------
 	# SAĞ PANEL: SEÇİLİ GÜNE AİT BİRLEŞİK "TAKVİM YAPRAĞI"
@@ -2052,12 +2110,12 @@ def _render_interactive_calendar_leaf(
 		special_badges_html.append(
 			f"""<div class="revir-leaf-ev-card" style="background:{b_bg};border:1px solid {b_bd};color:{b_fg};">
 				<button type="button" class="revir-leaf-ev-del" onclick="event.stopPropagation();window.__revirClick('btn_cal_ev_del_{ev_id}');" onkeydown="event.stopPropagation();" title="Bu etkinliği takvimden sil / kaldır">✕</button>
+				<button type="button" role="checkbox" aria-checked="false" aria-label="✓ Tamamlandı" class="revir-leaf-ev-done" onclick="event.stopPropagation();window.__revirClick('btn_cal_ev_done_{ev_id}');" onkeydown="event.stopPropagation();" title="✓ Tamamlandı — Etkinliği tamamlandı olarak işaretle">✓</button>
 				<div style="font-size:12.5px;font-weight:800;color:{b_fg};display:flex;align-items:center;justify-content:space-between;gap:6px;">
 					<span style="display:flex;align-items:center;gap:6px;min-width:0;flex:1;">{sym_html} <span>{e_ttl}</span></span>
 					{t_span}
 				</div>
 				{f'<div style="font-size:11.2px;color:#475569;margin-top:3px;">{e_desc}</div>' if e_desc else ''}
-				<button type="button" class="revir-leaf-ev-done" onclick="event.stopPropagation();window.__revirClick('btn_cal_ev_done_{ev_id}');" onkeydown="event.stopPropagation();" title="Etkinliği tamamlandı olarak işaretle">✓ Tamamlandı</button>
 			</div>"""
 		)
 	if sp_builtin and sp_builtin["title"].lower() not in existing_titles_low:
@@ -2265,7 +2323,8 @@ def _render_interactive_calendar_leaf(
 		"""<style>
 		.revir-leaf-ev-card {
 			position: relative;
-			padding: 8px 34px 27px 10px;
+			min-height: 58px;
+			padding: 8px 40px 8px 10px;
 			border-radius: 9px;
 			margin-bottom: 6px;
 			transition: box-shadow 0.16s ease, border-color 0.16s ease;
@@ -2275,8 +2334,8 @@ def _render_interactive_calendar_leaf(
 		}
 		.revir-leaf-ev-del {
 			position: absolute;
-			top: 5px;
-			right: 5px;
+			top: 6px;
+			right: 7px;
 			width: 22px;
 			height: 22px;
 			padding: 0;
@@ -2303,28 +2362,29 @@ def _render_interactive_calendar_leaf(
 		}
 		.revir-leaf-ev-done {
 			position: absolute;
-			bottom: 5px;
-			right: 6px;
+			top: 32px;
+			right: 7px;
+			width: 22px;
 			height: 22px;
-			padding: 0 8px;
+			padding: 0;
 			border-radius: 6px;
 			display: inline-flex;
 			align-items: center;
 			justify-content: center;
-			gap: 3px;
-			font-size: 10.5px;
-			font-weight: 800;
+			font-size: 13px;
+			font-weight: 900;
 			line-height: 1;
 			cursor: pointer;
-			background: rgba(255, 255, 255, 0.96);
-			color: #059669;
-			border: 1px solid #6ee7b7;
+			background: #ffffff;
+			color: transparent;
+			border: 2px solid #10b981;
 			opacity: 0;
 			pointer-events: none;
-			transform: translateY(2px);
-			transition: opacity 0.15s ease, transform 0.15s ease, background 0.15s ease, color 0.15s ease;
+			transform: scale(0.9);
+			transition: opacity 0.15s ease, transform 0.15s ease, background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 		}
-		.revir-leaf-ev-done:hover {
+		.revir-leaf-ev-done:hover,
+		.revir-leaf-ev-done:focus-visible {
 			background: #10b981;
 			color: #ffffff;
 			border-color: #059669;
@@ -2339,7 +2399,7 @@ def _render_interactive_calendar_leaf(
 		.revir-leaf-ev-card:focus-within .revir-leaf-ev-done {
 			opacity: 1;
 			pointer-events: auto;
-			transform: translateY(0);
+			transform: scale(1);
 		}
 		@media (hover: none), (max-width: 760px) {
 			.revir-leaf-ev-card .revir-leaf-ev-del,
@@ -2386,7 +2446,7 @@ def _render_interactive_calendar_leaf(
 			border-color: #047857;
 		}
 		.revir-done-ev-card .revir-leaf-ev-del {
-			opacity: 0.75;
+			opacity: 0.78;
 			pointer-events: auto;
 			transform: scale(1);
 		}
@@ -2399,42 +2459,42 @@ def _render_interactive_calendar_leaf(
 
 	# BİRLEŞİK TEK PARÇA TAKVİM YAPRAĞI KARTI (Tarih + Meslek + MEB Haftası + Tatil + Ezan Vakti + Yaprak Arkası Yazısı)
 	ui.markdown(
-		f"""<div style="border-radius:14px;overflow:hidden;border:2px solid {header_accent};background:#fffdf9;
+		f"""<div style="border-radius:13px;overflow:hidden;border:2px solid {header_accent};background:#fffdf9;
 		box-shadow:0 8px 22px rgba(15,23,42,0.08);margin-bottom:8px;color:#1e293b;">
-			<div style="background:{header_accent};color:#ffffff;padding:8px 14px;display:flex;align-items:center;justify-content:space-between;">
-				<span style="font-size:12px;font-weight:800;letter-spacing:0.6px;">🗓️ GÜNLÜK TAKVİM YAPRAĞI</span>
-				<span style="font-size:11.5px;font-weight:700;opacity:0.95;">🌙 {html.escape(hijri_str)}</span>
+			<div style="background:{header_accent};color:#ffffff;padding:7px 13px;display:flex;align-items:center;justify-content:space-between;">
+				<span style="font-size:11.5px;font-weight:800;letter-spacing:0.6px;">🗓️ GÜNLÜK TAKVİM YAPRAĞI</span>
+				<span style="font-size:11px;font-weight:700;opacity:0.95;">🌙 {html.escape(hijri_str)}</span>
 			</div>
-			<div style="padding:12px 15px;">
-				<div style="display:flex;align-items:center;justify-content:space-between;border-bottom:1.5px dashed #cbd5e1;padding-bottom:10px;">
+			<div style="padding:10px 13px;">
+				<div style="display:flex;align-items:center;justify-content:space-between;border-bottom:1.5px dashed #cbd5e1;padding-bottom:8px;">
 					<div>
-						<div style="font-size:13px;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:0.8px;">
+						<div style="font-size:12px;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:0.8px;">
 							{html.escape(month_name)} {sel_date.year}
 						</div>
-						<div style="display:flex;align-items:center;gap:10px;margin:2px 0;">
-							<span style="font-size:46px;font-weight:900;color:{num_color};line-height:1.0;">
+						<div style="display:flex;align-items:center;gap:9px;margin:2px 0;">
+							<span style="font-size:40px;font-weight:900;color:{num_color};line-height:1.0;">
 								{sel_date.day:02d}
 							</span>
 							<button type="button"
 							onclick="event.stopPropagation();window.__revirClick('btn_open_cal_event_popup');"
 							title="{sel_date.strftime('%d.%m.%Y')} — Etkinlik & Plan Yönetimi (Ekle / Düzenle)"
-							style="width:34px;height:34px;border-radius:50%;border:1.5px solid {header_accent};
-							background:{header_accent};color:#ffffff;font-size:21px;font-weight:900;
+							style="width:30px;height:30px;border-radius:50%;border:1.5px solid {header_accent};
+							background:{header_accent};color:#ffffff;font-size:19px;font-weight:900;
 							line-height:1;display:inline-flex;align-items:center;justify-content:center;
 							cursor:pointer;box-shadow:0 3px 10px rgba(15,23,42,0.16);">+</button>
 						</div>
-						<div style="font-size:16px;font-weight:800;color:{num_color};">
+						<div style="font-size:14.5px;font-weight:800;color:{num_color};">
 							{html.escape(weekday_name)}
 						</div>
 					</div>
 					<div style="text-align:right;">
-						<div style="display:inline-block;padding:4px 10px;border-radius:999px;background:{work_status_bg};color:{work_status_fg};font-size:10.8px;font-weight:900;margin-bottom:6px;">
+						<div style="display:inline-block;padding:3px 9px;border-radius:999px;background:{work_status_bg};color:{work_status_fg};font-size:10.2px;font-weight:900;margin-bottom:5px;">
 							{work_status_badge}
 						</div>
-						<div style="font-size:11.5px;color:#475569;font-weight:700;">
+						<div style="font-size:11px;color:#475569;font-weight:700;">
 							Yılın <b>{day_of_year}.</b> Günü · Kalan: <b>{remaining_days}</b>
 						</div>
-						<div style="font-size:11px;color:#64748b;margin-top:2px;">
+						<div style="font-size:10.5px;color:#64748b;margin-top:2px;">
 							Miladi: {sel_date.strftime('%d.%m.%Y')}
 						</div>
 					</div>
@@ -2518,9 +2578,10 @@ def _render_interactive_calendar_leaf(
 			ui.rerun()
 
 	# Tamamlanan Etkinlikler Bölümü (Yapraktan kaldırılan ama aylık takvimde görünmeye devam eden etkinlikler)
-	with ui.expander(f"✅ Tamamlanan Etkinlikler ({len(completed_all_events)})", expanded=False):
+	_expand_done_box = bool(ui.session_state.pop("_cal_expand_completed", False))
+	with ui.expander(f"✅ Tamamlanan Etkinlikler ({len(completed_all_events)})", expanded=_expand_done_box):
 		if not completed_all_events:
-			ui.caption("Henüz tamamlanmış etkinlik yok. Yapraktaki **✓ Tamamlandı** butonuyla işaretlenenler burada listelenir.")
+			ui.caption("Henüz tamamlanmış etkinlik yok. Yapraktaki etkinlik kutucuğuna tıklayarak tamamladığınız kayıtlar burada listelenir.")
 		else:
 			ui.caption("Aylık takvimde görünmeye devam eder; **↩️ Geri Al** ile yaprağa döndürebilir veya **✕** ile silebilirsiniz.")
 			for ce in completed_all_events:
@@ -2619,21 +2680,42 @@ def open_calendar_event_manager_dialog(
 
 	if day_events:
 		with ui.container(border=True):
+			done_cnt_dlg = sum(1 for e in day_events if bool(e.get("is_completed")))
+			active_cnt_dlg = len(day_events) - done_cnt_dlg
 			ui.markdown("#### 📋 Bu Güne Kayıtlı Etkinlikler / Tatiller")
+			if done_cnt_dlg:
+				ui.caption(f"⏳ Aktif: **{active_cnt_dlg}** · ✅ Tamamlandı: **{done_cnt_dlg}**")
 			for ev in day_events:
 				ev_id = int(ev["id"])
 				ev_done = bool(ev.get("is_completed"))
 				t_range = " - ".join(filter(None, [ev.get("start_time"), ev.get("end_time")]))
-				t_badge = f"`{t_range}` · " if t_range else ""
-				strike_open = "~~" if ev_done else ""
-				strike_close = "~~" if ev_done else ""
-				row_c1, row_c2, row_c3 = ui.columns([2.8, 0.55, 0.55])
+				t_badge = f"<span style='background:rgba(15,23,42,0.07);padding:1px 6px;border-radius:4px;font-size:11px;font-weight:800;'>⏰ {html.escape(t_range)}</span>" if t_range else ""
+				done_pill = (
+					"<span style='display:inline-block;background:#dcfce7;color:#166534;border:1px solid #86efac;"
+					"padding:1px 8px;border-radius:999px;font-size:11px;font-weight:800;'>✅ Tamamlandı</span>"
+					if ev_done
+					else "<span style='display:inline-block;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;"
+					"padding:1px 7px;border-radius:999px;font-size:10.5px;font-weight:700;'>⏳ Planlandı</span>"
+				)
+				ttl_html = html.escape(str(ev.get("title") or ""))
+				ttl_decor = "text-decoration:line-through;opacity:0.78;color:#065f46;" if ev_done else "color:var(--text-heading);"
+				card_style = "background:#f0fdf4;border:1px solid #86efac;" if ev_done else "background:var(--bg-card);border:1px solid var(--line);"
+				desc_html = f"<div style='font-size:12px;color:#475569;margin-top:3px;'>{html.escape(str(ev.get('description') or ''))}</div>" if ev.get("description") else ""
+				row_c1, row_c2, row_c3 = ui.columns([2.45, 0.95, 0.45], vertical_alignment="center")
 				with row_c1:
-					ui.markdown(f"{t_badge}{strike_open}**{ev['title']}**{strike_close}")
-					if ev.get("description"):
-						ui.caption(ev["description"])
+					ui.markdown(
+						f"""<div style="padding:7px 10px;border-radius:8px;{card_style}">
+							<div style="display:flex;align-items:center;flex-wrap:wrap;gap:6px;">
+								{t_badge}
+								<span style="font-size:13.5px;font-weight:800;{ttl_decor}">{ttl_html}</span>
+								{done_pill}
+							</div>
+							{desc_html}
+						</div>""",
+						unsafe_allow_html=True,
+					)
 				with row_c2:
-					done_lbl = "↩️" if ev_done else "✓"
+					done_lbl = "↩️ Geri Al" if ev_done else "✓ Tamamlandı"
 					if ui.button(done_lbl, key=f"dlg_btn_cal_done_{ev_id}", help="Tamamlandı durumunu değiştir", use_container_width=True):
 						with connect_db_fn() as conn:
 							conn.execute("UPDATE calendar_events SET is_completed = ? WHERE id = ?", (0 if ev_done else 1, ev_id))
@@ -3166,9 +3248,9 @@ def render_overview_calendar_widget(
 			d_bg = "#d1fae5" if is_done else ("#fee2e2" if is_hol else ("#dbeafe" if ev_d_str == today_iso else "#f1f5f9"))
 			d_fg = "#047857" if is_done else ("#dc2626" if is_hol else ("#1d4ed8" if ev_d_str == today_iso else "#334155"))
 			ttl_style = "text-decoration:line-through;opacity:0.65;" if is_done else ""
-			done_badge = "<span style='background:#d1fae5;color:#065f46;border:1px solid #6ee7b7;padding:0 5px;border-radius:4px;font-size:10px;font-weight:800;flex-shrink:0;'>✓ Yapıldı</span>" if is_done else ""
+			done_badge = "<span style='background:#d1fae5;color:#065f46;border:1px solid #6ee7b7;padding:0 5px;border-radius:4px;font-size:10px;font-weight:800;flex-shrink:0;'>✓ Tamamlandı</span>" if is_done else ""
 			done_btn_css = "background:#10b981;color:#ffffff;border:1px solid #059669;" if is_done else "background:#ffffff;color:#059669;border:1px solid #6ee7b7;"
-			done_title = "Yapıldı işaretini geri al" if is_done else "Yapıldı olarak işaretle"
+			done_title = "Tamamlandı işaretini geri al" if is_done else "Tamamlandı olarak işaretle"
 			row_tint_css = "background:#ecfdf5;border-color:#6ee7b7;" if is_done else ""
 
 			ui.markdown(

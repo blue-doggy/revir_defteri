@@ -166,8 +166,11 @@ class TestSchoolCalendar(unittest.TestCase):
                 {"action": "render"},
             )
             self.assertNotIn("Çalışma Zamanı Hatası", out_cal["main_html"])
+            self.assertIn("revir-cal-split-anchor", out_cal["main_html"])
+            self.assertIn(".revir-cal-split-anchor + .revir-cols", out_cal.get("styles_html", ""))
             self.assertIn(".revir-leaf-ev-card:hover .revir-leaf-ev-del", out_cal.get("styles_html", ""))
             self.assertIn(".revir-leaf-ev-card:hover .revir-leaf-ev-done", out_cal.get("styles_html", ""))
+            self.assertIn('role="checkbox"', out_cal["main_html"])
             self.assertIn("revir-leaf-ev-card", out_cal["main_html"])
             self.assertIn("✓ Tamamlandı", out_cal["main_html"])
             self.assertIn(f"btn_cal_ev_done_{ev_id}", out_cal["main_html"])
@@ -219,6 +222,20 @@ class TestSchoolCalendar(unittest.TestCase):
             completed_part = out_done["main_html"].split("Tamamlanan Etkinlikler (1)")[1]
             self.assertIn("4-A Göz Taraması", completed_part)
             self.assertIn("↩️ Geri Al", completed_part)
+
+            # 1b. Event management dialog clearly marks completed event as "✅ Tamamlandı"
+            out_mgr_done = revir_ui.run_action_headless(
+                lambda: school_calendar.open_calendar_event_manager_dialog(
+                    sel_iso=today_iso,
+                    connect_db_fn=self.connect,
+                    get_active_gemini_config_fn=lambda: (False, "", "gemini-2.5-flash"),
+                ),
+                {"action": "render"},
+            )
+            mgr_html = (out_mgr_done.get("dialog_html") or "") + (out_mgr_done.get("main_html") or "")
+            self.assertIn("✅ Tamamlandı", mgr_html)
+            self.assertIn("4-A Göz Taraması", mgr_html)
+            self.assertIn("↩️ Geri Al", mgr_html)
 
             # 2. Click ↩️ Geri Al -> toggles back to is_completed == 0 and returns to leaf
             out_undo = revir_ui.run_action_headless(
