@@ -1,6 +1,8 @@
 """Unit tests for all functions in school_calendar.py and insulin_diabetes.py."""
 from __future__ import annotations
 
+import json
+import re
 import sys
 import unittest
 from datetime import date, datetime
@@ -271,6 +273,110 @@ class TestSchoolCalendar(unittest.TestCase):
                     int(c.execute("SELECT COUNT(*) FROM calendar_events WHERE id = ?", (ev_id,)).fetchone()[0]),
                     0,
                 )
+
+    def test_calendar_leaf_semantic_dedup_ai_consolidation_and_meta_box_actions(self):
+        # 1. Seed semantic duplicates on 2026-11-22 (Diş Hekimleri Günü + MEB Haftası)
+        now_s = datetime.now().isoformat(timespec="seconds")
+        with self.connect() as c:
+            c.execute(
+                """INSERT INTO calendar_events(
+                    event_date, title, category, symbol_type, is_civil_holiday, is_half_day,
+                    profession_group, description, source, is_completed, created_at
+                ) VALUES (?, ?, 'meslek_gunu', 'profession', 0, 0, ?, ?, 'manual', 0, ?)""",
+                ("2026-11-22", "22 Kasım Diş Hekimleri Günü & Ağız ve Diş Sağlığı Haftası", "Diş Hekimleri ve Ağız-Diş Sağlığı Çalışanları", "Günün Meslek Grubu: Diş Hekimleri", now_s),
+            )
+            c.execute(
+                """INSERT INTO calendar_events(
+                    event_date, title, category, symbol_type, is_civil_holiday, is_half_day,
+                    profession_group, description, source, is_completed, created_at
+                ) VALUES (?, ?, 'belirli_gun', 'profession', 0, 0, ?, ?, 'builtin', 0, ?)""",
+                ("2026-11-22", "MEB - 22 Kasım Diş Hekimleri Günü & Ağız ve Diş Sağlığı Haftası (21-27 Kasım)", "Diş Hekimleri ve Ağız-Diş Sağlığı Çalışanları", "", now_s),
+            )
+            c.commit()
+
+        # AI save rejects semantic duplicate on same date
+        ins_dup = school_calendar.save_ai_generated_events_to_db(
+            [{"event_date": "2026-11-22", "title": "Ağız ve Diş Sağlığı Haftası (21–27 Kasım)", "category": "belirli_gun"}],
+            self.connect,
+            upsert=False,
+        )
+        self.assertEqual(ins_dup, 0)
+
+        settings = {
+            "calendar_province": "Ankara",
+            "calendar_show_prayer_times": "1",
+            "calendar_quote_mode": "Karışık (Hadis-i Şerif + Özlü Söz / Günün Yazısı)",
+            "calendar_auto_load_holidays": "0",
+        }
+        cal_kwargs = dict(
+            connect_db_fn=self.connect,
+            get_app_settings_fn=lambda: settings,
+            save_app_settings_fn=lambda d: settings.update(d),
+            get_active_gemini_config_fn=lambda: (False, "", "gemini-2.5-flash"),
+            get_tr_provinces_fn=lambda: ["Ankara"],
+        )
+        with mock.patch.object(school_calendar, "get_prayer_times_for_province", return_value={
+            "İmsak": "06:00", "Güneş": "07:30", "Öğle": "12:50", "İkindi": "15:20", "Akşam": "17:45", "Yatsı": "19:05"
+        }):
+            revir_ui.reset_session()
+            revir_ui.session_state["cal_view_year"] = 2026
+            revir_ui.session_state["cal_view_month"] = 11
+            revir_ui.session_state["cal_selected_date"] = "2026-11-22"
+            out = revir_ui.run_action_headless(lambda: school_calendar.render_calendar_and_planning_page(**cal_kwargs), {"action": "render"})
+            html_leaf = out["main_html"].split("🗓️ GÜNLÜK TAKVİM YAPRAĞI", 1)[1]
+            # Semantic duplicates merged cleanly: 1 event card instead of 3+ overlapping cards, with merged Revir focus
+            self.assertEqual(html_leaf.count("class=\"revir-leaf-ev-done\""), 2)  # 1 Profession card + 1 Unified Event card
+            self.assertIn("Doğru diş fırçalama", html_leaf)
+            # Profession card has hover X & Tamamlandı checkbox
+            prof_slice = html_leaf.split("GÜNÜN MESLEK GRUBU & ANLAMI", 1)[1].split("GÜNÜN TATİL, SINAV VE ETKİNLİKLERİ", 1)[0]
+            self.assertIn("btn_cal_meta_del_", prof_slice)
+            self.assertIn("btn_cal_meta_done_", prof_slice)
+
+            # Complete profession card -> removed from leaf, appears in Tamamlanan Etkinlikler, undo restores it
+            m_prof_done = re.search(r"btn_cal_meta_done_(prof_[0-9_a-f]+)", prof_slice)
+            self.assertIsNotNone(m_prof_done)
+            prof_wid = m_prof_done.group(0)
+            out_pdone = revir_ui.run_action_headless(lambda: school_calendar.render_calendar_and_planning_page(**cal_kwargs), {"action": "click", "key": prof_wid})
+            leaf_after = out_pdone["main_html"].split("🗓️ GÜNLÜK TAKVİM YAPRAĞI", 1)[1]
+            self.assertNotIn("GÜNÜN MESLEK GRUBU & ANLAMI", leaf_after.split("EZAN VAKİTLERİ", 1)[0])
+            self.assertIn("Tamamlanan Etkinlikler (1)", leaf_after)
+            m_undo = re.search(r"btn_cal_ev_done_(\d+)", leaf_after.split("Tamamlanan Etkinlikler (1)", 1)[1])
+            self.assertIsNotNone(m_undo)
+            out_pundo = revir_ui.run_action_headless(lambda: school_calendar.render_calendar_and_planning_page(**cal_kwargs), {"action": "click", "key": m_undo.group(0)})
+            self.assertIn("GÜNÜN MESLEK GRUBU & ANLAMI", out_pundo["main_html"])
+
+            # Delete MEB Week box on 2026-11-12 -> hides permanently on that date
+            revir_ui.session_state["cal_selected_date"] = "2026-11-12"
+            out_meb = revir_ui.run_action_headless(lambda: school_calendar.render_calendar_and_planning_page(**cal_kwargs), {"action": "render"})
+            self.assertIn("Atatürk Haftası", out_meb["main_html"])
+            m_meb_del = re.search(r"btn_cal_meta_del_(meb_[0-9_a-f]+)", out_meb["main_html"])
+            self.assertIsNotNone(m_meb_del)
+            out_meb_after = revir_ui.run_action_headless(lambda: school_calendar.render_calendar_and_planning_page(**cal_kwargs), {"action": "click", "key": m_meb_del.group(0)})
+            self.assertNotIn("Atatürk Haftası", out_meb_after["main_html"].split("🗓️ GÜNLÜK TAKVİM YAPRAĞI", 1)[1])
+
+        # 2. Gemini AI consolidation physically merges duplicate DB records down to 1
+        with self.connect() as c:
+            ids_22 = [int(r["id"]) for r in c.execute("SELECT id FROM calendar_events WHERE event_date='2026-11-22' ORDER BY id").fetchall()]
+        self.assertEqual(len(ids_22), 2)
+        ai_merge_resp = json.dumps({
+            "summary": "Diş Hekimleri Günü ve Ağız-Diş Sağlığı Haftası tekilleştirildi.",
+            "merged_groups": [{
+                "keep_id": ids_22[0],
+                "keep_title": "22 Kasım Diş Hekimleri Günü & Ağız ve Diş Sağlığı Haftası",
+                "keep_description": "Doğru diş fırçalama ve ağız-diş sağlığı farkındalığı",
+                "keep_profession_group": "Diş Hekimleri ve Ağız-Diş Sağlığı Çalışanları",
+                "drop_ids": [ids_22[1]],
+                "suppress_meta_keys": [],
+            }],
+        }, ensure_ascii=False)
+        with mock.patch.object(school_calendar, "consolidate_calendar_items_with_ai", return_value=(True, json.loads(ai_merge_resp), "gemini-2.5-flash")):
+            chg, msg = school_calendar.consolidate_calendar_day_with_ai_or_local(
+                self.connect, target_date="2026-11-22", use_ai=True, api_key="fake-key", model="gemini-2.5-flash"
+            )
+        self.assertGreaterEqual(chg, 2)
+        with self.connect() as c:
+            rem_cnt = c.execute("SELECT COUNT(*) FROM calendar_events WHERE event_date='2026-11-22'").fetchone()[0]
+        self.assertEqual(rem_cnt, 1)
 
 
 class TestInsulinDiabetes(unittest.TestCase):

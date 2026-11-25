@@ -7,6 +7,7 @@ ve Gemini AI Planlama Modülü.
 from __future__ import annotations
 
 import calendar
+import hashlib
 import html
 import json
 import math
@@ -18,6 +19,7 @@ from typing import Any, Callable
 
 import revir_ui as ui
 from gemini_assistant import (
+	consolidate_calendar_items_with_ai,
 	generate_calendar_events_with_ai,
 	generate_daily_leaf_content_with_ai,
 )
@@ -941,6 +943,380 @@ def seed_selected_exams_to_db(year: int, selected_exams: list[str], connect_db_f
 	return added
 
 
+_CAL_TR_TRANS = str.maketrans("çğıöşüâîûÇĞİÖŞÜÂÎÛ", "cgiosuaiucgiosuaiu")
+_CAL_STOPWORDS = {
+	"meb", "ve", "ile", "icin", "gunu", "gun", "haftasi", "hafta", "bayrami",
+	"anma", "kutlama", "ozel", "belirli", "meslek", "grubu", "calisanlari",
+	"calisan", "odagi", "revir", "okul", "tum", "genel", "yili", "arasinda",
+	"ocak", "subat", "mart", "nisan", "mayis", "haziran", "temmuz", "agustos",
+	"eylul", "ekim", "kasim", "aralik",
+}
+
+
+def _cal_tr_fold(text: Any) -> str:
+	s = str(text or "").translate(_CAL_TR_TRANS).lower()
+	s = re.sub(r"[^a-z0-9\s]", " ", s)
+	return re.sub(r"\s+", " ", s).strip()
+
+
+def _calendar_topic_tokens(text: Any) -> set[str]:
+	folded = _cal_tr_fold(text)
+	tokens: set[str] = set()
+	for w in folded.split():
+		if w.isdigit() or len(w) < 3 or w in _CAL_STOPWORDS:
+			continue
+		tokens.add(w[:5] if len(w) >= 6 else w)
+	return tokens
+
+
+def _are_calendar_topics_duplicate(title_a: str, title_b: str) -> bool:
+	fa = _cal_tr_fold(title_a)
+	fb = _cal_tr_fold(title_b)
+	if not fa or not fb:
+		return False
+	if fa == fb:
+		return True
+	ca = re.sub(r"\b(meb|\d+)\b", " ", fa).strip()
+	ca = re.sub(r"\s+", " ", ca)
+	cb = re.sub(r"\b(meb|\d+)\b", " ", fb).strip()
+	cb = re.sub(r"\s+", " ", cb)
+	if ca and cb and (ca == cb or (min(len(ca), len(cb)) >= 12 and (ca in cb or cb in ca))):
+		return True
+	ta = _calendar_topic_tokens(title_a)
+	tb = _calendar_topic_tokens(title_b)
+	if not ta or not tb:
+		return False
+	inter = ta & tb
+	if not inter:
+		return False
+	smaller = min(len(ta), len(tb))
+	if smaller == 1:
+		tok = next(iter(inter))
+		return len(tok) >= 5 and len(ta | tb) <= 3
+	return len(inter) >= max(2, math.ceil(smaller * 0.65))
+
+
+def _ensure_calendar_leaf_states_table(conn: Any) -> None:
+	conn.execute(
+		"""CREATE TABLE IF NOT EXISTS calendar_leaf_item_states (
+			state_key TEXT PRIMARY KEY,
+			item_date TEXT NOT NULL,
+			item_kind TEXT NOT NULL,
+			title TEXT NOT NULL,
+			state TEXT NOT NULL DEFAULT 'active',
+			linked_event_id INTEGER,
+			updated_at TEXT NOT NULL
+		)"""
+	)
+	conn.execute(
+		"CREATE INDEX IF NOT EXISTS idx_cal_leaf_state_date ON calendar_leaf_item_states(item_date)"
+	)
+
+
+def _build_leaf_meta_key(kind: str, item_date: str, title: str) -> str:
+	digest = hashlib.md5(f"{kind}|{item_date}|{title}".encode("utf-8")).hexdigest()[:10]
+	clean_d = re.sub(r"[^0-9]", "", str(item_date or ""))[:8] or "00000000"
+	clean_k = re.sub(r"[^a-z0-9]", "", str(kind or "meta").lower())[:12] or "meta"
+	return f"{clean_k}_{clean_d}_{digest}"
+
+
+def _register_leaf_meta_item(meta_key: str, payload: dict[str, Any]) -> None:
+	reg = ui.session_state.get("_cal_leaf_meta_registry")
+	if not isinstance(reg, dict):
+		reg = {}
+	reg[meta_key] = dict(payload)
+	if len(reg) > 250:
+		for old_k in list(reg.keys())[:50]:
+			reg.pop(old_k, None)
+	ui.session_state["_cal_leaf_meta_registry"] = reg
+
+
+def _resolve_leaf_meta_item(meta_key: str, connect_db_fn: Callable) -> dict[str, Any] | None:
+	reg = ui.session_state.get("_cal_leaf_meta_registry")
+	if isinstance(reg, dict) and meta_key in reg and isinstance(reg[meta_key], dict):
+		return dict(reg[meta_key])
+	# Fallback: oturum sıfırlanmışsa meta_key tarihinden deterministik yeniden çöz
+	parts = meta_key.split("_")
+	if len(parts) >= 3 and len(parts[1]) == 8 and parts[1].isdigit():
+		d_str = parts[1]
+		iso = f"{d_str[:4]}-{d_str[4:6]}-{d_str[6:8]}"
+		try:
+			d_obj = date.fromisoformat(iso)
+		except Exception:
+			return None
+		sp = PROFESSION_AND_SPECIAL_DAYS.get((d_obj.month, d_obj.day))
+		if sp and _build_leaf_meta_key("builtin", iso, sp["title"]) == meta_key:
+			return {
+				"kind": "builtin",
+				"item_date": iso,
+				"title": sp["title"],
+				"description": f"MEB / Özel Gün: {sp.get('prof', '')}".strip(": "),
+				"profession_group": sp.get("prof", ""),
+				"category": sp.get("cat", "belirli_gun"),
+				"symbol_type": "tr_flag" if sp.get("cat") == "milli_bayram" else "profession",
+			}
+		for mw in get_active_meb_weeks_for_date(d_obj):
+			if _build_leaf_meta_key("meb", iso, mw["title"]) == meta_key:
+				return {
+					"kind": "meb",
+					"item_date": iso,
+					"title": mw["title"],
+					"description": f"Revir & Okul Odağı: {mw['focus']}",
+					"profession_group": "",
+					"category": "meb_belirli_gun",
+					"symbol_type": "event",
+				}
+		if parts[0] == "prof":
+			with connect_db_fn() as conn:
+				_ensure_calendar_leaf_states_table(conn)
+				row = conn.execute(
+					"SELECT title FROM calendar_leaf_item_states WHERE state_key = ?",
+					(meta_key,),
+				).fetchone()
+			title_p = str(row["title"]) if row else WEEKDAY_DEFAULT_PROFESSION_THEME[d_obj.weekday()][0]
+			return {
+				"kind": "prof",
+				"item_date": iso,
+				"title": title_p,
+				"description": "Günün Meslek Grubu Takdiri",
+				"profession_group": title_p,
+				"category": "meslek_gunu",
+				"symbol_type": "profession",
+			}
+	return None
+
+
+def _deduplicate_events_cluster(
+	events: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[int, list[int]]]:
+	"""Aynı günde aynı konuyu tekrar eden etkinlikleri tekilleştirir ve küme ID haritasını döndürür."""
+	clusters: list[dict[str, Any]] = []
+	id_map: dict[int, list[int]] = {}
+	prio_src = {"manual": 3, "gemini_ai": 2, "builtin": 1}
+
+	for ev in events:
+		eid = int(ev["id"])
+		ttl = str(ev.get("title") or "").strip()
+		matched: dict[str, Any] | None = None
+		for cl in clusters:
+			if bool(cl.get("is_completed")) != bool(ev.get("is_completed")):
+				continue
+			if _are_calendar_topics_duplicate(str(cl.get("title") or ""), ttl):
+				matched = cl
+				break
+		if matched is None:
+			copy_ev = dict(ev)
+			copy_ev["_cluster_ids"] = [eid]
+			clusters.append(copy_ev)
+			continue
+		matched["_cluster_ids"].append(eid)
+		cur_rank = (
+			prio_src.get(str(matched.get("source") or ""), 1),
+			1 if matched.get("start_time") else 0,
+			len(str(matched.get("description") or "")),
+			-len(str(matched.get("title") or "")),
+		)
+		new_rank = (
+			prio_src.get(str(ev.get("source") or ""), 1),
+			1 if ev.get("start_time") else 0,
+			len(str(ev.get("description") or "")),
+			-len(ttl),
+		)
+		if new_rank > cur_rank:
+			saved_ids = matched["_cluster_ids"]
+			old_desc = str(matched.get("description") or "").strip()
+			old_prof = str(matched.get("profession_group") or "").strip()
+			matched.clear()
+			matched.update(ev)
+			matched["_cluster_ids"] = saved_ids
+			if old_desc and old_desc not in str(matched.get("description") or ""):
+				matched["description"] = " · ".join(filter(None, [str(matched.get("description") or "").strip(), old_desc]))
+			if old_prof and not matched.get("profession_group"):
+				matched["profession_group"] = old_prof
+		else:
+			new_desc = str(ev.get("description") or "").strip()
+			if new_desc and new_desc not in str(matched.get("description") or "") and not _are_calendar_topics_duplicate(new_desc, str(matched.get("title") or "")):
+				matched["description"] = " · ".join(filter(None, [str(matched.get("description") or "").strip(), new_desc]))
+			if ev.get("profession_group") and not matched.get("profession_group"):
+				matched["profession_group"] = ev["profession_group"]
+
+	for cl in clusters:
+		cids = cl.get("_cluster_ids") or [int(cl["id"])]
+		if len(cids) > 1:
+			for cid in cids:
+				id_map[int(cid)] = [int(x) for x in cids]
+	return clusters, id_map
+
+
+def consolidate_calendar_day_with_ai_or_local(
+	connect_db_fn: Callable,
+	*,
+	target_date: str,
+	use_ai: bool = False,
+	api_key: str = "",
+	model: str = "",
+) -> tuple[int, str]:
+	"""
+	Seçili gündeki mükerrer/benzer takvim kayıtlarını (AI varsa Gemini AI ile, yoksa yerel anlamsal eşleştirmeyle)
+	veritabanında teke düşürür. Döndürdüğü değer: (birleştirilen/temizlenen kayıt sayısı, açıklama mesajı).
+	"""
+	now_iso = datetime.now().isoformat(timespec="seconds")
+	with connect_db_fn() as conn:
+		_ensure_calendar_leaf_states_table(conn)
+		rows = [
+			dict(r)
+			for r in conn.execute(
+				"""SELECT id, event_date, title, category, symbol_type, is_civil_holiday,
+				          is_half_day, profession_group, start_time, end_time, description,
+				          source, is_completed
+				   FROM calendar_events
+				   WHERE event_date = ?
+				   ORDER BY is_civil_holiday DESC, start_time ASC, id ASC""",
+				(target_date,),
+			).fetchall()
+		]
+		state_rows = {
+			str(r["state_key"]): dict(r)
+			for r in conn.execute(
+				"SELECT * FROM calendar_leaf_item_states WHERE item_date = ?",
+				(target_date,),
+			).fetchall()
+		}
+
+	try:
+		d_obj = date.fromisoformat(target_date)
+	except Exception:
+		return 0, "Geçersiz tarih."
+
+	sp_b = PROFESSION_AND_SPECIAL_DAYS.get((d_obj.month, d_obj.day))
+	meb_ws = get_active_meb_weeks_for_date(d_obj)
+
+	items_for_ai: list[dict[str, Any]] = []
+	for r in rows:
+		items_for_ai.append({
+			"id": int(r["id"]),
+			"kind": "db_event",
+			"title": r["title"],
+			"description": r.get("description") or "",
+			"profession_group": r.get("profession_group") or "",
+			"is_completed": bool(r.get("is_completed")),
+		})
+	if sp_b:
+		bk = _build_leaf_meta_key("builtin", target_date, sp_b["title"])
+		if bk not in state_rows:
+			items_for_ai.append({
+				"meta_key": bk,
+				"kind": "builtin",
+				"title": sp_b["title"],
+				"profession_group": sp_b.get("prof", ""),
+			})
+	for mw in meb_ws:
+		mk = _build_leaf_meta_key("meb", target_date, mw["title"])
+		if mk not in state_rows:
+			items_for_ai.append({
+				"meta_key": mk,
+				"kind": "meb_week",
+				"title": mw["title"],
+				"description": mw["focus"],
+			})
+
+	changed = 0
+	used_label = "Akıllı Anlamsal Eşleştirme"
+	if use_ai and api_key and len(items_for_ai) >= 2:
+		ok_ai, res_ai, used_m = consolidate_calendar_items_with_ai(
+			api_key=api_key,
+			model=model,
+			target_date=target_date,
+			items=items_for_ai,
+		)
+		if ok_ai and isinstance(res_ai.get("merged_groups"), list):
+			used_label = f"Gemini AI ({used_m})"
+			with connect_db_fn() as conn:
+				_ensure_calendar_leaf_states_table(conn)
+				valid_ids = {int(r["id"]) for r in rows}
+				for grp in res_ai["merged_groups"]:
+					if not isinstance(grp, dict):
+						continue
+					keep_id = grp.get("keep_id")
+					drop_ids = [int(x) for x in (grp.get("drop_ids") or []) if str(x).isdigit() and int(x) in valid_ids and int(x) != keep_id]
+					sup_keys = [str(k).strip() for k in (grp.get("suppress_meta_keys") or []) if str(k).strip()]
+					if keep_id and str(keep_id).isdigit() and int(keep_id) in valid_ids:
+						k_id = int(keep_id)
+						k_ttl = str(grp.get("keep_title") or "").strip()
+						k_desc = str(grp.get("keep_description") or "").strip()
+						k_prof = str(grp.get("keep_profession_group") or "").strip()
+						if k_ttl:
+							conn.execute(
+								"""UPDATE calendar_events
+								   SET title=?, description=?, profession_group=?
+								   WHERE id=?""",
+								(k_ttl, k_desc, k_prof, k_id),
+							)
+							changed += 1
+						for did in drop_ids:
+							conn.execute("DELETE FROM calendar_events WHERE id=?", (did,))
+							changed += 1
+					for sk in sup_keys:
+						conn.execute(
+							"""INSERT INTO calendar_leaf_item_states(state_key, item_date, item_kind, title, state, updated_at)
+							   VALUES (?, ?, 'merged', ?, 'deleted', ?)
+							   ON CONFLICT(state_key) DO UPDATE SET state='deleted', updated_at=excluded.updated_at""",
+							(sk, target_date, str(grp.get("keep_title") or sk), now_iso),
+						)
+						changed += 1
+			if changed > 0:
+				return changed, str(res_ai.get("summary") or f"{used_label} ile {changed} mükerrer öğe teke düşürüldü.")
+
+	# Yerel fallback / garanti anlamsal birleştirme
+	clusters, _ = _deduplicate_events_cluster(rows)
+	with connect_db_fn() as conn:
+		_ensure_calendar_leaf_states_table(conn)
+		for cl in clusters:
+			cids = cl.get("_cluster_ids") or []
+			if len(cids) > 1:
+				keep_id = int(cl["id"])
+				conn.execute(
+					"UPDATE calendar_events SET title=?, description=?, profession_group=? WHERE id=?",
+					(cl["title"], cl.get("description") or "", cl.get("profession_group") or "", keep_id),
+				)
+				for did in cids:
+					if int(did) != keep_id:
+						conn.execute("DELETE FROM calendar_events WHERE id=?", (int(did),))
+						changed += 1
+				changed += 1
+		# Sanal/MEB kartı mevcut DB etkinliğiyle aynıysa onun odağını ana kayda katıp sanal tekrarı gizle
+		ref_rows = rows if changed == 0 else [dict(r) for r in conn.execute("SELECT * FROM calendar_events WHERE event_date=?", (target_date,)).fetchall()]
+		for mw in meb_ws:
+			mk = _build_leaf_meta_key("meb", target_date, mw["title"])
+			if mk in state_rows:
+				continue
+			hit = next((r for r in ref_rows if _are_calendar_topics_duplicate(r["title"], mw["title"])), None)
+			if hit is not None:
+				cur_d = str(hit.get("description") or "").strip()
+				if mw["focus"] not in cur_d:
+					new_d = " · ".join(filter(None, [cur_d, f"Revir & Okul Odağı: {mw['focus']}"]))
+					conn.execute("UPDATE calendar_events SET description=? WHERE id=?", (new_d, int(hit["id"])))
+				conn.execute(
+					"""INSERT INTO calendar_leaf_item_states(state_key, item_date, item_kind, title, state, updated_at)
+					   VALUES (?, ?, 'meb', ?, 'deleted', ?)
+					   ON CONFLICT(state_key) DO UPDATE SET state='deleted', updated_at=excluded.updated_at""",
+					(mk, target_date, mw["title"], now_iso),
+				)
+				changed += 1
+		if sp_b:
+			bk = _build_leaf_meta_key("builtin", target_date, sp_b["title"])
+			if bk not in state_rows and any(_are_calendar_topics_duplicate(r["title"], sp_b["title"]) for r in ref_rows):
+				conn.execute(
+					"""INSERT INTO calendar_leaf_item_states(state_key, item_date, item_kind, title, state, updated_at)
+					   VALUES (?, ?, 'builtin', ?, 'deleted', ?)
+					   ON CONFLICT(state_key) DO UPDATE SET state='deleted', updated_at=excluded.updated_at""",
+					(bk, target_date, sp_b["title"], now_iso),
+				)
+				changed += 1
+
+	return changed, f"{used_label} ile {changed} tekrarlı öğe birleştirildi." if changed else "Bu günde benzer/mükerrer öğe bulunmadı."
+
+
 def save_ai_generated_events_to_db(events: list[dict[str, Any]], connect_db_fn: Callable, upsert: bool = False) -> int:
 	"""Gemini AI tarafından üretilen takvim kayıtlarını tekilleştirerek SQLite veritabanına kaydeder."""
 	added = 0
@@ -974,10 +1350,11 @@ def save_ai_generated_events_to_db(events: list[dict[str, Any]], connect_db_fn: 
 			st_time = str(ev.get("start_time") or "").strip()[:5]
 			en_time = str(ev.get("end_time") or "").strip()[:5]
 			desc = str(ev.get("description") or "").strip()
-			dup = conn.execute(
-				"SELECT id FROM calendar_events WHERE event_date = ? AND lower(trim(title)) = lower(trim(?))",
-				(ev_date, title),
-			).fetchone()
+			existing_on_day = conn.execute(
+				"SELECT id, title FROM calendar_events WHERE event_date = ?",
+				(ev_date,),
+			).fetchall()
+			dup = next((r for r in existing_on_day if _are_calendar_topics_duplicate(str(r["title"] or ""), title)), None)
 			if dup:
 				if upsert:
 					conn.execute(
@@ -1281,22 +1658,36 @@ def _handle_calendar_event_inline_click(connect_db_fn: Callable, *, set_flash: b
 	if not isinstance(clicked_wid, str):
 		return False
 
+	cluster_map = ui.session_state.get("_cal_merged_id_clusters") or {}
+	now_iso = datetime.now().isoformat(timespec="seconds")
+
 	if clicked_wid.startswith("btn_cal_ev_done_"):
 		try:
 			ev_id = int(clicked_wid[len("btn_cal_ev_done_"):])
 		except ValueError:
 			return False
+		target_ids = [int(x) for x in cluster_map.get(ev_id, [ev_id])]
 		with connect_db_fn() as conn:
+			_ensure_calendar_leaf_states_table(conn)
 			row = conn.execute(
-				"SELECT title, is_completed FROM calendar_events WHERE id = ?",
+				"SELECT id, title, source, is_completed FROM calendar_events WHERE id = ?",
 				(ev_id,),
 			).fetchone()
 			if row is not None:
 				new_done = 0 if bool(row["is_completed"]) else 1
-				conn.execute(
-					"UPDATE calendar_events SET is_completed = ? WHERE id = ?",
-					(new_done, ev_id),
-				)
+				linked_meta = conn.execute(
+					"SELECT state_key FROM calendar_leaf_item_states WHERE linked_event_id = ?",
+					(ev_id,),
+				).fetchone()
+				if new_done == 0 and linked_meta is not None and str(row["source"] or "").startswith("leaf_"):
+					conn.execute("DELETE FROM calendar_leaf_item_states WHERE linked_event_id = ?", (ev_id,))
+					conn.execute("DELETE FROM calendar_events WHERE id = ?", (ev_id,))
+				else:
+					for tid in target_ids:
+						conn.execute(
+							"UPDATE calendar_events SET is_completed = ? WHERE id = ?",
+							(new_done, tid),
+						)
 				conn.commit()
 				if set_flash:
 					if new_done == 1:
@@ -1312,16 +1703,97 @@ def _handle_calendar_event_inline_click(connect_db_fn: Callable, *, set_flash: b
 			ev_id = int(clicked_wid[len("btn_cal_ev_del_"):])
 		except ValueError:
 			return False
+		target_ids = [int(x) for x in cluster_map.get(ev_id, [ev_id])]
 		with connect_db_fn() as conn:
+			_ensure_calendar_leaf_states_table(conn)
 			row = conn.execute(
-				"SELECT title FROM calendar_events WHERE id = ?",
+				"SELECT title, event_date, source FROM calendar_events WHERE id = ?",
 				(ev_id,),
 			).fetchone()
 			if row is not None:
-				conn.execute("DELETE FROM calendar_events WHERE id = ?", (ev_id,))
+				conn.execute(
+					"UPDATE calendar_leaf_item_states SET state = 'deleted', linked_event_id = NULL, updated_at = ? WHERE linked_event_id = ?",
+					(now_iso, ev_id),
+				)
+				for tid in target_ids:
+					conn.execute("DELETE FROM calendar_events WHERE id = ?", (tid,))
 				conn.commit()
 				if set_flash:
 					ui.session_state["_cal_flash_msg"] = f"✕ '{row['title']}' takvimden silindi."
+		ctx.clicked_button = None
+		return True
+
+	if clicked_wid.startswith("btn_cal_meta_done_"):
+		meta_key = clicked_wid[len("btn_cal_meta_done_"):]
+		meta = _resolve_leaf_meta_item(meta_key, connect_db_fn)
+		if meta is None:
+			return False
+		with connect_db_fn() as conn:
+			_ensure_calendar_leaf_states_table(conn)
+			existing_st = conn.execute(
+				"SELECT linked_event_id FROM calendar_leaf_item_states WHERE state_key = ?",
+				(meta_key,),
+			).fetchone()
+			ev_id_new = existing_st["linked_event_id"] if (existing_st and existing_st["linked_event_id"]) else None
+			if ev_id_new:
+				conn.execute("UPDATE calendar_events SET is_completed = 1 WHERE id = ?", (int(ev_id_new),))
+			else:
+				cur = conn.execute(
+					"""INSERT INTO calendar_events
+					   (event_date, title, category, symbol_type, is_civil_holiday, is_half_day,
+					    profession_group, start_time, end_time, description, source, is_completed, created_at)
+					   VALUES (?, ?, ?, ?, 0, 0, ?, '', '', ?, ?, 1, ?)""",
+					(
+						meta["item_date"],
+						meta["title"],
+						meta.get("category") or "belirli_gun",
+						meta.get("symbol_type") or "event",
+						meta.get("profession_group") or "",
+						meta.get("description") or "",
+						f"leaf_{meta.get('kind', 'meta')}",
+						now_iso,
+					),
+				)
+				ev_id_new = int(cur.lastrowid)
+			conn.execute(
+				"""INSERT INTO calendar_leaf_item_states
+				   (state_key, item_date, item_kind, title, state, linked_event_id, updated_at)
+				   VALUES (?, ?, ?, ?, 'completed', ?, ?)
+				   ON CONFLICT(state_key) DO UPDATE SET
+				     state='completed', linked_event_id=excluded.linked_event_id, updated_at=excluded.updated_at""",
+				(meta_key, meta["item_date"], meta.get("kind") or "meta", meta["title"], int(ev_id_new), now_iso),
+			)
+			conn.commit()
+		if set_flash:
+			ui.session_state["_cal_expand_completed"] = True
+			ui.session_state["_cal_flash_msg"] = f"✅ '{meta['title']}' tamamlandı olarak işaretlendi ve Tamamlanan Etkinlikler bölümüne taşındı."
+		ctx.clicked_button = None
+		return True
+
+	if clicked_wid.startswith("btn_cal_meta_del_"):
+		meta_key = clicked_wid[len("btn_cal_meta_del_"):]
+		meta = _resolve_leaf_meta_item(meta_key, connect_db_fn)
+		if meta is None:
+			return False
+		with connect_db_fn() as conn:
+			_ensure_calendar_leaf_states_table(conn)
+			existing_st = conn.execute(
+				"SELECT linked_event_id FROM calendar_leaf_item_states WHERE state_key = ?",
+				(meta_key,),
+			).fetchone()
+			if existing_st and existing_st["linked_event_id"]:
+				conn.execute("DELETE FROM calendar_events WHERE id = ?", (int(existing_st["linked_event_id"]),))
+			conn.execute(
+				"""INSERT INTO calendar_leaf_item_states
+				   (state_key, item_date, item_kind, title, state, linked_event_id, updated_at)
+				   VALUES (?, ?, ?, ?, 'deleted', NULL, ?)
+				   ON CONFLICT(state_key) DO UPDATE SET
+				     state='deleted', linked_event_id=NULL, updated_at=excluded.updated_at""",
+				(meta_key, meta["item_date"], meta.get("kind") or "meta", meta["title"], now_iso),
+			)
+			conn.commit()
+		if set_flash:
+			ui.session_state["_cal_flash_msg"] = f"✕ '{meta['title']}' takvim yaprağından kaldırıldı."
 		ctx.clicked_button = None
 		return True
 
@@ -1495,6 +1967,7 @@ def render_calendar_and_planning_page(
 	# -----------------------------------------------------------------------
 	month_prefix = f"{view_year:04d}-{view_month:02d}-"
 	with connect_db_fn() as conn:
+		_ensure_calendar_leaf_states_table(conn)
 		month_rows = conn.execute(
 			"""SELECT id, event_date, title, category, symbol_type, is_civil_holiday,
 			          is_half_day, profession_group, start_time, end_time, description,
@@ -1504,6 +1977,14 @@ def render_calendar_and_planning_page(
 			   ORDER BY is_civil_holiday DESC, is_half_day DESC, start_time ASC, id ASC""",
 			(month_prefix + "%",),
 		).fetchall()
+
+		month_suppressed_keys = {
+			str(sr["state_key"])
+			for sr in conn.execute(
+				"SELECT state_key FROM calendar_leaf_item_states WHERE item_date LIKE ? AND state IN ('completed', 'deleted')",
+				(month_prefix + "%",),
+			).fetchall()
+		}
 
 		visit_counts_by_day: dict[str, int] = {}
 		try:
@@ -1763,9 +2244,10 @@ def render_calendar_and_planning_page(
 							top_symbols.append('<span title="MEB Belirli Gün / Meslek Günü" style="font-size:11px;">👩‍⚕️</span>')
 						symbols_html = "".join(top_symbols)
 
-						shown_events = cell_events[:2]
-						done_in_cell = sum(1 for e in cell_events if bool(e.get("is_completed")))
-						done_hidden = sum(1 for e in cell_events[2:] if bool(e.get("is_completed")))
+						dedup_cell_events, _ = _deduplicate_events_cluster(cell_events)
+						shown_events = dedup_cell_events[:2]
+						done_in_cell = sum(1 for e in dedup_cell_events if bool(e.get("is_completed")))
+						done_hidden = sum(1 for e in dedup_cell_events[2:] if bool(e.get("is_completed")))
 
 						pills_html_list: list[str] = []
 						for ev in shown_events:
@@ -1802,8 +2284,9 @@ def render_calendar_and_planning_page(
 							)
 
 						if sp_builtin and len(pills_html_list) < 2:
-							existing_titles_low = {str(e.get("title") or "").lower() for e in cell_events}
-							if sp_builtin["title"].lower() not in existing_titles_low:
+							sp_meta_k = _build_leaf_meta_key("builtin", cell_iso, sp_builtin["title"])
+							sp_dup = any(_are_calendar_topics_duplicate(str(e.get("title") or ""), sp_builtin["title"]) for e in dedup_cell_events)
+							if sp_meta_k not in month_suppressed_keys and not sp_dup:
 								sp_t = html.escape(sp_builtin["title"])
 								pills_html_list.append(
 									f'<div style="font-size:9px;font-weight:600;color:#0f766e;background:#f0fdfa;'
@@ -1812,8 +2295,8 @@ def render_calendar_and_planning_page(
 									f'{sp_t}</div>'
 								)
 
-						if len(cell_events) > 2:
-							extra_cnt = len(cell_events) - 2
+						if len(dedup_cell_events) > 2:
+							extra_cnt = len(dedup_cell_events) - 2
 							done_extra_note = f" · ✅ {done_hidden} bitti" if done_hidden > 0 else ""
 							pills_html_list.append(
 								f'<div style="font-size:9px;font-weight:800;color:#475569;margin-top:1px;">+{extra_cnt} kayıt{done_extra_note}</div>'
@@ -1972,6 +2455,7 @@ def _render_interactive_calendar_leaf(
 			   WHERE note_date = ?""",
 			(sel_iso,),
 		).fetchone()
+		_ensure_calendar_leaf_states_table(conn)
 		completed_all_events = [
 			dict(r)
 			for r in conn.execute(
@@ -1985,6 +2469,13 @@ def _render_interactive_calendar_leaf(
 				(sel_iso,),
 			).fetchall()
 		]
+		leaf_item_states = {
+			str(r["state_key"]): str(r["state"])
+			for r in conn.execute(
+				"SELECT state_key, state FROM calendar_leaf_item_states WHERE item_date = ?",
+				(sel_iso,),
+			).fetchall()
+		}
 
 	sp_builtin = PROFESSION_AND_SPECIAL_DAYS.get((sel_date.month, sel_date.day))
 	active_meb_weeks = get_active_meb_weeks_for_date(sel_date)
@@ -2031,16 +2522,105 @@ def _render_interactive_calendar_leaf(
 		work_status_bg = "#d1fae5"
 		work_status_fg = "#065f46"
 
-	# 1. Meslek Grubu Bölümü (Ayarlardan açık/kapalı kontrolü)
+	def _render_leaf_hover_card(
+		*,
+		del_wid: str,
+		done_wid: str,
+		title_html: str,
+		body_html: str = "",
+		badge_right_html: str = "",
+		bg_css: str = "#f8fafc",
+		bd_css: str = "#cbd5e1",
+		fg_css: str = "#1e293b",
+		del_title: str = "Bu öğeyi takvim yaprağından kaldır",
+		done_title: str = "✓ Tamamlandı — Tamamlandı olarak işaretle",
+	) -> str:
+		return (
+			f"""<div class="revir-leaf-ev-card" style="background:{bg_css};border:1px solid {bd_css};color:{fg_css};">
+				<button type="button" class="revir-leaf-ev-del" onclick="event.stopPropagation();window.__revirClick('{del_wid}');" onkeydown="event.stopPropagation();" title="{html.escape(del_title, quote=True)}">✕</button>
+				<button type="button" role="checkbox" aria-checked="false" aria-label="✓ Tamamlandı" class="revir-leaf-ev-done" onclick="event.stopPropagation();window.__revirClick('{done_wid}');" onkeydown="event.stopPropagation();" title="{html.escape(done_title, quote=True)}">✓</button>
+				<div style="font-size:12.5px;font-weight:800;color:{fg_css};display:flex;align-items:center;justify-content:space-between;gap:6px;">
+					<span style="display:flex;align-items:center;gap:6px;min-width:0;flex:1;">{title_html}</span>
+					{badge_right_html}
+				</div>
+				{body_html}
+			</div>"""
+		)
+
+	# 0. ÖNCE GÜNÜN ETKİNLİK & HAFTA TEKİLLİĞİNİ ÇÖZÜMLE (Aynı amaca hizmet eden yazıları birleştir)
+	raw_active_events = [e for e in day_events if not bool(e.get("is_completed"))]
+	completed_day_events = [e for e in day_events if bool(e.get("is_completed"))]
+	active_day_events, merged_cluster_map = _deduplicate_events_cluster(raw_active_events)
+	ui.session_state["_cal_merged_id_clusters"] = merged_cluster_map
+	has_raw_duplicates = len(raw_active_events) > len(active_day_events)
+
+	# sp_builtin kartı aynı konuda bir DB etkinliğiyle zaten temsil ediliyorsa veya kullanıcı sildiyse/tamamladıysa tekrarı gösterme
+	show_sp_card = False
+	sp_meta_key = ""
+	if sp_builtin:
+		sp_meta_key = _build_leaf_meta_key("builtin", sel_iso, sp_builtin["title"])
+		sp_state = leaf_item_states.get(sp_meta_key, "active")
+		sp_covered_by_db = any(_are_calendar_topics_duplicate(str(e.get("title") or ""), sp_builtin["title"]) for e in day_events)
+		if sp_state == "active" and not sp_covered_by_db:
+			show_sp_card = True
+			_register_leaf_meta_item(sp_meta_key, {
+				"kind": "builtin",
+				"item_date": sel_iso,
+				"title": sp_builtin["title"],
+				"description": f"Meslek Grubu: {sp_builtin.get('prof', '')}" if sp_builtin.get("prof") else "",
+				"profession_group": sp_builtin.get("prof", ""),
+				"category": sp_builtin.get("cat", "belirli_gun"),
+				"symbol_type": "tr_flag" if sp_builtin.get("cat") == "milli_bayram" else "profession",
+			})
+
+	# MEB belirli gün/haftalar listesi: aktif etkinlikler veya sp_builtin ile aynı konudaysa odağı birleştir, kart tekrarını önle
+	visible_meb_weeks: list[tuple[str, dict[str, str]]] = []
+	for mw in active_meb_weeks:
+		mw_key = _build_leaf_meta_key("meb", sel_iso, mw["title"])
+		if leaf_item_states.get(mw_key) in ("completed", "deleted"):
+			continue
+		matched_ev = next(
+			(e for e in active_day_events if _are_calendar_topics_duplicate(str(e.get("title") or ""), mw["title"])),
+			None,
+		)
+		matched_done = any(
+			_are_calendar_topics_duplicate(str(e.get("title") or ""), mw["title"])
+			for e in completed_day_events
+		)
+		matched_sp = bool(show_sp_card and sp_builtin and _are_calendar_topics_duplicate(sp_builtin["title"], mw["title"]))
+		if matched_ev is not None:
+			cur_d = str(matched_ev.get("description") or "").strip()
+			if mw["focus"] and mw["focus"] not in cur_d:
+				matched_ev["description"] = " · ".join(filter(None, [cur_d, f"Revir & Okul Odağı: {mw['focus']}"]))
+			has_raw_duplicates = True
+			continue
+		if matched_done or matched_sp:
+			has_raw_duplicates = True
+			continue
+		_register_leaf_meta_item(mw_key, {
+			"kind": "meb",
+			"item_date": sel_iso,
+			"title": mw["title"],
+			"description": f"Revir & Okul Odağı: {mw['focus']}",
+			"profession_group": "",
+			"category": "meb_belirli_gun",
+			"symbol_type": "event",
+		})
+		visible_meb_weeks.append((mw_key, mw))
+
+	# 1. Meslek Grubu Bölümü (Ayarlardan açık/kapalı kontrolü + hover ✕ / ✓ + aynı başlık tekrarını önleme)
 	show_profession = str(cfg.get("calendar_show_profession", "1")).strip() != "0"
 	prof_section_html = ""
 	if show_profession:
 		prof_groups: list[str] = []
-		for e in day_events:
+		for e in active_day_events:
 			pg = str(e.get("profession_group") or "").strip()
 			if pg and pg not in prof_groups:
 				prof_groups.append(pg)
-		if sp_builtin and sp_builtin.get("prof") and sp_builtin["prof"] not in prof_groups:
+		sp_prof_completed = bool(
+			sp_builtin and any(_are_calendar_topics_duplicate(str(ce.get("title") or ""), sp_builtin["title"]) for ce in completed_day_events)
+		)
+		if sp_builtin and sp_builtin.get("prof") and sp_builtin["prof"] not in prof_groups and not sp_prof_completed:
 			prof_groups.append(sp_builtin["prof"])
 		ai_prof_override = (leaf_note_row["profession_override"] if leaf_note_row and leaf_note_row["profession_override"] else "").strip()
 		if ai_prof_override and ai_prof_override not in prof_groups:
@@ -2051,38 +2631,71 @@ def _render_interactive_calendar_leaf(
 
 		if prof_groups:
 			active_prof_title = " · ".join(prof_groups)
-			active_prof_sub = (
+			# Alt yazı, aşağıdaki etkinlik veya MEB kartının aynısıysa tekrara düşmeden anlamlı özet göster
+			shown_titles_pool = [str(e.get("title") or "") for e in active_day_events]
+			if show_sp_card and sp_builtin:
+				shown_titles_pool.append(sp_builtin["title"])
+			for _mk, _mw in visible_meb_weeks:
+				shown_titles_pool.append(_mw["title"])
+			cand_sub = (
 				ai_significance
 				or (sp_builtin["title"] if sp_builtin else "")
-				or next((e["title"] for e in day_events if e.get("profession_group")), "Günün Özel Meslek Grubu")
+				or next((e["title"] for e in active_day_events if e.get("profession_group")), "")
 			)
+			if cand_sub and any(_are_calendar_topics_duplicate(cand_sub, st_t) for st_t in shown_titles_pool):
+				active_prof_sub = "Günün meslek grubu & toplumsal farkındalık odağı."
+			else:
+				active_prof_sub = cand_sub or "Günün Özel Meslek Grubu"
 		else:
 			active_prof_title = default_wd_prof
 			active_prof_sub = ai_significance or default_wd_desc
 
-		prof_section_html = f"""<div style="margin-top:10px;padding:8px 11px;border-radius:9px;background:#f0fdfa;border:1px solid #99f6e4;">
-			<div style="font-size:10.5px;font-weight:800;color:#0f766e;text-transform:uppercase;letter-spacing:0.5px;">
-				👩‍⚕️ GÜNÜN MESLEK GRUBU & ANLAMI
-			</div>
-			<div style="font-size:13px;font-weight:800;color:#134e4a;margin-top:2px;">
-				{html.escape(active_prof_title)}
-			</div>
-			<div style="font-size:11.3px;color:#0f766e;margin-top:1px;">
-				{html.escape(active_prof_sub)}
-			</div>
-		</div>"""
+		prof_meta_key = _build_leaf_meta_key("prof", sel_iso, "daily_profession")
+		if leaf_item_states.get(prof_meta_key, "active") == "active":
+			_register_leaf_meta_item(prof_meta_key, {
+				"kind": "prof",
+				"item_date": sel_iso,
+				"title": f"Meslek Günü: {active_prof_title}",
+				"description": active_prof_sub,
+				"profession_group": active_prof_title,
+				"category": "meslek_gunu",
+				"symbol_type": "profession",
+			})
+			prof_card_html = _render_leaf_hover_card(
+				del_wid=f"btn_cal_meta_del_{prof_meta_key}",
+				done_wid=f"btn_cal_meta_done_{prof_meta_key}",
+				title_html=f"<span>👩‍⚕️ {html.escape(active_prof_title)}</span>",
+				body_html=f'<div style="font-size:11.3px;color:#0f766e;margin-top:2px;">{html.escape(active_prof_sub)}</div>',
+				bg_css="#f0fdfa",
+				bd_css="#99f6e4",
+				fg_css="#134e4a",
+				del_title="Günün meslek grubu kutusunu kaldır",
+				done_title="✓ Tamamlandı — Meslek grubu takdirini tamamlandı olarak işaretle",
+			)
+			prof_section_html = (
+				'<div style="margin-top:10px;">'
+				'<div style="font-size:10.5px;font-weight:800;color:#0f766e;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">👩‍⚕️ GÜNÜN MESLEK GRUBU & ANLAMI</div>'
+				f'{prof_card_html}</div>'
+			)
 
-	# 2. MEB Belirli Gün ve Haftalar Şeridi (Ayarlardan açık/kapalı kontrolü)
+	# 2. MEB Belirli Gün ve Haftalar Şeridi (Ayarlardan açık/kapalı kontrolü + hover ✕ / ✓)
 	show_meb_weeks = str(cfg.get("calendar_show_meb_weeks", "1")).strip() != "0"
 	meb_weeks_section_html = ""
-	if show_meb_weeks and active_meb_weeks:
+	if show_meb_weeks and visible_meb_weeks:
 		meb_weeks_html_list: list[str] = []
-		for mw in active_meb_weeks:
+		for mw_key, mw in visible_meb_weeks:
 			meb_weeks_html_list.append(
-				f"""<div style="padding:6px 10px;border-radius:8px;background:#eff6ff;border:1px solid #bfdbfe;margin-bottom:5px;">
-					<div style="font-size:12px;font-weight:800;color:#1e40af;">🏫 {html.escape(mw['title'])}</div>
-					<div style="font-size:11px;color:#1e3a8a;margin-top:1px;">Revir & Okul Odağı: {html.escape(mw['focus'])}</div>
-				</div>"""
+				_render_leaf_hover_card(
+					del_wid=f"btn_cal_meta_del_{mw_key}",
+					done_wid=f"btn_cal_meta_done_{mw_key}",
+					title_html=f"<span>🏫 {html.escape(mw['title'])}</span>",
+					body_html=f'<div style="font-size:11px;color:#1e3a8a;margin-top:2px;">Revir & Okul Odağı: {html.escape(mw["focus"])}</div>',
+					bg_css="#eff6ff",
+					bd_css="#bfdbfe",
+					fg_css="#1e40af",
+					del_title="Bu MEB belirli gün/hafta kutusunu kaldır",
+					done_title="✓ Tamamlandı — Bu MEB haftasını tamamlandı olarak işaretle",
+				)
 			)
 		meb_weeks_section_html = (
 			f'<div style="margin-top:9px;"><div style="font-size:10.5px;font-weight:800;color:#1e40af;'
@@ -2091,9 +2704,6 @@ def _render_interactive_calendar_leaf(
 		)
 
 	# 3. Günün Tatil / Sınav / Planlanan Etkinlik Özeti (Tamamlananlar yapraktan çıkar, alttaki 'Tamamlanan Etkinlikler'de gösterilir)
-	active_day_events = [e for e in day_events if not bool(e.get("is_completed"))]
-	completed_day_events = [e for e in day_events if bool(e.get("is_completed"))]
-	existing_titles_low: set[str] = {str(e.get("title") or "").strip().lower() for e in day_events if str(e.get("title") or "").strip()}
 	special_badges_html: list[str] = []
 	for e in active_day_events:
 		ev_id = int(e["id"])
@@ -2108,27 +2718,37 @@ def _render_interactive_calendar_leaf(
 		b_bd = "#fca5a5" if is_h else "#cbd5e1"
 		b_fg = "#b91c1c" if is_h else "#1e293b"
 		special_badges_html.append(
-			f"""<div class="revir-leaf-ev-card" style="background:{b_bg};border:1px solid {b_bd};color:{b_fg};">
-				<button type="button" class="revir-leaf-ev-del" onclick="event.stopPropagation();window.__revirClick('btn_cal_ev_del_{ev_id}');" onkeydown="event.stopPropagation();" title="Bu etkinliği takvimden sil / kaldır">✕</button>
-				<button type="button" role="checkbox" aria-checked="false" aria-label="✓ Tamamlandı" class="revir-leaf-ev-done" onclick="event.stopPropagation();window.__revirClick('btn_cal_ev_done_{ev_id}');" onkeydown="event.stopPropagation();" title="✓ Tamamlandı — Etkinliği tamamlandı olarak işaretle">✓</button>
-				<div style="font-size:12.5px;font-weight:800;color:{b_fg};display:flex;align-items:center;justify-content:space-between;gap:6px;">
-					<span style="display:flex;align-items:center;gap:6px;min-width:0;flex:1;">{sym_html} <span>{e_ttl}</span></span>
-					{t_span}
-				</div>
-				{f'<div style="font-size:11.2px;color:#475569;margin-top:3px;">{e_desc}</div>' if e_desc else ''}
-			</div>"""
+			_render_leaf_hover_card(
+				del_wid=f"btn_cal_ev_del_{ev_id}",
+				done_wid=f"btn_cal_ev_done_{ev_id}",
+				title_html=f"{sym_html} <span>{e_ttl}</span>",
+				body_html=f'<div style="font-size:11.2px;color:#475569;margin-top:3px;">{e_desc}</div>' if e_desc else "",
+				badge_right_html=t_span,
+				bg_css=b_bg,
+				bd_css=b_bd,
+				fg_css=b_fg,
+				del_title="Bu etkinliği takvimden sil / kaldır",
+				done_title="✓ Tamamlandı — Etkinliği tamamlandı olarak işaretle",
+			)
 		)
-	if sp_builtin and sp_builtin["title"].lower() not in existing_titles_low:
+	if show_sp_card and sp_builtin:
 		sym_html = render_symbol_badge("tr_flag" if sp_builtin.get("cat") == "milli_bayram" else "profession")
+		sp_prof_note = f'<div style="font-size:11.2px;color:#0f766e;margin-top:3px;">Meslek Grubu: {html.escape(sp_builtin["prof"])}</div>' if sp_builtin.get("prof") else ""
 		special_badges_html.append(
-			f"""<div style="padding:7px 10px;border-radius:8px;background:#f0fdfa;border:1px solid #99f6e4;margin-bottom:5px;">
-				<div style="font-size:12.5px;font-weight:800;color:#0f766e;display:flex;align-items:center;gap:6px;">
-					{sym_html} <span>{html.escape(sp_builtin['title'])}</span>
-				</div>
-			</div>"""
+			_render_leaf_hover_card(
+				del_wid=f"btn_cal_meta_del_{sp_meta_key}",
+				done_wid=f"btn_cal_meta_done_{sp_meta_key}",
+				title_html=f"{sym_html} <span>{html.escape(sp_builtin['title'])}</span>",
+				body_html=sp_prof_note,
+				bg_css="#f0fdfa",
+				bd_css="#99f6e4",
+				fg_css="#0f766e",
+				del_title="Bu özel gün kartını kaldır",
+				done_title="✓ Tamamlandı — Bu özel günü tamamlandı olarak işaretle",
+			)
 		)
 
-	if completed_day_events and not active_day_events:
+	if completed_day_events and not active_day_events and not show_sp_card:
 		done_note = '<div style="font-size:12px;color:#059669;font-style:italic;margin-top:4px;">✅ Bu güne ait tüm etkinlikler tamamlandı (aşağıdaki <b>Tamamlanan Etkinlikler</b> bölümünden inceleyebilirsiniz).</div>'
 		special_block = "".join(special_badges_html) + done_note
 	elif special_badges_html:
@@ -2518,7 +3138,20 @@ def _render_interactive_calendar_leaf(
 		unsafe_allow_html=True,
 	)
 
-	# Yaprak Altı Hızlı Aksiyonlar (Gemini ile Yaprak Yazısı Yenileme & Takvim Ayarları Kısayolu)
+	# Yaprak Altı Hızlı Aksiyonlar (Gemini ile Yaprak Yazısı / Benzerleri Teke Düşür / Takvim Ayarları)
+	dedup_btn_lbl = "✨ AI ile Benzerleri Teke Düşür" if (ai_enabled and ai_key) else "🧹 Mükerrerleri Teke Düşür"
+	if has_raw_duplicates or (ai_enabled and ai_key and (len(day_events) + len(visible_meb_weeks)) >= 2):
+		if ui.button(dedup_btn_lbl, key=f"btn_consolidate_leaf_{sel_iso}", type="secondary", use_container_width=True):
+			chg_n, chg_msg = consolidate_calendar_day_with_ai_or_local(
+				connect_db_fn,
+				target_date=sel_iso,
+				use_ai=bool(ai_enabled and ai_key),
+				api_key=ai_key,
+				model=ai_model,
+			)
+			ui.session_state["_cal_flash_msg"] = f"🧹 {chg_msg}"
+			ui.rerun()
+
 	leaf_act1, leaf_act2 = ui.columns(2)
 	with leaf_act1:
 		if ai_enabled and ai_key:
@@ -2718,11 +3351,23 @@ def open_calendar_event_manager_dialog(
 					done_lbl = "↩️ Geri Al" if ev_done else "✓ Tamamlandı"
 					if ui.button(done_lbl, key=f"dlg_btn_cal_done_{ev_id}", help="Tamamlandı durumunu değiştir", use_container_width=True):
 						with connect_db_fn() as conn:
-							conn.execute("UPDATE calendar_events SET is_completed = ? WHERE id = ?", (0 if ev_done else 1, ev_id))
+							_ensure_calendar_leaf_states_table(conn)
+							ev_meta = conn.execute("SELECT source FROM calendar_events WHERE id = ?", (ev_id,)).fetchone()
+							linked_m = conn.execute("SELECT state_key FROM calendar_leaf_item_states WHERE linked_event_id = ?", (ev_id,)).fetchone()
+							if ev_done and linked_m is not None and ev_meta and str(ev_meta["source"] or "").startswith("leaf_"):
+								conn.execute("DELETE FROM calendar_leaf_item_states WHERE linked_event_id = ?", (ev_id,))
+								conn.execute("DELETE FROM calendar_events WHERE id = ?", (ev_id,))
+							else:
+								conn.execute("UPDATE calendar_events SET is_completed = ? WHERE id = ?", (0 if ev_done else 1, ev_id))
 						ui.rerun()
 				with row_c3:
 					if ui.button("✕", key=f"dlg_btn_cal_del_{ev_id}", help="Bu etkinliği takvimden kaldır", use_container_width=True):
 						with connect_db_fn() as conn:
+							_ensure_calendar_leaf_states_table(conn)
+							conn.execute(
+								"UPDATE calendar_leaf_item_states SET state = 'deleted', linked_event_id = NULL, updated_at = ? WHERE linked_event_id = ?",
+								(datetime.now().isoformat(timespec="seconds"), ev_id),
+							)
 							conn.execute("DELETE FROM calendar_events WHERE id = ?", (ev_id,))
 						ui.session_state["_cal_dlg_flash"] = f"✕ '{ev['title']}' takvimden kaldırıldı."
 						ui.rerun()

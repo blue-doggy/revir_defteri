@@ -2535,6 +2535,70 @@ SADECE aşağıdaki JSON yapısını döndür:
 	return True, parsed, used_m
 
 
+def consolidate_calendar_items_with_ai(
+	*,
+	api_key: str,
+	model: str,
+	target_date: str,
+	items: list[dict[str, Any]],
+) -> tuple[bool, dict[str, Any], str]:
+	"""
+	Aynı güne veya haftaya ait benzer anlamlı takvim etkinliklerini, MEB haftalarını ve
+	özel gün yazılarını Gemini AI kullanarak tekilleştirip en sade biçimde birleştirir.
+	"""
+	clean_items = [it for it in (items or []) if isinstance(it, dict) and str(it.get("title") or "").strip()]
+	if len(clean_items) < 2:
+		return True, {"summary": "Birleştirilecek mükerrer kayıt bulunamadı.", "merged_groups": []}, "local"
+
+	payload_json = json.dumps(clean_items, ensure_ascii=False, indent=2)
+	prompt = f"""Sen Türkiye'de okul ve kurum takvimi düzenleyen titiz bir editörsün.
+Tarih: {target_date}
+
+Aşağıdaki JSON listesinde aynı güne ait etkinlikler, MEB belirli gün/haftaları ve özel gün kayıtları yer alıyor.
+Bazı kayıtlar aynı anlama/amaca hizmet ediyor (ör. "22 Kasım Diş Hekimleri Günü & Ağız ve Diş Sağlığı Haftası",
+"MEB - 22 Kasım Diş Hekimleri Günü & Ağız ve Diş Sağlığı Haftası (21-27 Kasım)" ve
+"Ağız ve Diş Sağlığı Haftası (21–27 Kasım)" gibi).
+
+Görevin:
+1. Aynı konuya/anlama hizmet eden kayıtları tek grupta birleştir (konusu farklı olan gerçek okul etkinliklerini, ör. "4-A Göz Taraması" ile "Öğretmenler Günü"nü ASLA birleştirme).
+2. Her mükerrer grup için en anlaşılır, sade tek bir `keep_title`, birleştirilmiş tek bir `keep_description` (varsa revir odağını içeren) ve tek bir `keep_profession_group` yaz.
+3. DB kaynaklı bir satır tutulacaksa `keep_id` alanına onun sayısal `id` değerini, silinecek diğer DB id'lerini `drop_ids` listesine yaz; eğer sanal/MEB/builtin kayıt (string `meta_key` olan) artık bu tek kart içinde birleştiği için ayrıca gösterilmemeliyse `suppress_meta_keys` listesine ekle.
+
+Kayıtlar:
+{payload_json}
+
+SADECE aşağıdaki JSON şemasını döndür:
+{{
+  "summary": "Yapılan tekleştirme özeti",
+  "merged_groups": [
+    {{
+      "keep_id": 12,
+      "keep_meta_key": "",
+      "keep_title": "22 Kasım Diş Hekimleri Günü & Ağız ve Diş Sağlığı Haftası",
+      "keep_description": "Doğru diş fırçalama, ağız-diş sağlığı farkındalığı ve okul taraması",
+      "keep_profession_group": "Diş Hekimleri ve Ağız-Diş Sağlığı Çalışanları",
+      "drop_ids": [15],
+      "suppress_meta_keys": ["meb_2026-11-22_abc123", "builtin_2026-11-22_def456"]
+    }}
+  ]
+}}"""
+
+	ok, raw, used_m = call_gemini(
+		prompt,
+		api_key=api_key,
+		model=model,
+		expect_json=True,
+		temperature=0.1,
+		timeout=25.0,
+	)
+	if not ok:
+		return False, {"error": raw}, used_m
+	parsed = _parse_json_response(raw)
+	if not parsed or not isinstance(parsed.get("merged_groups"), list):
+		return False, {"error": "Takvim tekilleştirme yanıtı ayrıştırılamadı."}, used_m
+	return True, parsed, used_m
+
+
 # ==============================================================================
 # 13. FAZ 2 & FAZ 3: AŞI, NÖBET, SOĞUK ZİNCİR, STOK, İZOLASYON, YETİŞKİN, TARAMA & BRİFİNG
 # ==============================================================================
