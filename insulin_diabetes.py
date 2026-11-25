@@ -365,25 +365,90 @@ def get_school_menus_for_month(connect_db_fn, year_month: str) -> list[dict[str,
 
 
 def get_school_menu_for_date(connect_db_fn, menu_date: str, meal_type: str = "Öğle Yemeği") -> dict[str, Any] | None:
+	iso_d = str(menu_date)[:10]
 	with connect_db_fn() as conn:
 		ensure_diabetes_tables(conn)
 		row = conn.execute(
 			"SELECT * FROM school_meal_menus WHERE menu_date=? AND meal_type=?",
-			(str(menu_date)[:10], str(meal_type)),
+			(iso_d, str(meal_type)),
 		).fetchone()
 		if not row:
 			row = conn.execute(
 				"SELECT * FROM school_meal_menus WHERE menu_date=? ORDER BY id ASC LIMIT 1",
-				(str(menu_date)[:10],),
+				(iso_d,),
 			).fetchone()
-	if not row:
-		return None
-	d = dict(row)
-	try:
-		d["items"] = json.loads(d.get("items_json") or "[]")
-	except Exception:
-		d["items"] = []
-	return d
+		if row:
+			d = dict(row)
+			try:
+				d["items"] = json.loads(d.get("items_json") or "[]")
+			except Exception:
+				d["items"] = []
+			d["source"] = "diabetes_menu"
+			return d
+
+		# Yemekhane Modülü (cafeteria_menu_plans) Otomatik Köprüsü
+		has_caf = conn.execute(
+			"SELECT 1 FROM sqlite_master WHERE type='table' AND name='cafeteria_menu_plans'"
+		).fetchone()
+		if has_caf:
+			caf_row = conn.execute(
+				"SELECT * FROM cafeteria_menu_plans WHERE plan_date=? AND meal_slot=?",
+				(iso_d, str(meal_type)),
+			).fetchone()
+			if not caf_row:
+				caf_row = conn.execute(
+					"SELECT * FROM cafeteria_menu_plans WHERE plan_date=? ORDER BY id ASC LIMIT 1",
+					(iso_d,),
+				).fetchone()
+			if caf_row:
+				caf_items: list[dict[str, Any]] = []
+				try:
+					dish_ids = [int(x) for x in json.loads(caf_row["dish_ids_json"] or "[]") if str(x).strip()]
+				except Exception:
+					dish_ids = []
+				if dish_ids:
+					q_marks = ",".join("?" for _ in dish_ids)
+					d_rows = {
+						int(r["id"]): r
+						for r in conn.execute(
+							f"SELECT id, name, portion_g, carbs_g FROM cafeteria_dishes WHERE id IN ({q_marks})",
+							tuple(dish_ids),
+						).fetchall()
+					}
+					for did in dish_ids:
+						dr = d_rows.get(did)
+						if dr:
+							pg = float(dr["portion_g"] or 0)
+							caf_items.append({
+								"name": str(dr["name"]),
+								"portion": f"{pg:g} g" if pg > 0 else "1 porsiyon",
+								"carbs_g": round(float(dr["carbs_g"] or 0.0), 1),
+								"gi": "Orta",
+								"fat_protein_note": "",
+							})
+				try:
+					cust_list = json.loads(caf_row["custom_items_json"] or "[]")
+				except Exception:
+					cust_list = []
+				for cit in cust_list:
+					if isinstance(cit, dict) and str(cit.get("name") or "").strip():
+						caf_items.append({
+							"name": str(cit["name"]).strip(),
+							"portion": str(cit.get("portion") or "1 porsiyon"),
+							"carbs_g": round(float(cit.get("carbs_g") or 0.0), 1),
+							"gi": "Orta",
+							"fat_protein_note": "",
+						})
+				if caf_items or float(caf_row["total_carbs_g"] or 0) > 0:
+					return {
+						"id": int(caf_row["id"]),
+						"menu_date": iso_d,
+						"meal_type": str(caf_row["meal_slot"] or meal_type),
+						"items": caf_items,
+						"total_carbs_g": float(caf_row["total_carbs_g"] or sum(x["carbs_g"] for x in caf_items)),
+						"source": "cafeteria_module",
+					}
+	return None
 
 
 def delete_school_menu_by_id(connect_db_fn, menu_id: int) -> None:
@@ -1035,6 +1100,8 @@ def _render_tab_bolus_calculator(
 			with ui.container(border=True):
 				ui.markdown(f"##### 2️⃣ Günün Okul Yemek Menüsü ({sel_date.strftime('%d.%m.%Y')} · {meal_type})")
 				day_menu = get_school_menu_for_date(connect_db_fn, sel_date.isoformat(), meal_type)
+				if day_menu and day_menu.get("source") == "cafeteria_module":
+					ui.caption("🍽️ **Yemekhane Yönetimi** modülündeki günlük menü planından karbonhidrat değerleri otomatik aktarıldı.")
 				if day_menu and day_menu.get("items"):
 					m_items = day_menu["items"]
 					item_labels = [
@@ -1082,10 +1149,7 @@ def _render_tab_bolus_calculator(
 						)
 						menu_carbs_raw = float(manual_menu_c)
 				else:
-					ui.info(
-						f"📅 `{sel_date.strftime('%d.%m.%Y')}` tarihi için kayıtlı yemek menüsü bulunamadı. "
-						"**'📅 Aylık Yemek Programı'** sekmesinden okulun aylık menüsünü yükleyebilir veya aşağıya doğrudan öğün karbonhidratını girebilirsiniz."
-					)
+					ui.caption(f"📅 `{sel_date.strftime('%d.%m.%Y')}` için kayıtlı menü yok — Yemekhane veya Aylık Yemek Programı'ndan ekleyebilir ya da aşağıya manuel girebilirsiniz.")
 					menu_carbs_raw = float(
 						ui.number_input(
 							"Manuel Öğün Karbonhidratı (g)",

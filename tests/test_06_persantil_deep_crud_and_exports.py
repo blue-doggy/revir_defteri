@@ -580,6 +580,110 @@ class TestPersantilDeepCRUDAndExports(unittest.TestCase):
             civ_out = revir_ui.run_action_headless(persantil.render_civilians)
             self.assertIn("Periyodik İşyeri", civ_out["main_html"])
 
+    def test_v1_30_0_enhancements_and_integrity(self):
+        import re
+        import cafeteria
+        import insulin_diabetes
+
+        # 1. Zero EVREN traces across application Python files
+        for fname in (
+            "persantil.py",
+            "gemini_assistant.py",
+            "school_calendar.py",
+            "cafeteria.py",
+            "insulin_diabetes.py",
+            "document_studio.py",
+            "revir_ui.py",
+            "desktop_app.py",
+        ):
+            src = (PROJECT_ROOT / fname).read_text(encoding="utf-8")
+            self.assertIsNone(
+                re.search(r"evren(?!sel)", src, re.IGNORECASE),
+                f"Unexpected EVREN trace found in {fname}",
+            )
+
+        # 2. DB health & orphan repair check
+        persantil.ensure_db_initialized()
+        with self.connect() as c:
+            c.execute("PRAGMA foreign_keys = OFF")
+            c.execute(
+                "INSERT INTO visits(student_id, visit_date, visit_time, complaint, action) VALUES (999999, '2026-11-25', '09:30', 'Test', 'Test')"
+            )
+        rep_dirty = persantil.run_system_health_and_integrity_check(repair_orphans=False)
+        self.assertTrue(rep_dirty["sqlite_ok"])
+        self.assertEqual(rep_dirty["orphan_counts"].get("visits"), 1)
+        self.assertFalse(rep_dirty["ok"])
+
+        rep_clean = persantil.run_system_health_and_integrity_check(repair_orphans=True)
+        self.assertEqual(rep_clean["repaired_orphans"], 1)
+        self.assertEqual(rep_clean["total_orphans"], 0)
+        self.assertTrue(rep_clean["ok"])
+
+        # 3. Cafeteria -> Insulin Bolus automatic menu carbohydrate bridge
+        today_iso = date.today().isoformat()
+        with self.connect() as c:
+            cafeteria.ensure_cafeteria_tables(c)
+            c.execute(
+                "INSERT INTO cafeteria_dishes(name, category, portion_g, total_kcal, carbs_g, created_at, updated_at) VALUES ('Bulgur Pilavı', 'Ana Yemek', 180, 250, 42.5, ?, ?)",
+                (today_iso, today_iso),
+            )
+            did = c.execute("SELECT last_insert_rowid()").fetchone()[0]
+            c.execute(
+                "INSERT INTO cafeteria_menu_plans(year_month, plan_date, meal_slot, dish_ids_json, total_kcal, total_carbs_g, updated_at) VALUES (?, ?, 'Öğle Yemeği', ?, 250, 42.5, ?)",
+                (today_iso[:7], today_iso, f"[{did}]", today_iso),
+            )
+        bridged = insulin_diabetes.get_school_menu_for_date(self.connect, today_iso, "Öğle Yemeği")
+        self.assertIsNotNone(bridged)
+        self.assertEqual(bridged["source"], "cafeteria_module")
+        self.assertAlmostEqual(bridged["items"][0]["carbs_g"], 42.5)
+
+        # 4. Recurring visit warning, growth band-shift alert, active NANDA summary, and KVKK masking
+        with self.connect() as c:
+            c.execute("INSERT INTO classes(name) VALUES ('3-A')")
+            cid = c.execute("SELECT id FROM classes WHERE name='3-A'").fetchone()["id"]
+            c.execute(
+                "INSERT INTO students(class_id, person_type, student_no, full_name, sex, birth_date) VALUES (?, 'Öğrenci', '301', 'Zeynep Acar', 'K', '2017-05-15')",
+                (cid,),
+            )
+            sid = c.execute("SELECT id FROM students WHERE student_no='301'").fetchone()["id"]
+            c.execute(
+                "INSERT INTO health_profiles(student_id, allergies, chronic_conditions, updated_at) VALUES (?, 'Yer Fıstığı', 'Astım', ?)",
+                (sid, today_iso),
+            )
+            c.execute(
+                "INSERT INTO visits(student_id, visit_date, visit_time, complaint, symptoms, action) VALUES (?, ?, '09:00', 'Karın ağrısı', 'Karın ağrısı', 'İstirahat')",
+                (sid, today_iso),
+            )
+            c.execute(
+                "INSERT INTO visits(student_id, visit_date, visit_time, complaint, symptoms, action) VALUES (?, ?, '11:00', 'Baş ağrısı', 'Baş ağrısı', 'İstirahat')",
+                (sid, today_iso),
+            )
+            c.execute(
+                "INSERT INTO care_plans(student_id, created_at, reviewed_by, nursing_diagnosis, goals, interventions, monitoring, status) VALUES (?, ?, 'Hemşire', 'Etkisiz Solunum', 'SpO2 >= 95', 'İzlem', 'Haftalık', 'Aktif - İzlemde')",
+                (sid, today_iso),
+            )
+        persantil.import_builtin_who_references()
+        persantil.record_linked_measurement(sid, date(2026, 3, 1), 130.0, 24.0, "2017-05-15", "K")
+        persantil.record_linked_measurement(sid, date(2026, 10, 1), 131.0, 33.5, "2017-05-15", "K")
+        persantil.clear_all_data_caches()
+
+        revir_ui.reset_session()
+        persantil.set_active_person(sid)
+        vis_out = revir_ui.run_action_headless(persantil.render_visit)
+        self.assertIn("Tekrarlayan Başvuru İkazı", vis_out["main_html"])
+
+        revir_ui.reset_session()
+        persantil.set_active_person(sid)
+        revir_ui.session_state["kvkk_privacy_mode"] = True
+        meas_out = revir_ui.run_action_headless(persantil.render_measurements)
+        self.assertIn("Persantil Kanal Kayması Saptandı", meas_out["main_html"])
+        self.assertNotIn("Zeynep Acar", meas_out["main_html"])
+
+        revir_ui.reset_session()
+        persantil.set_active_person(sid)
+        hp_out = revir_ui.run_action_headless(persantil.render_health_profile_and_plan)
+        self.assertIn("Okul Geneli Aktif / Takipteki NANDA-I Bakım Planları", hp_out["main_html"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

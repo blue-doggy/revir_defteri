@@ -1804,6 +1804,53 @@ def render_calendar_and_planning_page(
 							unsafe_allow_html=True,
 						)
 
+	# Sol Panel Altı: Bu Ayın Etkinlik Özeti & Hızlı Kategori Filtresi
+	with connect_db_fn() as _mconn:
+		_ym_prefix = f"{view_year:04d}-{view_month:02d}-"
+		_month_ev_rows = [
+			dict(r)
+			for r in _mconn.execute(
+				"""SELECT id, event_date, title, category, is_civil_holiday, is_half_day, start_time, is_completed
+				   FROM calendar_events WHERE event_date LIKE ?
+				   ORDER BY event_date ASC, start_time ASC, id ASC""",
+				(f"{_ym_prefix}%",),
+			).fetchall()
+		]
+	with ui.expander(f"🔎 {TR_MONTH_NAMES[view_month]} {view_year} Etkinlik Özeti & Kategori Filtresi ({len(_month_ev_rows)})", expanded=False):
+		_cat_f = ui.radio(
+			"Kategori Filtresi",
+			["🌐 Tümü", "🇹🇷 Resmi Tatil", "📝 Sınav", "🩺 Revir / Tarama", "🎗️ Belirli Gün"],
+			horizontal=True,
+			key=f"cal_month_cat_filter_{view_year}_{view_month}",
+			label_visibility="collapsed",
+		)
+		_f_evs = []
+		for _mev in _month_ev_rows:
+			_mc = str(_mev.get("category") or "")
+			if _cat_f == "🇹🇷 Resmi Tatil" and not (_mev.get("is_civil_holiday") or _mc in ("milli_bayram", "resmi_tatil", "yarim_gun", "secim_idari_tatil")):
+				continue
+			if _cat_f == "📝 Sınav" and "sinav" not in _mc:
+				continue
+			if _cat_f == "🩺 Revir / Tarama" and "revir" not in _mc:
+				continue
+			if _cat_f == "🎗️ Belirli Gün" and _mc not in ("meb_belirli_gun", "meslek_gunu"):
+				continue
+			_f_evs.append(_mev)
+		if not _f_evs:
+			ui.caption("Seçili kategoride bu ay için kayıtlı etkinlik bulunmuyor.")
+		else:
+			for _mev in _f_evs[:25]:
+				_ed = str(_mev["event_date"])[:10]
+				_st_ico = "✅" if _mev.get("is_completed") else ("🔴" if _mev.get("is_civil_holiday") else "📌")
+				_tm_s = f" · {_mev['start_time']}" if _mev.get("start_time") else ""
+				_mc1, _mc2 = ui.columns([4.2, 1.0], vertical_alignment="center")
+				with _mc1:
+					ui.caption(f"{_st_ico} **{_ed}**{_tm_s} — {_mev['title']}")
+				with _mc2:
+					if ui.button("Güne Git", key=f"cal_jump_ev_{_mev['id']}", use_container_width=True):
+						ui.session_state["cal_selected_date"] = _ed
+						ui.rerun()
+
 	# -----------------------------------------------------------------------
 	# SAĞ PANEL: SEÇİLİ GÜNE AİT BİRLEŞİK "TAKVİM YAPRAĞI"
 	# -----------------------------------------------------------------------
@@ -2464,16 +2511,9 @@ def _render_interactive_calendar_leaf(
 	# Tamamlanan Etkinlikler Bölümü (Yapraktan kaldırılan ama aylık takvimde görünmeye devam eden etkinlikler)
 	with ui.expander(f"✅ Tamamlanan Etkinlikler ({len(completed_all_events)})", expanded=False):
 		if not completed_all_events:
-			ui.caption(
-				"Henüz tamamlanmış takvim etkinliği bulunmuyor. Günlük Takvim Yaprağı içindeki bir etkinlik "
-				"kutucuğunun üzerine gelip **✓ Tamamlandı** butonuna tıkladığınızda kayıt yapraktan buraya "
-				"taşınır (aylık takvimde görünmeye devam eder)."
-			)
+			ui.caption("Henüz tamamlanmış etkinlik yok. Yapraktaki **✓ Tamamlandı** butonuyla işaretlenenler burada listelenir.")
 		else:
-			ui.caption(
-				"Tamamlanan etkinlikler Günlük Takvim Yaprağı'ndan kaldırılır; aylık takvimde görünmeye devam eder. "
-				"İsterseniz buradan tekrar yaprağa geri alabilir veya **✕** ile takvimden silebilirsiniz."
-			)
+			ui.caption("Aylık takvimde görünmeye devam eder; **↩️ Geri Al** ile yaprağa döndürebilir veya **✕** ile silebilirsiniz.")
 			for ce in completed_all_events:
 				ce_id = int(ce["id"])
 				ce_d_str = str(ce.get("event_date") or "")[:10]
@@ -2720,11 +2760,7 @@ def render_calendar_settings_tab(
 	"""
 	today = date.today()
 	ai_enabled, ai_key, ai_model = get_active_gemini_config_fn()
-	ai_provider_lbl = "EVREN AI" if (
-		str(ai_key or "").strip().lower().startswith("evren_")
-		or str(ai_model or "").strip().lower().startswith("evren:")
-		or str(ai_model or "").strip() in ("gemma-4-31b", "gpt-oss-120b")
-	) else "Gemini AI"
+	ai_provider_lbl = "Gemini AI"
 	all_provs = get_tr_provinces_fn() or sorted(TR_PROVINCE_COORDS.keys())
 	cur_prov = (current_cfg.get("default_province") or "Ankara").strip() or "Ankara"
 	if cur_prov not in all_provs:

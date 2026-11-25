@@ -6154,13 +6154,35 @@ def _render_tab_menu_planner(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict
 	)
 
 	tot_planned_days = len({p[0] for p in plans.keys()})
+	unplanned_workdays = max(0, len([w for w in workdays if not any(p[0] == w["date_iso"] for p in plans.keys())]))
 	slot_times_disp = " · ".join(f"{sl} ({sched['meal_times'][sl]})" for sl in active_slots if sched["meal_times"].get(sl))
 	ram_info_bit = f" · 🌙 **Ramazan Modu ({sched['ramazan_province']})**" if sched["ramazan_mode"] else ""
+	unplanned_bit = f" · ⚠️ **Boş İş Günü: {unplanned_workdays}**" if unplanned_workdays > 0 else " · ✅ **Tüm İş Günleri Planlandı**"
 	ui.info(
-		f"📅 **{_fmt_ym(sel_ym)} Hizmet & İş Günü Özeti:** Haftada **{sched['days_per_week']} gün**, günde **{len(active_slots)} öğün** "
-		f"({slot_times_disp}) · Ay toplamı **{len(workdays)} hizmet günü** · Planlanmış gün: **{tot_planned_days}**{ram_info_bit}"
-		+ (f" · Resmi/İdari Tatil ({len(holidays_in_month)}): " + ", ".join(f"{h['day_num']} ({h['holiday_title']})" for h in holidays_in_month[:4]) if holidays_in_month else "")
+		f"📅 **{_fmt_ym(sel_ym)} Özeti:** Haftada **{sched['days_per_week']} gün**, **{len(active_slots)} öğün** "
+		f"({slot_times_disp}) · **{len(workdays)} iş günü** · Planlanan: **{tot_planned_days}**{unplanned_bit}{ram_info_bit}"
+		+ (f" · Tatil ({len(holidays_in_month)}): " + ", ".join(f"{h['day_num']} ({h['holiday_title']})" for h in holidays_in_month[:3]) if holidays_in_month else "")
 	)
+	# Okuldaki Besin Alerjili Öğrenci & Aylık Menü Alerjen Çapraz İkazı
+	try:
+		with connect_db_fn() as _aconn:
+			_allergy_stu_cnt = int(
+				_aconn.execute(
+					"SELECT COUNT(*) FROM health_profiles WHERE allergies IS NOT NULL AND trim(allergies) != ''"
+				).fetchone()[0]
+			)
+		_planned_allergens: set[str] = set()
+		for _pv in plans.values():
+			for _alg in (_pv.get("allergens") or []):
+				if str(_alg).strip():
+					_planned_allergens.add(str(_alg).strip())
+		if _allergy_stu_cnt > 0 and _planned_allergens:
+			ui.caption(
+				f"🥜 **Besin Güvenliği Özeti:** Okulda alerji kaydı bulunan **{_allergy_stu_cnt}** kişi var · "
+				f"Bu ayki menüde yer alan alerjen grupları ({len(_planned_allergens)}): {', '.join(sorted(_planned_allergens)[:6])}"
+			)
+	except Exception:
+		pass
 
 	# AI Akıllı Menü Oluşturucu & Dosyadan Aktarıcı
 	with ui.expander("🤖 Gemini AI ile Aylık/Haftalık Dengeli Menü Tasarla veya Dosyadan Aktar"):

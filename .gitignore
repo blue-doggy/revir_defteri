@@ -36,7 +36,6 @@ Kurulum_Paketleri/
 .revir_server.log
 .revir_desktop.pid
 .gemini_api_key
-.evren_api_key
 .webview2_cache/
 .window_state.json
 scratch/
