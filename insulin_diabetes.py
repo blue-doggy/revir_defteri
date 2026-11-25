@@ -1008,21 +1008,17 @@ def render_insulin_diabetes_page(ctx_api: dict[str, Any]) -> None:
 			unsafe_allow_html=True,
 		)
 
-	tab_calc, tab_menu, tab_prof, tab_logs = ui.tabs([
+	tabs = ui.tabs([
 		"🧮 İnsülin Doz Hesaplayıcı & AI Yorum",
 		"📅 Aylık Yemek Programı & İnsülin Planı",
 		"⚙️ Öğrenci Diyabet Profili (İKO / İDF)",
 		"📈 Uygulama Defteri, TIR Trendi & Raporlar",
-	])
+	], lazy=True)
 
-	with tab_calc:
-		_render_tab_bolus_calculator(ctx_api, person, sel_pid, prof, growth, dp_dis, iob_now, active_boluses, last_site)
-	with tab_menu:
-		_render_tab_monthly_menu(ctx_api, person, sel_pid, prof)
-	with tab_prof:
-		_render_tab_diabetes_profile(ctx_api, person, sel_pid, prof, growth)
-	with tab_logs:
-		_render_tab_logs_and_trends(ctx_api, person, sel_pid, prof, growth)
+	tabs.render(0, lambda: _render_tab_bolus_calculator(ctx_api, person, sel_pid, prof, growth, dp_dis, iob_now, active_boluses, last_site))
+	tabs.render(1, lambda: _render_tab_monthly_menu(ctx_api, person, sel_pid, prof))
+	tabs.render(2, lambda: _render_tab_diabetes_profile(ctx_api, person, sel_pid, prof, growth))
+	tabs.render(3, lambda: _render_tab_logs_and_trends(ctx_api, person, sel_pid, prof, growth))
 
 
 # ==============================================================================

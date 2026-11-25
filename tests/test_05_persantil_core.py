@@ -107,6 +107,40 @@ class TestPersantilCoreAndUI(unittest.TestCase):
         self.assertIn("data-layout-widget-marker=\"vision\"", output["main_html"])
         self.assertIn("layout_dossier_cards", output["scripts_html"])
 
+    def test_report_settings_have_one_entry_point(self):
+        output = revir_ui.run_action_headless(persantil.render_reports, {"action": "render"})
+        main_html = str(output.get("main_html") or "")
+        self.assertIn("Rapor Ayarları", main_html)
+        self.assertIn("Tarama ve Persantil Şablonları", main_html)
+        self.assertIn("Kişi Dosyası Rapor Ayarları", main_html)
+        self.assertNotIn("Kişi Raporu Ayarları", main_html)
+
+    def test_dashboard_distinguishes_failed_checks_from_clear_status(self):
+        failures = (
+            mock.patch.object(persantil, "get_scheduled_doses_for_date", side_effect=RuntimeError("test")),
+            mock.patch.object(persantil, "get_pending_followup_visits", side_effect=RuntimeError("test")),
+            mock.patch.object(persantil, "get_infirmary_inventory_alerts", side_effect=RuntimeError("test")),
+            mock.patch.object(persantil, "get_fridge_temp_logs", side_effect=RuntimeError("test")),
+        )
+        for failure in failures:
+            failure.start()
+        try:
+            output = revir_ui.run_action_headless(persantil.render_overview, {"action": "render"})
+        finally:
+            for failure in reversed(failures):
+                failure.stop()
+        main_html = str(output.get("main_html") or "")
+        self.assertIn("Bazı sağlık kontrollerinin durumu alınamadı", main_html)
+        self.assertNotIn("Bekleyen ilaç dozu, açık sevk/izlem veya kritik stok uyarısı bulunmuyor", main_html)
+
+    def test_navigation_pages_all_have_renderers(self):
+        unmapped_pages = [
+            page.split(" ", 1)[-1]
+            for page in persantil.PAGES
+            if page.split(" ", 1)[-1] not in persantil.PAGE_RENDERERS
+        ]
+        self.assertEqual(unmapped_pages, [])
+
     def test_02_academic_years_and_backups(self):
         years = persantil.get_all_academic_years()
         self.assertGreaterEqual(len(years), 1)

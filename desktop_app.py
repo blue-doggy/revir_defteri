@@ -34,7 +34,7 @@ def _ensure_standard_streams() -> None:
 
 _ensure_standard_streams()
 
-_DEFAULT_APP_VERSION = "1.31.3"
+_DEFAULT_APP_VERSION = "1.32.0"
 
 
 def _load_app_version() -> str:
@@ -58,8 +58,8 @@ APP_TITLE = f"Okul Revir Defteri ve Sağlık Takip Sistemi v{APP_VERSION}"
 MUTEX_NAME = "Local\\OkulRevirDefteri_SingleInstance_Mutex_v1"
 WINDOW_WIDTH = 1440
 WINDOW_HEIGHT = 900
-MIN_WINDOW_WIDTH = 1024
-MIN_WINDOW_HEIGHT = 700
+MIN_WINDOW_WIDTH = 900
+MIN_WINDOW_HEIGHT = 600
 
 _SINGLE_INSTANCE_HANDLE = None
 _LOCK_FILE_PATH: Path | None = None

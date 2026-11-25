@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import unittest
 import urllib.request
@@ -190,6 +191,9 @@ class TestRevirUI(unittest.TestCase):
                     "revir-box-res-se",
                     "revir_box_layout_v1",
                     "revir-layout-bar",
+                    "@media (max-width: 760px)",
+                    "revir-settings-status-grid",
+                    "window.__revirTabKey",
                 ):
                     self.assertIn(marker, body)
                 out_box_off = revir_ui.run_action_headless(lambda: (_app(), revir_ui.configure_box_layout(False)), {"action": "render"})
@@ -216,6 +220,27 @@ class TestRevirUI(unittest.TestCase):
         self.assertIn('class="revir-table-outer" data-tbl-key="dlg_df_1" data-tbl-explicit="1"', dlg_html)
         self.assertIn('class="revir-table-outer" data-tbl-key="dlg_ed_1" data-tbl-explicit="1"', dlg_html)
         self.assertIn('class="revir-md-table-wrap"', dlg_html)
+
+    def test_lazy_tabs_render_only_the_active_panel(self):
+        def _app():
+            tabs = revir_ui.tabs(["Ağır Sekme", "İkinci Sekme"], lazy=True)
+            tabs.render(0, lambda: revir_ui.text("İlk panel içeriği"))
+            tabs.render(1, lambda: revir_ui.text("İkinci panel içeriği"))
+
+        first = revir_ui.run_action_headless(_app, {"action": "render"})
+        first_html = str(first.get("main_html") or "")
+        self.assertIn('data-rerender-on-tab="true"', first_html)
+        self.assertIn("İlk panel içeriği", first_html)
+        self.assertNotIn("İkinci panel içeriği", first_html)
+
+        tab_match = re.search(r'<div class="revir-tab-bar" id="([^"]+)"', first_html)
+        if tab_match is None:
+            self.fail("Sekme listesi HTML içinde bulunamadı.")
+        revir_ui._ACTIVE_SESSION.active_tabs[tab_match.group(1)] = 1
+        second = revir_ui.run_action_headless(_app, {"action": "render"})
+        second_html = str(second.get("main_html") or "")
+        self.assertIn("İkinci panel içeriği", second_html)
+        self.assertNotIn("İlk panel içeriği", second_html)
 
     def test_native_audio_controller_status(self):
         ctrl = revir_ui._NativeAudioController()

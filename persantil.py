@@ -2,6 +2,7 @@ from __future__ import annotations
 import base64
 import mimetypes
 import os
+import logging
 
 import copy
 import sys
@@ -20,7 +21,7 @@ from hashlib import sha256
 import io
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 import pandas as pd
 import revir_ui as ui
@@ -29,6 +30,8 @@ import insulin_diabetes as idm
 import document_studio as dstudio
 import cafeteria as caf
 import school_calendar
+
+LOGGER = logging.getLogger(__name__)
 
 # Ağır kütüphaneler (altair, openpyxl, python-docx) açılışta değil, ilk kullanıldıklarında tembel yüklenir.
 docx = None
@@ -126,7 +129,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.31.3"
+_DEFAULT_APP_VERSION = "1.32.0"
 
 
 def _load_app_version() -> str:
@@ -157,23 +160,33 @@ EVRAKLAR_DIR.mkdir(parents=True, exist_ok=True)
 EGITIM_YILLARI_DIR.mkdir(parents=True, exist_ok=True)
 AUTO_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 
-PAGES = [
-	"📊 Genel Bakış",
-	"👥 Öğrenciler",
-	"👫 Yetişkinler",
-	"🏫 Okul Taraması",
-	"🩺 Revir Kaydı",
-	"💊 İlaç Takip Sistemi",
-	"💉 İnsülin & Diyabet Yönetimi",
-	"💓 Vital Takip",
-	"📋 Sağlık Profili ve Bakım Planı",
-	"📏 Ölçüm ve Gelişim",
-	"📅 Takvim & Planlama",
-	"🍽️ Yemekhane Yönetimi",
-	"🖨️ Raporlar",
-	"📁 Evraklar",
-	"⚙️ Ayarlar",
-]
+PAGE_NAV_GROUPS: tuple[tuple[str, tuple[tuple[str, str, str, str | None], ...]], ...] = (
+	("GÜNLÜK KLİNİK", (
+		("📊 Genel Bakış", "📊", "Genel Bakış", "open_followups"),
+		("🩺 Revir Kaydı", "🩺", "Revir Kaydı", "today_visits"),
+		("💊 İlaç Takip Sistemi", "💊", "İlaç Takip", "active_meds"),
+		("💉 İnsülin & Diyabet Yönetimi", "💉", "İnsülin & Diyabet", "diabetes_profiles"),
+		("💓 Vital Takip", "💓", "Vital Takip", None),
+	)),
+	("KİŞİ & TARAMA", (
+		("👥 Öğrenciler", "👥", "Öğrenciler", None),
+		("👫 Yetişkinler", "👫", "Yetişkinler", None),
+		("🏫 Okul Taraması", "🏫", "Okul Taraması", None),
+	)),
+	("GELİŞİM & PLAN", (
+		("📋 Sağlık Profili ve Bakım Planı", "📋", "Sağlık Profili & Plan", None),
+		("📏 Ölçüm ve Gelişim", "📏", "Ölçüm & Gelişim", None),
+		("📅 Takvim & Planlama", "📅", "Takvim & Planlama", None),
+		("🍽️ Yemekhane Yönetimi", "🍽️", "Yemekhane Yönetimi", None),
+	)),
+	("BELGE & SİSTEM", (
+		("🖨️ Raporlar", "🖨️", "Raporlar", None),
+		("📁 Evraklar", "📁", "Evraklar", None),
+		("⚙️ Ayarlar", "⚙️", "Ayarlar", None),
+	)),
+)
+
+PAGES = [page_value for _group, items in PAGE_NAV_GROUPS for page_value, _icon, _label, _badge in items]
 
 
 _DB_PATH_CACHE: dict[int | None, Path] = {}
@@ -407,6 +420,15 @@ def build_app_css(font_css: str, font_url: str, base_fsize: str, pad_top: str, t
 		--text-main: {theme['ink']};
 		--text-heading: {theme['ink']};
 		--text-muted: #475569;
+		--status-warning-bg: #fffbeb;
+		--status-warning-text: #92400e;
+		--status-warning-border: #fde68a;
+		--status-info-bg: #eff6ff;
+		--status-info-text: #1e40af;
+		--status-info-border: #bfdbfe;
+		--status-danger-bg: #fef2f2;
+		--status-danger-text: #991b1b;
+		--status-danger-border: #fecaca;
 	}}
 	html, body {{ font-family: {effective_font_css}; color: var(--text-main); font-size: {base_fsize}; user-select: text !important; -webkit-user-select: text !important; }}
 	.revir-main, .revir-card, .revir-md, .revir-alert, .revir-cmsg, .revir-chat-msgs, .revir-table, .revir-table td, .revir-table th, .revir-metric, .revir-caption {{ user-select: text !important; -webkit-user-select: text !important; }}
@@ -488,6 +510,15 @@ def build_app_css(font_css: str, font_url: str, base_fsize: str, pad_top: str, t
 		--text-main: #f8fafc !important;
 		--text-heading: #ffffff !important;
 		--text-muted: #94a3b8 !important;
+		--status-warning-bg: #451a03 !important;
+		--status-warning-text: #fcd34d !important;
+		--status-warning-border: #92400e !important;
+		--status-info-bg: #082f49 !important;
+		--status-info-text: #7dd3fc !important;
+		--status-info-border: #0369a1 !important;
+		--status-danger-bg: #450a0a !important;
+		--status-danger-text: #fca5a5 !important;
+		--status-danger-border: #991b1b !important;
 	}
 	.revir-app { background: var(--bg-page) !important; color: var(--text-main) !important; }
 	.revir-sidebar { background: var(--sidebar-bg) !important; border-right-color: var(--line) !important; }
@@ -10076,8 +10107,7 @@ def render_shared_person_summary(person: sqlite3.Row, section_key: str = "") -> 
 	app_cfg = get_app_settings()
 	theme_name = app_cfg.get("theme_name", "Klinik Turkuaz (Varsayılan)")
 	theme = THEME_PRESETS.get(theme_name, THEME_PRESETS["Klinik Turkuaz (Varsayılan)"])
-	is_dark = is_dark_mode_active(app_cfg)
-	muted_col = "#94a3b8" if is_dark else "#475569"
+	muted_col = "var(--text-muted)"
 
 	with connect_db() as connection:
 		profile = connection.execute("SELECT * FROM health_profiles WHERE student_id=?", (person_id,)).fetchone()
@@ -10163,8 +10193,8 @@ def render_shared_person_summary(person: sqlite3.Row, section_key: str = "") -> 
 
 	alert_banner_html = ""
 	if a_items:
-		alert_bg = "#450a0a" if is_dark else "#fef2f2"
-		alert_col = "#fecaca" if is_dark else "#7f1d1d"
+		alert_bg = "var(--status-danger-bg)"
+		alert_col = "var(--status-danger-text)"
 		alert_banner_html = (
 			f"<div style='background:{alert_bg};border:1px solid #f87171;border-left:5px solid #dc2626;padding:8px 12px;border-radius:6px;margin-top:8px;font-size:13.5px;color:{alert_col};'>"
 			+ " &nbsp;·&nbsp; ".join(a_items)
@@ -16298,8 +16328,7 @@ def render_person_dossier_content(person_id: int, is_dialog: bool = False) -> No
 	app_cfg = get_app_settings()
 	theme_name = app_cfg.get("theme_name", "Klinik Turkuaz (Varsayılan)")
 	theme = THEME_PRESETS.get(theme_name, THEME_PRESETS["Klinik Turkuaz (Varsayılan)"])
-	is_dark = is_dark_mode_active(app_cfg)
-	muted_col = "#94a3b8" if is_dark else "#475569"
+	muted_col = "var(--text-muted)"
 
 	person = get_person_by_id(person_id)
 	if not person:
@@ -16442,31 +16471,22 @@ def render_person_dossier_content(person_id: int, is_dialog: bool = False) -> No
 		("print", "🖨️ Yazdırılabilir Dosya"),
 	])
 
-	d_tabs = ui.tabs([lbl for _, lbl in tab_defs], orientation="vertical")
-	for tab_obj, (t_id, _t_lbl) in zip(d_tabs, tab_defs):
-		with tab_obj:
-			if t_id == "overview":
-				_render_dossier_tab_overview(person, person_id, hp, visit_stats, theme, muted_col)
-			elif t_id == "disability":
-				_render_dossier_tab_disability(person, person_id, hp)
-			elif t_id == "visits":
-				_render_dossier_tab_visits(person, person_id)
-			elif t_id == "meas":
-				_render_dossier_tab_measurements(person, person_id)
-			elif t_id == "vitals":
-				_render_dossier_tab_vitals(person, person_id)
-			elif t_id == "labs":
-				_render_dossier_tab_labs(person, person_id)
-			elif t_id == "vax":
-				_render_dossier_tab_vaccinations(person, person_id, hp)
-			elif t_id == "care":
-				_render_dossier_tab_care_plans(person, person_id, hp)
-			elif t_id == "seizures":
-				_render_dossier_tab_seizures(person, person_id, hp)
-			elif t_id == "edit":
-				_render_dossier_tab_edit_demographics(person, person_id, hp)
-			elif t_id == "print":
-				_render_dossier_tab_printable(person, person_id)
+	d_tabs = ui.tabs([lbl for _, lbl in tab_defs], orientation="vertical", lazy=True)
+	active_tab_id = tab_defs[d_tabs.active_index][0]
+	tab_renderers: dict[str, Callable[[], None]] = {
+		"overview": lambda: _render_dossier_tab_overview(person, person_id, hp, visit_stats, theme, muted_col),
+		"disability": lambda: _render_dossier_tab_disability(person, person_id, hp),
+		"visits": lambda: _render_dossier_tab_visits(person, person_id),
+		"meas": lambda: _render_dossier_tab_measurements(person, person_id),
+		"vitals": lambda: _render_dossier_tab_vitals(person, person_id),
+		"labs": lambda: _render_dossier_tab_labs(person, person_id),
+		"vax": lambda: _render_dossier_tab_vaccinations(person, person_id, hp),
+		"care": lambda: _render_dossier_tab_care_plans(person, person_id, hp),
+		"seizures": lambda: _render_dossier_tab_seizures(person, person_id, hp),
+		"edit": lambda: _render_dossier_tab_edit_demographics(person, person_id, hp),
+		"print": lambda: _render_dossier_tab_printable(person, person_id),
+	}
+	d_tabs.render(d_tabs.active_index, tab_renderers[active_tab_id])
 
 	if is_dialog:
 		ui.write("")
@@ -17949,6 +17969,23 @@ def get_recent_operations(limit: int = 50) -> list[dict]:
 	return ops[:limit]
 
 
+def _overview_chart_window(today: date, academic_start: str, academic_end: str) -> tuple[date, date] | None:
+	start = date.fromisoformat(academic_start)
+	end = min(today, date.fromisoformat(academic_end))
+	window_start = max(start, end - timedelta(days=13))
+	return (window_start, end) if window_start <= end else None
+
+
+def _overview_visit_series(rows: pd.DataFrame, start: date, end: date) -> pd.Series:
+	if rows.empty:
+		counts = pd.Series(dtype="int64")
+	else:
+		counts = pd.to_numeric(rows.set_index("visit_date")["vizit_sayisi"], errors="raise")
+		counts.index = pd.to_datetime(counts.index).strftime("%Y-%m-%d")
+	days = pd.date_range(start=start, end=end, freq="D").strftime("%Y-%m-%d")
+	return counts.reindex(days, fill_value=0).astype("int64")
+
+
 def render_overview() -> None:
 	active_ay = get_active_academic_year()
 	s_date = active_ay["start_date"]
@@ -17992,34 +18029,50 @@ def render_overview() -> None:
 			metric_cols[5].metric("Alerji / Kronik", counts["risk_profiles"])
 
 		# Günün Öncelikli Hemşire İş Özeti Şeridi
+		dashboard_check_errors: list[str] = []
 		try:
 			_ov_pend_doses = sum(1 for _d in get_scheduled_doses_for_date(date.today()) if not _d.get("is_logged"))
 		except Exception:
-			_ov_pend_doses = 0
+			LOGGER.exception("Genel Bakış: bekleyen ilaç dozları kontrol edilemedi")
+			_ov_pend_doses = None
+			dashboard_check_errors.append("bekleyen ilaç dozları")
 		try:
 			_ov_open_fups = len(get_pending_followup_visits())
 		except Exception:
-			_ov_open_fups = 0
+			LOGGER.exception("Genel Bakış: bekleyen izlem ve sevkler kontrol edilemedi")
+			_ov_open_fups = None
+			dashboard_check_errors.append("bekleyen izlem ve sevkler")
 		try:
 			_ov_inv_al = get_infirmary_inventory_alerts(days_horizon=14)
 			_ov_inv_warn = len(_ov_inv_al["expired"]) + len(_ov_inv_al["critical_stock"])
 		except Exception:
-			_ov_inv_warn = 0
+			LOGGER.exception("Genel Bakış: stok ve son kullanma tarihi uyarıları kontrol edilemedi")
+			_ov_inv_warn = None
+			dashboard_check_errors.append("stok ve son kullanma tarihi uyarıları")
 		try:
 			_ov_cc = get_fridge_temp_logs(limit=1)
 			_ov_cc_bad = bool(_ov_cc and is_fridge_temp_alert(_ov_cc[0].get("fridge_temp_c")))
 		except Exception:
-			_ov_cc_bad = False
+			LOGGER.exception("Genel Bakış: soğuk zincir durumu kontrol edilemedi")
+			_ov_cc_bad = None
+			dashboard_check_errors.append("soğuk zincir durumu")
+
+		if dashboard_check_errors:
+			ui.warning(
+				"⚠️ Bazı sağlık kontrollerinin durumu alınamadı: "
+				+ ", ".join(dashboard_check_errors)
+				+ ". Bu kontroller için aşağıdaki yeşil duruma güvenmeyin."
+			)
 
 		_prio_chips: list[str] = []
-		if _ov_pend_doses > 0:
-			_prio_chips.append(f"<span style='background:#fef3c7;color:#b45309;border:1px solid #fde68a;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:700;'>💊 {_ov_pend_doses} Bekleyen İlaç Dozu</span>")
-		if _ov_open_fups > 0:
-			_prio_chips.append(f"<span style='background:#e0f2fe;color:#0369a1;border:1px solid #bae6fd;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:700;'>⏳ {_ov_open_fups} Açık İzlem / Sevk</span>")
-		if _ov_inv_warn > 0:
-			_prio_chips.append(f"<span style='background:#fee2e2;color:#991b1b;border:1px solid #fecaca;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:700;'>📦 {_ov_inv_warn} Kritik / SKT Stok</span>")
-		if _ov_cc_bad:
-			_prio_chips.append("<span style='background:#fee2e2;color:#991b1b;border:1px solid #f87171;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:800;'>❄️ Soğuk Zincir Sapması!</span>")
+		if _ov_pend_doses is not None and _ov_pend_doses > 0:
+			_prio_chips.append(f"<span class='revir-status-chip warning'>💊 {_ov_pend_doses} Bekleyen İlaç Dozu</span>")
+		if _ov_open_fups is not None and _ov_open_fups > 0:
+			_prio_chips.append(f"<span class='revir-status-chip info'>⏳ {_ov_open_fups} Açık İzlem / Sevk</span>")
+		if _ov_inv_warn is not None and _ov_inv_warn > 0:
+			_prio_chips.append(f"<span class='revir-status-chip danger'>📦 {_ov_inv_warn} Kritik / SKT Stok</span>")
+		if _ov_cc_bad is True:
+			_prio_chips.append("<span class='revir-status-chip danger'>❄️ Soğuk Zincir Sapması!</span>")
 		if _prio_chips:
 			ui.markdown(
 				f"<div style='display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:4px 0 10px 0;'>"
@@ -18027,6 +18080,8 @@ def render_overview() -> None:
 				f"{''.join(_prio_chips)}</div>",
 				unsafe_allow_html=True,
 			)
+		elif dashboard_check_errors:
+			ui.caption("⚠️ Bazı öncelik kontrolleri tamamlanamadı; sonuçlar doğrulanana kadar bu alanı boş kabul etmeyin.")
 		else:
 			ui.caption("🟢 **Günün Öncelikleri:** Bekleyen ilaç dozu, açık sevk/izlem veya kritik stok uyarısı bulunmuyor.")
 
@@ -18124,22 +18179,26 @@ def render_overview() -> None:
 
 	with bento_r:
 		if is_section_visible("overview_charts"):
+			chart_window = _overview_chart_window(date.today(), s_date, e_date)
 			try:
-				with connect_db() as conn:
-					v_df = pd.read_sql_query(
-						"SELECT visit_date, COUNT(*) as vizit_sayisi FROM visits WHERE visit_date >= ? AND visit_date <= ? GROUP BY visit_date ORDER BY visit_date DESC LIMIT 14",
-						conn,
-						params=(s_date, e_date)
-					)
 				with ui.container(border=True):
-					ui.markdown("##### 📊 Son 14 Günlük Vizit Yoğunluğu")
-					if not v_df.empty:
-						v_df = v_df.sort_values("visit_date")
-						ui.bar_chart(v_df.set_index("visit_date")["vizit_sayisi"], height=215, color="#0ea5e9")
+					ui.markdown("##### 📊 Seçili Eğitim Yılındaki Son 14 Takvim Günü")
+					if chart_window is None:
+						ui.caption("Seçili eğitim yılı için gösterilecek takvim günü bulunmuyor.")
 					else:
-						ui.caption("Son 14 gün için vizit verisi henüz oluşmadı.")
+						chart_start, chart_end = chart_window
+						with connect_db() as conn:
+							v_df = pd.read_sql_query(
+								"SELECT visit_date, COUNT(*) AS vizit_sayisi FROM visits WHERE visit_date >= ? AND visit_date <= ? GROUP BY visit_date ORDER BY visit_date",
+								conn,
+								params=(chart_start.isoformat(), chart_end.isoformat()),
+							)
+						v_series = _overview_visit_series(v_df, chart_start, chart_end)
+						ui.caption(f"{chart_start:%d.%m.%Y} – {chart_end:%d.%m.%Y}")
+						ui.bar_chart(v_series, height=215, color="#0ea5e9")
 			except Exception:
-				pass
+				LOGGER.exception("Genel Bakış: vizit grafiği yüklenemedi")
+				ui.warning("Vizit grafiği şu anda yüklenemedi. Lütfen daha sonra tekrar deneyin.")
 
 		if is_section_visible("overview_calendar_events"):
 			try:
@@ -18149,7 +18208,8 @@ def render_overview() -> None:
 					get_active_gemini_config_fn=_get_active_gemini_config,
 				)
 			except Exception:
-				pass
+				LOGGER.exception("Genel Bakış: takvim özeti yüklenemedi")
+				ui.warning("Takvim özeti şu anda yüklenemedi. Lütfen Takvim & Planlama bölümünü açın.")
 
 	render_gemini_overview_command_center(s_date, e_date)
 
@@ -30446,20 +30506,19 @@ def _render_meb_activity_report_tab() -> None:
 
 
 def render_reports() -> None:
-	hdr_col1, hdr_col2, hdr_col3 = ui.columns([2.6, 1.7, 1.3])
+	hdr_col1, hdr_actions = ui.columns([3.2, 1.3])
 	with hdr_col1:
 		ui.markdown("## 🖨️ Kişi ve Sınıf Raporları (Yazdırma & İndirme)")
 		ui.caption("Resmi kurum antetli, tarih bazlı toplu tarama & persantil raporları (Word, Excel, HTML) veya bireysel öğrenci sağlık dosyası çıktıları oluşturun.")
-	with hdr_col2:
+	with hdr_actions:
 		ui.markdown("<div style='height: 4px'></div>", unsafe_allow_html=True)
-		if ui.button("⚙️ Rapor İçeriği & Sütun Ayarları (Pop-up)", key="btn_open_dyn_report_builder_top", type="primary", use_container_width=True, help="Okul taraması ve persantil raporlarının sütunlarını, şablonunu ve imzalarını pop-up içinden özelleştirin"):
-			pref_c = ui.session_state.get("dyn_rep_cls_select")
-			_trigger_open_report_builder("🖨️ Raporlar", default_classes=pref_c if pref_c else None)
-	with hdr_col3:
-		ui.markdown("<div style='height: 4px'></div>", unsafe_allow_html=True)
-		if ui.button("⚙️ Kişi Raporu Ayarları", key="btn_open_report_settings_modal", type="secondary", use_container_width=True, help="Bireysel ve klasik sınıf dosyası raporlarında hangi bölümlerin yer alacağını özelleştirin"):
-			_close_dyn_report_builder_dialog()
-			open_report_settings_dialog()
+		with ui.popover("⚙️ Rapor Ayarları", use_container_width=True):
+			if ui.button("📊 Tarama ve Persantil Şablonları", key="btn_open_dyn_report_builder_top", use_container_width=True):
+				pref_c = ui.session_state.get("dyn_rep_cls_select")
+				_trigger_open_report_builder("🖨️ Raporlar", default_classes=pref_c if pref_c else None)
+			if ui.button("👤 Kişi Dosyası Rapor Ayarları", key="btn_open_report_settings_modal", use_container_width=True):
+				_close_dyn_report_builder_dialog()
+				open_report_settings_dialog()
 
 	report_cfg = get_report_settings()
 	all_classes = [c for c in get_classes() if c != "Sivil / Diğer"]
@@ -33010,7 +33069,7 @@ def render_settings() -> None:
 	ay_pill_color = "#d97706" if is_arch_ay else "var(--teal)"
 	ai_pill_txt = f"Aktif ({ai_model_disp})" if ai_on_cfg else "Kapalı"
 	ui.markdown(
-		f"""<div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:14px;">
+		f"""<div class="revir-settings-status-grid">
 			<div class="revir-card" style="padding:10px 14px;margin:0;">
 				<div style="font-size:11.5px;color:var(--text-muted);font-weight:600;">📅 Aktif Eğitim Yılı</div>
 				<div style="font-size:14.5px;font-weight:800;color:{ay_pill_color};margin-top:2px;">{html.escape(active_ay['name'])}{' (Arşiv)' if is_arch_ay else ''}</div>
@@ -34426,7 +34485,7 @@ def _handle_cmd_search(query: str) -> list[dict[str, Any]]:
 	if _cmd_ai_on:
 		quick_cmds.extend([
 			{"group": "⚡ Hızlı İşlemler", "kind": "smart_doc_import", "value": "", "icon": "🤖", "title": "Belge Oku & Öğrenciye Otomatik İşle (Gemini)", "subtitle": "Sağlık raporu, tahlil, reçete veya ÇÖZGER belgesini okuyup öğrenci dosyasına işle", "tag": "AI"},
-			{"group": "⚡ Hızlı İşlemler", "kind": "open_chat", "value": "", "icon": "🤖", "title": "Gemini Klinik Asistanı Aç", "subtitle": "Soru sor, sınıf/etkinlik oluştur, Word/Excel ürettir veya tahlil/evrak yükle (⌘J)", "tag": "AI"},
+			{"group": "⚡ Hızlı İşlemler", "kind": "open_chat", "value": "", "icon": "🤖", "title": "Gemini Klinik Asistanı Aç", "subtitle": "Soru sor, sınıf/etkinlik oluştur, Word/Excel ürettir veya tahlil/evrak yükle (Ctrl/⌘J)", "tag": "AI"},
 		])
 	for cmd in quick_cmds:
 		if not q or q in _tr_fold(cmd["title"]) or q in _tr_fold(cmd["subtitle"]) or q in _tr_fold(cmd["tag"]):
@@ -34595,7 +34654,7 @@ def _build_topbar_html(cur_page: str, active_person: dict | sqlite3.Row | None, 
 		person_crumb = (
 			f"<small>›</small> "
 			f"<button type='button' class='revir-tb-pill' style='padding:2px 8px;font-size:12px;' "
-			f"title='Aktif kişinin dosyasını aç' onclick=\"window.__revirTopbarAction('open_active_dossier', '')\">"
+			f"title='Aktif kişinin dosyasını aç' aria-label='Aktif kişinin dosyasını aç' onclick=\"window.__revirTopbarAction('open_active_dossier', '')\">"
 			f"👤 {html.escape(p_nm)} ({html.escape(str(active_person['class_name'] or ''))})</button>"
 		)
 
@@ -34643,19 +34702,19 @@ def _build_topbar_html(cur_page: str, active_person: dict | sqlite3.Row | None, 
 
 	return (
 		f'<div class="revir-tb-left">'
-		f'<button type="button" class="revir-tb-icon-btn" title="Yan Menüyü Daralt / Genişlet (Alt+B)" onclick="window.__revirToggleSidebar()">☰</button>'
+		f'<button type="button" class="revir-tb-icon-btn" title="Yan Menüyü Daralt / Genişlet (Alt+B)" aria-label="Yan menüyü daralt veya genişlet" onclick="window.__revirToggleSidebar()">☰</button>'
 		f'<div class="revir-tb-crumb">{html.escape(page_clean)} {person_crumb}</div>'
 		f'<button type="button" class="{ay_cls}" title="Eğitim Yılını Değiştir" onclick="window.__revirTopbarAction(\'goto_settings_group\', \'🏫 Kurum & Şube\')">{html.escape(ay_txt)}</button>'
 		f'</div>'
 		f'<div class="revir-tb-center">'
-		f'<button type="button" class="revir-tb-search-btn" onclick="window.__revirOpenCmdPalette()">'
-		f'<span>🔍 Öğrenci, sayfa veya ayar ara...</span><span class="revir-kbd">⌘K</span></button>'
+		f'<button type="button" class="revir-tb-search-btn" aria-label="Öğrenci, sayfa veya ayar ara (Ctrl/⌘K)" onclick="window.__revirOpenCmdPalette()">'
+		f'<span>🔍 Öğrenci, sayfa veya ayar ara...</span><span class="revir-kbd">Ctrl/⌘K</span></button>'
 		f'</div>'
 		f'<div class="revir-tb-right">'
 		f'{layout_btn_html}'
 		f'<button type="button" class="{kvkk_cls}" title="KVKK Ekran Maskelemesini Aç / Kapat" onclick="window.__revirTopbarAction(\'toggle_kvkk\', \'\')">{kvkk_lbl}</button>'
-		f'<button type="button" class="revir-tb-icon-btn" title="{dk_tip}" onclick="window.__revirTopbarAction(\'cycle_dark\', \'\')">{dk_ico}</button>'
-		f'<button type="button" class="{ai_cls}" title="{html.escape(ai_tip, quote=True)}" onclick="window.__revirTopbarAction(\'toggle_ai\', \'\')">{html.escape(ai_lbl)}</button>'
+		f'<button type="button" class="revir-tb-icon-btn" title="{dk_tip}" aria-label="{dk_tip}" onclick="window.__revirTopbarAction(\'cycle_dark\', \'\')">{dk_ico}</button>'
+		f'<button type="button" class="{ai_cls}" title="{html.escape(ai_tip, quote=True)}" aria-label="{html.escape(ai_tip, quote=True)}" onclick="window.__revirTopbarAction(\'toggle_ai\', \'\')">{html.escape(ai_lbl)}</button>'
 		f'</div>'
 	)
 
@@ -34698,6 +34757,38 @@ def render_cafeteria_page() -> None:
 	)
 
 
+def render_calendar_page() -> None:
+	school_calendar.render_calendar_and_planning_page(
+		connect_db_fn=connect_db,
+		get_app_settings_fn=get_app_settings,
+		save_app_settings_fn=save_app_settings,
+		get_active_gemini_config_fn=_get_active_gemini_config,
+		get_tr_provinces_fn=get_tr_provinces,
+		is_section_visible_fn=is_section_visible,
+	)
+
+
+PAGE_RENDERERS: dict[str, Callable[[], None]] = {
+	"Genel Bakış": render_overview,
+	"Öğrenciler": render_students,
+	"Yetişkinler": render_civilians,
+	"Sivil Kişiler": render_civilians,
+	"Okul Taraması": render_school_screening,
+	"Revir Kaydı": render_visit,
+	"İlaç Takip Sistemi": render_medication_tracker,
+	"İnsülin & Diyabet Yönetimi": render_insulin_diabetes,
+	"Vital Takip": render_vital_tracking,
+	"Sağlık Profili ve Bakım Planı": render_health_profile_and_plan,
+	"Ölçüm ve Gelişim": render_measurements,
+	"Takvim & Planlama": render_calendar_page,
+	"Takvim ve Planlama": render_calendar_page,
+	"Yemekhane Yönetimi": render_cafeteria_page,
+	"Raporlar": render_reports,
+	"Evraklar": render_documents_depot,
+	"Ayarlar": render_settings,
+}
+
+
 def main() -> None:
 	fav_icon = get_app_icon()
 	ui.set_page_config(page_title="Revir Defteri", page_icon=fav_icon, layout="wide", initial_sidebar_state="expanded")
@@ -34730,13 +34821,12 @@ def main() -> None:
 
 	# Aktif sayfa durumunu yönet
 	target_p = ui.session_state.pop("target_page", None)
-	if target_p and target_p in PAGES:
-		ui.session_state["main_menu_page"] = target_p
+	if target_p:
+		ui.session_state["main_menu_page"] = str(target_p)
 
-	cur_page_val = ui.session_state.get("main_menu_page", PAGES[0])
+	cur_page_val = str(ui.session_state.get("main_menu_page", PAGES[0]) or PAGES[0])
 	if cur_page_val not in PAGES:
-		cur_page_val = PAGES[0]
-		ui.session_state["main_menu_page"] = cur_page_val
+		LOGGER.error("Geçersiz uygulama sayfası durumu: %s", cur_page_val)
 
 	active_id = ui.session_state.get("active_person_id")
 	active_person = get_person_by_id(active_id) if active_id else None
@@ -34753,6 +34843,7 @@ def main() -> None:
 	active_meds_badge = 0
 	open_fup_badge = 0
 	diab_badge = 0
+	nav_badge_error = False
 	try:
 		with connect_db() as _bconn:
 			idm.ensure_diabetes_tables(_bconn)
@@ -34770,35 +34861,34 @@ def main() -> None:
 				open_fup_badge = int(b_row["fu"] or 0)
 				diab_badge = int(b_row["db"] or 0)
 	except Exception:
-		pass
+		LOGGER.exception("Yan menü bildirim sayıları alınamadı.")
+		nav_badge_error = True
 
+	nav_badges = {
+		"open_followups": open_fup_badge or None,
+		"today_visits": today_vis_badge or None,
+		"active_meds": active_meds_badge or None,
+		"diabetes_profiles": diab_badge or None,
+	}
 	nav_groups = [
-		("GÜNLÜK KLİNİK", [
-			{"value": "📊 Genel Bakış", "icon": "📊", "label": "Genel Bakış", "badge": open_fup_badge or None},
-			{"value": "🩺 Revir Kaydı", "icon": "🩺", "label": "Revir Kaydı", "badge": today_vis_badge or None},
-			{"value": "💊 İlaç Takip Sistemi", "icon": "💊", "label": "İlaç Takip", "badge": active_meds_badge or None},
-			{"value": "💉 İnsülin & Diyabet Yönetimi", "icon": "💉", "label": "İnsülin & Diyabet", "badge": diab_badge or None},
-			{"value": "💓 Vital Takip", "icon": "💓", "label": "Vital Takip"},
-		]),
-		("KİŞİ & TARAMA", [
-			{"value": "👥 Öğrenciler", "icon": "👥", "label": "Öğrenciler"},
-			{"value": "👫 Yetişkinler", "icon": "👫", "label": "Yetişkinler"},
-			{"value": "🏫 Okul Taraması", "icon": "🏫", "label": "Okul Taraması"},
-		]),
-		("GELİŞİM & PLAN", [
-			{"value": "📋 Sağlık Profili ve Bakım Planı", "icon": "📋", "label": "Sağlık Profili & Plan"},
-			{"value": "📏 Ölçüm ve Gelişim", "icon": "📏", "label": "Ölçüm & Gelişim"},
-			{"value": "📅 Takvim & Planlama", "icon": "📅", "label": "Takvim & Planlama"},
-			{"value": "🍽️ Yemekhane Yönetimi", "icon": "🍽️", "label": "Yemekhane Yönetimi"},
-		]),
-		("BELGE & SİSTEM", [
-			{"value": "🖨️ Raporlar", "icon": "🖨️", "label": "Raporlar"},
-			{"value": "📁 Evraklar", "icon": "📁", "label": "Evraklar"},
-			{"value": "⚙️ Ayarlar", "icon": "⚙️", "label": "Ayarlar"},
-		]),
+		(
+			group_name,
+			[
+				{
+					"value": page_value,
+					"icon": icon,
+					"label": label,
+					"badge": nav_badges.get(badge_key) if badge_key else None,
+				}
+				for page_value, icon, label, badge_key in items
+			],
+		)
+		for group_name, items in PAGE_NAV_GROUPS
 	]
 
 	with ui.sidebar:
+		if nav_badge_error:
+			ui.caption("⚠️ Bildirim sayıları şu an alınamıyor.")
 		if APP_ICON_PATH.exists():
 			col_logo, col_ttl = ui.columns([0.85, 2.8])
 			with col_logo:
@@ -34837,49 +34927,18 @@ def main() -> None:
 		)
 
 	# Extract clean page name regardless of emoji prefix
-	page = ui.session_state.get("main_menu_page", page)
+	page = str(ui.session_state.get("main_menu_page", page) or page)
 	page_clean = page.split(" ", 1)[-1] if " " in page else page
 
-	if page_clean == "Genel Bakış":
-		render_overview()
-	elif page_clean == "Öğrenciler":
-		render_students()
-	elif page_clean == "Okul Taraması":
-		render_school_screening()
-	elif page_clean in ["Yetişkinler", "Sivil Kişiler"]:
-		render_civilians()
-	elif "Kişi Dosyası" in page_clean:
+	if "Kişi Dosyası" in page_clean:
 		render_person_dossier()
-	elif page_clean == "Revir Kaydı":
-		render_visit()
-	elif page_clean == "İlaç Takip Sistemi":
-		render_medication_tracker()
-	elif page_clean == "İnsülin & Diyabet Yönetimi":
-		render_insulin_diabetes()
-	elif page_clean == "Vital Takip":
-		render_vital_tracking()
-	elif page_clean == "Sağlık Profili ve Bakım Planı":
-		render_health_profile_and_plan()
-	elif page_clean == "Ölçüm ve Gelişim":
-		render_measurements()
-	elif page_clean in ("Takvim & Planlama", "Takvim ve Planlama"):
-		from school_calendar import render_calendar_and_planning_page
-		render_calendar_and_planning_page(
-			connect_db_fn=connect_db,
-			get_app_settings_fn=get_app_settings,
-			save_app_settings_fn=save_app_settings,
-			get_active_gemini_config_fn=_get_active_gemini_config,
-			get_tr_provinces_fn=get_tr_provinces,
-			is_section_visible_fn=is_section_visible,
-		)
-	elif page_clean == "Yemekhane Yönetimi":
-		render_cafeteria_page()
-	elif page_clean == "Raporlar":
-		render_reports()
-	elif page_clean == "Evraklar":
-		render_documents_depot()
 	else:
-		render_settings()
+		renderer = PAGE_RENDERERS.get(page_clean)
+		if renderer is None:
+			LOGGER.error("Sayfa için görünüm yönlendiricisi bulunamadı: %s", page_clean)
+			ui.error(f"“{page_clean}” sayfası açılamadı. Lütfen gezinme menüsünden başka bir sayfa seçin.")
+		else:
+			renderer()
 
 
 if __name__ == "__main__":

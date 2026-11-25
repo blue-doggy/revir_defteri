@@ -8840,20 +8840,15 @@ def render_cafeteria_management_page(ctx_api: dict[str, Any]) -> None:
 	ui.markdown("## 🍽️ Yemekhane, Menü Planlama, Gider & Kasa Yönetimi")
 	ui.caption("Yemekler bankası (AI malzeme/kalori/alerjen), iş günü bazlı öğün planı, imzalı A4 çıktı, gelen ürün/fatura giderleri ve öğrenci/kasa muhasebesi.")
 
-	tab_menu, tab_dishes, tab_purch, tab_cash, tab_cfg = ui.tabs([
+	tabs = ui.tabs([
 		"🗓️ Menü Planlayıcı & A4 Çıktı",
 		"🍲 Yemekler Bankası & AI Malzeme",
 		"🚚 Gelen Ürün & Giderler",
 		"💵 Yemek Yiyenler & Kasa",
 		"⚙️ Yemekhane Ayarları & Excel",
-	])
-	with tab_menu:
-		_render_tab_menu_planner(ctx_api, sel_ym, app_cfg, ym_opts)
-	with tab_dishes:
-		_render_tab_dishes(ctx_api)
-	with tab_purch:
-		_render_tab_purchases_and_expenses(ctx_api, sel_ym, app_cfg)
-	with tab_cash:
-		_render_tab_diners_and_cash(ctx_api, sel_ym, app_cfg)
-	with tab_cfg:
-		_render_tab_settings_and_exports(ctx_api, sel_ym, app_cfg)
+	], lazy=True)
+	tabs.render(0, lambda: _render_tab_menu_planner(ctx_api, sel_ym, app_cfg, ym_opts))
+	tabs.render(1, lambda: _render_tab_dishes(ctx_api))
+	tabs.render(2, lambda: _render_tab_purchases_and_expenses(ctx_api, sel_ym, app_cfg))
+	tabs.render(3, lambda: _render_tab_diners_and_cash(ctx_api, sel_ym, app_cfg))
+	tabs.render(4, lambda: _render_tab_settings_and_exports(ctx_api, sel_ym, app_cfg))

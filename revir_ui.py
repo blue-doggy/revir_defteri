@@ -1385,7 +1385,7 @@ class _UIContainer:
 			wrapper_close="</div></div>",
 		)
 
-	def tabs(self, tab_labels: Sequence[str], *, orientation: str = "horizontal") -> list[_UIContainer]:
+	def tabs(self, tab_labels: Sequence[str], *, orientation: str = "horizontal", lazy: bool = False) -> _TabContainers:
 		ctx = _get_ctx()
 		labels = [str(x) for x in tab_labels]
 		tab_sig = f"{orientation}|" + "|".join(labels)
@@ -1398,9 +1398,9 @@ class _UIContainer:
 		if active_idx < 0 or active_idx >= len(labels):
 			active_idx = 0
 		pane_lists: list[list[str]] = [[] for _ in labels]
-		node = _LazyTabsNode(tab_id, labels, active_idx, pane_lists, orientation=orientation)
+		node = _LazyTabsNode(tab_id, labels, active_idx, pane_lists, orientation=orientation, lazy=lazy)
 		ctx.current_nodes().append(node)  # type: ignore[arg-type]
-		return [_UIContainer(target_list=pl) for pl in pane_lists]
+		return _TabContainers([_UIContainer(target_list=pl) for pl in pane_lists], active_idx, lazy=lazy)
 
 	def sidebar_nav_groups(
 		self,
@@ -1427,7 +1427,7 @@ class _UIContainer:
 		self._register_widget_meta(wid, True, {"kind": "radio", "options": flat_opts})
 		esc_wid = html_lib.escape(wid, quote=True)
 
-		chunks: list[str] = [f'<div class="revir-nav-grouped" data-key="{esc_wid}" data-kind="radio" data-value="{sel_idx}">']
+		chunks: list[str] = [f'<nav class="revir-nav-grouped" aria-label="Ana gezinme" data-key="{esc_wid}" data-kind="radio" data-value="{sel_idx}">']
 		running_idx = 0
 		for g_title, items in groups:
 			chunks.append(f'<div class="revir-nav-sec-hdr">{html_lib.escape(str(g_title))}</div>')
@@ -1443,15 +1443,16 @@ class _UIContainer:
 					if badge is not None and str(badge) != "" and str(badge) != "0"
 					else ""
 				)
+				aria_current = ' aria-current="page"' if running_idx == sel_idx else ""
 				chunks.append(
-					f'<button type="button" class="revir-nav-item revir-nav-rail-item{act_cls}" title="{tip}" '
+					f'<button type="button" class="revir-nav-item revir-nav-rail-item{act_cls}" title="{tip}" aria-label="{tip}"{aria_current} '
 					f'onclick="window.__revirRadioPick(\'{esc_wid}\', {running_idx}, this)">'
 					f'<span class="revir-nav-ico">{html_lib.escape(ico)}</span>'
 					f'<span class="revir-nav-txt">{html_lib.escape(lbl)}</span>'
 					f'{badge_html}</button>'
 				)
 				running_idx += 1
-		chunks.append("</div>")
+		chunks.append("</nav>")
 		ctx.emit("".join(chunks))
 		return str(cur)
 
@@ -2542,40 +2543,80 @@ class _LazyColumnsNode:
 			is_st = (self.sticky_first_col and idx == 0) or (self.sticky_last_col and idx == last_i)
 			cls = "revir-col revir-sticky-col" if is_st else "revir-col"
 			col_parts.append(f'<div class="{cls}">{_flatten_nodes(cl)}</div>')
-		return f'<div class="revir-cols" style="grid-template-columns:{self.grid_tpl}; gap:{self.gap_px}; align-items:{self.align_css};">{"".join(col_parts)}</div>'
+		return f'<div class="revir-cols revir-cols-{len(self.col_lists)}" style="grid-template-columns:{self.grid_tpl}; gap:{self.gap_px}; align-items:{self.align_css};">{"".join(col_parts)}</div>'
+
+
+class _TabContainers(list[_UIContainer]):
+	def __init__(self, containers: list[_UIContainer], active_index: int, *, lazy: bool) -> None:
+		super().__init__(containers)
+		self.active_index = active_index
+		self.lazy = lazy
+
+	def render(self, index: int, renderer: Callable[[], Any]) -> None:
+		if index < 0 or index >= len(self):
+			raise IndexError("Sekme indeksi geçersiz.")
+		if self.lazy and index != self.active_index:
+			return
+		with self[index]:
+			renderer()
 
 
 class _LazyTabsNode:
-	def __init__(self, tab_id: str, labels: list[str], active_idx: int, pane_lists: list[list[str]], *, orientation: str = "horizontal") -> None:
+	def __init__(
+		self,
+		tab_id: str,
+		labels: list[str],
+		active_idx: int,
+		pane_lists: list[list[str]],
+		*,
+		orientation: str = "horizontal",
+		lazy: bool = False,
+	) -> None:
 		self.tab_id = tab_id
 		self.labels = labels
 		self.active_idx = active_idx
 		self.pane_lists = pane_lists
 		self.orientation = orientation
+		self.lazy = lazy
 
 	def render(self) -> str:
 		btns = []
 		panes = []
+		tablist_id = html_lib.escape(self.tab_id, quote=True)
+		group_attr = html_lib.escape(self.tab_id, quote=True)
+		group_js = html_lib.escape(json.dumps(self.tab_id), quote=True)
+		orientation = "vertical" if self.orientation == "vertical" else "horizontal"
+		lazy_attr = ' data-rerender-on-tab="true"' if self.lazy else ""
 		for i, (lbl, pl) in enumerate(zip(self.labels, self.pane_lists)):
 			act = " active" if i == self.active_idx else ""
+			selected = i == self.active_idx
+			button_id = html_lib.escape(f"{self.tab_id}_tab_{i}", quote=True)
+			pane_id = html_lib.escape(f"{self.tab_id}_pane_{i}", quote=True)
 			btns.append(
-				f'<button type="button" class="revir-tab-btn{act}" data-tab-group="{self.tab_id}" data-tab-idx="{i}" '
-				f'onclick="window.__revirSwitchTab(\'{self.tab_id}\', {i})">{html_lib.escape(lbl)}</button>'
+				f'<button type="button" class="revir-tab-btn{act}" data-tab-group="{group_attr}" data-tab-idx="{i}" '
+				f'id="{button_id}" role="tab" aria-selected="{str(selected).lower()}" aria-controls="{pane_id}" '
+				f'tabindex="{0 if selected else -1}" '
+				f'onclick="window.__revirSwitchTab({group_js}, {i})" '
+				f'onkeydown="window.__revirTabKey(event, {group_js}, {i}, \'{orientation}\')">{html_lib.escape(lbl)}</button>'
 			)
-			panes.append(f'<div class="revir-tab-pane{act}" data-tab-group="{self.tab_id}" data-tab-idx="{i}">{_flatten_nodes(pl)}</div>')
+			panes.append(
+				f'<div class="revir-tab-pane{act}" data-tab-group="{group_attr}" data-tab-idx="{i}" '
+				f'id="{pane_id}" role="tabpanel" aria-labelledby="{button_id}" aria-hidden="{str(not selected).lower()}" '
+				f'tabindex="0">{_flatten_nodes(pl)}</div>'
+			)
 		if self.orientation == "vertical":
 			return (
-				f'<div class="revir-tabs revir-tabs-vertical">'
-				f'<div class="revir-tab-bar-v">{"".join(btns)}</div>'
+				f'<div class="revir-tabs revir-tabs-vertical"{lazy_attr}>'
+				f'<div class="revir-tab-bar-v" id="{tablist_id}" role="tablist" aria-orientation="vertical">{"".join(btns)}</div>'
 				f'<div class="revir-tab-content-v">{"".join(panes)}</div></div>'
 			)
 		if self.orientation == "segmented":
 			return (
-				f'<div class="revir-tabs revir-tabs-seg">'
-				f'<div class="revir-tab-bar-seg">{"".join(btns)}</div>'
+				f'<div class="revir-tabs revir-tabs-seg"{lazy_attr}>'
+				f'<div class="revir-tab-bar-seg" id="{tablist_id}" role="tablist" aria-orientation="horizontal">{"".join(btns)}</div>'
 				f'<div class="revir-tab-content">{"".join(panes)}</div></div>'
 			)
-		return f'<div class="revir-tabs"><div class="revir-tab-bar">{"".join(btns)}</div><div class="revir-tab-content">{"".join(panes)}</div></div>'
+		return f'<div class="revir-tabs"{lazy_attr}><div class="revir-tab-bar" id="{tablist_id}" role="tablist" aria-orientation="horizontal">{"".join(btns)}</div><div class="revir-tab-content">{"".join(panes)}</div></div>'
 
 
 def _flatten_nodes(nodes: list[Any]) -> str:
@@ -3120,6 +3161,15 @@ _SHELL_HTML = r"""<!DOCTYPE html>
 	--text-main: #0f172a;
 	--text-heading: #0f172a;
 	--text-muted: #475569;
+	--status-warning-bg: #fffbeb;
+	--status-warning-text: #92400e;
+	--status-warning-border: #fde68a;
+	--status-info-bg: #eff6ff;
+	--status-info-text: #1e40af;
+	--status-info-border: #bfdbfe;
+	--status-danger-bg: #fef2f2;
+	--status-danger-text: #991b1b;
+	--status-danger-border: #fecaca;
 }
 *, *::before, *::after { box-sizing: border-box; }
 html, body {
@@ -3252,6 +3302,10 @@ html, body {
 
 /* Düzen & Kartlar */
 .revir-cols { display: grid; width: 100%; margin-bottom: 8px; }
+.revir-settings-status-grid {
+	display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+	gap: 10px; margin-bottom: 14px;
+}
 .revir-col { min-width: 0; }
 .revir-container { margin-bottom: 10px; }
 .revir-card {
@@ -3274,6 +3328,20 @@ html, body {
 .revir-alert-info { background: #eff6ff; border-color: #bfdbfe; color: #1e40af; }
 .revir-alert-warning { background: #fffbeb; border-color: #fde68a; color: #92400e; }
 .revir-alert-error { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+.revir-status-chip {
+	display: inline-flex; align-items: center; gap: 5px;
+	padding: 3px 10px; border: 1px solid; border-radius: 999px;
+	font-size: 12px; font-weight: 700; line-height: 1.4;
+}
+.revir-status-chip.warning {
+	background: var(--status-warning-bg); color: var(--status-warning-text); border-color: var(--status-warning-border);
+}
+.revir-status-chip.info {
+	background: var(--status-info-bg); color: var(--status-info-text); border-color: var(--status-info-border);
+}
+.revir-status-chip.danger {
+	background: var(--status-danger-bg); color: var(--status-danger-text); border-color: var(--status-danger-border);
+}
 
 /* Metrikler */
 .revir-metric {
@@ -3473,6 +3541,47 @@ html, body {
 	.revir-tabs-vertical { grid-template-columns: 1fr; }
 	.revir-tab-bar-v { flex-direction: row; flex-wrap: wrap; position: static; }
 	.revir-tab-bar-v .revir-tab-btn { width: auto; }
+	.revir-cols-5, .revir-cols-6 { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
+	.revir-settings-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	.revir-sticky-col { position: static; max-height: none; overflow: visible; }
+}
+@media (max-width: 760px) {
+	.revir-cols-3, .revir-cols-4, .revir-cols-5, .revir-cols-6 {
+		grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+	}
+	.revir-cols-7 { min-width: 620px; }
+	.revir-sidebar {
+		position: fixed; top: 0; left: 0; bottom: 0; height: 100dvh;
+		width: min(268px, 84vw); min-width: min(268px, 84vw); max-width: min(268px, 84vw);
+		transform: translateX(0); box-shadow: 12px 0 32px rgba(15, 23, 42, 0.18);
+	}
+	.revir-sidebar.collapsed {
+		width: min(268px, 84vw); min-width: min(268px, 84vw); max-width: min(268px, 84vw);
+		transform: translateX(-105%);
+	}
+	.revir-app:has(.revir-sidebar:not(.collapsed))::after {
+		content: ""; position: fixed; inset: 0; z-index: 19; background: rgba(15, 23, 42, 0.35);
+	}
+	.revir-workspace { width: 100%; }
+	.revir-topbar { height: auto; min-height: 52px; flex-wrap: wrap; gap: 6px; padding: 7px 12px; }
+	.revir-tb-left { flex: 1 1 auto; }
+	.revir-tb-center { order: 3; flex: 1 0 100%; min-width: 0; max-width: none; }
+	.revir-tb-right { gap: 5px; }
+	.revir-main { padding: 16px 14px 48px; }
+	.revir-modal-backdrop { padding: 8px; }
+	.revir-modal-card { width: 100%; max-height: 96dvh; }
+	.revir-modal-body { padding: 12px 14px 56px; }
+	.revir-sticky-col { position: static; max-height: none; overflow: visible; }
+}
+@media (max-width: 520px) {
+	.revir-cols-2, .revir-cols-3, .revir-cols-4, .revir-cols-5, .revir-cols-6 {
+		grid-template-columns: minmax(0, 1fr) !important;
+	}
+	.revir-settings-status-grid { grid-template-columns: minmax(0, 1fr); }
+	.revir-tb-crumb { max-width: 34vw; }
+	.revir-tb-center { flex-basis: 100%; }
+	.revir-modal-hdr-left { min-width: 0; }
+	.revir-modal-title { white-space: normal; }
 }
 
 /* Expander */
@@ -4273,7 +4382,7 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 <body>
 <div id="revir-busy-bar"></div>
 <div id="revir-loading-pill"><span class="revir-spin-dot"></span><span>İşlem yürütülüyor...</span></div>
-<button id="revir-sidebar-open" class="revir-sidebar-open-btn" type="button" title="Menüyü Aç" onclick="window.__revirSetSidebar(false)">❯</button>
+<button id="revir-sidebar-open" class="revir-sidebar-open-btn" type="button" title="Menüyü Aç" aria-label="Yan menüyü aç" onclick="window.__revirSetSidebar(false)">❯</button>
 <div class="revir-app">
 	<aside id="revir-sidebar" class="revir-sidebar">__REVIR_INIT_SIDEBAR__</aside>
 	<div class="revir-workspace">
@@ -4284,7 +4393,7 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 	</div>
 </div>
 <div id="revir-modal-backdrop" class="revir-modal-backdrop" onclick="if(event.target===this) window.__revirTryBackdropClose()">
-	<div id="revir-modal-card" class="revir-modal-card" role="dialog" aria-modal="true">
+	<div id="revir-modal-card" class="revir-modal-card" role="dialog" aria-modal="true" aria-labelledby="revir-modal-title">
 		<div class="revir-modal-header">
 			<div class="revir-modal-hdr-left">
 				<button id="revir-modal-back" type="button" class="revir-modal-back" title="Önceki Pencereye Dön" onclick="window.__revirCloseDialog()">← Geri</button>
@@ -4292,9 +4401,9 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 				<span id="revir-modal-dirty-pill" class="revir-modal-dirty-pill" title="Kaydedilmemiş değişiklikler var">● Kaydedilmemiş</span>
 			</div>
 			<div class="revir-modal-hdr-actions">
-				<button id="revir-modal-reset-sz" type="button" class="revir-modal-hbtn" title="Pencere Boyutunu Sıfırla" onclick="window.__revirResetModalSize()">↺</button>
-				<button id="revir-modal-fs-btn" type="button" class="revir-modal-hbtn" title="Tam Ekran Büyüt / Küçült" onclick="window.__revirToggleModalFullscreen()">⤢</button>
-				<button type="button" class="revir-modal-close" title="Kapat (ESC)" onclick="window.__revirCloseDialog(true)">✕</button>
+				<button id="revir-modal-reset-sz" type="button" class="revir-modal-hbtn" title="Pencere Boyutunu Sıfırla" aria-label="Pencere boyutunu sıfırla" onclick="window.__revirResetModalSize()">↺</button>
+				<button id="revir-modal-fs-btn" type="button" class="revir-modal-hbtn" title="Tam Ekran Büyüt / Küçült" aria-label="Tam ekranı büyüt veya küçült" onclick="window.__revirToggleModalFullscreen()">⤢</button>
+				<button type="button" class="revir-modal-close" title="Kapat (ESC)" aria-label="Pencereyi kapat" onclick="window.__revirCloseDialog(true)">✕</button>
 			</div>
 		</div>
 		<div id="revir-modal-body" class="revir-modal-body"></div>
@@ -4306,17 +4415,17 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 	</div>
 </div>
 <div id="revir-cmd-backdrop" onclick="if(event.target===this) window.__revirCloseCmdPalette()">
-	<div id="revir-cmd-card" role="dialog" aria-modal="true">
+	<div id="revir-cmd-card" role="dialog" aria-modal="true" aria-label="Kişi, sayfa ve ayar arama">
 		<div class="revir-cmd-top">
 			<span style="font-size:17px;">🔍</span>
-			<input id="revir-cmd-input" type="text" placeholder="Öğrenci adı, okul no, sayfa veya ayar ara... (Örn: Ahmet, yedek, tema, aşı)" autocomplete="off" oninput="window.__revirCmdSearch(this.value)" onkeydown="window.__revirCmdKey(event)"/>
+			<input id="revir-cmd-input" type="text" aria-label="Öğrenci, sayfa veya ayar ara" placeholder="Öğrenci adı, okul no, sayfa veya ayar ara... (Örn: Ahmet, yedek, tema, aşı)" autocomplete="off" oninput="window.__revirCmdSearch(this.value)" onkeydown="window.__revirCmdKey(event)"/>
 			<span class="revir-kbd">ESC</span>
-			<button type="button" class="revir-cmd-close" title="Kapat (ESC)" onclick="window.__revirCloseCmdPalette()">✕</button>
+			<button type="button" class="revir-cmd-close" title="Kapat (ESC)" aria-label="Komut paletini kapat" onclick="window.__revirCloseCmdPalette()">✕</button>
 		</div>
 		<div id="revir-cmd-results"></div>
 		<div class="revir-cmd-footer">
 			<span>↑↓ Gezin · ↵ Seç · ESC Kapat</span>
-			<span>Kısayollar: ⌘K Ara · ⌘J Sohbet · Alt+V Yeni Vizit · Alt+B Menü</span>
+			<span>Kısayollar: Ctrl/⌘K Ara · Ctrl/⌘J Sohbet · Alt+V Yeni Vizit · Alt+B Menü</span>
 		</div>
 	</div>
 </div>
@@ -4330,7 +4439,7 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 </div>
 
 <!-- Yüzen Gemini Sohbet Butonu ve Konuşma Balonu -->
-<button id="revir-fab-btn" type="button" title="Gemini Klinik Asistan ile Konuş (⌘J / Alt+A)" aria-label="Gemini Klinik Asistan" onclick="window.__revirToggleChatBubble()">
+<button id="revir-fab-btn" type="button" title="Gemini Klinik Asistan ile Konuş (Ctrl/⌘J / Alt+A)" aria-label="Gemini Klinik Asistan" onclick="window.__revirToggleChatBubble()">
 	<svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
 		<path d="M12 2L14.6 9.4L22 12L14.6 14.6L12 22L9.4 14.6L2 12L9.4 9.4L12 2Z" fill="currentColor"/>
 		<circle cx="19" cy="5" r="1.4" fill="currentColor" opacity="0.85"/>
@@ -4395,6 +4504,8 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 	var modalBackdropWarned = false;
 	var lastDialogSig = "";
 	var lastDialogTitle = "";
+	var modalReturnFocus = null;
+	var commandReturnFocus = null;
 	var lastRenderedPage = "";
 	var loadingPillTimer = null;
 	var cmdItems = [];
@@ -4551,6 +4662,23 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 		});
 	}
 
+	function describeFocusTarget(el) {
+		if (!el) return null;
+		return { element: el, id: el.id || "", key: el.getAttribute("data-key") || "" };
+	}
+
+	function restoreFocusTarget(target) {
+		if (!target) return;
+		var el = target.element && target.element.isConnected ? target.element : null;
+		if (!el && target.id) el = document.getElementById(target.id);
+		if (!el && target.key) {
+			el = document.querySelector('[data-key="' + CSS.escape(target.key) + '"]');
+		}
+		if (el && el.focus) {
+			try { el.focus({ preventScroll: true }); } catch (_fe) { el.focus(); }
+		}
+	}
+
 	function applyRender(data, mainScroll, dlgScroll, sbScroll, refocusId) {
 		if (!data) return;
 		cleanupPortaledMenus();
@@ -4597,9 +4725,11 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 		var mBack = document.getElementById("revir-modal-back");
 		var mFs = document.getElementById("revir-modal-fs-btn");
 		if (data.dialog_html !== null && data.dialog_html !== undefined) {
+			var modalWasOpen = !!(backdrop && backdrop.classList.contains("open"));
 			var curSig = String(data.dialog_title || "") + "|" + String(data.dialog_depth || 1) + "|" + String(data.dialog_mode || "modal");
 			var isNewSig = (curSig !== lastDialogSig);
 			if (isNewSig) {
+				if (!modalWasOpen) modalReturnFocus = describeFocusTarget(document.activeElement);
 				setModalDirty(false);
 				modalBackdropWarned = false;
 				if (card) card.classList.remove("fullscreen");
@@ -4634,10 +4764,14 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 					var firstInp = mBody.querySelector("input:not([type=hidden]):not([type=file]):not([disabled]), textarea:not([disabled]), select:not([disabled])");
 					if (firstInp && firstInp.focus) {
 						try { firstInp.focus({ preventScroll: true }); } catch (_fe) {}
+					} else if (card && card.focus) {
+						card.setAttribute("tabindex", "-1");
+						card.focus();
 					}
 				}, 40);
 			}
 		} else {
+			var shouldRestoreModalFocus = !!(backdrop && backdrop.classList.contains("open"));
 			lastDialogTitle = "";
 			if (backdrop) {
 				backdrop.classList.remove("open");
@@ -4660,6 +4794,11 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 				mFs.textContent = "⤢";
 			}
 			document.body.classList.remove("modal-open");
+			if (shouldRestoreModalFocus && modalReturnFocus) {
+				var returnTarget = modalReturnFocus;
+				modalReturnFocus = null;
+				setTimeout(function() { restoreFocusTarget(returnTarget); }, 0);
+			}
 		}
 
 		// Expander durumlarını dinle
@@ -4720,7 +4859,7 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 			chatTitleEl.textContent = data.floating_chat_title;
 			if (chatWelcomeEl) chatWelcomeEl.textContent = data.floating_chat_title;
 			if (fabBtn) {
-				fabBtn.title = data.floating_chat_title + " ile Konuş (⌘J / Alt+A)";
+				fabBtn.title = data.floating_chat_title + " ile Konuş (Ctrl/⌘J / Alt+A)";
 				fabBtn.setAttribute("aria-label", data.floating_chat_title);
 			}
 		}
@@ -4785,7 +4924,13 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 
 	window.__revirRadioPick = function(key, idx, el) {
 		var grp = el && el.closest ? el.closest("[data-kind='radio']") : null;
-		if (grp) grp.dataset.value = String(idx);
+		if (grp) {
+			grp.dataset.value = String(idx);
+			grp.querySelectorAll(".revir-nav-item").forEach(function(button, buttonIdx) {
+				if (buttonIdx === idx) button.setAttribute("aria-current", "page");
+				else button.removeAttribute("aria-current");
+			});
+		}
 		if (grp && grp.dataset && grp.dataset.form) return;
 		sendAction({ action: "change", key: key, value: idx });
 	};
@@ -5115,17 +5260,42 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 
 	// Sekmeler (Anlık geçiş + arka plan kalıcılığı)
 	window.__revirSwitchTab = function(groupId, idx) {
+		var tablist = document.getElementById(groupId);
+		var currentButton = tablist ? tablist.querySelector('.revir-tab-btn[aria-selected="true"]') : null;
+		if (currentButton && parseInt(currentButton.dataset.tabIdx, 10) === idx) return;
+		var shouldRerender = Boolean(tablist && tablist.closest('.revir-tabs[data-rerender-on-tab="true"]'));
 		document.querySelectorAll('.revir-tab-btn[data-tab-group="' + groupId + '"]').forEach(function(b) {
-			b.classList.toggle("active", parseInt(b.dataset.tabIdx, 10) === idx);
+			var selected = parseInt(b.dataset.tabIdx, 10) === idx;
+			b.classList.toggle("active", selected);
+			b.setAttribute("aria-selected", String(selected));
+			b.setAttribute("tabindex", selected ? "0" : "-1");
 		});
 		document.querySelectorAll('.revir-tab-pane[data-tab-group="' + groupId + '"]').forEach(function(p) {
-			p.classList.toggle("active", parseInt(p.dataset.tabIdx, 10) === idx);
+			var selected = parseInt(p.dataset.tabIdx, 10) === idx;
+			p.classList.toggle("active", selected);
+			p.setAttribute("aria-hidden", String(!selected));
 		});
 		fetch("/api/ui_state", {
 			method: "POST",
 			headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
 			body: JSON.stringify({ kind: "tab", id: groupId, value: idx })
+		}).then(function(response) {
+			if (response.ok && shouldRerender) sendAction({ action: "render" });
 		}).catch(function(){});
+	};
+	window.__revirTabKey = function(ev, groupId, idx, orientation) {
+		var next = idx;
+		var forward = orientation === "vertical" ? "ArrowDown" : "ArrowRight";
+		var backward = orientation === "vertical" ? "ArrowUp" : "ArrowLeft";
+		var buttons = Array.prototype.slice.call(document.querySelectorAll('.revir-tab-btn[data-tab-group="' + groupId + '"]'));
+		if (ev.key === forward) next = (idx + 1) % buttons.length;
+		else if (ev.key === backward) next = (idx - 1 + buttons.length) % buttons.length;
+		else if (ev.key === "Home") next = 0;
+		else if (ev.key === "End") next = buttons.length - 1;
+		else return;
+		ev.preventDefault();
+		window.__revirSwitchTab(groupId, next);
+		if (buttons[next]) buttons[next].focus();
 	};
 
 	// Popover (Ekran kenarlarında otomatik yukarı/sağa-sola hizalama destekli)
@@ -5427,6 +5597,7 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 		var bd = document.getElementById("revir-cmd-backdrop");
 		var inp = document.getElementById("revir-cmd-input");
 		if (!bd) return;
+		if (!bd.classList.contains("open")) commandReturnFocus = document.activeElement;
 		bd.classList.add("open");
 		if (inp) {
 			inp.value = "";
@@ -5438,6 +5609,13 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 	window.__revirCloseCmdPalette = function() {
 		var bd = document.getElementById("revir-cmd-backdrop");
 		if (bd) bd.classList.remove("open");
+		if (commandReturnFocus && commandReturnFocus.isConnected) {
+			var returnTarget = commandReturnFocus;
+			commandReturnFocus = null;
+			setTimeout(function() {
+				if (returnTarget.isConnected && returnTarget.focus) returnTarget.focus({ preventScroll: true });
+			}, 0);
+		}
 	};
 
 	function renderCmdList() {
@@ -5560,6 +5738,36 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 	});
 
 	document.addEventListener("keydown", function(ev) {
+		if (ev.key === "Tab") {
+			var modalBd = document.getElementById("revir-modal-backdrop");
+			var cmdBd = document.getElementById("revir-cmd-backdrop");
+			var activeBackdrop = modalBd && modalBd.classList.contains("open")
+				? modalBd
+				: (cmdBd && cmdBd.classList.contains("open") ? cmdBd : null);
+			if (activeBackdrop) {
+				var focusables = Array.prototype.slice.call(activeBackdrop.querySelectorAll(
+					'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])'
+				)).filter(function(el) { return el.offsetWidth || el.offsetHeight || el.getClientRects().length; });
+				if (!focusables.length) {
+					ev.preventDefault();
+					var dialog = activeBackdrop.querySelector('[role="dialog"]');
+					if (dialog) {
+						dialog.setAttribute("tabindex", "-1");
+						dialog.focus();
+					}
+					return;
+				}
+				var first = focusables[0];
+				var last = focusables[focusables.length - 1];
+				if (ev.shiftKey && (document.activeElement === first || !activeBackdrop.contains(document.activeElement))) {
+					ev.preventDefault();
+					last.focus();
+				} else if (!ev.shiftKey && (document.activeElement === last || !activeBackdrop.contains(document.activeElement))) {
+					ev.preventDefault();
+					first.focus();
+				}
+			}
+		}
 		if ((ev.metaKey || ev.ctrlKey) && (ev.key === "k" || ev.key === "K")) {
 			ev.preventDefault();
 			var cmdBd = document.getElementById("revir-cmd-backdrop");
@@ -5725,7 +5933,7 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 		var div = document.createElement("div");
 		div.className = "revir-cmsg " + (role === "user" ? "revir-cmsg-user" : "revir-cmsg-ai");
 		div.innerHTML = htmlContent;
-		if (role === "ai" && writeProposal && writeProposal.token) {
+		if (role === "ai" && writeProposal && writeProposal.token && !writeProposal.text_confirm) {
 			var isBatch = (writeProposal.mode === "batch_action");
 			var isDestructive = !!writeProposal.is_destructive;
 			var wc = document.createElement("div");

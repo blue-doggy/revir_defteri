@@ -1611,7 +1611,8 @@ def render_calendar_and_planning_page(
 				ui.rerun()
 
 	if show_grid_sec and show_leaf_sec:
-		cal_col, leaf_col = ui.columns([1.62, 1.12], gap="medium")
+		cal_col = ui.container()
+		leaf_col = ui.container()
 	elif show_grid_sec:
 		cal_col = ui.container()
 		leaf_col = None
@@ -2339,6 +2340,14 @@ def _render_interactive_calendar_leaf(
 			opacity: 1;
 			pointer-events: auto;
 			transform: translateY(0);
+		}
+		@media (hover: none), (max-width: 760px) {
+			.revir-leaf-ev-card .revir-leaf-ev-del,
+			.revir-leaf-ev-card .revir-leaf-ev-done {
+				opacity: 1;
+				pointer-events: auto;
+				transform: none;
+			}
 		}
 		.revir-done-ev-card {
 			position: relative;
