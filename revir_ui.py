@@ -6694,12 +6694,13 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 		var nxt = (forceVal !== undefined) ? !!forceVal : !document.body.classList.contains("revir-layout-edit");
 		document.body.classList.toggle("revir-layout-edit", nxt);
 		if (String(lastRenderedPage || "").includes("Genel Bakış")) {
-			var overviewEdit = document.querySelector('input[data-key="layout_overview_edit"]');
-			if (overviewEdit) {
+			var overviewEditState = document.querySelector('input[data-key="layout_overview_edit"]');
+			if (overviewEditState) {
 				var targetChecked = !!nxt;
-				if (overviewEdit.checked !== targetChecked) {
-					overviewEdit.checked = targetChecked;
-					overviewEdit.dispatchEvent(new Event("change", { bubbles: true }));
+				var targetValue = targetChecked ? "true" : "false";
+				if (overviewEditState.value !== targetValue) {
+					overviewEditState.value = targetValue;
+					overviewEditState.dispatchEvent(new Event("change", { bubbles: true }));
 				}
 			}
 		}
@@ -6711,7 +6712,7 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 	document.addEventListener("change", function(e) {
 		var t = e && e.target;
 		if (!t || t.dataset.key !== "layout_overview_edit") return;
-		document.body.classList.toggle("revir-layout-edit", !!t.checked);
+		document.body.classList.toggle("revir-layout-edit", String(t.value).toLowerCase() === "true");
 		syncLayoutBtnState();
 	});
 
