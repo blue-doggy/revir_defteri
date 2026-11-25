@@ -33,6 +33,7 @@ import report_settings_ui
 import report_workflow_ui
 import cafeteria as caf
 import school_calendar
+import medication_prospectus as mprosp
 
 LOGGER = logging.getLogger(__name__)
 
@@ -137,7 +138,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return (Path(meipass_raw) if meipass_raw else _BUNDLE_DIR) / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.38.1"
+_DEFAULT_APP_VERSION = "1.39.0"
 
 
 def _load_app_version() -> str:
@@ -2548,6 +2549,9 @@ def initialize_db() -> None:
 		# Yemekhane Yönetimi tabloları
 		caf.ensure_cafeteria_tables(connection)
 
+		# İlaç Prospektüsü & Türkiye Piyasa İlaç Veri Bankası tabloları
+		mprosp.ensure_prospectus_tables(connection)
+
 		# Resilient person_type normalization
 		connection.execute("UPDATE students SET person_type='Öğrenci' WHERE person_type LIKE '%renci%'")
 		connection.execute(
@@ -2980,6 +2984,7 @@ def perform_factory_reset() -> tuple[bool, str]:
 			"vital_reference",
 			"cafeteria_dish_ingredients",
 			"cafeteria_dishes",
+			"medication_prospectus",
 		]
 
 		for db_file in target_dbs:
@@ -11267,6 +11272,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 		emer_notes = (hp["emergency_notes"] if hp and hp["emergency_notes"] else "").strip()
 		# İlaç Takip Sistemindeki aktif ilaçları da Sağlık Profili sürekli ilaçlarıyla canlı birleştir
 		active_tracked_meds: list[str] = []
+		active_tracked_raw_names: list[str] = []
 		try:
 			with connect_db() as _mconn:
 				_mrows = _mconn.execute(
@@ -11276,6 +11282,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 				for _mr in _mrows:
 					m_lbl = str(_mr["medication_name"] or "").strip()
 					if m_lbl:
+						active_tracked_raw_names.append(m_lbl)
 						dos_s = f" ({_mr['dosage_pattern']})" if _mr["dosage_pattern"] else ""
 						active_tracked_meds.append(f"{m_lbl}{dos_s}")
 		except Exception:
@@ -11287,6 +11294,19 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 			ui.markdown(f"🔴 **Alerjiler:** `{mask_kvkk_value(hp['allergies'], 'medical') if (hp and hp['allergies']) else 'Yok / Bildirilmedi'}`")
 			ui.markdown(f"🟠 **Kronik Durumlar:** `{mask_kvkk_value(hp['chronic_conditions'], 'medical') if (hp and hp['chronic_conditions']) else 'Yok / Bildirilmedi'}`")
 			ui.markdown(f"💊 **Sürekli / Aktif İlaçlar:** `{mask_kvkk_value(combined_meds, 'medical') if combined_meds else 'Yok / Bildirilmedi'}`")
+			if active_tracked_raw_names:
+				_btn_cols = ui.columns(min(len(active_tracked_raw_names), 3))
+				for _bidx, _rmed in enumerate(active_tracked_raw_names[:3]):
+					with _btn_cols[_bidx]:
+						if ui.button(f"📖 {_rmed[:22]} Prospektüs", key=f"btn_sum_med_prosp_{person_id}_{_bidx}", use_container_width=True):
+							_open_student_med_prospectus_modal(
+								_rmed,
+								person_info={
+									"full_name": mask_kvkk_value(str(person.get("full_name") or ""), "name"),
+									"allergies": mask_kvkk_value(hp["allergies"], "medical") if (hp and hp["allergies"]) else "",
+									"chronic_conditions": mask_kvkk_value(hp["chronic_conditions"], "medical") if (hp and hp["chronic_conditions"]) else "",
+								},
+							)
 			if med_hist:
 				ui.markdown(f"📜 **Geçmiş:** {html.escape(mask_kvkk_value(med_hist, 'medical'))}")
 			if emer_notes:
@@ -21346,9 +21366,19 @@ def open_add_medication_dialog(preselected_student_id: int | None = None, edit_m
 					u_idx = 0
 			dose_unit = ui.selectbox("📏 Doz Birimi", unit_opts, index=u_idx, key=f"{k}unit")
 
-	render_gemini_medication_safety_shield(selected_stu_id, med_name, med_route, dosage_pattern, dose_unit, "Fark etmez", k)
-
 	is_prn = "Gerektiğinde" in dosage_pattern or "PRN" in dosage_pattern or "S.O.S" in dosage_pattern
+
+	mprosp.render_med_dialog_prospectus_helper(
+		med_name,
+		connect_db_fn=connect_db,
+		gemini_cfg_fn=lambda: _get_active_gemini_config(),
+		ensure_docx_fn=_ensure_docx_loaded,
+		app_cfg_fn=get_app_settings,
+		k_prefix=k,
+		is_prn=is_prn,
+	)
+
+	render_gemini_medication_safety_shield(selected_stu_id, med_name, med_route, dosage_pattern, dose_unit, "Fark etmez", k)
 
 	# Calculate number of daily doses from dosage pattern
 	if is_prn:
@@ -22477,6 +22507,46 @@ def _render_med_tab_cold_chain(nurse_name: str) -> None:
 			ui.rerun()
 
 
+def _extract_clicked_df_row_idx(tbl_event: Any, max_rows: int) -> int | None:
+	sel_obj = getattr(tbl_event, "selection", None)
+	if sel_obj is None:
+		return None
+	sel_cells = getattr(sel_obj, "cells", []) or []
+	sel_rows = getattr(sel_obj, "rows", []) or []
+	if sel_cells:
+		c = sel_cells[0]
+		c_row = c[0] if isinstance(c, (tuple, list)) else (c.get("row") if isinstance(c, dict) else None)
+		if c_row is not None and 0 <= int(c_row) < max_rows:
+			return int(c_row)
+	if sel_rows and 0 <= int(sel_rows[0]) < max_rows:
+		return int(sel_rows[0])
+	return None
+
+
+def _open_student_med_prospectus_modal(
+	medication_name: str,
+	*,
+	med_record: dict[str, Any] | None = None,
+	person_info: dict[str, Any] | None = None,
+) -> None:
+	p_ctx = person_info
+	if p_ctx is None and isinstance(med_record, dict) and med_record.get("full_name"):
+		p_ctx = {
+			"full_name": mask_kvkk_value(str(med_record.get("full_name") or ""), "name"),
+			"allergies": mask_kvkk_value(str(med_record.get("allergies") or ""), "medical") if med_record.get("allergies") else "",
+			"chronic_conditions": mask_kvkk_value(str(med_record.get("chronic_conditions") or ""), "medical") if med_record.get("chronic_conditions") else "",
+		}
+	mprosp.open_medication_prospectus_dialog(
+		medication_name,
+		connect_db_fn=connect_db,
+		gemini_cfg_fn=lambda: _get_active_gemini_config(),
+		ensure_docx_fn=_ensure_docx_loaded,
+		app_cfg_fn=get_app_settings,
+		person_info=p_ctx,
+		med_record=med_record,
+	)
+
+
 def render_medication_tracker() -> None:
 	app_cfg = get_app_settings()
 	nurse_name = app_cfg.get("nurse_name", "Okul Revir Sorumlusu")
@@ -22484,10 +22554,15 @@ def render_medication_tracker() -> None:
 	if "med_tracker_date" not in ui.session_state:
 		ui.session_state["med_tracker_date"] = date.today()
 
-	top_col1, top_col2 = ui.columns([7, 3])
+	top_col1, top_col_p, top_col2 = ui.columns([5.4, 2.3, 2.3])
 	with top_col1:
 		ui.markdown("## 💊 İlaç Takip Sistemi & Günlük İlaç Çizelgesi")
-		ui.caption("Reçeteli öğrenci ilaçlarını saatlik çizelgeden uygulayın; stok, SKT ve soğuk zincir kayıtlarını tek ekrandan denetleyin.")
+		ui.caption("Reçeteli öğrenci ilaçlarını saatlik çizelgeden uygulayın; stok, SKT, prospektüs ve soğuk zincir kayıtlarını tek ekrandan denetleyin.")
+	with top_col_p:
+		ui.markdown("<div style='height: 8px'></div>", unsafe_allow_html=True)
+		if ui.button("📖 Prospektüs & AI İlaç Ara", type="secondary", use_container_width=True, key="btn_open_prosp_tab_top"):
+			ui.session_state["_force_tab_label"] = "📖 İlaç Prospektüsü & Veri Bankası"
+			ui.rerun()
 	with top_col2:
 		ui.markdown("<div style='height: 8px'></div>", unsafe_allow_html=True)
 		if ui.button("➕ Yeni İlaç ve Tedavi Planı Ekle", type="primary", use_container_width=True, key="btn_open_add_med_top"):
@@ -22554,10 +22629,11 @@ def render_medication_tracker() -> None:
 
 	ui.markdown("<div style='height: 10px'></div>", unsafe_allow_html=True)
 
-	tab_timetable, tab_cabinet, tab_history, tab_supply, tab_cold_chain = ui.tabs([
+	tab_timetable, tab_cabinet, tab_history, tab_prospectus, tab_supply, tab_cold_chain = ui.tabs([
 		f"🕒 Günlük Saatlik İlaç Çizelgesi ({total_doses_count})",
 		f"📦 İlaç Dolabı & Aktif Tedavi Planları ({len(all_active_meds)})",
 		"📜 Revir İlaç Defteri & Geçmiş Kayıtlar",
+		"📖 İlaç Prospektüsü & Veri Bankası",
 		"🩹 Revir Sarf Malzeme & İlk Yardım Stoku",
 		"❄️ Buzdolabı & Ortam Isı İzlem Çizelgesi",
 	])
@@ -22676,7 +22752,13 @@ def render_medication_tracker() -> None:
 									open_person_dossier_dialog(int(dose["student_id"]))
 
 							with c_med:
-								ui.markdown(f"💊 **{dose['medication_name']}**")
+								if ui.button(
+									f"💊 {dose['medication_name']} · 📖 Prospektüs",
+									key=f"btn_dose_prosp_{card_key}",
+									type="secondary",
+									use_container_width=True,
+								):
+									_open_student_med_prospectus_modal(str(dose["medication_name"]), med_record=dose)
 								route_txt = dose.get("route") or "Oral"
 								ui.markdown(f"💉 Yol: **{route_txt}** | 📏 Doz: **{dose['dose_amount']} {dose['dose_unit']}** ({dose['dosage_pattern']})")
 								ui.caption(f"🍽️ {dose.get('meal_relation', 'Tok karnına')} | ❄️ {dose.get('storage_condition', 'Oda Sıcaklığı')}")
@@ -22782,7 +22864,21 @@ def render_medication_tracker() -> None:
 						"Uygulayan": d.get("administered_by") or "-",
 					})
 				df_table = pd.DataFrame(rows_data)
-				ui.dataframe(df_table, use_container_width=True, hide_index=True)
+				_tb_key = f"med_tb_df_{selected_date.isoformat()}"
+				_tb_ev = ui.dataframe(
+					df_table,
+					use_container_width=True,
+					hide_index=True,
+					on_select="rerun",
+					selection_mode=["single-row", "single-cell"],
+					key=_tb_key,
+				)
+				ui.caption("💡 İpucu: Tabloda herhangi bir ilacın üzerine tıklayarak prospektüsünü açabilirsiniz.")
+				_tb_row_idx = _extract_clicked_df_row_idx(_tb_ev, len(scheduled_doses))
+				if _tb_row_idx is not None:
+					_clicked_dose = scheduled_doses[_tb_row_idx]
+					ui.clear_dataframe_selection(_tb_key)
+					_open_student_med_prospectus_modal(str(_clicked_dose["medication_name"]), med_record=_clicked_dose)
 
 	# TAB 2: İLAÇ DOLABI & AKTİF TEDAVİ PLANLARI
 	with tab_cabinet:
@@ -22882,7 +22978,13 @@ def render_medication_tracker() -> None:
 							ui.markdown(f"<div style='background:#fffbeb;color:#b45309;border:1px solid #fde68a;padding:2px 8px;border-radius:4px;font-size:11.5px;font-weight:700;margin-top:4px;'>⚠️ SKT'ye {exp_days_left} Gün Kaldı ({exp_formatted})</div>", unsafe_allow_html=True)
 
 					with mc_2:
-						ui.markdown(f"💊 **{m_item['medication_name']}**")
+						if ui.button(
+							f"💊 {m_item['medication_name']} · 📖 Prospektüs",
+							key=f"btn_cab_prosp_{m_item['id']}",
+							type="secondary",
+							use_container_width=True,
+						):
+							_open_student_med_prospectus_modal(str(m_item["medication_name"]), med_record=m_item)
 						ui.caption(f"💉 {m_item.get('route', 'Oral')} | 🔁 {m_item.get('dosage_pattern', '1x1')} | 📏 {m_item.get('dose_amount', 1)} {m_item.get('dose_unit', 'adet')}")
 						ui.caption(f"⏰ Saatler: **{m_item.get('scheduled_times', '-')}**")
 						# Explicit SKT Information Display
@@ -22979,7 +23081,21 @@ def render_medication_tracker() -> None:
 				"administered_by": "Uygulayan",
 				"notes": "Notlar"
 			})
-			ui.dataframe(hist_df, use_container_width=True, hide_index=True)
+			_hist_ev = ui.dataframe(
+				hist_df,
+				use_container_width=True,
+				hide_index=True,
+				on_select="rerun",
+				selection_mode=["single-row", "single-cell"],
+				key="med_history_df",
+			)
+			ui.caption("💡 İpucu: Geçmiş defterdeki bir satıra veya ilaca tıklayarak prospektüsünü açabilirsiniz.")
+			_hist_row_idx = _extract_clicked_df_row_idx(_hist_ev, len(hist_df))
+			if _hist_row_idx is not None:
+				_picked_hmed = str(hist_df.iloc[_hist_row_idx].get("İlaç Adı") or "").strip()
+				ui.clear_dataframe_selection("med_history_df")
+				if _picked_hmed:
+					_open_student_med_prospectus_modal(_picked_hmed)
 
 			# Lazy Excel Export
 			def _make_med_hist_xlsx(_df=hist_df.copy()):
@@ -22995,6 +23111,14 @@ def render_medication_tracker() -> None:
 				mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 				key="btn_down_hist_excel",
 			)
+
+	with tab_prospectus:
+		mprosp.render_prospectus_tab(
+			connect_db_fn=connect_db,
+			gemini_cfg_fn=lambda: _get_active_gemini_config(),
+			ensure_docx_fn=_ensure_docx_loaded,
+			app_cfg_fn=get_app_settings,
+		)
 
 	with tab_supply:
 		_render_med_tab_infirmary_inventory()

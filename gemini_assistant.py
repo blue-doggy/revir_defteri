@@ -3942,4 +3942,179 @@ SADECE aşağıdaki JSON şemasını döndür (tüm tarihler YYYY-MM-DD biçimin
 	return True, out, used_m
 
 
+# ==============================================================================
+# 14. İLAÇ PROSPEKTÜSÜ SORGULAMA VE BÖLÜM TAMAMLAMA ASİSTANI
+# ==============================================================================
+
+_MED_PROSPECTUS_KEYS: tuple[str, ...] = (
+	"medication_name",
+	"generic_name",
+	"brand_examples",
+	"therapeutic_class",
+	"dosage_form",
+	"route_default",
+	"meal_relation_default",
+	"storage_condition_default",
+	"general_purpose",
+	"administration_and_meal",
+	"max_daily_dose",
+	"side_effects",
+	"contraindicated_drugs",
+	"pediatric_notes",
+	"full_prospectus_notes",
+)
+
+
+def _normalize_prospectus_route(val: str) -> str:
+	v = str(val or "").lower()
+	if any(w in v for w in ("inhal", "solun", "nebül", "nebul")) or ("sprey" in v and "burun" not in v and "nazal" not in v and "boğaz" not in v):
+		return "Solunum (İnhalasyon / Hava)"
+	if any(w in v for w in ("göz", "oküler", "oftalm")):
+		return "Göz Damlası"
+	if any(w in v for w in ("kulak", "otik")):
+		return "Kulak Damlası"
+	if any(w in v for w in ("burun", "nazal")):
+		return "Burun Spreyi"
+	if any(w in v for w in ("cilt", "dermal", "topikal", "haric", "krem", "merhem", "jel")):
+		return "Cilt / Dermal (Merhem/Krem)"
+	if any(w in v for w in ("enjeks", "subkut", "im", "iv", "insülin", "oto-enjektör")):
+		return "Enjeksiyon (Deri Altı/İnsülin)"
+	if any(w in v for w in ("rektal", "fitil", "supoz")):
+		return "Rektal"
+	if any(w in v for w in ("ağız", "oral", "şurup", "tablet", "kapsül", "saşe")):
+		return "Ağızdan (Oral)"
+	return "Diğer"
+
+
+def _normalize_prospectus_meal(val: str) -> str:
+	v = str(val or "").lower()
+	if "30" in v and ("önce" in v or "once" in v):
+		return "Yemekten 30 dk önce"
+	if "aç" in v or "ac karn" in v:
+		return "Aç karnına"
+	if "yemekle birlikte" in v or "yemek esnasında" in v or "yemek sırasında" in v:
+		return "Yemekle birlikte"
+	if "tok" in v or "yemekten sonra" in v:
+		return "Tok karnına"
+	return "Fark etmez"
+
+
+def _normalize_prospectus_storage(val: str) -> str:
+	v = str(val or "").lower()
+	if "buzdolab" in v or "+2" in v or "2-8" in v or "soğuk" in v:
+		return "Buzdolabı (+2 / +8 °C)"
+	if "kilitli" in v:
+		return "Kilitli Revir Dolabı"
+	if "ışık" in v or "karanlık" in v:
+		return "Işıktan Korunan Dolap"
+	return "Oda Sıcaklığı (15-25 °C)"
+
+
+def lookup_medication_prospectus_with_ai(
+	*,
+	api_key: str,
+	model: str,
+	medication_name: str,
+	extra_context: str = "",
+	existing_fields: dict[str, Any] | None = None,
+	fill_mode: str = "all",  # "all" | "missing_only"
+) -> tuple[bool, dict[str, str], str]:
+	"""Verilen ilaç adı için TİTCK KÜB/KT ve okul reviri klinik pratikleri çerçevesinde yapılandırılmış Türkçe prospektüs döndürür."""
+	clean_med = anonymize_free_text(str(medication_name or "").strip())
+	if not clean_med:
+		return False, {"error": "Sorgulanacak ilaç adı boş olamaz."}, ""
+
+	safe_ctx = anonymize_free_text(str(extra_context or "").strip())
+	existing = existing_fields if isinstance(existing_fields, dict) else {}
+	filled_preview: dict[str, str] = {}
+	for fk in _MED_PROSPECTUS_KEYS:
+		fv = str(existing.get(fk) or "").strip()
+		if fv:
+			filled_preview[fk] = anonymize_free_text(fv)
+
+	ctx_block = f"\n[EK KLİNİK / KULLANIM BAĞLAMI]: {safe_ctx}" if safe_ctx else ""
+	existing_block = ""
+	if filled_preview:
+		existing_block = f"\n[KULLANICININ HALİHAZIRDA GİRDİĞİ ALANLAR]:\n{json.dumps(filled_preview, ensure_ascii=False)}"
+	mode_note = (
+		"Kullanıcının girdiği alanlarla tutarlı kalarak özellikle eksik alanları doldur; mevcut bilgiyi daha anlaşılır veya klinik açıdan eksiksiz hale getirebilirsin."
+		if fill_mode == "missing_only" and filled_preview
+		else "Tüm prospektüs bölümlerini sıfırdan açık, doğru ve okul revir hemşiresinin hızla okuyabileceği netlikte Türkçe olarak doldur."
+	)
+
+	prompt = f"""Türkiye ilaç piyasasındaki (TİTCK KÜB/KT referanslı) aşağıdaki ilaç hakkında okul reviri ve aile sağlığı takibi için profesyonel, net ve yapılandırılmış prospektüs özeti hazırla:
+
+[ARANAN İLAÇ ADI / FORMU]: {clean_med}{ctx_block}{existing_block}
+
+GÖREV TALİMATI:
+{mode_note}
+- Kesin olmayan uydurma ticari bilgi verme; çocuklarda/adolesanlarda ve yetişkinlerde dikkat edilmesi gereken doz sınırlarını ayrı vurgula.
+- "route_default" için şu seçeneklerden en uygununu seç: "Ağızdan (Oral)", "Solunum (İnhalasyon / Hava)", "Göz Damlası", "Kulak Damlası", "Burun Spreyi", "Cilt / Dermal (Merhem/Krem)", "Enjeksiyon (Deri Altı/İnsülin)", "Rektal", "Diğer".
+- "meal_relation_default" için şu seçeneklerden en uygununu seç: "Tok karnına", "Aç karnına", "Yemekle birlikte", "Yemekten 30 dk önce", "Fark etmez".
+- "storage_condition_default" için şu seçeneklerden en uygununu seç: "Oda Sıcaklığı (15-25 °C)", "Buzdolabı (+2 / +8 °C)", "Kilitli Revir Dolabı", "Işıktan Korunan Dolap".
+
+Yanıtı SADECE aşağıdaki JSON şemasıyla Türkçe döndür:
+{{
+  "medication_name": "Standart ürün ve form adı (örn: Augmentin-BID 400 mg Süspansiyon)",
+  "generic_name": "Etken madde(ler)",
+  "brand_examples": "Türkiye'deki bilinen eşdeğer / piyasa adları (virgülle)",
+  "therapeutic_class": "İlaç grubu (örn: Penisilin Grubu Antibiyotik, Analjezik/Antipiretik)",
+  "dosage_form": "Farmasötik form (Şurup / Süspansiyon, Tablet, İnhaler vb.)",
+  "route_default": "Ağızdan (Oral)",
+  "meal_relation_default": "Tok karnına",
+  "storage_condition_default": "Oda Sıcaklığı (15-25 °C)",
+  "general_purpose": "Genel Kullanım Amacı: İlacın ne işe yaradığı, başlıca endikasyonları (2-4 kısa cümle)",
+  "administration_and_meal": "Kullanım Şekli, Aç/Tok Durumu ve Uygulama Yolu: Aç mı tok mu alınacağı, uygulama yolu ve dikkat edilecek uygulama tekniği",
+  "max_daily_dose": "Günlük Alınabilecek Maksimum Doz: Pediatrik (mg/kg/gün ve tavan) ile yetişkin/ergen günlük maksimum güvenli doz bilgisi",
+  "side_effects": "Olası Yan Etkiler: Sık görülen hafif yan etkiler ile acil müdahale/sevk gerektiren ciddi uyarı belirtileri",
+  "contraindicated_drugs": "Beraber Kullanılmaması Gereken İlaçlar & Kontrendikasyonlar: Kritik ilaç etkileşimleri ve birlikte kullanılmaması gereken durumlar",
+  "pediatric_notes": "Okul Reviri & Pediatrik Bakım Notu: Çocuklarda doz güvenliği, okulda gözetim ve saklama hatırlatması",
+  "full_prospectus_notes": "Ek Prospektüs Özeti: İlacın kullanım süresi, unutulan doz veya özel uyarılar"
+}}"""
+
+	ok, raw, used_m = call_gemini(
+		prompt,
+		api_key=api_key,
+		model=model,
+		expect_json=True,
+		temperature=0.15,
+		timeout=24.0,
+		max_output_tokens=2200,
+	)
+	if not ok:
+		return False, {"error": raw}, used_m
+
+	parsed = _parse_json_response(raw)
+	if not isinstance(parsed, dict):
+		return False, {"error": "Gemini prospektüs yanıtı JSON olarak ayrıştırılamadı."}, used_m
+
+	result: dict[str, str] = {}
+	for k in _MED_PROSPECTUS_KEYS:
+		val = _stringify_ai_field(parsed.get(k))
+		if fill_mode == "missing_only" and str(existing.get(k) or "").strip():
+			result[k] = str(existing[k]).strip()
+		else:
+			result[k] = val
+
+	if not result.get("medication_name"):
+		result["medication_name"] = clean_med
+	result["route_default"] = (
+		str(existing.get("route_default") or "").strip()
+		if (fill_mode == "missing_only" and str(existing.get("route_default") or "").strip())
+		else _normalize_prospectus_route(result.get("route_default", ""))
+	)
+	result["meal_relation_default"] = (
+		str(existing.get("meal_relation_default") or "").strip()
+		if (fill_mode == "missing_only" and str(existing.get("meal_relation_default") or "").strip())
+		else _normalize_prospectus_meal(result.get("meal_relation_default", ""))
+	)
+	result["storage_condition_default"] = (
+		str(existing.get("storage_condition_default") or "").strip()
+		if (fill_mode == "missing_only" and str(existing.get("storage_condition_default") or "").strip())
+		else _normalize_prospectus_storage(result.get("storage_condition_default", ""))
+	)
+	return True, result, used_m
+
+
+
 
