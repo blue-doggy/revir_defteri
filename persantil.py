@@ -126,7 +126,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.30.0"
+_DEFAULT_APP_VERSION = "1.31.0"
 
 
 def _load_app_version() -> str:
@@ -979,6 +979,457 @@ def save_app_settings(updates: dict[str, str]) -> None:
 		ui.session_state.pop("_cached_page_sections_visibility", None)
 	except Exception:
 		pass
+
+
+WIDGET_LAYOUT_PRESETS = (
+	"Varsayılan Düzen",
+	"Muayene Odaklı Düzen",
+	"Tarama Odaklı Düzen",
+)
+WIDGET_LAYOUT_ACCENTS = {
+	"Turkuaz": "#0d9488",
+	"Uyarı Kırmızı": "#f43f5e",
+	"Bilgi Mavi": "#2563eb",
+	"Yeşil": "#16a34a",
+}
+
+
+def _widget_layout_setting_key(page_key: str) -> str:
+	key = clean_text(page_key)
+	if not key or not re.fullmatch(r"[a-zA-Z0-9_-]+", key):
+		raise ValueError("Yerleşim sayfa anahtarı yalnızca harf, sayı, alt çizgi ve tire içerebilir.")
+	return f"widget_layout:{key}"
+
+
+def _normalize_widget_layout(layout_data: dict[str, Any]) -> dict[str, dict[str, Any]]:
+	if not isinstance(layout_data, dict):
+		raise ValueError("Yerleşim verisi bir sözlük olmalıdır.")
+	normalized: dict[str, dict[str, Any]] = {}
+	for raw_id, raw_item in layout_data.items():
+		widget_id = str(raw_id)
+		if not re.fullmatch(r"[a-zA-Z0-9_-]+", widget_id) or not isinstance(raw_item, dict):
+			continue
+		try:
+			x_pct = float(raw_item.get("x_pct", 0))
+			y_px = int(raw_item.get("y_px", 0))
+			w_pct = float(raw_item.get("w_pct", 50))
+			h_px = int(raw_item.get("h_px", 240))
+			z_index = int(raw_item.get("z", 1))
+		except (TypeError, ValueError, OverflowError):
+			continue
+		if not all(math.isfinite(value) for value in (x_pct, w_pct)):
+			continue
+		w_pct = min(100.0, max(15.0, w_pct))
+		x_pct = min(100.0 - w_pct, max(0.0, x_pct))
+		normalized[widget_id] = {
+			"id": widget_id,
+			"x_pct": x_pct,
+			"y_px": min(20000, max(0, y_px)),
+			"w_pct": w_pct,
+			"h_px": min(4000, max(90, h_px)),
+			"visible": bool(raw_item.get("visible", True)),
+			"z": min(9999, max(0, z_index)),
+			"accent": raw_item.get("accent") if raw_item.get("accent") in WIDGET_LAYOUT_ACCENTS.values() else WIDGET_LAYOUT_ACCENTS["Turkuaz"],
+		}
+	return normalized
+
+
+def _read_widget_layout_bundle(page_key: str) -> dict[str, Any]:
+	raw = get_app_settings().get(_widget_layout_setting_key(page_key), "").strip()
+	if not raw:
+		return {"active_preset": WIDGET_LAYOUT_PRESETS[0], "presets": {}}
+	try:
+		bundle = json.loads(raw)
+	except json.JSONDecodeError as exc:
+		raise ValueError(f"{page_key} sayfasının kayıtlı yerleşim JSON verisi geçersiz.") from exc
+	if not isinstance(bundle, dict) or not isinstance(bundle.get("presets", {}), dict):
+		raise ValueError(f"{page_key} sayfasının kayıtlı yerleşim yapısı geçersiz.")
+	return bundle
+
+
+def _preset_default_layout(page_key: str, preset_name: str, default_layout: dict[str, Any]) -> dict[str, dict[str, Any]]:
+	layout = _normalize_widget_layout(default_layout)
+	if preset_name == "Varsayılan Düzen" or not layout:
+		return layout
+	ordered = list(layout.values())
+	if preset_name == "Muayene Odaklı Düzen":
+		ordered.sort(key=lambda item: (0 if any(token in item["id"] for token in ("clinical", "vision", "hearing", "vital", "pending", "recent")) else 1, item["y_px"], item["x_pct"]))
+	elif preset_name == "Tarama Odaklı Düzen":
+		ordered.sort(key=lambda item: (0 if any(token in item["id"] for token in ("screen", "hair", "vision", "hearing", "behavior", "harmful", "vax", "outbreak")) else 1, item["y_px"], item["x_pct"]))
+	for index, item in enumerate(ordered):
+		item["y_px"] = 16 + index * 270
+		item["x_pct"] = 0
+		item["w_pct"] = 100
+	return {item["id"]: item for item in ordered}
+
+
+def get_saved_widget_layout(page_key: str, default_layout: dict[str, Any]) -> dict[str, dict[str, Any]]:
+	bundle = _read_widget_layout_bundle(page_key)
+	preset = str(ui.session_state.get(f"widget_layout_preset_{page_key}") or bundle.get("active_preset") or WIDGET_LAYOUT_PRESETS[0])
+	saved = bundle.get("presets", {}).get(preset)
+	if isinstance(saved, dict):
+		layout = _normalize_widget_layout(default_layout)
+		for widget_id, item in _normalize_widget_layout(saved).items():
+			if widget_id in layout:
+				layout[widget_id] = item
+		return layout
+	return _preset_default_layout(page_key, preset, default_layout)
+
+
+def save_widget_layout(page_key: str, layout_data: dict[str, Any], preset_name: str = "Varsayılan") -> None:
+	preset = clean_text(preset_name) or "Varsayılan"
+	if len(preset) > 60:
+		raise ValueError("Yerleşim profili adı en fazla 60 karakter olabilir.")
+	bundle = _read_widget_layout_bundle(page_key)
+	presets = bundle.setdefault("presets", {})
+	presets[preset] = _normalize_widget_layout(layout_data)
+	bundle["active_preset"] = preset
+	save_app_settings({_widget_layout_setting_key(page_key): json.dumps(bundle, ensure_ascii=False, separators=(",", ":"))})
+	ui.session_state[f"widget_layout_preset_{page_key}"] = preset
+	ui.session_state[f"widget_layout_preset_{page_key}_select"] = preset
+
+
+def reset_widget_layout(page_key: str) -> None:
+	save_app_settings({_widget_layout_setting_key(page_key): ""})
+	ui.session_state.pop(f"widget_layout_preset_{page_key}", None)
+	ui.session_state.pop(f"widget_layout_preset_{page_key}_select", None)
+	ui.session_state.pop(f"widget_layout_restore_{page_key}", None)
+
+
+def _layout_json_from_sync(raw_value: object) -> dict[str, dict[str, Any]] | None:
+	raw = str(raw_value or "").strip()
+	if not raw:
+		return None
+	try:
+		parsed = json.loads(raw)
+	except json.JSONDecodeError as exc:
+		raise ValueError("Tarayıcıdan gelen yerleşim verisi geçersiz JSON içeriyor.") from exc
+	if not isinstance(parsed, dict):
+		raise ValueError("Tarayıcıdan gelen yerleşim verisi sözlük biçiminde olmalıdır.")
+	return _normalize_widget_layout(parsed)
+
+
+def render_layout_toolbar(
+	page_key: str,
+	default_layout: dict[str, Any],
+	*,
+	edit_key: str,
+) -> tuple[dict[str, dict[str, Any]], bool, bool, str | None]:
+	bundle = _read_widget_layout_bundle(page_key)
+	saved_presets = bundle.get("presets", {})
+	preset_options = list(dict.fromkeys([*WIDGET_LAYOUT_PRESETS, *saved_presets.keys()]))
+	preset_key = f"widget_layout_preset_{page_key}"
+	stored_preset = str(ui.session_state.get(preset_key) or bundle.get("active_preset") or WIDGET_LAYOUT_PRESETS[0])
+	if stored_preset not in preset_options:
+		preset_options.append(stored_preset)
+	edit_mode = ui.toggle("✏️ Düzeni Özelleştir / 🔒 Düzeni Kilitle", value=False, key=edit_key)
+
+	bar_cols = ui.columns([1.25, 1.1, 1.0, 1.0, 1.0, 1.0])
+	with bar_cols[0]:
+		selected_preset = ui.selectbox("Yerleşim Profili", preset_options, index=preset_options.index(stored_preset), key=f"{preset_key}_select")
+		if selected_preset != stored_preset:
+			ui.session_state[preset_key] = selected_preset
+			stored_preset = selected_preset
+	with bar_cols[1]:
+		magnetic = ui.toggle("🧲 Manyetik Hizalama (8px)", value=True, key=f"widget_layout_magnetic_{page_key}")
+	with bar_cols[2]:
+		auto_align = ui.button("📐 Izgaraya Oturt", key=f"widget_layout_align_{page_key}", disabled=not edit_mode, use_container_width=True)
+	with bar_cols[3]:
+		undo = ui.button("↩️ Geri Al", key=f"widget_layout_undo_{page_key}", disabled=not edit_mode, use_container_width=True)
+	with bar_cols[4]:
+		save_now = ui.button("💾 Düzeni Kaydet", key=f"widget_layout_save_{page_key}", disabled=not edit_mode, type="primary", use_container_width=True)
+	with bar_cols[5]:
+		reset_now = ui.button("🔄 Varsayılana Sıfırla", key=f"widget_layout_reset_{page_key}", use_container_width=True)
+	if reset_now:
+		reset_widget_layout(page_key)
+		ui.rerun()
+
+	layout_data = get_saved_widget_layout(page_key, default_layout)
+	sync_key = f"_widget_layout_sync_{page_key}"
+	sync_value = ui.text_input("Yerleşim senkronizasyon verisi", value="", key=sync_key, label_visibility="collapsed")
+	synced_layout = _layout_json_from_sync(sync_value)
+	if synced_layout is not None:
+		layout_data.update(synced_layout)
+		save_widget_layout(page_key, layout_data, stored_preset)
+		ui.session_state[sync_key] = ""
+	if save_now:
+		save_widget_layout(page_key, layout_data, stored_preset)
+		ui.success(f"“{stored_preset}” yerleşim profili kaydedildi.")
+
+	new_profile_col, restore_col = ui.columns([1.4, 1.6])
+	with new_profile_col:
+		new_profile_name = ui.text_input("Yeni profil adı", placeholder="Örn: Haftalık tarama", key=f"widget_layout_new_name_{page_key}", disabled=not edit_mode)
+		if ui.button("➕ Yeni Profili Kaydet", key=f"widget_layout_new_{page_key}", disabled=not edit_mode or not clean_text(new_profile_name)):
+			save_widget_layout(page_key, layout_data, clean_text(new_profile_name))
+			ui.rerun()
+	with restore_col:
+		hidden_widgets = [widget_id for widget_id, item in layout_data.items() if not item["visible"]]
+		if hidden_widgets:
+			restore_id = ui.selectbox(
+				"👁️ Gizli Kutular",
+				["—"] + hidden_widgets,
+				key=f"widget_layout_restore_{page_key}",
+				disabled=not edit_mode,
+			)
+			if restore_id != "—":
+				layout_data[restore_id]["visible"] = True
+				save_widget_layout(page_key, layout_data, stored_preset)
+
+	ui.markdown(
+		"<style>"
+		f'.revir-field:has(input[data-key="{sync_key}"]){{display:none!important}}'
+		".revir-layout-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center}"
+		"</style>",
+		unsafe_allow_html=True,
+	)
+	action = "align" if auto_align else "undo" if undo else None
+	return layout_data, bool(edit_mode), bool(magnetic), action if edit_mode else None
+
+
+def render_draggable_resizable_canvas(
+	page_key: str,
+	layout_data: dict[str, Any],
+	edit_mode: bool,
+	*,
+	magnetic: bool = True,
+	action: str | None = None,
+) -> None:
+	config = {
+		"page": page_key,
+		"layout": _normalize_widget_layout(layout_data),
+		"edit": bool(edit_mode),
+		"magnetic": bool(magnetic),
+		"action": action,
+		"accentColors": list(WIDGET_LAYOUT_ACCENTS.values()),
+	}
+	config_json = json.dumps(config, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
+	script = r"""
+<script>
+(function(){
+	const cfg = __LAYOUT_CONFIG__;
+	const engine = window.__revirSmartLayout || (window.__revirSmartLayout = {page:"", undo:[]});
+	const layoutIds = new Set(Object.keys(cfg.layout || {}));
+	const firstMarker = Array.from(document.querySelectorAll("[data-layout-widget-marker]")).find(m => layoutIds.has(m.dataset.layoutWidgetMarker));
+	const main = firstMarker ? (firstMarker.closest("#revir-main, #revir-modal-body") || document.getElementById("revir-main")) : document.getElementById("revir-main");
+	if (!main) return;
+	if (engine.page !== cfg.page) { engine.page = cfg.page; engine.undo = []; }
+	const markers = Array.from(main.querySelectorAll("[data-layout-widget-marker]"));
+	let canvas = main.querySelector("[data-layout-canvas]");
+	if (!canvas) {
+		canvas = document.createElement("section");
+		canvas.dataset.layoutCanvas = cfg.page;
+		canvas.className = "revir-layout-canvas";
+		const anchor = main.querySelector("[data-layout-canvas-anchor]");
+		const host = anchor ? (anchor.closest(".revir-md") || anchor) : null;
+		if (host && host.parentNode) host.parentNode.insertBefore(canvas, host.nextSibling);
+		else main.insertBefore(canvas, main.firstChild);
+	}
+	const markerById = new Map(markers.map(m => [m.dataset.layoutWidgetMarker, m]));
+	const cards = new Map();
+	markerById.forEach((marker,id) => {
+		const markerHost = marker.closest(".revir-md") || marker;
+		let card = markerHost.nextElementSibling;
+		while (card && !card.classList.contains("revir-card")) card = card.nextElementSibling;
+		if (!card) {
+			const col = marker.closest(".revir-col, .revir-column");
+			if (col) card = Array.from(col.children).find(el => el.classList.contains("revir-card")) || null;
+		}
+		if (!card) {
+			const first = markerHost.nextElementSibling;
+			if (first) {
+				card = document.createElement("div");
+				card.className = "revir-container revir-card";
+				markerHost.parentNode.insertBefore(card, first);
+				let node = first;
+				while (node && !node.matches("[data-layout-widget-marker], [data-layout-canvas-anchor]")) {
+					const next = node.nextElementSibling;
+					card.appendChild(node);
+					node = next;
+				}
+			}
+		}
+		if (!card) return;
+		card.dataset.layoutWidget = id;
+		cards.set(id, card);
+		if (card.parentElement !== canvas) canvas.appendChild(card);
+	});
+	const defs = cfg.layout || {};
+	const guideLayer = canvas.querySelector(".revir-layout-guides") || document.createElement("div");
+	guideLayer.className = "revir-layout-guides";
+	if (!guideLayer.parentElement) canvas.appendChild(guideLayer);
+	const cssId = "revir-smart-layout-css";
+	if (!document.getElementById(cssId)) {
+		const style = document.createElement("style");
+		style.id = cssId;
+		style.textContent = `
+			.revir-layout-canvas{position:relative;width:100%;min-height:180px;margin:12px 0 18px;contain:layout style}
+			.revir-layout-canvas>.revir-card[data-layout-widget]{position:absolute!important;box-sizing:border-box!important;margin:0!important;overflow:auto!important;transition:box-shadow .12s ease}
+			.revir-layout-canvas>.revir-card[data-layout-widget].layout-hidden{visibility:hidden!important;pointer-events:none!important}
+			.revir-layout-canvas>.revir-card[data-layout-widget].layout-edit{outline:2px dashed #0d9488!important;outline-offset:2px}
+			.revir-layout-title{cursor:move;touch-action:none;user-select:none;min-height:20px}
+			.layout-handle{position:absolute;z-index:60;background:#0d9488;opacity:.38;display:none;touch-action:none}
+			.layout-edit .layout-handle{display:block}
+			.layout-handle-n,.layout-handle-s{height:7px;left:12px;right:12px;cursor:ns-resize}
+			.layout-handle-n{top:0}.layout-handle-s{bottom:0}
+			.layout-handle-e,.layout-handle-w{width:7px;top:12px;bottom:12px;cursor:ew-resize}
+			.layout-handle-e{right:0}.layout-handle-w{left:0}
+			.layout-handle-ne,.layout-handle-sw,.layout-handle-nw,.layout-handle-se{width:13px;height:13px;border-radius:50%}
+			.layout-handle-ne{right:0;top:0;cursor:nesw-resize}.layout-handle-nw{left:0;top:0;cursor:nwse-resize}
+			.layout-handle-se{right:0;bottom:0;cursor:nwse-resize}.layout-handle-sw{left:0;bottom:0;cursor:nesw-resize}
+			.layout-tools{display:none;position:absolute;right:7px;top:7px;z-index:65;gap:3px}
+			.layout-edit .layout-tools{display:flex}
+			.layout-tools button{border:1px solid #cbd5e1;border-radius:6px;background:#fff;padding:2px 6px;cursor:pointer}
+			.revir-layout-guides{position:absolute;inset:0;pointer-events:none;z-index:9999}
+			.layout-guide{position:absolute;border-color:#0d9488;border-style:dashed;border-width:0}
+			.layout-guide.x{top:0;bottom:0;border-left-width:1px}
+			.layout-guide.y{left:0;right:0;border-top-width:1px;border-color:#f43f5e}
+			.layout-guide-label{position:absolute;padding:1px 5px;border-radius:4px;background:#0f172a;color:#fff;font:700 10px sans-serif;white-space:nowrap}
+			.revir-layout-canvas.layout-locked>.revir-card[data-layout-widget]{cursor:default}
+			@media(max-width:700px){.revir-layout-canvas>.revir-card[data-layout-widget]{max-width:100%}}
+		`;
+		document.head.appendChild(style);
+	}
+	const syncInput = document.querySelector('[data-key="_widget_layout_sync_' + CSS.escape(cfg.page) + '"]');
+	const sync = () => {
+		const out = {};
+		cards.forEach((card,id) => {
+			const r = card.getBoundingClientRect(), c = canvas.getBoundingClientRect();
+			out[id] = {id:id,x_pct:Math.max(0,((r.left-c.left)/Math.max(1,c.width))*100),y_px:Math.max(0,Math.round(r.top-c.top)),w_pct:Math.min(100,((r.width)/Math.max(1,c.width))*100),h_px:Math.max(90,Math.round(r.height)),visible:!card.classList.contains("layout-hidden"),z:parseInt(card.style.zIndex||"1",10)||1,accent:card.dataset.layoutAccent||"#0d9488"};
+		});
+		if (syncInput) {
+			syncInput.value = JSON.stringify(out);
+			window.__revirFieldChange("_widget_layout_sync_" + cfg.page, syncInput.value, syncInput);
+		}
+	};
+	const setCanvasHeight = () => {
+		let max = 180;
+		cards.forEach(card => { if (!card.classList.contains("layout-hidden")) max=Math.max(max,card.offsetTop+card.offsetHeight+24); });
+		canvas.style.height=max+"px";
+	};
+	const addGuide = (axis, pos, label) => {
+		const line=document.createElement("div");line.className="layout-guide "+axis;
+		if(axis==="x")line.style.left=pos+"px";else line.style.top=pos+"px";
+		const tag=document.createElement("span");tag.className="layout-guide-label";tag.textContent=label;
+		if(axis==="x"){tag.style.left=(pos+4)+"px";tag.style.top="4px"}else{tag.style.top=(pos+4)+"px";tag.style.left="4px"}
+		guideLayer.append(line,tag);
+	};
+	const clearGuides=()=>{guideLayer.replaceChildren()};
+	const applySnap = (box, mode, handle) => {
+		if(!cfg.magnetic)return;
+		const rect=box.getBoundingClientRect(), base=canvas.getBoundingClientRect();
+		const otherRects=Array.from(cards.values()).filter(c=>c!==box&&!c.classList.contains("layout-hidden")).map(c=>c.getBoundingClientRect());
+		const xEdges=mode==="drag"?[["l",rect.left],["c",(rect.left+rect.right)/2],["r",rect.right]]:
+			(handle.includes("e")?[["r",rect.right]]:handle.includes("w")?[["l",rect.left]]:[]);
+		const yEdges=mode==="drag"?[["t",rect.top],["c",(rect.top+rect.bottom)/2],["b",rect.bottom]]:
+			(handle.includes("s")?[["b",rect.bottom]]:handle.includes("n")?[["t",rect.top]]:[]);
+		let bestX=null,bestY=null;
+		for(const [edge,value] of xEdges) for(const other of otherRects) for(const [target,targetVal] of [["l",other.left],["c",(other.left+other.right)/2],["r",other.right]]) {
+			const d=targetVal-value;if(Math.abs(d)<=8&&(!bestX||Math.abs(d)<Math.abs(bestX.d)))bestX={d,pos:targetVal-base.left};
+		}
+		for(const [edge,value] of yEdges) for(const other of otherRects) for(const [target,targetVal] of [["t",other.top],["c",(other.top+other.bottom)/2],["b",other.bottom]]) {
+			const d=targetVal-value;if(Math.abs(d)<=8&&(!bestY||Math.abs(d)<Math.abs(bestY.d)))bestY={d,pos:targetVal-base.top};
+		}
+		if(bestX){if(mode==="drag")box.style.left=(box.offsetLeft+bestX.d)+"px";else if(handle.includes("e"))box.style.width=Math.max(180,box.offsetWidth+bestX.d)+"px";else{box.style.left=(box.offsetLeft+bestX.d)+"px";box.style.width=Math.max(180,box.offsetWidth-bestX.d)+"px"}addGuide("x",bestX.pos,""+Math.round(bestX.pos)+" px")}
+		if(bestY){if(mode==="drag")box.style.top=(box.offsetTop+bestY.d)+"px";else if(handle.includes("s"))box.style.height=Math.max(90,box.offsetHeight+bestY.d)+"px";else{box.style.top=(box.offsetTop+bestY.d)+"px";box.style.height=Math.max(90,box.offsetHeight-bestY.d)+"px"}addGuide("y",bestY.pos,""+Math.round(bestY.pos)+" px")}
+		if(mode==="drag"){
+			const sorted=otherRects.slice().sort((a,b)=>a.left-b.left);
+			for(let i=0;i<sorted.length-1;i++){
+				const a=sorted[i],b=sorted[i+1];
+				if(box.left>=a.right&&box.right<=b.left&&Math.min(box.bottom,b.bottom)>Math.max(box.top,b.top)){
+					const gapA=box.left-a.right,gapB=b.left-box.right;
+					if(Math.abs(gapA-gapB)<=8)addGuide("y",box.bottom-base.top+6,"Eşit aralık · "+Math.round((gapA+gapB)/2)+" px");
+				}
+			}
+		}
+	};
+	const historyPush=()=>{engine.undo.push(JSON.stringify(Object.fromEntries(Array.from(cards,([id,el])=>[id,{left:el.style.left,top:el.style.top,width:el.style.width,height:el.style.height,z:el.style.zIndex,hidden:el.classList.contains("layout-hidden"),accent:el.dataset.layoutAccent}]))));if(engine.undo.length>30)engine.undo.shift()};
+	const decorate=(card,id,item)=>{
+		card.classList.toggle("layout-edit",!!cfg.edit);
+		card.classList.toggle("layout-hidden",item.visible===false);
+		const canvasWidth=Math.max(1,canvas.clientWidth);
+		const cardWidth=Math.min(canvasWidth,Math.max(Math.min(180,canvasWidth),(Math.min(100,Number(item.w_pct)||50)/100)*canvasWidth));
+		card.style.left=Math.min((Math.max(0,Number(item.x_pct)||0)/100)*canvasWidth,canvasWidth-cardWidth)+"px";
+		card.style.top=Math.max(0,Number(item.y_px)||0)+"px";
+		card.style.width=cardWidth+"px";
+		card.style.height=Math.max(90,Number(item.h_px)||240)+"px";
+		card.style.zIndex=String(Number(item.z)||1);
+		card.dataset.layoutAccent=item.accent||"#0d9488";
+		card.style.borderTop="4px solid "+card.dataset.layoutAccent;
+		if(card.dataset.layoutControls!=="1"){
+			card.dataset.layoutControls="1";
+			const title=card.querySelector("h1,h2,h3,h4,h5,.revir-md");
+			if(title){title.classList.add("revir-layout-title");title.dataset.layoutDrag="1"}
+			const tools=document.createElement("div");tools.className="layout-tools";
+			const hide=document.createElement("button");hide.type="button";hide.textContent="👁️";hide.title="Kutuyu gizle";
+			hide.addEventListener("click",e=>{e.stopPropagation();historyPush();card.classList.toggle("layout-hidden");sync();setCanvasHeight()});
+			const accent=document.createElement("button");accent.type="button";accent.textContent="🎨";accent.title="Vurgu rengini değiştir";
+			accent.addEventListener("click",e=>{e.stopPropagation();historyPush();const colors=cfg.accentColors;let i=colors.indexOf(card.dataset.layoutAccent);card.dataset.layoutAccent=colors[(i+1+colors.length)%colors.length];card.style.borderTop="4px solid "+card.dataset.layoutAccent;sync()});
+			tools.append(hide,accent);card.appendChild(tools);
+			["n","s","e","w","ne","nw","se","sw"].forEach(side=>{const h=document.createElement("div");h.className="layout-handle layout-handle-"+side;h.dataset.handle=side;card.appendChild(h)});
+			card.addEventListener("pointerdown",e=>{
+				if(!cfg.edit||e.button!==0)return;
+				const handle=e.target.closest(".layout-handle");const title=e.target.closest("[data-layout-drag]");
+				if(!handle&&!title)return;
+				e.preventDefault();e.stopPropagation();historyPush();clearGuides();
+				const mode=handle?"resize":"drag",side=handle?handle.dataset.handle:"";
+				const sx=e.clientX,sy=e.clientY,left=card.offsetLeft,top=card.offsetTop,w=card.offsetWidth,h=card.offsetHeight;
+				const maxZ=Math.max(1,...Array.from(cards.values()).map(c=>parseInt(c.style.zIndex||"1",10)||1));card.style.zIndex=String(maxZ+1);
+				const move=ev=>{const dx=ev.clientX-sx,dy=ev.clientY-sy;
+					if(mode==="drag"){card.style.left=Math.max(0,left+dx)+"px";card.style.top=Math.max(0,top+dy)+"px"}
+					else {let nl=left,nt=top,nw=w,nh=h;if(side.includes("e"))nw=Math.max(180,w+dx);if(side.includes("s"))nh=Math.max(90,h+dy);if(side.includes("w")){nw=Math.max(180,w-dx);nl=left+(w-nw)}if(side.includes("n")){nh=Math.max(90,h-dy);nt=top+(h-nh)}card.style.left=Math.max(0,nl)+"px";card.style.top=Math.max(0,nt)+"px";card.style.width=nw+"px";card.style.height=nh+"px"}
+					clearGuides();applySnap(card,mode,side);setCanvasHeight()};
+				const up=()=>{window.removeEventListener("pointermove",move);window.removeEventListener("pointerup",up);clearGuides();sync();setCanvasHeight()};
+				window.addEventListener("pointermove",move);window.addEventListener("pointerup",up,{once:true});
+			});
+		}
+	};
+	cards.forEach((card,id)=>decorate(card,id,defs[id]||{x_pct:0,y_px:0,w_pct:50,h_px:240,visible:true,z:1,accent:"#0d9488"}));
+	canvas.classList.toggle("layout-locked",!cfg.edit);
+	if(cfg.action==="undo"&&engine.undo.length){const prior=JSON.parse(engine.undo.pop());cards.forEach((card,id)=>{const s=prior[id];if(!s)return;card.style.left=s.left;card.style.top=s.top;card.style.width=s.width;card.style.height=s.height;card.style.zIndex=s.z;card.classList.toggle("layout-hidden",s.hidden);card.dataset.layoutAccent=s.accent||"#0d9488";card.style.borderTop="4px solid "+card.dataset.layoutAccent});sync()}
+	if(cfg.action==="align"){
+		historyPush();
+		const visible=Array.from(cards.values()).filter(card=>!card.classList.contains("layout-hidden"));
+		visible.forEach(card=>{
+			for(const other of visible){if(other===card)continue;
+				if(Math.abs(card.offsetLeft-other.offsetLeft)<=10)card.style.left=other.offsetLeft+"px";
+				if(Math.abs(card.offsetTop-other.offsetTop)<=10)card.style.top=other.offsetTop+"px";
+				const right=other.offsetLeft+other.offsetWidth;
+				if(Math.abs(card.offsetLeft+card.offsetWidth-right)<=10)card.style.left=(right-card.offsetWidth)+"px";
+			}
+		});
+		visible.forEach(card=>{card.style.left=(Math.round(card.offsetLeft/10)*10)+"px";card.style.top=(Math.round(card.offsetTop/10)*10)+"px"});
+		sync();
+	}
+	if(cfg.restore){const card=cards.get(cfg.restore);if(card)card.classList.remove("layout-hidden")}
+	let previousCanvasWidth=canvas.clientWidth;
+	const resize=()=>{
+		const currentWidth=canvas.clientWidth;
+		if(Math.abs(currentWidth-previousCanvasWidth)>1){
+			cards.forEach((card,id)=>{
+				const d=defs[id];if(!d)return;
+				const w=Math.min(currentWidth,Math.max(Math.min(180,currentWidth),(Math.min(100,Number(d.w_pct)||50)/100)*currentWidth));
+				card.style.width=w+"px";
+				card.style.left=Math.min((Math.max(0,Number(d.x_pct)||0)/100)*currentWidth,currentWidth-w)+"px";
+			});
+			previousCanvasWidth=currentWidth;
+		}
+		setCanvasHeight();
+	};
+	resize();if(!canvas.dataset.resizeBound){new ResizeObserver(resize).observe(canvas);canvas.dataset.resizeBound="1"}
+})();
+</script>
+"""
+	ui.components.v1.html(script.replace("__LAYOUT_CONFIG__", config_json), height=0)
+
+
+def _render_layout_canvas_anchor() -> None:
+	ui.markdown('<span data-layout-canvas-anchor="1"></span>', unsafe_allow_html=True)
+
+
+def _render_layout_widget_marker(widget_id: str) -> None:
+	if not re.fullmatch(r"[a-zA-Z0-9_-]+", widget_id):
+		raise ValueError("Yerleşim kutusu kimliği geçersiz.")
+	ui.markdown(f'<span data-layout-widget-marker="{widget_id}"></span>', unsafe_allow_html=True)
 
 
 def import_tr_locations_to_db(force: bool = False) -> int:
@@ -9921,6 +10372,19 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 			(person_id,),
 		).fetchall()
 
+	dossier_layout_defaults = {
+		"vision": {"id": "vision", "x_pct": 0, "y_px": 0, "w_pct": 49, "h_px": 190, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Bilgi Mavi"]},
+		"behavior": {"id": "behavior", "x_pct": 51, "y_px": 0, "w_pct": 49, "h_px": 190, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Yeşil"]},
+		"hair": {"id": "hair", "x_pct": 0, "y_px": 205, "w_pct": 49, "h_px": 205, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Turkuaz"]},
+		"hearing": {"id": "hearing", "x_pct": 51, "y_px": 205, "w_pct": 49, "h_px": 205, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Bilgi Mavi"]},
+		"harmful": {"id": "harmful", "x_pct": 0, "y_px": 425, "w_pct": 49, "h_px": 205, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Uyarı Kırmızı"]},
+		"clinical": {"id": "clinical", "x_pct": 51, "y_px": 425, "w_pct": 49, "h_px": 205, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Turkuaz"]},
+		"vaccination": {"id": "vaccination", "x_pct": 0, "y_px": 645, "w_pct": 49, "h_px": 205, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Yeşil"]},
+	}
+	dossier_layout, dossier_edit, dossier_magnetic, dossier_action = render_layout_toolbar(
+		"layout_dossier_cards", dossier_layout_defaults, edit_key=f"layout_dossier_edit_{person_id}"
+	)
+
 	# Metric Cards with Ideal Weight & Conditional Head Circumference
 	h_v = meas_info["height_cm"]
 	h_ev = meas_info["height_eval"]
@@ -10232,11 +10696,13 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 		if ui.button("🩺 Tam Taramayı Aç / Düzenle ↗️", type="primary", use_container_width=True, key=f"dossier_btn_full_scr_{person_id}"):
 			open_screening_dialog(person_id)
 
+	_render_layout_canvas_anchor()
 	scr_c1, scr_c2 = ui.columns(2)
 	active_box_key = f"active_edit_box_{person_id}"
 
 	# Card 1: Göz ve Görme
 	with scr_c1:
+		_render_layout_widget_marker("vision")
 		with ui.container(border=True):
 			hdr1, hdr2 = ui.columns([3, 1.2])
 			hdr1.markdown("##### 👓 Göz ve Görme Durumu")
@@ -10275,6 +10741,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 
 	# Card 2: Sağlık Davranışı & Alışkanlıkları (Çoklu Seçim)
 	with scr_c2:
+		_render_layout_widget_marker("behavior")
 		with ui.container(border=True):
 			hdr1, hdr2 = ui.columns([3, 1.2])
 			hdr1.markdown("##### 🍎 Sağlık Davranışı & Alışkanlıkları")
@@ -10307,6 +10774,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 
 	# Card 3: Saç Taraması & Hijyen (Çoklu Seçim)
 	with scr_c1:
+		_render_layout_widget_marker("hair")
 		with ui.container(border=True):
 			hdr1, hdr2 = ui.columns([3, 1.2])
 			hdr1.markdown("##### 💇 Saç Taraması & Hijyen (Pediküloz)")
@@ -10374,6 +10842,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 
 	# Card 5: İşitme Durumu (Kulak - Çoklu Seçim)
 	with scr_c1:
+		_render_layout_widget_marker("hearing")
 		with ui.container(border=True):
 			hdr1, hdr2 = ui.columns([3, 1.2])
 			hdr1.markdown("##### 👂 İşitme Durumu (Kulak)")
@@ -10409,6 +10878,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 
 	# Card 6: Zararlı Alışkanlıklar & Risk Faktörleri (Çoklu Seçim)
 	with scr_c2:
+		_render_layout_widget_marker("harmful")
 		with ui.container(border=True):
 			hdr1, hdr2 = ui.columns([3, 1.2])
 			hdr1.markdown("##### ⚠️ Zararlı Alışkanlıklar & Riskler")
@@ -10441,6 +10911,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 
 	# Card 6: Klinik Tıbbi Profil
 	with scr_c2:
+		_render_layout_widget_marker("clinical")
 		with ui.container(border=True):
 			hdr1, hdr2 = ui.columns([3, 1.2])
 			hdr1.markdown("##### 📋 Klinik Sağlık Özeti")
@@ -10481,6 +10952,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 
 	# Card 7: Aşı Takvimi ve Bağışıklama Özeti
 	with scr_c1:
+		_render_layout_widget_marker("vaccination")
 		with ui.container(border=True):
 			hdr1, hdr2 = ui.columns([3, 1.2])
 			hdr1.markdown("##### 💉 Aşı Takvimi & Bağışıklama")
@@ -10543,6 +11015,14 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 			ui.markdown("##### 🏛️ T.C. Sağlık Bakanlığı Takvimi")
 			ui.caption("Öğrencinin tüm bebeklik ve okul çağı aşılarını resmi Sağlık Bakanlığı matris tablosu üstünde incelemek ve işaretlemek için:")
 			ui.info("💡 Yukarıdaki sekmelerden **'💉 Aşı Takvimi'** sekmesine geçerek tüm aşıları renkli matriste görebilir, tek tıkla tamamlayabilir veya Aşı Kartı çıktısı alabilirsiniz.")
+
+	render_draggable_resizable_canvas(
+		"layout_dossier_cards",
+		dossier_layout,
+		dossier_edit,
+		magnetic=dossier_magnetic,
+		action=dossier_action,
+	)
 
 	# Card 9: Özel Gereksinim, Tıbbi Cihaz & Yutma Güvenliği (Sadece engeli / özel gereksinimi varsa görünür)
 	def _hp_col_txt(col_name: str) -> str:
@@ -17475,6 +17955,16 @@ def render_overview() -> None:
 	e_date = active_ay["end_date"]
 	today = date.today().isoformat()
 	is_archive = e_date < today
+	overview_layout_defaults = {
+		"overview_stats": {"id": "overview_stats", "x_pct": 0, "y_px": 0, "w_pct": 100, "h_px": 150, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Turkuaz"]},
+		"overview_quick_links": {"id": "overview_quick_links", "x_pct": 0, "y_px": 165, "w_pct": 100, "h_px": 125, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Bilgi Mavi"]},
+		"overview_pending": {"id": "overview_pending", "x_pct": 0, "y_px": 305, "w_pct": 49, "h_px": 430, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Turkuaz"]},
+		"overview_outbreak": {"id": "overview_outbreak", "x_pct": 51, "y_px": 305, "w_pct": 49, "h_px": 520, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Uyarı Kırmızı"]},
+		"overview_recent": {"id": "overview_recent", "x_pct": 0, "y_px": 845, "w_pct": 100, "h_px": 470, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Yeşil"]},
+	}
+	overview_layout, overview_edit, overview_magnetic, overview_action = render_layout_toolbar(
+		"layout_overview", overview_layout_defaults, edit_key="layout_overview_edit"
+	)
 
 	with connect_db() as connection:
 		counts = connection.execute(
@@ -17487,15 +17977,19 @@ def render_overview() -> None:
 			(today, s_date, e_date, s_date, e_date),
 		).fetchone()
 
-	ui.markdown(f"<div id='revir-overview-resizable-anchor' style='display:none;'></div>\n\n## 📊 Revir Genel Durumu ve Göstergeler ({active_ay['name']})", unsafe_allow_html=True)
+	ui.markdown(f"## 📊 Revir Genel Durumu ve Göstergeler ({active_ay['name']})")
+	_render_layout_canvas_anchor()
 	if is_section_visible("overview_stats"):
-		metric_cols = ui.columns(6)
-		metric_cols[0].metric("Kayıtlı Kişi", counts["students"])
-		metric_cols[1].metric("Sınıf / Grup", counts["classes"])
-		metric_cols[2].metric("Bugünkü Başvuru", counts["today_visits"])
-		metric_cols[3].metric(f"Revir ({active_ay['name']})", counts["total_visits"])
-		metric_cols[4].metric(f"Ölçüm ({active_ay['name']})", counts["measurements"])
-		metric_cols[5].metric("Alerji / Kronik", counts["risk_profiles"])
+		_render_layout_widget_marker("overview_stats")
+		with ui.container(border=True):
+			ui.markdown("##### 📈 İstatistik Kartları")
+			metric_cols = ui.columns(6)
+			metric_cols[0].metric("Kayıtlı Kişi", counts["students"])
+			metric_cols[1].metric("Sınıf / Grup", counts["classes"])
+			metric_cols[2].metric("Bugünkü Başvuru", counts["today_visits"])
+			metric_cols[3].metric(f"Revir ({active_ay['name']})", counts["total_visits"])
+			metric_cols[4].metric(f"Ölçüm ({active_ay['name']})", counts["measurements"])
+			metric_cols[5].metric("Alerji / Kronik", counts["risk_profiles"])
 
 		# Günün Öncelikli Hemşire İş Özeti Şeridi
 		try:
@@ -17537,6 +18031,7 @@ def render_overview() -> None:
 			ui.caption("🟢 **Günün Öncelikleri:** Bekleyen ilaç dozu, açık sevk/izlem veya kritik stok uyarısı bulunmuyor.")
 
 	if is_section_visible("overview_quick_links"):
+		_render_layout_widget_marker("overview_quick_links")
 		with ui.container(border=True):
 			ui.markdown("##### ⚡ Hızlı Erişim ve İşlemler")
 			q_c1, q_c2, q_c3, q_c4, q_c5 = ui.columns(5)
@@ -17659,12 +18154,15 @@ def render_overview() -> None:
 	render_gemini_overview_command_center(s_date, e_date)
 
 	if is_section_visible("overview_pending_followups"):
+		_render_layout_widget_marker("overview_pending")
 		render_pending_followups_panel()
 
 	if is_section_visible("overview_outbreak_radar"):
+		_render_layout_widget_marker("overview_outbreak")
 		render_outbreak_and_isolation_panel()
 
 	if is_section_visible("overview_recent_ops"):
+		_render_layout_widget_marker("overview_recent")
 		top_op1, top_op2 = ui.columns([4, 1.2])
 		with top_op1:
 			ui.markdown("### 🕒 Son Yapılan İşlemler")
@@ -17710,6 +18208,14 @@ def render_overview() -> None:
 							open_edit_visit_dialog(op["id"])
 						elif op["type"] == "screening":
 							open_screening_dialog(op["student_id"], op["class_name"])
+
+	render_draggable_resizable_canvas(
+		"layout_overview",
+		overview_layout,
+		overview_edit,
+		magnetic=overview_magnetic,
+		action=overview_action,
+	)
 
 	# Genel Bakış Pencereleri İçin Tıkla-Basılı Tut / Sürükle Yeniden Boyutlandırma Sistemi
 	ui.markdown(

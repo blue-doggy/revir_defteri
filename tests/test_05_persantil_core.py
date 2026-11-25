@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import json
 import unittest
 from datetime import date, datetime
 from pathlib import Path
@@ -59,6 +60,52 @@ class TestPersantilCoreAndUI(unittest.TestCase):
 
         provs = persantil.get_tr_provinces()
         self.assertIsInstance(provs, list)
+
+    def test_widget_layout_profile_persistence_and_reset(self):
+        default = {
+            "stats": {"id": "stats", "x_pct": 0, "y_px": 0, "w_pct": 100, "h_px": 120, "visible": True, "z": 1, "accent": "#0d9488"},
+        }
+        saved = {
+            "stats": {"id": "stats", "x_pct": 12.5, "y_px": 40, "w_pct": 60, "h_px": 240, "visible": False, "z": 4, "accent": "#2563eb"},
+        }
+
+        persantil.save_widget_layout("layout_test", saved, "Kişisel Düzen")
+        self.assertEqual(persantil.get_saved_widget_layout("layout_test", default), saved)
+        bundle = json.loads(persantil.get_app_settings()["widget_layout:layout_test"])
+        self.assertEqual(bundle["active_preset"], "Kişisel Düzen")
+        self.assertEqual(bundle["presets"]["Kişisel Düzen"], saved)
+
+        persantil.reset_widget_layout("layout_test")
+        self.assertEqual(persantil.get_saved_widget_layout("layout_test", default), default)
+        with self.assertRaises(ValueError):
+            persantil._layout_json_from_sync("{invalid")
+
+    def test_dossier_layout_renders_widget_markers_and_sync_engine(self):
+        with self.connect() as connection:
+            class_id = connection.execute("INSERT INTO classes(name) VALUES ('Düzen Testi')").lastrowid
+            person_id = connection.execute(
+                "INSERT INTO students(class_id, full_name, sex, birth_date, person_type) VALUES (?, 'Yerleşim Testi', 'K', '2018-01-01', 'Öğrenci')",
+                (class_id,),
+            ).lastrowid
+        person = persantil.get_person_by_id(person_id)
+        with self.connect() as connection:
+            health_profile = connection.execute("SELECT * FROM health_profiles WHERE student_id=?", (person_id,)).fetchone()
+            visit_stats = connection.execute("SELECT COUNT(*) cnt, MAX(visit_date) last_date FROM visits WHERE student_id=?", (person_id,)).fetchone()
+
+        output = revir_ui.run_action_headless(
+            lambda: persantil._render_dossier_tab_overview(
+                person,
+                person_id,
+                health_profile,
+                visit_stats,
+                persantil.THEME_PRESETS["Klinik Turkuaz (Varsayılan)"],
+                "#475569",
+            ),
+            {"action": "render"},
+        )
+        self.assertNotIn("Çalışma Zamanı Hatası", output["main_html"])
+        self.assertIn("data-layout-widget-marker=\"vision\"", output["main_html"])
+        self.assertIn("layout_dossier_cards", output["scripts_html"])
 
     def test_02_academic_years_and_backups(self):
         years = persantil.get_all_academic_years()
