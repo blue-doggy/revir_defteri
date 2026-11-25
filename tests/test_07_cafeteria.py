@@ -618,6 +618,7 @@ class TestCafeteriaModule(unittest.TestCase):
         self.assertIn("Yemekhane, Menü Planlama, Gider", main_html)
         self.assertIn("Menü Planlayıcı", main_html)
         self.assertIn("Yemekler Bankası", main_html)
+        self.assertNotIn("Aylar Arası Planlama Merkezi", main_html)
 
         ctx_api = {
             "connect_db": persantil.connect_db,
@@ -629,6 +630,8 @@ class TestCafeteriaModule(unittest.TestCase):
             "is_section_visible": persantil.is_section_visible,
         }
         cfg = persantil.get_app_settings()
+        revir_ui.session_state["caf_menu_week_month"] = "2026-10"
+        revir_ui.session_state["caf_menu_wk_pick"] = "5. Hafta (26 – 30 Ekim)"
         for tab_fn in (
             lambda: caf._render_tab_menu_planner(ctx_api, ym, cfg),
             lambda: caf._render_tab_dishes(ctx_api),
@@ -639,6 +642,8 @@ class TestCafeteriaModule(unittest.TestCase):
             out_tab = revir_ui.run_action_headless(tab_fn, {"action": "render"})
             self.assertIsInstance(out_tab, dict)
             self.assertNotIn("Traceback", json.dumps(out_tab, ensure_ascii=False))
+        self.assertEqual(revir_ui.session_state["caf_menu_week_month"], ym)
+        self.assertTrue(revir_ui.session_state["caf_menu_wk_pick"].startswith("1. Hafta"))
 
     def test_recalculate_menu_on_dish_edit_diabetes_cleanup_copy_and_archive_months(self):
         d_id = caf.upsert_dish_with_ingredients(

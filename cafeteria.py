@@ -6354,6 +6354,9 @@ def _render_tab_menu_planner(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict
 		return
 
 	wk_labels = [f"{i + 1}. Hafta ({w[0]['day_num']} – {w[-1]['day_num']} {TR_MONTH_NAMES[int(sel_ym[5:7])]})" for i, w in enumerate(weeks)]
+	if ui.session_state.get("caf_menu_week_month") != sel_ym or ui.session_state.get("caf_menu_wk_pick") not in wk_labels:
+		ui.session_state["caf_menu_week_month"] = sel_ym
+		ui.session_state["caf_menu_wk_pick"] = wk_labels[0]
 	w_col1, w_col2, w_col3, w_col4 = ui.columns([1.8, 1.1, 1.1, 1.2], vertical_alignment="center")
 	with w_col1:
 		picked_wk_lbl = ui.selectbox("Düzenlenecek Haftayı Seçin (İş Günleri)", wk_labels, key="caf_menu_wk_pick")
