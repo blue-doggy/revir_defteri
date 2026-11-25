@@ -137,7 +137,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return (Path(meipass_raw) if meipass_raw else _BUNDLE_DIR) / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.35.1"
+_DEFAULT_APP_VERSION = "1.35.2"
 
 
 def _load_app_version() -> str:
@@ -1137,6 +1137,8 @@ def render_layout_toolbar(
 	if stored_preset not in preset_options:
 		preset_options.append(stored_preset)
 	edit_mode = ui.toggle("✏️ Düzeni Özelleştir / 🔒 Düzeni Kilitle", value=False, key=edit_key)
+	if page_key == "layout_overview" and not edit_mode:
+		return get_saved_widget_layout(page_key, default_layout), False, True, None
 
 	bar_cols = ui.columns([1.25, 1.1, 1.0, 1.0, 1.0, 1.0])
 	with bar_cols[0]:
@@ -18071,9 +18073,9 @@ def render_overview() -> None:
 	overview_layout_defaults = {
 		"overview_stats": {"id": "overview_stats", "x_pct": 0, "y_px": 0, "w_pct": 100, "h_px": 150, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Turkuaz"]},
 		"overview_quick_links": {"id": "overview_quick_links", "x_pct": 0, "y_px": 165, "w_pct": 100, "h_px": 125, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Bilgi Mavi"]},
-		"overview_pending": {"id": "overview_pending", "x_pct": 0, "y_px": 305, "w_pct": 49, "h_px": 430, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Turkuaz"]},
+		"overview_pending": {"id": "overview_pending", "x_pct": 0, "y_px": 305, "w_pct": 49, "h_px": 520, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Turkuaz"]},
 		"overview_outbreak": {"id": "overview_outbreak", "x_pct": 51, "y_px": 305, "w_pct": 49, "h_px": 520, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Uyarı Kırmızı"]},
-		"overview_recent": {"id": "overview_recent", "x_pct": 0, "y_px": 845, "w_pct": 100, "h_px": 470, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Yeşil"]},
+		"overview_recent": {"id": "overview_recent", "x_pct": 0, "y_px": 840, "w_pct": 100, "h_px": 470, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Yeşil"]},
 	}
 	overview_layout, overview_edit, overview_magnetic, overview_action = render_layout_toolbar(
 		"layout_overview", overview_layout_defaults, edit_key="layout_overview_edit"
