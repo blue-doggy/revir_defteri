@@ -137,7 +137,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return (Path(meipass_raw) if meipass_raw else _BUNDLE_DIR) / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.35.2"
+_DEFAULT_APP_VERSION = "1.35.3"
 
 
 def _load_app_version() -> str:
@@ -1137,6 +1137,11 @@ def render_layout_toolbar(
 	if stored_preset not in preset_options:
 		preset_options.append(stored_preset)
 	edit_mode = ui.toggle("✏️ Düzeni Özelleştir / 🔒 Düzeni Kilitle", value=False, key=edit_key)
+	if page_key == "layout_overview":
+		ui.markdown(
+			f'<style>.revir-field:has(input[data-key="{edit_key}"]){{display:none!important}}</style>',
+			unsafe_allow_html=True,
+		)
 	if page_key == "layout_overview" and not edit_mode:
 		return get_saved_widget_layout(page_key, default_layout), False, True, None
 
