@@ -664,6 +664,66 @@ class TestPersantilCoreAndUI(unittest.TestCase):
         self.assertIn("Sözleşmeli Personel", exp_html)
         self.assertIn("Matematik Öğretmeni", exp_html)
 
+    def test_11_smart_grid_projection_and_overview_widgets(self):
+        # 1. Legacy %-based coordinates map onto 12-column grid & respect readability minimums
+        legacy = {
+            "overview_stats": {"id": "overview_stats", "x_pct": 0, "y_px": 0, "w_pct": 16, "h_px": 100, "visible": True, "z": 1, "accent": "#0d9488"},
+            "overview_outbreak": {"id": "overview_outbreak", "x_pct": 51, "y_px": 305, "w_pct": 49, "h_px": 520, "visible": True, "z": 1, "accent": "#f43f5e"},
+        }
+        projected = persantil._project_widget_layout_to_grid(legacy)
+        self.assertEqual(projected["overview_stats"]["min_col_span"], persantil._WIDGET_MIN_GRID_BOUNDS["overview_stats"][0])
+        self.assertEqual(projected["overview_stats"]["col_span"], 6)  # Clamped up from ~2 cols for readability
+        self.assertEqual(projected["overview_outbreak"]["col"], 6)
+        self.assertEqual(projected["overview_outbreak"]["col_span"], 6)
+
+        # 2. _normalize_widget_layout rejects invalid coordinates but keeps valid 12-col fields
+        grid_payload = {
+            "overview_meds": {
+                "id": "overview_meds", "x_pct": 0, "y_px": 0, "w_pct": 50, "h_px": 260,
+                "col": 10, "row": 2, "col_span": 2, "row_span": 1, "min_col_span": 4, "min_row_span": 3,
+                "visible": True, "z": 1, "accent": "#0d9488",
+            }
+        }
+        norm = persantil._normalize_widget_layout(grid_payload)
+        self.assertEqual(norm["overview_meds"]["col_span"], 4)
+        self.assertEqual(norm["overview_meds"]["row_span"], 3)
+        self.assertEqual(norm["overview_meds"]["col"], 8)  # 12 - 4 boundary clamp
+
+        # 3. Overview page wraps every card cleanly inside smart grid & drops legacy resize script
+        revir_ui.reset_session()
+        with mock.patch.object(persantil, "_get_active_gemini_config", return_value=(True, "fake-key", "gemini-2.5-flash")):
+            out_ov = revir_ui.run_action_headless(persantil.render_overview, {"action": "render"})
+        ov_html = str(out_ov.get("main_html") or "")
+        ov_scripts = str(out_ov.get("scripts_html") or "")
+        for wid in (
+            "overview_stats",
+            "overview_quick_links",
+            "overview_meds",
+            "overview_diabetes",
+            "overview_chart",
+            "overview_calendar",
+            "overview_gemini",
+            "overview_pending",
+            "overview_outbreak",
+            "overview_recent",
+        ):
+            self.assertIn(f'data-layout-widget-marker="{wid}"', ov_html)
+        # Günün Öncelikleri resides inside the overview_stats card
+        stats_slice = ov_html.split('data-layout-widget-marker="overview_stats"')[1].split('data-layout-widget-marker="overview_quick_links"')[0]
+        self.assertIn("Günün Öncelikleri", stats_slice)
+        # Smart grid engine active & legacy conflicting resize system removed
+        for js_marker in (
+            "resolveGridCollisions",
+            "compactGridUpward",
+            "detectSwapTarget",
+            "revir-layout-grid-overlay",
+            "revir-swap-pill",
+            "revir_smart_grid_v2:",
+        ):
+            self.assertIn(js_marker, ov_scripts)
+        self.assertNotIn("revir-ov-resizable", ov_html + ov_scripts)
+        self.assertNotIn("initOverviewResizableCards", ov_html + ov_scripts)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

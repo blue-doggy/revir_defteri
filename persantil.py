@@ -137,7 +137,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return (Path(meipass_raw) if meipass_raw else _BUNDLE_DIR) / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.36.0"
+_DEFAULT_APP_VERSION = "1.37.0"
 
 
 def _load_app_version() -> str:
@@ -1015,6 +1015,54 @@ def _widget_layout_setting_key(page_key: str) -> str:
 	return f"widget_layout:{key}"
 
 
+GRID_LAYOUT_COLS = 12
+GRID_LAYOUT_ROW_PX = 56
+GRID_LAYOUT_GAP_PX = 12
+
+# İçerik okunabilirliğini korumak için bileşen bazlı en küçük izin verilen sütun / satır eşikleri
+_WIDGET_MIN_GRID_BOUNDS: dict[str, tuple[int, int]] = {
+	"overview_stats": (6, 3),
+	"overview_quick_links": (4, 2),
+	"overview_meds": (4, 3),
+	"overview_diabetes": (4, 3),
+	"overview_chart": (4, 4),
+	"overview_calendar": (4, 3),
+	"overview_gemini": (6, 4),
+	"overview_pending": (5, 4),
+	"overview_outbreak": (5, 4),
+	"overview_recent": (6, 4),
+	"vision": (4, 3),
+	"behavior": (4, 3),
+	"hair": (4, 3),
+	"hearing": (4, 3),
+	"harmful": (4, 3),
+	"clinical": (4, 3),
+	"vaccination": (4, 3),
+	"vaccination_info": (4, 3),
+}
+
+
+def _pct_to_grid_col_span(x_pct: float, w_pct: float, min_cols: int = 3) -> tuple[int, int]:
+	"""Eski yüzde tabanlı yerleşimi 12 sütunlu ızgaraya yuvarlayıp okunabilir alt sınırı korur."""
+	raw_span = round((max(1.0, float(w_pct)) / 100.0) * GRID_LAYOUT_COLS)
+	# Eski 49% yarım kartlar doğrudan 6 sütuna (%50) hizalanır
+	if 45.0 <= float(w_pct) <= 55.0:
+		raw_span = 6
+	span = max(min_cols, min(GRID_LAYOUT_COLS, raw_span))
+	raw_col = round((max(0.0, float(x_pct)) / 100.0) * GRID_LAYOUT_COLS)
+	if 48.0 <= float(x_pct) <= 53.0 and span <= 6:
+		raw_col = 6
+	col = max(0, min(GRID_LAYOUT_COLS - span, raw_col))
+	return col, span
+
+
+def _px_to_grid_row_span(y_px: int, h_px: int, min_rows: int = 2) -> tuple[int, int]:
+	step = GRID_LAYOUT_ROW_PX + GRID_LAYOUT_GAP_PX
+	row = max(0, round(max(0, int(y_px)) / step))
+	rspan = max(min_rows, round((max(GRID_LAYOUT_ROW_PX, int(h_px)) + GRID_LAYOUT_GAP_PX) / step))
+	return row, min(48, rspan)
+
+
 def _normalize_widget_layout(layout_data: dict[str, Any]) -> dict[str, dict[str, Any]]:
 	if not isinstance(layout_data, dict):
 		raise ValueError("Yerleşim verisi bir sözlük olmalıdır.")
@@ -1035,7 +1083,7 @@ def _normalize_widget_layout(layout_data: dict[str, Any]) -> dict[str, dict[str,
 			continue
 		w_pct = min(100.0, max(15.0, w_pct))
 		x_pct = min(100.0 - w_pct, max(0.0, x_pct))
-		normalized[widget_id] = {
+		item_out: dict[str, Any] = {
 			"id": widget_id,
 			"x_pct": x_pct,
 			"y_px": min(20000, max(0, y_px)),
@@ -1045,7 +1093,54 @@ def _normalize_widget_layout(layout_data: dict[str, Any]) -> dict[str, dict[str,
 			"z": min(9999, max(0, z_index)),
 			"accent": raw_item.get("accent") if raw_item.get("accent") in WIDGET_LAYOUT_ACCENTS.values() else WIDGET_LAYOUT_ACCENTS["Turkuaz"],
 		}
+		if any(k in raw_item for k in ("col", "row", "col_span", "row_span", "min_col_span", "min_row_span")):
+			def_mc, def_mr = _WIDGET_MIN_GRID_BOUNDS.get(widget_id, (3, 2))
+			try:
+				min_col_span = max(2, min(GRID_LAYOUT_COLS, int(raw_item.get("min_col_span", def_mc))))
+				min_row_span = max(2, min(16, int(raw_item.get("min_row_span", def_mr))))
+				col_span = max(min_col_span, min(GRID_LAYOUT_COLS, int(raw_item.get("col_span", _pct_to_grid_col_span(x_pct, w_pct, min_col_span)[1]))))
+				col = max(0, min(GRID_LAYOUT_COLS - col_span, int(raw_item.get("col", _pct_to_grid_col_span(x_pct, w_pct, min_col_span)[0]))))
+				row = max(0, min(250, int(raw_item.get("row", _px_to_grid_row_span(y_px, h_px, min_row_span)[0]))))
+				row_span = max(min_row_span, min(48, int(raw_item.get("row_span", _px_to_grid_row_span(y_px, h_px, min_row_span)[1]))))
+				item_out["col"] = col
+				item_out["row"] = row
+				item_out["col_span"] = col_span
+				item_out["row_span"] = row_span
+				item_out["min_col_span"] = min_col_span
+				item_out["min_row_span"] = min_row_span
+			except (TypeError, ValueError, OverflowError):
+				pass
+		normalized[widget_id] = item_out
 	return normalized
+
+
+def _project_widget_layout_to_grid(layout_data: dict[str, Any]) -> dict[str, dict[str, Any]]:
+	"""Kayıtlı yerleşim sözlüğünü 12-sütunlu sanal ızgara koordinatları ve okunabilirlik sınırlarıyla zenginleştirir."""
+	norm = _normalize_widget_layout(layout_data)
+	enriched: dict[str, dict[str, Any]] = {}
+	for widget_id, item in norm.items():
+		row_out = dict(item)
+		def_mc, def_mr = _WIDGET_MIN_GRID_BOUNDS.get(widget_id, (3, 2))
+		min_col_span = int(row_out.get("min_col_span", def_mc))
+		min_row_span = int(row_out.get("min_row_span", def_mr))
+		if "col" in row_out and "col_span" in row_out:
+			col_span = max(min_col_span, min(GRID_LAYOUT_COLS, int(row_out["col_span"])))
+			col = max(0, min(GRID_LAYOUT_COLS - col_span, int(row_out["col"])))
+		else:
+			col, col_span = _pct_to_grid_col_span(row_out["x_pct"], row_out["w_pct"], min_col_span)
+		if "row" in row_out and "row_span" in row_out:
+			row = max(0, int(row_out["row"]))
+			row_span = max(min_row_span, int(row_out["row_span"]))
+		else:
+			row, row_span = _px_to_grid_row_span(row_out["y_px"], row_out["h_px"], min_row_span)
+		row_out["col"] = col
+		row_out["row"] = row
+		row_out["col_span"] = col_span
+		row_out["row_span"] = row_span
+		row_out["min_col_span"] = min_col_span
+		row_out["min_row_span"] = min_row_span
+		enriched[widget_id] = row_out
+	return enriched
 
 
 def _read_widget_layout_bundle(page_key: str) -> dict[str, Any]:
@@ -1229,7 +1324,10 @@ def render_draggable_resizable_canvas(
 ) -> None:
 	config = {
 		"page": page_key,
-		"layout": _normalize_widget_layout(layout_data),
+		"cols": GRID_LAYOUT_COLS,
+		"rowPx": GRID_LAYOUT_ROW_PX,
+		"gapPx": GRID_LAYOUT_GAP_PX,
+		"layout": _project_widget_layout_to_grid(layout_data),
 		"edit": bool(edit_mode),
 		"magnetic": bool(magnetic),
 		"action": action,
@@ -1240,6 +1338,11 @@ def render_draggable_resizable_canvas(
 <script>
 (function(){
 	const cfg = __LAYOUT_CONFIG__;
+	const COLS = Math.max(4, Number(cfg.cols) || 12);
+	const ROW_PX = Math.max(36, Number(cfg.rowPx) || 56);
+	const GAP_PX = Math.max(6, Number(cfg.gapPx) || 12);
+	const STEP_Y = ROW_PX + GAP_PX;
+	const CACHE_KEY = "revir_smart_grid_v2:" + cfg.page;
 	const engine = window.__revirSmartLayout || (window.__revirSmartLayout = {page:"", undo:[]});
 	const layoutIds = new Set(Object.keys(cfg.layout || {}));
 	const firstMarker = Array.from(document.querySelectorAll("[data-layout-widget-marker]")).find(m => layoutIds.has(m.dataset.layoutWidgetMarker));
@@ -1259,8 +1362,10 @@ def render_draggable_resizable_canvas(
 	}
 	const markerById = new Map(markers.map(m => [m.dataset.layoutWidgetMarker, m]));
 	const cards = new Map();
-	markerById.forEach((marker,id) => {
+	const emptiedHosts = new Set();
+	markerById.forEach((marker, id) => {
 		const markerHost = marker.closest(".revir-md") || marker;
+		const origParent = markerHost.parentElement;
 		let card = markerHost.nextElementSibling;
 		while (card && !card.classList.contains("revir-card")) card = card.nextElementSibling;
 		if (!card) {
@@ -1269,12 +1374,12 @@ def render_draggable_resizable_canvas(
 		}
 		if (!card) {
 			const first = markerHost.nextElementSibling;
-			if (first) {
+			if (first && !first.matches("[data-layout-canvas], [data-layout-widget-marker]")) {
 				card = document.createElement("div");
 				card.className = "revir-container revir-card";
 				markerHost.parentNode.insertBefore(card, first);
 				let node = first;
-				while (node && !node.matches("[data-layout-widget-marker], [data-layout-canvas-anchor]")) {
+				while (node && !node.matches("[data-layout-widget-marker], [data-layout-canvas-anchor], [data-layout-canvas]")) {
 					const next = node.nextElementSibling;
 					card.appendChild(node);
 					node = next;
@@ -1284,236 +1389,597 @@ def render_draggable_resizable_canvas(
 		if (!card) return;
 		card.dataset.layoutWidget = id;
 		cards.set(id, card);
-		if (card.parentElement !== canvas) canvas.appendChild(card);
+		if (card.parentElement !== canvas) {
+			if (origParent) emptiedHosts.add(origParent);
+			const prevCol = card.closest(".revir-cols");
+			if (prevCol) emptiedHosts.add(prevCol);
+			canvas.appendChild(card);
+		}
 	});
+	// Taşınan kartlardan sonra boş kalan sarmalayıcı sütunların ekranda boşluk bırakmasını önle
+	emptiedHosts.forEach(hostEl => {
+		const rowEl = hostEl.classList && hostEl.classList.contains("revir-cols") ? hostEl : hostEl.closest(".revir-cols");
+		const checkTarget = rowEl || hostEl;
+		if (checkTarget && !checkTarget.querySelector(".revir-card, table, canvas, svg, button, input")) {
+			checkTarget.style.display = "none";
+		}
+	});
+
 	const defs = cfg.layout || {};
+	const gridBg = canvas.querySelector(".revir-layout-grid-overlay") || document.createElement("div");
+	gridBg.className = "revir-layout-grid-overlay";
+	if (!gridBg.parentElement) canvas.appendChild(gridBg);
+	if (!gridBg.children.length) {
+		for (let i = 0; i < COLS; i++) {
+			const cCell = document.createElement("div");
+			cCell.className = "revir-grid-col-cell";
+			const num = document.createElement("span");
+			num.textContent = String(i + 1);
+			cCell.appendChild(num);
+			gridBg.appendChild(cCell);
+		}
+	}
+	const ghostEl = canvas.querySelector(".revir-layout-ghost") || document.createElement("div");
+	ghostEl.className = "revir-layout-ghost";
+	const ghostLabel = ghostEl.querySelector(".revir-layout-ghost-label") || document.createElement("span");
+	ghostLabel.className = "revir-layout-ghost-label";
+	if (!ghostLabel.parentElement) ghostEl.appendChild(ghostLabel);
+	if (!ghostEl.parentElement) canvas.appendChild(ghostEl);
 	const guideLayer = canvas.querySelector(".revir-layout-guides") || document.createElement("div");
 	guideLayer.className = "revir-layout-guides";
 	if (!guideLayer.parentElement) canvas.appendChild(guideLayer);
+
 	const cssId = "revir-smart-layout-css";
-	if (!document.getElementById(cssId)) {
-		const style = document.createElement("style");
+	let style = document.getElementById(cssId);
+	if (!style) {
+		style = document.createElement("style");
 		style.id = cssId;
-		style.textContent = `
-			.revir-layout-canvas{position:relative;width:100%;min-height:180px;margin:12px 0 18px;contain:layout style}
-			.revir-layout-canvas>.revir-card[data-layout-widget]{position:absolute!important;box-sizing:border-box!important;margin:0!important;overflow:auto!important;transition:box-shadow .12s ease}
-			.revir-layout-canvas>.revir-card[data-layout-widget].layout-hidden{visibility:hidden!important;pointer-events:none!important}
-			.revir-layout-canvas>.revir-card[data-layout-widget].layout-edit{outline:2px dashed #0d9488!important;outline-offset:2px}
-			.revir-layout-title{cursor:move;touch-action:none;user-select:none;min-height:20px}
-			.layout-handle{position:absolute;z-index:60;background:#0d9488;opacity:.38;display:none;touch-action:none}
-			.layout-edit .layout-handle{display:block}
-			.layout-handle-n,.layout-handle-s{height:7px;left:12px;right:12px;cursor:ns-resize}
-			.layout-handle-n{top:0}.layout-handle-s{bottom:0}
-			.layout-handle-e,.layout-handle-w{width:7px;top:12px;bottom:12px;cursor:ew-resize}
-			.layout-handle-e{right:0}.layout-handle-w{left:0}
-			.layout-handle-ne,.layout-handle-sw,.layout-handle-nw,.layout-handle-se{width:13px;height:13px;border-radius:50%}
-			.layout-handle-ne{right:0;top:0;cursor:nesw-resize}.layout-handle-nw{left:0;top:0;cursor:nwse-resize}
-			.layout-handle-se{right:0;bottom:0;cursor:nwse-resize}.layout-handle-sw{left:0;bottom:0;cursor:nesw-resize}
-			.layout-tools{display:none;position:absolute;right:7px;top:7px;z-index:65;gap:3px}
-			.layout-edit .layout-tools{display:flex}
-			.layout-tools button{border:1px solid #cbd5e1;border-radius:6px;background:#fff;padding:2px 6px;cursor:pointer}
-			.revir-layout-guides{position:absolute;inset:0;pointer-events:none;z-index:9999}
-			.layout-guide{position:absolute;border-color:#0d9488;border-style:dashed;border-width:0}
-			.layout-guide.x{top:0;bottom:0;border-left-width:1px}
-			.layout-guide.y{left:0;right:0;border-top-width:1px;border-color:#f43f5e}
-			.layout-guide-label{position:absolute;padding:1px 5px;border-radius:4px;background:#0f172a;color:#fff;font:700 10px sans-serif;white-space:nowrap}
-			.revir-layout-canvas.layout-locked>.revir-card[data-layout-widget]{cursor:default}
-			@media(max-width:700px){.revir-layout-canvas>.revir-card[data-layout-widget]{max-width:100%}}
-		`;
 		document.head.appendChild(style);
 	}
-	const syncInput = document.querySelector('[data-key="_widget_layout_sync_' + CSS.escape(cfg.page) + '"]');
+	style.textContent = `
+		.revir-layout-canvas{position:relative;width:100%;min-height:180px;margin:12px 0 22px;contain:layout style}
+		.revir-layout-canvas.layout-edit-active{padding-bottom:24px}
+		.revir-layout-grid-overlay{display:none;position:absolute;inset:0;pointer-events:none;z-index:1;gap:${GAP_PX}px;grid-template-columns:repeat(${COLS},minmax(0,1fr))}
+		.revir-layout-canvas.layout-edit-active .revir-layout-grid-overlay{display:grid}
+		.revir-grid-col-cell{position:relative;border:1px dashed rgba(13,148,136,0.28);border-radius:10px;background:rgba(13,148,136,0.03)}
+		.revir-grid-col-cell span{position:sticky;top:6px;display:inline-block;margin:4px 6px;font:800 10px sans-serif;color:rgba(13,148,136,0.55)}
+		.revir-layout-ghost{display:none;position:absolute;z-index:2;border:2px dashed #0d9488;background:rgba(13,148,136,0.12);border-radius:12px;pointer-events:none;transition:left .10s ease,top .10s ease,width .10s ease,height .10s ease;align-items:flex-end;justify-content:flex-end;padding:8px}
+		.revir-layout-ghost.active{display:flex}
+		.revir-layout-ghost-label{background:#0f172a;color:#fff;font:800 11px sans-serif;padding:3px 8px;border-radius:6px;box-shadow:0 3px 10px rgba(0,0,0,0.2)}
+		.revir-layout-canvas>.revir-card[data-layout-widget]{position:absolute!important;box-sizing:border-box!important;margin:0!important;overflow-y:auto!important;overflow-x:auto!important;container-type:inline-size;transition:left .16s cubic-bezier(.2,.8,.2,1),top .16s cubic-bezier(.2,.8,.2,1),width .16s cubic-bezier(.2,.8,.2,1),height .16s cubic-bezier(.2,.8,.2,1),box-shadow .14s ease,transform .12s ease}
+		.revir-layout-canvas>.revir-card[data-layout-widget].layout-dragging,
+		.revir-layout-canvas>.revir-card[data-layout-widget].layout-resizing{transition:box-shadow .12s ease!important;z-index:900!important;box-shadow:0 18px 40px rgba(15,23,42,0.24)!important;opacity:0.94}
+		.revir-layout-canvas>.revir-card[data-layout-widget].layout-hidden{visibility:hidden!important;pointer-events:none!important}
+		.revir-layout-canvas>.revir-card[data-layout-widget].layout-edit{outline:2px dashed rgba(13,148,136,0.75)!important;outline-offset:2px}
+		.revir-layout-canvas>.revir-card[data-layout-widget].layout-swap-target{outline:3px solid #f59e0b!important;box-shadow:0 0 0 5px rgba(245,158,11,0.24),0 14px 32px rgba(245,158,11,0.2)!important;transform:scale(1.01)}
+		.revir-swap-pill{display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:950;background:#b45309;color:#fff;font:800 13px sans-serif;padding:8px 14px;border-radius:999px;pointer-events:none;box-shadow:0 8px 24px rgba(0,0,0,0.28)}
+		.revir-layout-canvas>.revir-card[data-layout-widget].layout-swap-target>.revir-swap-pill{display:block}
+		.revir-layout-title{cursor:move;touch-action:none;user-select:none;min-height:20px}
+		.layout-handle{position:absolute;z-index:60;background:transparent;display:none;touch-action:none}
+		.layout-edit .layout-handle{display:block}
+		.layout-handle-n,.layout-handle-s{height:8px;left:12px;right:12px;cursor:ns-resize}
+		.layout-handle-n{top:0}.layout-handle-s{bottom:0}
+		.layout-handle-e,.layout-handle-w{width:8px;top:12px;bottom:12px;cursor:ew-resize}
+		.layout-handle-e{right:0}.layout-handle-w{left:0}
+		.layout-handle-ne,.layout-handle-sw,.layout-handle-nw,.layout-handle-se{width:16px;height:16px;border-radius:50%;background:rgba(13,148,136,0.35)}
+		.layout-handle-ne{right:1px;top:1px;cursor:nesw-resize}.layout-handle-nw{left:1px;top:1px;cursor:nwse-resize}
+		.layout-handle-se{right:1px;bottom:1px;cursor:nwse-resize;background:linear-gradient(135deg,transparent 40%,#0d9488 45%)}.layout-handle-sw{left:1px;bottom:1px;cursor:nesw-resize}
+		.layout-tools{display:none;position:absolute;right:8px;top:8px;z-index:65;gap:4px;background:rgba(255,255,255,0.92);padding:2px 4px;border-radius:8px;border:1px solid rgba(13,148,136,0.35)}
+		.layout-edit .layout-tools{display:inline-flex}
+		.layout-tools button{border:1px solid #cbd5e1;border-radius:6px;background:#fff;padding:2px 6px;cursor:pointer;font-size:12px}
+		.layout-tools button:hover{background:#f0fdfa;border-color:#0d9488}
+		.revir-layout-guides{position:absolute;inset:0;pointer-events:none;z-index:999}
+		.layout-guide{position:absolute;border-color:#0d9488;border-style:dashed;border-width:0}
+		.layout-guide.x{top:0;bottom:0;border-left-width:1px}
+		.layout-guide.y{left:0;right:0;border-top-width:1px;border-color:#f43f5e}
+		.layout-guide-label{position:absolute;padding:1px 5px;border-radius:4px;background:#0f172a;color:#fff;font:700 10px sans-serif;white-space:nowrap}
+		.revir-layout-canvas.layout-locked>.revir-card[data-layout-widget]{cursor:default}
+		/* Okunabilirlik sigortası: daralan kutularda çok sütunlu metrik ve butonlar otomatik temiz satıra kırılır */
+		@container (max-width: 760px){
+			.revir-cols-6,.revir-cols-5{grid-template-columns:repeat(3,minmax(0,1fr))!important}
+		}
+		@container (max-width: 520px){
+			.revir-cols-6,.revir-cols-5,.revir-cols-4,.revir-cols-3{grid-template-columns:repeat(2,minmax(0,1fr))!important}
+			.revir-cols-2{grid-template-columns:repeat(1,minmax(0,1fr))!important}
+		}
+		@container (max-width: 340px){
+			.revir-cols-6,.revir-cols-5,.revir-cols-4,.revir-cols-3,.revir-cols-2{grid-template-columns:minmax(0,1fr)!important}
+		}
+		@media(max-width:760px){
+			.revir-layout-canvas{height:auto!important}
+			.revir-layout-canvas>.revir-card[data-layout-widget]{position:static!important;width:100%!important;height:auto!important;margin-bottom:12px!important}
+			.revir-layout-grid-overlay,.revir-layout-ghost{display:none!important}
+		}
+	`;
+
+	// Eski localStorage kalıntısı çakışmasını engellemek için temizlik
+	try { localStorage.removeItem("revir_ov_card_sizes_v1"); } catch (_e) {}
+
+	const gridState = new Map();
+	let cachedLocal = {};
+	try { cachedLocal = JSON.parse(localStorage.getItem(CACHE_KEY) || "{}") || {}; } catch (_e) { cachedLocal = {}; }
+
+	cards.forEach((_, id) => {
+		const d = defs[id] || {col:0,row:0,col_span:6,row_span:4,min_col_span:3,min_row_span:2,visible:true,z:1,accent:"#0d9488"};
+		const loc = (cachedLocal[id] && typeof cachedLocal[id] === "object") ? cachedLocal[id] : {};
+		const minCol = Math.max(2, Math.min(COLS, Number(d.min_col_span) || 3));
+		const minRow = Math.max(2, Number(d.min_row_span) || 2);
+		const colSpan = Math.max(minCol, Math.min(COLS, Number(loc.col_span ?? d.col_span) || 6));
+		const col = Math.max(0, Math.min(COLS - colSpan, Number(loc.col ?? d.col) || 0));
+		const row = Math.max(0, Number(loc.row ?? d.row) || 0);
+		const rowSpan = Math.max(minRow, Number(loc.row_span ?? d.row_span) || 4);
+		gridState.set(id, {
+			id,
+			col,
+			row,
+			colSpan,
+			rowSpan,
+			minCol,
+			minRow,
+			visible: (loc.visible !== undefined ? loc.visible : d.visible) !== false,
+			z: Number(d.z) || 1,
+			accent: loc.accent || d.accent || "#0d9488",
+		});
+	});
+
+	const rectsOverlap = (a, b) => !(
+		a.col + a.colSpan <= b.col ||
+		b.col + b.colSpan <= a.col ||
+		a.row + a.rowSpan <= b.row ||
+		b.row + b.rowSpan <= a.row
+	);
+
+	// Android Launcher / Widget tarzı çarpışma itme (önce aynı satırda boşluğa kaydırır, sığmazsa alta iter)
+	const resolveGridCollisions = (pinnedIds) => {
+		const pinSet = new Set(Array.isArray(pinnedIds) ? pinnedIds : (pinnedIds ? [pinnedIds] : []));
+		const visible = Array.from(gridState.values()).filter(it => it.visible);
+		visible.forEach(it => {
+			it.colSpan = Math.max(it.minCol, Math.min(COLS, it.colSpan));
+			it.col = Math.max(0, Math.min(COLS - it.colSpan, it.col));
+			it.row = Math.max(0, it.row);
+			it.rowSpan = Math.max(it.minRow, it.rowSpan);
+		});
+		const ordered = [
+			...visible.filter(it => pinSet.has(it.id)),
+			...visible.filter(it => !pinSet.has(it.id)).sort((a, b) => (a.row - b.row) || (a.col - b.col)),
+		];
+		const placed = [];
+		for (const item of ordered) {
+			if (pinSet.has(item.id)) {
+				// Pinned öğeler arasında bile üst üste binme olmasın
+				while (placed.some(p => rectsOverlap(item, p))) {
+					const blocker = placed.find(p => rectsOverlap(item, p));
+					item.row = blocker.row + blocker.rowSpan;
+				}
+				placed.push(item);
+				continue;
+			}
+			let guard = 0;
+			while (placed.some(p => rectsOverlap(item, p)) && guard++ < 400) {
+				const blocker = placed.find(p => rectsOverlap(item, p));
+				const tryRightCol = blocker.col + blocker.colSpan;
+				if (tryRightCol + item.colSpan <= COLS) {
+					const candidate = Object.assign({}, item, {col: tryRightCol});
+					if (!placed.some(p => rectsOverlap(candidate, p))) {
+						item.col = tryRightCol;
+						continue;
+					}
+				}
+				item.row = blocker.row + blocker.rowSpan;
+				item.col = Math.min(item.col, COLS - item.colSpan);
+			}
+			placed.push(item);
+		}
+	};
+
+	// Yerçekimi sıkıştırması: üst satırlarda gereksiz boşluk varsa kartları yukarı toplar
+	const compactGridUpward = (freezeId) => {
+		const visible = Array.from(gridState.values())
+			.filter(it => it.visible)
+			.sort((a, b) => (a.row - b.row) || (a.col - b.col));
+		for (const item of visible) {
+			if (item.id === freezeId) continue;
+			while (item.row > 0) {
+				item.row -= 1;
+				const collides = visible.some(other => other !== item && rectsOverlap(item, other));
+				if (collides) {
+					item.row += 1;
+					break;
+				}
+			}
+		}
+	};
+
+	const metrics = () => {
+		const cw = Math.max(320, canvas.clientWidth || main.clientWidth || 1000);
+		const colW = (cw - GAP_PX * (COLS - 1)) / COLS;
+		return {cw, colW};
+	};
+
+	const gridToBoxPx = (item) => {
+		const {colW} = metrics();
+		return {
+			left: Math.round(item.col * (colW + GAP_PX)),
+			top: Math.round(item.row * STEP_Y),
+			width: Math.round(item.colSpan * colW + (item.colSpan - 1) * GAP_PX),
+			height: Math.round(item.rowSpan * ROW_PX + (item.rowSpan - 1) * GAP_PX),
+		};
+	};
+
+	const setCanvasHeight = () => {
+		if (window.innerWidth <= 760) { canvas.style.height = "auto"; return; }
+		let max = 200;
+		cards.forEach((card, id) => {
+			const it = gridState.get(id);
+			if (!it || !it.visible || card.classList.contains("layout-hidden")) return;
+			max = Math.max(max, card.offsetTop + card.offsetHeight + 24);
+		});
+		canvas.style.height = max + "px";
+	};
+
+	const applyGridDOM = (skipId) => {
+		if (window.innerWidth <= 760) {
+			cards.forEach((card, id) => {
+				const it = gridState.get(id);
+				if (!it) return;
+				card.classList.toggle("layout-hidden", !it.visible);
+				card.classList.toggle("layout-edit", !!cfg.edit);
+			});
+			return;
+		}
+		cards.forEach((card, id) => {
+			const it = gridState.get(id);
+			if (!it) return;
+			card.classList.toggle("layout-hidden", !it.visible);
+			card.classList.toggle("layout-edit", !!cfg.edit);
+			card.dataset.layoutAccent = it.accent;
+			card.style.borderTop = "4px solid " + it.accent;
+			if (id === skipId) return;
+			const px = gridToBoxPx(it);
+			card.style.left = px.left + "px";
+			card.style.top = px.top + "px";
+			card.style.width = px.width + "px";
+			card.style.height = px.height + "px";
+			card.style.zIndex = String(it.z || 1);
+		});
+		setCanvasHeight();
+	};
+
+	// İlk yüklemede içerik yüksekliğine göre taşma varsa kartı otomatik sığdır (kayıtlı özel yüksekliği ezme)
+	if (window.innerWidth > 760) {
+		cards.forEach((card, id) => {
+			const it = gridState.get(id);
+			const loc = cachedLocal[id];
+			if (!it || !it.visible || (loc && loc.row_span)) return;
+			const px = gridToBoxPx(it);
+			card.style.width = px.width + "px";
+			const prevH = card.style.height;
+			card.style.height = "auto";
+			const naturalH = card.scrollHeight + 10;
+			card.style.height = prevH;
+			const neededRows = Math.max(it.minRow, Math.min(18, Math.ceil((naturalH + GAP_PX) / STEP_Y)));
+			if (neededRows > it.rowSpan) it.rowSpan = neededRows;
+		});
+	}
+	// İlk yüklemede çakışmasız kompakt yerleştirme ve içeriğe göre taşan satır yüksekliği koruması
+	resolveGridCollisions();
+	compactGridUpward();
+
 	const sync = () => {
 		const out = {};
-		cards.forEach((card,id) => {
-			const r = card.getBoundingClientRect(), c = canvas.getBoundingClientRect();
-			out[id] = {id:id,x_pct:Math.max(0,((r.left-c.left)/Math.max(1,c.width))*100),y_px:Math.max(0,Math.round(r.top-c.top)),w_pct:Math.min(100,((r.width)/Math.max(1,c.width))*100),h_px:Math.max(90,Math.round(r.height)),visible:!card.classList.contains("layout-hidden"),z:parseInt(card.style.zIndex||"1",10)||1,accent:card.dataset.layoutAccent||"#0d9488"};
+		const localOut = {};
+		gridState.forEach((it, id) => {
+			const xPct = Math.round(((it.col / COLS) * 100) * 100) / 100;
+			const wPct = Math.round(((it.colSpan / COLS) * 100) * 100) / 100;
+			const yPx = Math.round(it.row * STEP_Y);
+			const hPx = Math.round(it.rowSpan * ROW_PX + (it.rowSpan - 1) * GAP_PX);
+			out[id] = {
+				id,
+				x_pct: xPct,
+				y_px: yPx,
+				w_pct: wPct,
+				h_px: hPx,
+				col: it.col,
+				row: it.row,
+				col_span: it.colSpan,
+				row_span: it.rowSpan,
+				min_col_span: it.minCol,
+				min_row_span: it.minRow,
+				visible: !!it.visible,
+				z: it.z || 1,
+				accent: it.accent || "#0d9488",
+			};
+			localOut[id] = {col: it.col, row: it.row, col_span: it.colSpan, row_span: it.rowSpan, visible: !!it.visible, accent: it.accent};
 		});
+		try { localStorage.setItem(CACHE_KEY, JSON.stringify(localOut)); } catch (_e) {}
+		const syncInput = document.querySelector('[data-key="_widget_layout_sync_' + CSS.escape(cfg.page) + '"]');
 		if (syncInput) {
 			syncInput.value = JSON.stringify(out);
 			window.__revirFieldChange("_widget_layout_sync_" + cfg.page, syncInput.value, syncInput);
 		}
 	};
-	const setCanvasHeight = () => {
-		let max = 180;
-		cards.forEach(card => { if (!card.classList.contains("layout-hidden")) max=Math.max(max,card.offsetTop+card.offsetHeight+24); });
-		canvas.style.height=max+"px";
+
+	const showGhost = (it, customText) => {
+		const px = gridToBoxPx(it);
+		ghostEl.style.left = px.left + "px";
+		ghostEl.style.top = px.top + "px";
+		ghostEl.style.width = px.width + "px";
+		ghostEl.style.height = px.height + "px";
+		const pct = Math.round((it.colSpan / COLS) * 100);
+		ghostLabel.textContent = customText || `${it.colSpan}/${COLS} sütun (%${pct}) · ${it.rowSpan} satır`;
+		ghostEl.classList.add("active");
 	};
-	const addGuide = (axis, pos, label) => {
-		const line=document.createElement("div");line.className="layout-guide "+axis;
-		if(axis==="x")line.style.left=pos+"px";else line.style.top=pos+"px";
-		const tag=document.createElement("span");tag.className="layout-guide-label";tag.textContent=label;
-		if(axis==="x"){tag.style.left=(pos+4)+"px";tag.style.top="4px"}else{tag.style.top=(pos+4)+"px";tag.style.left="4px"}
-		guideLayer.append(line,tag);
+	const hideGhost = () => { ghostEl.classList.remove("active"); };
+
+	const clearSwapMarks = () => {
+		cards.forEach(c => c.classList.remove("layout-swap-target"));
 	};
-	const clearGuides=()=>{guideLayer.replaceChildren()};
-	const applySnap = (box, mode, handle) => {
-		if(!cfg.magnetic)return;
-		const rect=box.getBoundingClientRect(), base=canvas.getBoundingClientRect();
-		const otherRects=Array.from(cards.values()).filter(c=>c!==box&&!c.classList.contains("layout-hidden")).map(c=>c.getBoundingClientRect());
-		const xEdges=mode==="drag"?[["l",rect.left],["c",(rect.left+rect.right)/2],["r",rect.right]]:
-			(handle.includes("e")?[["r",rect.right]]:handle.includes("w")?[["l",rect.left]]:[]);
-		const yEdges=mode==="drag"?[["t",rect.top],["c",(rect.top+rect.bottom)/2],["b",rect.bottom]]:
-			(handle.includes("s")?[["b",rect.bottom]]:handle.includes("n")?[["t",rect.top]]:[]);
-		let bestX=null,bestY=null;
-		for(const [edge,value] of xEdges) for(const other of otherRects) for(const [target,targetVal] of [["l",other.left],["c",(other.left+other.right)/2],["r",other.right]]) {
-			const d=targetVal-value;if(Math.abs(d)<=8&&(!bestX||Math.abs(d)<Math.abs(bestX.d)))bestX={d,pos:targetVal-base.left};
-		}
-		for(const [edge,value] of yEdges) for(const other of otherRects) for(const [target,targetVal] of [["t",other.top],["c",(other.top+other.bottom)/2],["b",other.bottom]]) {
-			const d=targetVal-value;if(Math.abs(d)<=8&&(!bestY||Math.abs(d)<Math.abs(bestY.d)))bestY={d,pos:targetVal-base.top};
-		}
-		if(bestX){if(mode==="drag")box.style.left=(box.offsetLeft+bestX.d)+"px";else if(handle.includes("e"))box.style.width=Math.max(180,box.offsetWidth+bestX.d)+"px";else{box.style.left=(box.offsetLeft+bestX.d)+"px";box.style.width=Math.max(180,box.offsetWidth-bestX.d)+"px"}addGuide("x",bestX.pos,""+Math.round(bestX.pos)+" px")}
-		if(bestY){if(mode==="drag")box.style.top=(box.offsetTop+bestY.d)+"px";else if(handle.includes("s"))box.style.height=Math.max(90,box.offsetHeight+bestY.d)+"px";else{box.style.top=(box.offsetTop+bestY.d)+"px";box.style.height=Math.max(90,box.offsetHeight-bestY.d)+"px"}addGuide("y",bestY.pos,""+Math.round(bestY.pos)+" px")}
-		if(mode==="drag"){
-			const sorted=otherRects.slice().sort((a,b)=>a.left-b.left);
-			for(let i=0;i<sorted.length-1;i++){
-				const a=sorted[i],b=sorted[i+1];
-				if(box.left>=a.right&&box.right<=b.left&&Math.min(box.bottom,b.bottom)>Math.max(box.top,b.top)){
-					const gapA=box.left-a.right,gapB=b.left-box.right;
-					if(Math.abs(gapA-gapB)<=8)addGuide("y",box.bottom-base.top+6,"Eşit aralık · "+Math.round((gapA+gapB)/2)+" px");
-				}
-			}
-		}
-	};
-	const LAYOUT_GAP = 12;
-	const findSwapTarget = (movedCard) => {
-		const mr=movedCard.getBoundingClientRect();
-		let best=null;
-		cards.forEach((candidate,id)=>{
-			if(candidate===movedCard||candidate.classList.contains("layout-hidden"))return;
-			const rr=candidate.getBoundingClientRect();
-			const ox=Math.max(0,Math.min(mr.right,rr.right)-Math.max(mr.left,rr.left));
-			const oy=Math.max(0,Math.min(mr.bottom,rr.bottom)-Math.max(mr.top,rr.top));
-			const overlap=ox*oy;
-			const candidateArea=Math.max(1,rr.width*rr.height);
-			const ratio=overlap/candidateArea;
-			if(ratio>=0.28){
-				const mx=(mr.left+mr.right)/2,my=(mr.top+mr.bottom)/2;
-				const cx=(rr.left+rr.right)/2,cy=(rr.top+rr.bottom)/2;
-				const distance=Math.hypot(mx-cx,my-cy);
-				if(!best||distance<best.distance)best={card:candidate,distance,ratio};
+
+	// Merkez tabanlı akıllı takas adayı tespiti
+	const detectSwapTarget = (dragCard, dragId, pointerX, pointerY) => {
+		const dr = dragCard.getBoundingClientRect();
+		const dragArea = Math.max(1, dr.width * dr.height);
+		let best = null;
+		cards.forEach((cand, cid) => {
+			if (cid === dragId || cand.classList.contains("layout-hidden")) return;
+			const rr = cand.getBoundingClientRect();
+			const candArea = Math.max(1, rr.width * rr.height);
+			const ox = Math.max(0, Math.min(dr.right, rr.right) - Math.max(dr.left, rr.left));
+			const oy = Math.max(0, Math.min(dr.bottom, rr.bottom) - Math.max(dr.top, rr.top));
+			const overlapRatio = (ox * oy) / Math.min(dragArea, candArea);
+			const inCenter = (
+				pointerX >= rr.left + rr.width * 0.24 &&
+				pointerX <= rr.right - rr.width * 0.24 &&
+				pointerY >= rr.top + rr.height * 0.20 &&
+				pointerY <= rr.bottom - rr.height * 0.20
+			);
+			if (inCenter || overlapRatio >= 0.56) {
+				const cx = (rr.left + rr.right) / 2, cy = (rr.top + rr.bottom) / 2;
+				const dist = Math.hypot(pointerX - cx, pointerY - cy);
+				if (!best || dist < best.dist) best = {id: cid, card: cand, dist};
 			}
 		});
-		return best?best.card:null;
+		return best;
 	};
-	const swapLayoutGeometry = (first, second) => {
-		const firstGeometry={left:first.style.left,top:first.style.top,width:first.style.width,height:first.style.height,z:first.style.zIndex,accent:first.dataset.layoutAccent};
-		const secondGeometry={left:second.style.left,top:second.style.top,width:second.style.width,height:second.style.height,z:second.style.zIndex,accent:second.dataset.layoutAccent};
-		const apply=(card,geometry)=>{
-			card.style.left=geometry.left;
-			card.style.top=geometry.top;
-			card.style.width=geometry.width;
-			card.style.height=geometry.height;
-			card.style.zIndex=geometry.z;
-			card.dataset.layoutAccent=geometry.accent||"#0d9488";
-			card.style.borderTop="4px solid "+card.dataset.layoutAccent;
-		};
-		apply(first,secondGeometry);
-		apply(second,firstGeometry);
+
+	const historyPush = () => {
+		const snap = {};
+		gridState.forEach((it, id) => { snap[id] = Object.assign({}, it); });
+		engine.undo.push(JSON.stringify(snap));
+		if (engine.undo.length > 30) engine.undo.shift();
 	};
-	const separateCardFromNeighbors = (movedCard) => {
-		const canvasRect=canvas.getBoundingClientRect();
-		let cardRect=movedCard.getBoundingClientRect();
-		cards.forEach((other)=>{
-			if(other===movedCard||other.classList.contains("layout-hidden"))return;
-			let otherRect=other.getBoundingClientRect();
-			const vertical=Math.min(cardRect.bottom,otherRect.bottom)-Math.max(cardRect.top,otherRect.top);
-			const horizontal=Math.min(cardRect.right,otherRect.right)-Math.max(cardRect.left,otherRect.left);
-			if(vertical>0&&horizontal>0){
-				const movedCenter=(cardRect.left+cardRect.right)/2;
-				const otherCenter=(otherRect.left+otherRect.right)/2;
-				if(movedCenter<otherCenter){
-					const desired=otherRect.left-LAYOUT_GAP-cardRect.width;
-					movedCard.style.left=Math.max(0,Math.round(desired-canvasRect.left))+"px";
-				}else{
-					const desired=otherRect.right+LAYOUT_GAP;
-					movedCard.style.left=Math.min(canvasRect.width-cardRect.width,Math.max(0,Math.round(desired-canvasRect.left)))+"px";
-				}
-				cardRect=movedCard.getBoundingClientRect();
-			}
-		});
+
+	const fitCardToContent = (card, id) => {
+		const it = gridState.get(id);
+		if (!it) return;
+		const prevH = card.style.height;
+		card.style.height = "auto";
+		const naturalH = card.scrollHeight + 8;
+		card.style.height = prevH;
+		it.rowSpan = Math.max(it.minRow, Math.min(48, Math.ceil((naturalH + GAP_PX) / STEP_Y)));
 	};
-	const historyPush=()=>{engine.undo.push(JSON.stringify(Object.fromEntries(Array.from(cards,([id,el])=>[id,{left:el.style.left,top:el.style.top,width:el.style.width,height:el.style.height,z:el.style.zIndex,hidden:el.classList.contains("layout-hidden"),accent:el.dataset.layoutAccent}]))));if(engine.undo.length>30)engine.undo.shift()};
-	const decorate=(card,id,item)=>{
-		card.classList.toggle("layout-edit",!!cfg.edit);
-		card.classList.toggle("layout-hidden",item.visible===false);
-		const canvasWidth=Math.max(1,canvas.clientWidth);
-		const cardWidth=Math.min(canvasWidth,Math.max(Math.min(180,canvasWidth),(Math.min(100,Number(item.w_pct)||50)/100)*canvasWidth));
-		card.style.left=Math.min((Math.max(0,Number(item.x_pct)||0)/100)*canvasWidth,canvasWidth-cardWidth)+"px";
-		card.style.top=Math.max(0,Number(item.y_px)||0)+"px";
-		card.style.width=cardWidth+"px";
-		card.style.height=Math.max(90,Number(item.h_px)||240)+"px";
-		card.style.zIndex=String(Number(item.z)||1);
-		card.dataset.layoutAccent=item.accent||"#0d9488";
-		card.style.borderTop="4px solid "+card.dataset.layoutAccent;
-		if(card.dataset.layoutControls!=="1"){
-			card.dataset.layoutControls="1";
-			const title=card.querySelector("h1,h2,h3,h4,h5,.revir-md");
-			if(title){title.classList.add("revir-layout-title");title.dataset.layoutDrag="1"}
-			const tools=document.createElement("div");tools.className="layout-tools";
-			const hide=document.createElement("button");hide.type="button";hide.textContent="👁️";hide.title="Kutuyu gizle";
-			hide.addEventListener("click",e=>{e.stopPropagation();historyPush();card.classList.toggle("layout-hidden");sync();setCanvasHeight()});
-			const accent=document.createElement("button");accent.type="button";accent.textContent="🎨";accent.title="Vurgu rengini değiştir";
-			accent.addEventListener("click",e=>{e.stopPropagation();historyPush();const colors=cfg.accentColors;let i=colors.indexOf(card.dataset.layoutAccent);card.dataset.layoutAccent=colors[(i+1+colors.length)%colors.length];card.style.borderTop="4px solid "+card.dataset.layoutAccent;sync()});
-			tools.append(hide,accent);card.appendChild(tools);
-			["n","s","e","w","ne","nw","se","sw"].forEach(side=>{const h=document.createElement("div");h.className="layout-handle layout-handle-"+side;h.dataset.handle=side;card.appendChild(h)});
-			card.addEventListener("pointerdown",e=>{
-				if(!cfg.edit||e.button!==0)return;
-				const handle=e.target.closest(".layout-handle");const title=e.target.closest("[data-layout-drag]");
-				if(!handle&&!title)return;
-				e.preventDefault();e.stopPropagation();historyPush();clearGuides();
-				const mode=handle?"resize":"drag",side=handle?handle.dataset.handle:"";
-				const sx=e.clientX,sy=e.clientY,left=card.offsetLeft,top=card.offsetTop,w=card.offsetWidth,h=card.offsetHeight;
-				const maxZ=Math.max(1,...Array.from(cards.values()).map(c=>parseInt(c.style.zIndex||"1",10)||1));card.style.zIndex=String(maxZ+1);
-				const move=ev=>{const dx=ev.clientX-sx,dy=ev.clientY-sy;
-					if(mode==="drag"){card.style.left=Math.max(0,left+dx)+"px";card.style.top=Math.max(0,top+dy)+"px"}
-					else {let nl=left,nt=top,nw=w,nh=h;if(side.includes("e"))nw=Math.max(180,w+dx);if(side.includes("s"))nh=Math.max(90,h+dy);if(side.includes("w")){nw=Math.max(180,w-dx);nl=left+(w-nw)}if(side.includes("n")){nh=Math.max(90,h-dy);nt=top+(h-nh)}card.style.left=Math.max(0,nl)+"px";card.style.top=Math.max(0,nt)+"px";card.style.width=nw+"px";card.style.height=nh+"px"}
-					clearGuides();applySnap(card,mode,side);
-					setCanvasHeight()};
-				const up=()=>{window.removeEventListener("pointermove",move);window.removeEventListener("pointerup",up);clearGuides();
-					if(mode==="drag"){
-						const target=findSwapTarget(card);
-						if(target)swapLayoutGeometry(card,target);
-						else separateCardFromNeighbors(card);
+
+	cards.forEach((card, id) => {
+		if (!card.querySelector(".revir-swap-pill")) {
+			const pill = document.createElement("div");
+			pill.className = "revir-swap-pill";
+			pill.textContent = "🔁 Yer Değiştir";
+			card.appendChild(pill);
+		}
+		if (card.dataset.layoutControls !== "1") {
+			card.dataset.layoutControls = "1";
+			const title = card.querySelector("h1,h2,h3,h4,h5,.revir-md");
+			if (title) { title.classList.add("revir-layout-title"); title.dataset.layoutDrag = "1"; }
+			const tools = document.createElement("div"); tools.className = "layout-tools";
+			const fitBtn = document.createElement("button"); fitBtn.type = "button"; fitBtn.textContent = "⇕"; fitBtn.title = "İçeriğe göre otomatik boyutlandır";
+			fitBtn.addEventListener("click", e => {
+				e.stopPropagation();
+				historyPush();
+				fitCardToContent(card, id);
+				resolveGridCollisions(id);
+				compactGridUpward();
+				applyGridDOM();
+				sync();
+			});
+			const hide = document.createElement("button"); hide.type = "button"; hide.textContent = "👁️"; hide.title = "Kutuyu gizle";
+			hide.addEventListener("click", e => {
+				e.stopPropagation();
+				historyPush();
+				const it = gridState.get(id);
+				if (it) it.visible = !it.visible;
+				compactGridUpward();
+				applyGridDOM();
+				sync();
+			});
+			const accent = document.createElement("button"); accent.type = "button"; accent.textContent = "🎨"; accent.title = "Vurgu rengini değiştir";
+			accent.addEventListener("click", e => {
+				e.stopPropagation();
+				historyPush();
+				const it = gridState.get(id);
+				const colors = cfg.accentColors;
+				const idx = colors.indexOf(it.accent);
+				it.accent = colors[(idx + 1 + colors.length) % colors.length];
+				applyGridDOM();
+				sync();
+			});
+			tools.append(fitBtn, hide, accent);
+			card.appendChild(tools);
+			["n","s","e","w","ne","nw","se","sw"].forEach(side => {
+				const h = document.createElement("div");
+				h.className = "layout-handle layout-handle-" + side;
+				h.dataset.handle = side;
+				h.title = "Kenardan veya köşeden boyutlandır · İçeriğe sığdırmak için çift tıklayın";
+				h.addEventListener("dblclick", ev => {
+					if (!cfg.edit) return;
+					ev.preventDefault(); ev.stopPropagation();
+					historyPush();
+					fitCardToContent(card, id);
+					resolveGridCollisions(id);
+					compactGridUpward();
+					applyGridDOM();
+					sync();
+				});
+				card.appendChild(h);
+			});
+
+			card.addEventListener("pointerdown", e => {
+				if (!cfg.edit || e.button !== 0 || window.innerWidth <= 760) return;
+				const handle = e.target.closest(".layout-handle");
+				const titleEl = e.target.closest("[data-layout-drag]");
+				if (!handle && !titleEl) return;
+				e.preventDefault(); e.stopPropagation();
+				historyPush();
+				const it = gridState.get(id);
+				if (!it) return;
+				const snapshot = {};
+				gridState.forEach((v, k) => { snapshot[k] = Object.assign({}, v); });
+
+				const mode = handle ? "resize" : "drag";
+				const side = handle ? handle.dataset.handle : "";
+				const sx = e.clientX, sy = e.clientY;
+				const origPx = gridToBoxPx(it);
+				const origCol = it.col, origRow = it.row, origCSpan = it.colSpan, origRSpan = it.rowSpan;
+				let activeSwap = null;
+				card.classList.add(mode === "drag" ? "layout-dragging" : "layout-resizing");
+
+				const restoreSnapshot = () => {
+					gridState.forEach((v, k) => { if (snapshot[k]) Object.assign(v, snapshot[k]); });
+				};
+
+				const move = ev => {
+					const {colW} = metrics();
+					const dx = ev.clientX - sx, dy = ev.clientY - sy;
+					const stepX = colW + GAP_PX;
+
+					if (mode === "drag") {
+						const curLeft = Math.max(0, origPx.left + dx);
+						const curTop = Math.max(0, origPx.top + dy);
+						card.style.left = curLeft + "px";
+						card.style.top = curTop + "px";
+
+						const tgtCol = Math.max(0, Math.min(COLS - origCSpan, Math.round(curLeft / stepX)));
+						const tgtRow = Math.max(0, Math.round(curTop / STEP_Y));
+
+						clearSwapMarks();
+						const swapCand = detectSwapTarget(card, id, ev.clientX, ev.clientY);
+						if (swapCand) {
+							activeSwap = swapCand.id;
+							swapCand.card.classList.add("layout-swap-target");
+							restoreSnapshot();
+							applyGridDOM(id);
+							const swapTargetIt = gridState.get(activeSwap);
+							showGhost(swapTargetIt, `🔁 ${id} ↔ ${activeSwap} Yer Değiştir`);
+						} else {
+							activeSwap = null;
+							restoreSnapshot();
+							it.col = tgtCol;
+							it.row = tgtRow;
+							resolveGridCollisions(id);
+							compactGridUpward(id);
+							applyGridDOM(id);
+							showGhost(it);
+						}
+					} else {
+						let nCol = origCol, nRow = origRow, nCSpan = origCSpan, nRSpan = origRSpan;
+						const dCols = Math.round(dx / stepX);
+						const dRows = Math.round(dy / STEP_Y);
+						if (side.includes("e")) nCSpan = Math.max(it.minCol, Math.min(COLS - origCol, origCSpan + dCols));
+						if (side.includes("w")) {
+							const maxShift = origCSpan - it.minCol;
+							const shift = Math.max(-origCol, Math.min(maxShift, dCols));
+							nCol = origCol + shift;
+							nCSpan = origCSpan - shift;
+						}
+						if (side.includes("s")) nRSpan = Math.max(it.minRow, Math.min(48, origRSpan + dRows));
+						if (side.includes("n")) {
+							const maxRShift = origRSpan - it.minRow;
+							const rShift = Math.max(-origRow, Math.min(maxRShift, dRows));
+							nRow = origRow + rShift;
+							nRSpan = origRSpan - rShift;
+						}
+						restoreSnapshot();
+						it.col = nCol;
+						it.row = nRow;
+						it.colSpan = nCSpan;
+						it.rowSpan = nRSpan;
+						resolveGridCollisions(id);
+						compactGridUpward(id);
+						applyGridDOM();
+						showGhost(it);
 					}
-					sync();setCanvasHeight()};
-				window.addEventListener("pointermove",move);window.addEventListener("pointerup",up,{once:true});
+				};
+
+				const up = () => {
+					window.removeEventListener("pointermove", move);
+					window.removeEventListener("pointerup", up);
+					card.classList.remove("layout-dragging", "layout-resizing");
+					clearSwapMarks();
+					hideGhost();
+					if (mode === "drag" && activeSwap) {
+						restoreSnapshot();
+						const a = gridState.get(id);
+						const b = gridState.get(activeSwap);
+						if (a && b) {
+							const aOrigCol = a.col, aOrigRow = a.row;
+							const bOrigCol = b.col, bOrigRow = b.row;
+							// Yalnızca konum takası; her kart kendi okunabilir genişliğini (colSpan >= minCol) korur
+							a.col = Math.max(0, Math.min(COLS - a.colSpan, bOrigCol));
+							a.row = bOrigRow;
+							b.col = Math.max(0, Math.min(COLS - b.colSpan, aOrigCol));
+							b.row = aOrigRow;
+							resolveGridCollisions([a.id, b.id]);
+							compactGridUpward();
+						}
+					} else {
+						compactGridUpward();
+					}
+					applyGridDOM();
+					sync();
+				};
+
+				window.addEventListener("pointermove", move);
+				window.addEventListener("pointerup", up, {once: true});
 			});
 		}
-	};
-	cards.forEach((card,id)=>decorate(card,id,defs[id]||{x_pct:0,y_px:0,w_pct:50,h_px:240,visible:true,z:1,accent:"#0d9488"}));
-	canvas.classList.toggle("layout-locked",!cfg.edit);
-	if(cfg.action==="undo"&&engine.undo.length){const prior=JSON.parse(engine.undo.pop());cards.forEach((card,id)=>{const s=prior[id];if(!s)return;card.style.left=s.left;card.style.top=s.top;card.style.width=s.width;card.style.height=s.height;card.style.zIndex=s.z;card.classList.toggle("layout-hidden",s.hidden);card.dataset.layoutAccent=s.accent||"#0d9488";card.style.borderTop="4px solid "+card.dataset.layoutAccent});sync()}
-	if(cfg.action==="align"){
-		historyPush();
-		const visible=Array.from(cards.values()).filter(card=>!card.classList.contains("layout-hidden"));
-		visible.forEach(card=>{
-			for(const other of visible){if(other===card)continue;
-				if(Math.abs(card.offsetLeft-other.offsetLeft)<=10)card.style.left=other.offsetLeft+"px";
-				if(Math.abs(card.offsetTop-other.offsetTop)<=10)card.style.top=other.offsetTop+"px";
-				const right=other.offsetLeft+other.offsetWidth;
-				if(Math.abs(card.offsetLeft+card.offsetWidth-right)<=10)card.style.left=(right-card.offsetWidth)+"px";
-			}
-		});
-		visible.forEach(card=>{card.style.left=(Math.round(card.offsetLeft/12)*12)+"px";card.style.top=(Math.round(card.offsetTop/12)*12)+"px"});
+	});
+
+	canvas.classList.toggle("layout-edit-active", !!cfg.edit);
+	canvas.classList.toggle("layout-locked", !cfg.edit);
+
+	if (cfg.action === "undo" && engine.undo.length) {
+		try {
+			const prior = JSON.parse(engine.undo.pop());
+			gridState.forEach((it, id) => { if (prior[id]) Object.assign(it, prior[id]); });
+		} catch (_ue) {}
+		applyGridDOM();
 		sync();
+	} else if (cfg.action === "align") {
+		historyPush();
+		resolveGridCollisions();
+		compactGridUpward();
+		applyGridDOM();
+		sync();
+	} else {
+		applyGridDOM();
 	}
-	if(cfg.restore){const card=cards.get(cfg.restore);if(card)card.classList.remove("layout-hidden")}
-	let previousCanvasWidth=canvas.clientWidth;
-	const resize=()=>{
-		const currentWidth=canvas.clientWidth;
-		if(Math.abs(currentWidth-previousCanvasWidth)>1){
-			cards.forEach((card,id)=>{
-				const d=defs[id];if(!d)return;
-				const w=Math.min(currentWidth,Math.max(Math.min(180,currentWidth),(Math.min(100,Number(d.w_pct)||50)/100)*currentWidth));
-				card.style.width=w+"px";
-				card.style.left=Math.min((Math.max(0,Number(d.x_pct)||0)/100)*currentWidth,currentWidth-w)+"px";
-			});
-			previousCanvasWidth=currentWidth;
-		}
-		setCanvasHeight();
+
+	window.__revirResetSmartCanvas = function() {
+		try { localStorage.removeItem(CACHE_KEY); } catch (_e) {}
+		const rstBtn = document.querySelector('[data-key="widget_layout_reset_' + CSS.escape(cfg.page) + '"]');
+		if (rstBtn) { rstBtn.click(); return true; }
+		return false;
 	};
-	resize();if(!canvas.dataset.resizeBound){new ResizeObserver(resize).observe(canvas);canvas.dataset.resizeBound="1"}
+
+	if (!canvas.dataset.resizeBound) {
+		let prevW = canvas.clientWidth;
+		new ResizeObserver(() => {
+			if (Math.abs(canvas.clientWidth - prevW) > 2) {
+				prevW = canvas.clientWidth;
+				applyGridDOM();
+			}
+		}).observe(canvas);
+		canvas.dataset.resizeBound = "1";
+	}
 })();
 </script>
 """
@@ -10673,13 +11139,14 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 		).fetchall()
 
 	dossier_layout_defaults = {
-		"vision": {"id": "vision", "x_pct": 0, "y_px": 0, "w_pct": 49, "h_px": 190, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Bilgi Mavi"]},
-		"behavior": {"id": "behavior", "x_pct": 51, "y_px": 0, "w_pct": 49, "h_px": 190, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Yeşil"]},
-		"hair": {"id": "hair", "x_pct": 0, "y_px": 205, "w_pct": 49, "h_px": 205, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Turkuaz"]},
-		"hearing": {"id": "hearing", "x_pct": 51, "y_px": 205, "w_pct": 49, "h_px": 205, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Bilgi Mavi"]},
-		"harmful": {"id": "harmful", "x_pct": 0, "y_px": 425, "w_pct": 49, "h_px": 205, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Uyarı Kırmızı"]},
-		"clinical": {"id": "clinical", "x_pct": 51, "y_px": 425, "w_pct": 49, "h_px": 205, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Turkuaz"]},
-		"vaccination": {"id": "vaccination", "x_pct": 0, "y_px": 645, "w_pct": 49, "h_px": 205, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Yeşil"]},
+		"vision": {"id": "vision", "x_pct": 0, "y_px": 0, "w_pct": 49, "h_px": 200, "col": 0, "row": 0, "col_span": 6, "row_span": 3, "min_col_span": 4, "min_row_span": 3, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Bilgi Mavi"]},
+		"behavior": {"id": "behavior", "x_pct": 51, "y_px": 0, "w_pct": 49, "h_px": 200, "col": 6, "row": 0, "col_span": 6, "row_span": 3, "min_col_span": 4, "min_row_span": 3, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Yeşil"]},
+		"hair": {"id": "hair", "x_pct": 0, "y_px": 212, "w_pct": 49, "h_px": 205, "col": 0, "row": 3, "col_span": 6, "row_span": 3, "min_col_span": 4, "min_row_span": 3, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Turkuaz"]},
+		"hearing": {"id": "hearing", "x_pct": 51, "y_px": 212, "w_pct": 49, "h_px": 205, "col": 6, "row": 3, "col_span": 6, "row_span": 3, "min_col_span": 4, "min_row_span": 3, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Bilgi Mavi"]},
+		"harmful": {"id": "harmful", "x_pct": 0, "y_px": 424, "w_pct": 49, "h_px": 205, "col": 0, "row": 6, "col_span": 6, "row_span": 3, "min_col_span": 4, "min_row_span": 3, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Uyarı Kırmızı"]},
+		"clinical": {"id": "clinical", "x_pct": 51, "y_px": 424, "w_pct": 49, "h_px": 205, "col": 6, "row": 6, "col_span": 6, "row_span": 3, "min_col_span": 4, "min_row_span": 3, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Turkuaz"]},
+		"vaccination": {"id": "vaccination", "x_pct": 0, "y_px": 636, "w_pct": 49, "h_px": 205, "col": 0, "row": 9, "col_span": 6, "row_span": 3, "min_col_span": 4, "min_row_span": 3, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Yeşil"]},
+		"vaccination_info": {"id": "vaccination_info", "x_pct": 51, "y_px": 636, "w_pct": 49, "h_px": 205, "col": 6, "row": 9, "col_span": 6, "row_span": 3, "min_col_span": 4, "min_row_span": 3, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Bilgi Mavi"]},
 	}
 	dossier_layout, dossier_edit, dossier_magnetic, dossier_action = render_layout_toolbar(
 		"layout_dossier_cards", dossier_layout_defaults, edit_key=f"layout_dossier_edit_{person_id}"
@@ -11311,6 +11778,7 @@ def _render_dossier_tab_overview(person: sqlite3.Row, person_id: int, hp: sqlite
 
 	# Card 8: Sağlık Bakanlığı Takvim Yönlendirmesi
 	with scr_c2:
+		_render_layout_widget_marker("vaccination_info")
 		with ui.container(border=True):
 			ui.markdown("##### 🏛️ T.C. Sağlık Bakanlığı Takvimi")
 			ui.caption("Öğrencinin tüm bebeklik ve okul çağı aşılarını resmi Sağlık Bakanlığı matris tablosu üstünde incelemek ve işaretlemek için:")
@@ -12569,6 +13037,7 @@ def render_gemini_overview_command_center(s_date: str, e_date: str) -> None:
 	is_on, api_key, model = _get_active_gemini_config()
 	if not is_on:
 		return
+	_render_layout_widget_marker("overview_gemini")
 	with ui.container(border=True):
 		ui.markdown("##### 🤖 Gemini AI Klinik Komuta Merkezi <small>(KVKK Korumalı Doğal Dil Sorgu & Salgın Radarı)</small>", unsafe_allow_html=True)
 		tab_nlq, tab_epi = ui.tabs([
@@ -18280,11 +18749,66 @@ def render_overview() -> None:
 	today = date.today().isoformat()
 	is_archive = e_date < today
 	overview_layout_defaults = {
-		"overview_stats": {"id": "overview_stats", "x_pct": 0, "y_px": 0, "w_pct": 100, "h_px": 150, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Turkuaz"]},
-		"overview_quick_links": {"id": "overview_quick_links", "x_pct": 0, "y_px": 165, "w_pct": 100, "h_px": 125, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Bilgi Mavi"]},
-		"overview_pending": {"id": "overview_pending", "x_pct": 0, "y_px": 305, "w_pct": 49, "h_px": 520, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Turkuaz"]},
-		"overview_outbreak": {"id": "overview_outbreak", "x_pct": 51, "y_px": 305, "w_pct": 49, "h_px": 520, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Uyarı Kırmızı"]},
-		"overview_recent": {"id": "overview_recent", "x_pct": 0, "y_px": 840, "w_pct": 100, "h_px": 470, "visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Yeşil"]},
+		"overview_stats": {
+			"id": "overview_stats", "col": 0, "row": 0, "col_span": 12, "row_span": 4,
+			"min_col_span": 6, "min_row_span": 3,
+			"x_pct": 0, "y_px": 0, "w_pct": 100, "h_px": 260,
+			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Turkuaz"],
+		},
+		"overview_quick_links": {
+			"id": "overview_quick_links", "col": 0, "row": 4, "col_span": 12, "row_span": 2,
+			"min_col_span": 4, "min_row_span": 2,
+			"x_pct": 0, "y_px": 272, "w_pct": 100, "h_px": 124,
+			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Bilgi Mavi"],
+		},
+		"overview_meds": {
+			"id": "overview_meds", "col": 0, "row": 6, "col_span": 6, "row_span": 4,
+			"min_col_span": 4, "min_row_span": 3,
+			"x_pct": 0, "y_px": 408, "w_pct": 50, "h_px": 260,
+			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Turkuaz"],
+		},
+		"overview_chart": {
+			"id": "overview_chart", "col": 6, "row": 6, "col_span": 6, "row_span": 5,
+			"min_col_span": 4, "min_row_span": 4,
+			"x_pct": 50, "y_px": 408, "w_pct": 50, "h_px": 328,
+			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Bilgi Mavi"],
+		},
+		"overview_diabetes": {
+			"id": "overview_diabetes", "col": 0, "row": 10, "col_span": 6, "row_span": 4,
+			"min_col_span": 4, "min_row_span": 3,
+			"x_pct": 0, "y_px": 680, "w_pct": 50, "h_px": 260,
+			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Bilgi Mavi"],
+		},
+		"overview_calendar": {
+			"id": "overview_calendar", "col": 6, "row": 11, "col_span": 6, "row_span": 5,
+			"min_col_span": 4, "min_row_span": 3,
+			"x_pct": 50, "y_px": 748, "w_pct": 50, "h_px": 328,
+			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Turkuaz"],
+		},
+		"overview_gemini": {
+			"id": "overview_gemini", "col": 0, "row": 16, "col_span": 12, "row_span": 4,
+			"min_col_span": 6, "min_row_span": 4,
+			"x_pct": 0, "y_px": 1088, "w_pct": 100, "h_px": 260,
+			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Bilgi Mavi"],
+		},
+		"overview_pending": {
+			"id": "overview_pending", "col": 0, "row": 20, "col_span": 6, "row_span": 6,
+			"min_col_span": 5, "min_row_span": 4,
+			"x_pct": 0, "y_px": 1360, "w_pct": 50, "h_px": 396,
+			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Turkuaz"],
+		},
+		"overview_outbreak": {
+			"id": "overview_outbreak", "col": 6, "row": 20, "col_span": 6, "row_span": 6,
+			"min_col_span": 5, "min_row_span": 4,
+			"x_pct": 50, "y_px": 1360, "w_pct": 50, "h_px": 396,
+			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Uyarı Kırmızı"],
+		},
+		"overview_recent": {
+			"id": "overview_recent", "col": 0, "row": 26, "col_span": 12, "row_span": 7,
+			"min_col_span": 6, "min_row_span": 4,
+			"x_pct": 0, "y_px": 1768, "w_pct": 100, "h_px": 464,
+			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Yeşil"],
+		},
 	}
 	overview_layout, overview_edit, overview_magnetic, overview_action = render_layout_toolbar(
 		"layout_overview", overview_layout_defaults, edit_key="layout_overview_edit"
@@ -18315,62 +18839,62 @@ def render_overview() -> None:
 			metric_cols[4].metric(f"Ölçüm ({active_ay['name']})", counts["measurements"])
 			metric_cols[5].metric("Alerji / Kronik", counts["risk_profiles"])
 
-		# Günün Öncelikli Hemşire İş Özeti Şeridi
-		dashboard_check_errors: list[str] = []
-		try:
-			_ov_pend_doses = sum(1 for _d in get_scheduled_doses_for_date(date.today()) if not _d.get("is_logged"))
-		except Exception:
-			LOGGER.exception("Genel Bakış: bekleyen ilaç dozları kontrol edilemedi")
-			_ov_pend_doses = None
-			dashboard_check_errors.append("bekleyen ilaç dozları")
-		try:
-			_ov_open_fups = len(get_pending_followup_visits())
-		except Exception:
-			LOGGER.exception("Genel Bakış: bekleyen izlem ve sevkler kontrol edilemedi")
-			_ov_open_fups = None
-			dashboard_check_errors.append("bekleyen izlem ve sevkler")
-		try:
-			_ov_inv_al = get_infirmary_inventory_alerts(days_horizon=14)
-			_ov_inv_warn = len(_ov_inv_al["expired"]) + len(_ov_inv_al["critical_stock"])
-		except Exception:
-			LOGGER.exception("Genel Bakış: stok ve son kullanma tarihi uyarıları kontrol edilemedi")
-			_ov_inv_warn = None
-			dashboard_check_errors.append("stok ve son kullanma tarihi uyarıları")
-		try:
-			_ov_cc = get_fridge_temp_logs(limit=1)
-			_ov_cc_bad = bool(_ov_cc and is_fridge_temp_alert(_ov_cc[0].get("fridge_temp_c")))
-		except Exception:
-			LOGGER.exception("Genel Bakış: soğuk zincir durumu kontrol edilemedi")
-			_ov_cc_bad = None
-			dashboard_check_errors.append("soğuk zincir durumu")
+			# Günün Öncelikli Hemşire İş Özeti Şeridi
+			dashboard_check_errors: list[str] = []
+			try:
+				_ov_pend_doses = sum(1 for _d in get_scheduled_doses_for_date(date.today()) if not _d.get("is_logged"))
+			except Exception:
+				LOGGER.exception("Genel Bakış: bekleyen ilaç dozları kontrol edilemedi")
+				_ov_pend_doses = None
+				dashboard_check_errors.append("bekleyen ilaç dozları")
+			try:
+				_ov_open_fups = len(get_pending_followup_visits())
+			except Exception:
+				LOGGER.exception("Genel Bakış: bekleyen izlem ve sevkler kontrol edilemedi")
+				_ov_open_fups = None
+				dashboard_check_errors.append("bekleyen izlem ve sevkler")
+			try:
+				_ov_inv_al = get_infirmary_inventory_alerts(days_horizon=14)
+				_ov_inv_warn = len(_ov_inv_al["expired"]) + len(_ov_inv_al["critical_stock"])
+			except Exception:
+				LOGGER.exception("Genel Bakış: stok ve son kullanma tarihi uyarıları kontrol edilemedi")
+				_ov_inv_warn = None
+				dashboard_check_errors.append("stok ve son kullanma tarihi uyarıları")
+			try:
+				_ov_cc = get_fridge_temp_logs(limit=1)
+				_ov_cc_bad = bool(_ov_cc and is_fridge_temp_alert(_ov_cc[0].get("fridge_temp_c")))
+			except Exception:
+				LOGGER.exception("Genel Bakış: soğuk zincir durumu kontrol edilemedi")
+				_ov_cc_bad = None
+				dashboard_check_errors.append("soğuk zincir durumu")
 
-		if dashboard_check_errors:
-			ui.warning(
-				"⚠️ Bazı sağlık kontrollerinin durumu alınamadı: "
-				+ ", ".join(dashboard_check_errors)
-				+ ". Bu kontroller için aşağıdaki yeşil duruma güvenmeyin."
-			)
+			if dashboard_check_errors:
+				ui.warning(
+					"⚠️ Bazı sağlık kontrollerinin durumu alınamadı: "
+					+ ", ".join(dashboard_check_errors)
+					+ ". Bu kontroller için aşağıdaki yeşil duruma güvenmeyin."
+				)
 
-		_prio_chips: list[str] = []
-		if _ov_pend_doses is not None and _ov_pend_doses > 0:
-			_prio_chips.append(f"<span class='revir-status-chip warning'>💊 {_ov_pend_doses} Bekleyen İlaç Dozu</span>")
-		if _ov_open_fups is not None and _ov_open_fups > 0:
-			_prio_chips.append(f"<span class='revir-status-chip info'>⏳ {_ov_open_fups} Açık İzlem / Sevk</span>")
-		if _ov_inv_warn is not None and _ov_inv_warn > 0:
-			_prio_chips.append(f"<span class='revir-status-chip danger'>📦 {_ov_inv_warn} Kritik / SKT Stok</span>")
-		if _ov_cc_bad is True:
-			_prio_chips.append("<span class='revir-status-chip danger'>❄️ Soğuk Zincir Sapması!</span>")
-		if _prio_chips:
-			ui.markdown(
-				f"<div style='display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:4px 0 10px 0;'>"
-				f"<span style='font-size:12px;font-weight:800;color:var(--text-muted);'>📌 Günün Öncelikleri:</span>"
-				f"{''.join(_prio_chips)}</div>",
-				unsafe_allow_html=True,
-			)
-		elif dashboard_check_errors:
-			ui.caption("⚠️ Bazı öncelik kontrolleri tamamlanamadı; sonuçlar doğrulanana kadar bu alanı boş kabul etmeyin.")
-		else:
-			ui.caption("🟢 **Günün Öncelikleri:** Bekleyen ilaç dozu, açık sevk/izlem veya kritik stok uyarısı bulunmuyor.")
+			_prio_chips: list[str] = []
+			if _ov_pend_doses is not None and _ov_pend_doses > 0:
+				_prio_chips.append(f"<span class='revir-status-chip warning'>💊 {_ov_pend_doses} Bekleyen İlaç Dozu</span>")
+			if _ov_open_fups is not None and _ov_open_fups > 0:
+				_prio_chips.append(f"<span class='revir-status-chip info'>⏳ {_ov_open_fups} Açık İzlem / Sevk</span>")
+			if _ov_inv_warn is not None and _ov_inv_warn > 0:
+				_prio_chips.append(f"<span class='revir-status-chip danger'>📦 {_ov_inv_warn} Kritik / SKT Stok</span>")
+			if _ov_cc_bad is True:
+				_prio_chips.append("<span class='revir-status-chip danger'>❄️ Soğuk Zincir Sapması!</span>")
+			if _prio_chips:
+				ui.markdown(
+					f"<div style='display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:4px 0 4px 0;'>"
+					f"<span style='font-size:12px;font-weight:800;color:var(--text-muted);'>📌 Günün Öncelikleri:</span>"
+					f"{''.join(_prio_chips)}</div>",
+					unsafe_allow_html=True,
+				)
+			elif dashboard_check_errors:
+				ui.caption("⚠️ Bazı öncelik kontrolleri tamamlanamadı; sonuçlar doğrulanana kadar bu alanı boş kabul etmeyin.")
+			else:
+				ui.caption("🟢 **Günün Öncelikleri:** Bekleyen ilaç dozu, açık sevk/izlem veya kritik stok uyarısı bulunmuyor.")
 
 	if is_section_visible("overview_quick_links"):
 		_render_layout_widget_marker("overview_quick_links")
@@ -18398,9 +18922,10 @@ def render_overview() -> None:
 					ui.session_state["target_page"] = "💉 İnsülin & Diyabet Yönetimi"
 					ui.rerun()
 
-	# Bugünün Hemşire Masası (2 Sütunlu Bento Panosu: Bekleyen İlaçlar + Diyabetli Öğrenciler + 14 Günlük Grafik)
+	# Bugünün Hemşire Masası (2 Sütunlu Bento Panosu: Bekleyen İlaçlar + Diyabetli Öğrenciler + 14 Günlük Grafik + Takvim)
 	bento_l, bento_r = ui.columns([1.05, 1.0], gap="medium")
 	with bento_l:
+		_render_layout_widget_marker("overview_meds")
 		with ui.container(border=True):
 			b_med_h1, b_med_h2 = ui.columns([2.2, 1.1])
 			with b_med_h1:
@@ -18432,6 +18957,7 @@ def render_overview() -> None:
 				if len(pend_doses) > 4:
 					ui.caption(f"… ve {len(pend_doses) - 4} bekleyen doz daha.")
 
+		_render_layout_widget_marker("overview_diabetes")
 		with ui.container(border=True):
 			b_diab_h1, b_diab_h2 = ui.columns([2.2, 1.1])
 			with b_diab_h1:
@@ -18468,6 +18994,7 @@ def render_overview() -> None:
 		if is_section_visible("overview_charts"):
 			chart_window = _overview_chart_window(date.today(), s_date, e_date)
 			try:
+				_render_layout_widget_marker("overview_chart")
 				with ui.container(border=True):
 					ui.markdown("##### 📊 Seçili Eğitim Yılındaki Son 14 Takvim Günü")
 					if chart_window is None:
@@ -18490,6 +19017,7 @@ def render_overview() -> None:
 		if is_section_visible("overview_calendar_events"):
 			try:
 				from school_calendar import render_overview_calendar_widget
+				_render_layout_widget_marker("overview_calendar")
 				render_overview_calendar_widget(
 					connect_db_fn=connect_db,
 					get_active_gemini_config_fn=_get_active_gemini_config,
@@ -18510,51 +19038,52 @@ def render_overview() -> None:
 
 	if is_section_visible("overview_recent_ops"):
 		_render_layout_widget_marker("overview_recent")
-		top_op1, top_op2 = ui.columns([4, 1.2])
-		with top_op1:
-			ui.markdown("### 🕒 Son Yapılan İşlemler")
-		with top_op2:
-			op_limit = ui.selectbox("Kayıt Limiti", [15, 30, 50, 100], index=1, key="sel_recent_ops_limit", label_visibility="collapsed")
-		recent_ops = get_recent_operations(limit=op_limit)
-		if not recent_ops:
-			ui.info("Henüz revir başvurusu veya sağlık taraması kaydı bulunmuyor.")
-		else:
-			for op in recent_ops:
-				r_col, dos_col, btn_col = ui.columns([11.4, 0.95, 0.95])
-				with r_col:
-					badges = []
-					if op["date_str"]:
-						badges.append(f"<span style='color:var(--text-muted); font-size:12.5px; font-weight:600;'>{html.escape(op['date_str'])}</span>")
-					if op["class_name"] and op["class_name"] != "—":
-						badges.append(f"<span style='background:#e0f2fe; color:#0369a1; padding:2px 8px; border-radius:6px; font-weight:700; font-size:13px;'>{html.escape(op['class_name'])}</span>")
-					disp_op_name = mask_kvkk_value(op["full_name"], "name")
-					badges.append(f"<span style='font-weight:700; color:var(--text-heading); font-size:14.5px;'>{html.escape(disp_op_name)}</span>")
-					if op["student_no"]:
-						badges.append(f"<span style='background:#f1f5f9; color:#475569; padding:2px 7px; border-radius:6px; font-weight:600; font-size:12.5px;'>{html.escape(op['student_no'])}</span>")
-					if is_kvkk_privacy_active():
-						if op["details"]:
-							masked_med = mask_kvkk_value(" · ".join(op["details"]), "medical")
-							badges.append(f"<span style='color:var(--text-muted);'>·</span><span style='color:var(--text-muted); font-size:13px; font-weight:600;'>{html.escape(masked_med)}</span>")
-					else:
-						for d in op["details"]:
-							clean_d = html.escape(d)
-							badges.append(f"<span style='color:var(--text-muted);'>·</span><span style='color:var(--text-main); font-size:13.5px; font-weight:500;'>{clean_d}</span>")
+		with ui.container(border=True):
+			top_op1, top_op2 = ui.columns([4, 1.2])
+			with top_op1:
+				ui.markdown("### 🕒 Son Yapılan İşlemler")
+			with top_op2:
+				op_limit = ui.selectbox("Kayıt Limiti", [15, 30, 50, 100], index=1, key="sel_recent_ops_limit", label_visibility="collapsed")
+			recent_ops = get_recent_operations(limit=op_limit)
+			if not recent_ops:
+				ui.info("Henüz revir başvurusu veya sağlık taraması kaydı bulunmuyor.")
+			else:
+				for op in recent_ops:
+					r_col, dos_col, btn_col = ui.columns([11.4, 0.95, 0.95])
+					with r_col:
+						badges = []
+						if op["date_str"]:
+							badges.append(f"<span style='color:var(--text-muted); font-size:12.5px; font-weight:600;'>{html.escape(op['date_str'])}</span>")
+						if op["class_name"] and op["class_name"] != "—":
+							badges.append(f"<span style='background:#e0f2fe; color:#0369a1; padding:2px 8px; border-radius:6px; font-weight:700; font-size:13px;'>{html.escape(op['class_name'])}</span>")
+						disp_op_name = mask_kvkk_value(op["full_name"], "name")
+						badges.append(f"<span style='font-weight:700; color:var(--text-heading); font-size:14.5px;'>{html.escape(disp_op_name)}</span>")
+						if op["student_no"]:
+							badges.append(f"<span style='background:#f1f5f9; color:#475569; padding:2px 7px; border-radius:6px; font-weight:600; font-size:12.5px;'>{html.escape(op['student_no'])}</span>")
+						if is_kvkk_privacy_active():
+							if op["details"]:
+								masked_med = mask_kvkk_value(" · ".join(op["details"]), "medical")
+								badges.append(f"<span style='color:var(--text-muted);'>·</span><span style='color:var(--text-muted); font-size:13px; font-weight:600;'>{html.escape(masked_med)}</span>")
+						else:
+							for d in op["details"]:
+								clean_d = html.escape(d)
+								badges.append(f"<span style='color:var(--text-muted);'>·</span><span style='color:var(--text-main); font-size:13.5px; font-weight:500;'>{clean_d}</span>")
 
-					content_html = " ".join(badges)
-					ui.markdown(
-						f"<div class='revir-op-row'>{content_html}</div>",
-						unsafe_allow_html=True,
-					)
-				with dos_col:
-					if ui.button("📂", key=f"btn_dos_op_{op['key']}", help="Kişi Dosyasını Aç", use_container_width=True):
-						set_active_person(int(op["student_id"]))
-						open_person_dossier_dialog(int(op["student_id"]))
-				with btn_col:
-					if ui.button("✏️", key=f"btn_edit_op_{op['key']}", help="Bu işlemi düzenle", use_container_width=True):
-						if op["type"] == "visit":
-							open_edit_visit_dialog(op["id"])
-						elif op["type"] == "screening":
-							open_screening_dialog(op["student_id"], op["class_name"])
+						content_html = " ".join(badges)
+						ui.markdown(
+							f"<div class='revir-op-row'>{content_html}</div>",
+							unsafe_allow_html=True,
+						)
+					with dos_col:
+						if ui.button("📂", key=f"btn_dos_op_{op['key']}", help="Kişi Dosyasını Aç", use_container_width=True):
+							set_active_person(int(op["student_id"]))
+							open_person_dossier_dialog(int(op["student_id"]))
+					with btn_col:
+						if ui.button("✏️", key=f"btn_edit_op_{op['key']}", help="Bu işlemi düzenle", use_container_width=True):
+							if op["type"] == "visit":
+								open_edit_visit_dialog(op["id"])
+							elif op["type"] == "screening":
+								open_screening_dialog(op["student_id"], op["class_name"])
 
 	render_draggable_resizable_canvas(
 		"layout_overview",
@@ -18562,227 +19091,6 @@ def render_overview() -> None:
 		overview_edit,
 		magnetic=overview_magnetic,
 		action=overview_action,
-	)
-
-	# Genel Bakış Pencereleri İçin Tıkla-Basılı Tut / Sürükle Yeniden Boyutlandırma Sistemi
-	ui.markdown(
-		"""<style>
-		.revir-ov-resizable {
-			position: relative !important;
-			overflow: auto !important;
-			transition: box-shadow 0.15s ease;
-		}
-		.revir-ov-resizable.revir-ov-resizing {
-			outline: 2px dashed var(--teal, #0d9488) !important;
-			box-shadow: 0 10px 28px rgba(13, 148, 136, 0.18) !important;
-			user-select: none !important;
-		}
-		.revir-ov-handle-r {
-			position: absolute;
-			top: 8px;
-			right: 0;
-			width: 8px;
-			bottom: 14px;
-			cursor: ew-resize;
-			z-index: 15;
-		}
-		.revir-ov-handle-b {
-			position: absolute;
-			left: 8px;
-			right: 14px;
-			bottom: 0;
-			height: 8px;
-			cursor: ns-resize;
-			z-index: 15;
-		}
-		.revir-ov-handle-se {
-			position: absolute;
-			right: 2px;
-			bottom: 2px;
-			width: 16px;
-			height: 16px;
-			cursor: nwse-resize;
-			z-index: 16;
-			border-radius: 0 0 8px 0;
-			background: linear-gradient(135deg, transparent 48%, rgba(13,148,136,0.45) 50%, transparent 56%, rgba(13,148,136,0.7) 75%);
-			opacity: 0.65;
-			transition: opacity 0.15s ease;
-		}
-		.revir-ov-resizable:hover .revir-ov-handle-se {
-			opacity: 1;
-		}
-		.revir-ov-size-badge {
-			position: fixed;
-			z-index: 99999;
-			background: #0f172a;
-			color: #ffffff;
-			font-size: 11px;
-			font-weight: 800;
-			padding: 3px 8px;
-			border-radius: 6px;
-			pointer-events: none;
-			box-shadow: 0 4px 12px rgba(0,0,0,0.22);
-		}
-		</style>
-		<script>
-		(function() {
-			function initOverviewResizableCards() {
-				if (!document.getElementById('revir-overview-resizable-anchor')) return;
-				var cards = document.querySelectorAll('.revir-main .revir-card');
-				var storeKey = 'revir_ov_card_sizes_v1';
-				var saved = {};
-				try { saved = JSON.parse(localStorage.getItem(storeKey) || '{}') || {}; } catch (e) { saved = {}; }
-
-				function saveSizes() {
-					try { localStorage.setItem(storeKey, JSON.stringify(saved)); } catch (e) {}
-				}
-
-				cards.forEach(function(card, idx) {
-					if (card.dataset.ovResizeInit === '1') return;
-					card.dataset.ovResizeInit = '1';
-					card.classList.add('revir-ov-resizable');
-
-					var cardId = 'ov_card_' + idx;
-					if (saved[cardId]) {
-						if (saved[cardId].h) card.style.height = saved[cardId].h + 'px';
-						if (saved[cardId].wPct) {
-							var colWrap = card.parentElement;
-							var colsRow = colWrap && colWrap.parentElement;
-							if (colsRow && colsRow.classList.contains('revir-columns') && colsRow.children.length === 2) {
-								var cIdx = Array.prototype.indexOf.call(colsRow.children, colWrap);
-								var p1 = Math.max(25, Math.min(75, saved[cardId].wPct));
-								if (cIdx === 0) colsRow.style.gridTemplateColumns = p1 + 'fr ' + (100 - p1) + 'fr';
-								else if (cIdx === 1) colsRow.style.gridTemplateColumns = (100 - p1) + 'fr ' + p1 + 'fr';
-							} else {
-								card.style.width = saved[cardId].wPct + '%';
-							}
-						}
-					}
-
-					function startResize(e, mode) {
-						e.preventDefault();
-						e.stopPropagation();
-						var startX = e.clientX;
-						var startY = e.clientY;
-						var rect = card.getBoundingClientRect();
-						var startW = rect.width;
-						var startH = rect.height;
-						var colWrap = card.parentElement;
-						var colsRow = colWrap && colWrap.parentElement;
-						var isTwoCol = !!(colsRow && colsRow.classList.contains('revir-columns') && colsRow.children.length === 2);
-						var rowW = isTwoCol ? colsRow.getBoundingClientRect().width : (card.parentElement ? card.parentElement.getBoundingClientRect().width : window.innerWidth);
-						var colIndex = isTwoCol ? Array.prototype.indexOf.call(colsRow.children, colWrap) : -1;
-
-						card.classList.add('revir-ov-resizing');
-						var badge = document.createElement('div');
-						badge.className = 'revir-ov-size-badge';
-						document.body.appendChild(badge);
-
-						function onMove(mv) {
-							var dx = mv.clientX - startX;
-							var dy = mv.clientY - startY;
-							var newH = Math.round(Math.max(110, startH + dy));
-							var newW = Math.round(Math.max(220, startW + (colIndex === 1 ? -dx : dx)));
-
-							if (mode === 'b' || mode === 'se' || mode === 'hold') {
-								card.style.height = newH + 'px';
-								saved[cardId] = saved[cardId] || {};
-								saved[cardId].h = newH;
-							}
-							if (mode === 'r' || mode === 'se' || mode === 'hold') {
-								if (isTwoCol && rowW > 0) {
-									var pct = Math.max(25, Math.min(75, Math.round((newW / rowW) * 100)));
-									if (colIndex === 0) colsRow.style.gridTemplateColumns = pct + 'fr ' + (100 - pct) + 'fr';
-									else if (colIndex === 1) colsRow.style.gridTemplateColumns = (100 - pct) + 'fr ' + pct + 'fr';
-									saved[cardId] = saved[cardId] || {};
-									saved[cardId].wPct = pct;
-								} else if (rowW > 0) {
-									var wp = Math.max(35, Math.min(100, Math.round((newW / rowW) * 100)));
-									card.style.width = wp + '%';
-									saved[cardId] = saved[cardId] || {};
-									saved[cardId].wPct = wp;
-								}
-							}
-							var curR = card.getBoundingClientRect();
-							badge.textContent = Math.round(curR.width) + ' × ' + Math.round(curR.height) + ' px';
-							badge.style.left = (mv.clientX + 12) + 'px';
-							badge.style.top = (mv.clientY + 12) + 'px';
-						}
-
-						function onUp() {
-							card.classList.remove('revir-ov-resizing');
-							if (badge && badge.parentNode) badge.parentNode.removeChild(badge);
-							saveSizes();
-							window.removeEventListener('pointermove', onMove);
-							window.removeEventListener('pointerup', onUp);
-						}
-
-						window.addEventListener('pointermove', onMove);
-						window.addEventListener('pointerup', onUp);
-					}
-
-					// Sağ kenar, alt kenar ve sağ-alt köşe tutamaçları
-					var hR = document.createElement('div');
-					hR.className = 'revir-ov-handle-r';
-					hR.title = 'Genişliği ayarlamak için basılı tutup sürükleyin';
-					hR.addEventListener('pointerdown', function(e) { startResize(e, 'r'); });
-
-					var hB = document.createElement('div');
-					hB.className = 'revir-ov-handle-b';
-					hB.title = 'Yüksekliği ayarlamak için basılı tutup sürükleyin';
-					hB.addEventListener('pointerdown', function(e) { startResize(e, 'b'); });
-
-					var hSE = document.createElement('div');
-					hSE.className = 'revir-ov-handle-se';
-					hSE.title = 'Boyutlandırmak için basılı tutup sürükleyin · Sıfırlamak için çift tıklayın';
-					hSE.addEventListener('pointerdown', function(e) { startResize(e, 'se'); });
-					hSE.addEventListener('dblclick', function(e) {
-						e.stopPropagation();
-						card.style.height = '';
-						card.style.width = '';
-						var colWrap = card.parentElement;
-						var colsRow = colWrap && colWrap.parentElement;
-						if (colsRow && colsRow.classList.contains('revir-columns')) {
-							colsRow.style.gridTemplateColumns = '';
-						}
-						delete saved[cardId];
-						saveSizes();
-					});
-
-					card.appendChild(hR);
-					card.appendChild(hB);
-					card.appendChild(hSE);
-
-					// Kartın boş bir yerine tıklayıp basılı tutunca (320ms) doğrudan boyutlandırma modu!
-					card.addEventListener('pointerdown', function(e) {
-						if (e.button !== 0) return;
-						var tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : '';
-						if (['button', 'input', 'select', 'textarea', 'a', 'label', 'svg', 'path'].indexOf(tag) !== -1) return;
-						if (e.target && e.target.closest && e.target.closest('button, a, input, select, textarea, .revir-ov-handle-r, .revir-ov-handle-b, .revir-ov-handle-se, .revir-table-outer, .revir-tbl-handle-r, .revir-tbl-handle-l, .revir-tbl-handle-b, .revir-tbl-handle-se, .revir-tbl-handle-sw, .revir-col-resizer')) return;
-						var holdEvent = { clientX: e.clientX, clientY: e.clientY, preventDefault: function(){}, stopPropagation: function(){} };
-						var holdTimer = setTimeout(function() {
-							startResize(holdEvent, 'hold');
-						}, 320);
-						function cancelHold() {
-							clearTimeout(holdTimer);
-							window.removeEventListener('pointerup', cancelHold);
-							window.removeEventListener('pointermove', moveCheck);
-						}
-						function moveCheck(mv) {
-							if (Math.abs(mv.clientX - e.clientX) > 6 || Math.abs(mv.clientY - e.clientY) > 6) {
-								cancelHold();
-							}
-						}
-						window.addEventListener('pointerup', cancelHold);
-						window.addEventListener('pointermove', moveCheck);
-					});
-				});
-			}
-			initOverviewResizableCards();
-			setTimeout(initOverviewResizableCards, 120);
-		})();
-		</script>""",
-		unsafe_allow_html=True,
 	)
 
 

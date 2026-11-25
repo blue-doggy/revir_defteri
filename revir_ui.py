@@ -4154,17 +4154,55 @@ body.revir-busy .revir-btn { cursor: progress; }
 .revir-chat-resize-nw:hover::after { opacity: 1; }
 #revir-chat-bubble.expanded { width: 550px; height: 675px; }
 
-/* Sayfa İçi Kutucuk Yerleşimi & Boyutlandırma Modu (Takvim Hariç) */
-.revir-box-host { position: relative; box-sizing: border-box; transition: border-color 0.15s ease, box-shadow 0.15s ease; }
+/* Sayfa İçi 12-Sütunlu Sanal Izgara Kutucuk Yerleşimi & Boyutlandırma Modu (Takvim Hariç) */
+.revir-grid-zone {
+	position: relative;
+	display: grid !important;
+	grid-template-columns: repeat(12, minmax(0, 1fr));
+	gap: 12px;
+	align-items: stretch;
+	grid-auto-flow: row;
+	width: 100%;
+}
+.revir-grid-zone > * { grid-column: 1 / -1; min-width: 0; }
+body.revir-layout-edit .revir-grid-zone {
+	background-image: repeating-linear-gradient(
+		to right,
+		rgba(13,148,136,0.06) 0,
+		rgba(13,148,136,0.06) calc((100% - 132px) / 12),
+		transparent calc((100% - 132px) / 12),
+		transparent calc((100% - 132px) / 12 + 12px)
+	);
+	border-radius: 12px;
+	padding-bottom: 12px;
+}
+.revir-box-host {
+	position: relative;
+	box-sizing: border-box;
+	container-type: inline-size;
+	transition: transform 0.16s cubic-bezier(0.2, 0.8, 0.2, 1), border-color 0.15s ease, box-shadow 0.15s ease;
+}
 body.revir-layout-edit .revir-box-host {
-	outline: 1.5px dashed rgba(13,148,136,0.45); outline-offset: 2px; border-radius: 12px;
+	outline: 1.5px dashed rgba(13,148,136,0.55); outline-offset: 2px; border-radius: 12px;
 }
 body.revir-layout-edit .revir-box-host:hover {
 	outline-color: var(--teal); box-shadow: 0 6px 20px rgba(13,148,136,0.12);
 }
-.revir-box-host.revir-box-dragging { opacity: 0.48; outline: 2px solid var(--teal) !important; }
-.revir-box-host.revir-box-drop-before { box-shadow: 0 -4px 0 0 var(--teal), 0 0 0 2px rgba(13,148,136,0.22) !important; }
-.revir-box-host.revir-box-drop-after { box-shadow: 0 4px 0 0 var(--teal), 0 0 0 2px rgba(13,148,136,0.22) !important; }
+.revir-box-host.revir-box-dragging { opacity: 0.52; outline: 2px solid var(--teal) !important; transform: scale(0.99); }
+.revir-box-host.revir-box-drop-before { box-shadow: 0 -4px 0 0 var(--teal), -4px 0 0 0 rgba(13,148,136,0.35), 0 0 0 2px rgba(13,148,136,0.22) !important; }
+.revir-box-host.revir-box-drop-after { box-shadow: 0 4px 0 0 var(--teal), 4px 0 0 0 rgba(13,148,136,0.35), 0 0 0 2px rgba(13,148,136,0.22) !important; }
+.revir-box-host.revir-box-swap-target {
+	outline: 3px solid #f59e0b !important;
+	box-shadow: 0 0 0 5px rgba(245,158,11,0.24), 0 12px 28px rgba(245,158,11,0.18) !important;
+	transform: scale(1.008);
+}
+.revir-box-swap-pill {
+	display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+	z-index: 30; background: #b45309; color: #ffffff; font: 800 12px sans-serif;
+	padding: 6px 12px; border-radius: 999px; pointer-events: none;
+	box-shadow: 0 6px 18px rgba(0,0,0,0.24);
+}
+.revir-box-host.revir-box-swap-target > .revir-box-swap-pill { display: block; }
 .revir-box-host.revir-box-resizing {
 	transition: none !important; user-select: none !important;
 	outline: 2px dashed var(--teal) !important; box-shadow: 0 10px 26px rgba(13,148,136,0.18) !important;
@@ -4183,8 +4221,9 @@ body.revir-layout-edit .revir-box-host > .revir-box-toolbar { display: inline-fl
 	padding: 0; line-height: 1;
 }
 .revir-box-tbtn:hover { background: var(--mint); color: var(--teal); }
-.revir-box-drag { cursor: grab; color: var(--teal); font-size: 13px; }
+.revir-box-drag { cursor: grab; color: var(--teal); font-size: 13px; touch-action: none; }
 .revir-box-drag:active { cursor: grabbing; }
+.revir-box-span-tag { font-size: 10.5px; font-weight: 800; color: var(--teal); padding: 0 4px; white-space: nowrap; }
 .revir-box-res-r {
 	position: absolute; top: 10px; right: -4px; bottom: 14px; width: 8px;
 	cursor: ew-resize; z-index: 21; touch-action: none; display: none;
@@ -4204,6 +4243,17 @@ body.revir-box-resize-on .revir-box-host:hover > .revir-box-res-se { opacity: 0.
 body.revir-layout-edit .revir-box-res-r,
 body.revir-layout-edit .revir-box-res-b,
 body.revir-layout-edit .revir-box-res-se { display: block; opacity: 0.92; }
+/* Daralan grid kutularında okunabilirliği korumak için içerik kırılım kuralları */
+@container (max-width: 720px) {
+	.revir-cols-6, .revir-cols-5 { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
+}
+@container (max-width: 500px) {
+	.revir-cols-6, .revir-cols-5, .revir-cols-4, .revir-cols-3 { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+	.revir-cols-2 { grid-template-columns: repeat(1, minmax(0, 1fr)) !important; }
+}
+@media (max-width: 760px) {
+	.revir-grid-zone > .revir-box-host { grid-column: 1 / -1 !important; width: auto !important; height: auto !important; }
+}
 #revir-layout-bar {
 	position: fixed; bottom: 18px; left: 24px; z-index: 3390;
 	display: none; align-items: center; gap: 8px; flex-wrap: wrap;
@@ -6624,8 +6674,9 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 		});
 	})();
 
-	// Sayfa İçi Kutucuk Yer Değiştirme & Boyutlandırma Motoru (TAKVİM HARİÇ)
+	// Sayfa İçi 12-Sütunlu Sanal Izgara Yerleşim, İtme, Takas & Boyutlandırma Motoru (TAKVİM HARİÇ)
 	var BOX_STORE_KEY = "revir_box_layout_v1";
+	var GRID_COLS = 12;
 	function loadBoxStore() {
 		var obj = loadResizeStore(BOX_STORE_KEY);
 		if (!obj || typeof obj !== "object") obj = {};
@@ -6646,9 +6697,16 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 		var raw = (hdr ? hdr.textContent : el.textContent) || "kutu";
 		return raw.replace(/\s+/g, " ").trim().slice(0, 40) || "kutu";
 	}
+	function inferMinGridCols(el) {
+		if (!el) return 4;
+		if (el.querySelector(".revir-table-outer, table, .revir-chart-card, .revir-cols-5, .revir-cols-6")) return 6;
+		if (el.classList.contains("revir-cols")) return 6;
+		return 4;
+	}
 	function isEligibleBoxNode(el) {
 		if (!el || el.nodeType !== 1) return false;
-		if (el.closest(".cal-leaf, .cal-grid, [data-no-box-layout='1'], .revir-a4-sheet, .revir-a4-sheet-landscape, #revir-modal-body, #revir-sidebar, #revir-chat-bubble")) return false;
+		if (el.closest(".cal-leaf, .cal-grid, [data-no-box-layout='1'], [data-layout-canvas], .revir-a4-sheet, .revir-a4-sheet-landscape, #revir-modal-body, #revir-sidebar, #revir-chat-bubble")) return false;
+		if (el.hasAttribute("data-layout-widget") || el.hasAttribute("data-layout-canvas")) return false;
 		if (el.classList.contains("revir-card") || el.classList.contains("revir-chart-card") || el.classList.contains("revir-metric")) return true;
 		if (el.tagName === "DETAILS" && el.classList.contains("revir-expander")) return true;
 		if (el.classList.contains("revir-cols") && !el.querySelector(":scope > .revir-sticky-col")) {
@@ -6659,11 +6717,12 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 	function isEligibleGridCol(colEl) {
 		if (!colEl || !colEl.classList || !colEl.classList.contains("revir-col")) return false;
 		if (colEl.classList.contains("revir-sticky-col")) return false;
+		if (colEl.closest("[data-layout-canvas], [data-layout-widget]")) return false;
 		return !!colEl.querySelector(".revir-card, .revir-metric, .revir-chart-card, details.revir-expander, .revir-btn");
 	}
 	function clearBoxDrops() {
-		document.querySelectorAll(".revir-box-drop-before, .revir-box-drop-after").forEach(function(n) {
-			n.classList.remove("revir-box-drop-before", "revir-box-drop-after");
+		document.querySelectorAll(".revir-box-drop-before, .revir-box-drop-after, .revir-box-swap-target").forEach(function(n) {
+			n.classList.remove("revir-box-drop-before", "revir-box-drop-after", "revir-box-swap-target");
 		});
 	}
 	function syncLayoutBtnState() {
@@ -6674,7 +6733,7 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 		btn.classList.toggle("active", document.body.classList.contains("revir-layout-edit"));
 		if (isCal) btn.title = "Takvim sayfası kutucuk düzenlemesinden hariçtir";
 		else if (!boxLayoutEnabled) btn.title = "Kutucuk düzeni Ayarlar bölümünden kapalı";
-		else btn.title = "Sayfa içindeki kutucukların yerini ve boyutunu değiştir (Takvim hariç)";
+		else btn.title = "Sayfa içindeki kutucukların 12 sütunlu ızgarada yerini ve boyutunu değiştir (Takvim hariç)";
 	}
 	window.__revirSyncLayoutBtn = syncLayoutBtnState;
 
@@ -6696,8 +6755,7 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 		if (String(lastRenderedPage || "").includes("Genel Bakış")) {
 			var overviewEditState = document.querySelector('input[data-key="layout_overview_edit"]');
 			if (overviewEditState) {
-				var targetChecked = !!nxt;
-				var targetValue = targetChecked ? "true" : "false";
+				var targetValue = nxt ? "true" : "false";
 				if (overviewEditState.value !== targetValue) {
 					overviewEditState.value = targetValue;
 					overviewEditState.dispatchEvent(new Event("change", { bubbles: true }));
@@ -6706,7 +6764,7 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 		}
 		syncLayoutBtnState();
 		if (nxt) {
-			showToast("🧩 Kutucuk düzenleme modu açıldı — sürükleyerek yer değiştirin veya kenarlardan boyutlandırın");
+			showToast("🧩 12 sütunlu akıllı düzen açıldı — merkeze sürükleyince takas, araya bırakınca itme yapar");
 		}
 	};
 	document.addEventListener("change", function(e) {
@@ -6724,12 +6782,20 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 			delete store.pages[pg];
 			saveBoxStore(store);
 		}
+		if (typeof window.__revirResetSmartCanvas === "function") {
+			window.__revirResetSmartCanvas();
+		}
 		showToast("↺ Bu sayfanın kutucuk yerleşimi ve boyutları sıfırlandı");
 		sendAction({ action: "refresh" });
 	};
 
 	window.__revirResetAllBoxLayouts = function() {
-		try { localStorage.removeItem(BOX_STORE_KEY); } catch (_e) {}
+		try {
+			localStorage.removeItem(BOX_STORE_KEY);
+			Object.keys(localStorage).forEach(function(k) {
+				if (k.indexOf("revir_smart_grid_v2:") === 0) localStorage.removeItem(k);
+			});
+		} catch (_e) {}
 		document.body.classList.remove("revir-layout-edit");
 		syncLayoutBtnState();
 		showToast("↺ Tüm sayfa kutucuk yerleşimleri ve boyutları sıfırlandı");
@@ -6757,45 +6823,121 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 		var boxId = hostEl.dataset.boxId;
 		if (!boxId) return;
 		hostEl.classList.add("revir-box-host");
+		var minCol = inferMinGridCols(hostEl);
+		var isGridZone = !isHoriz && zoneEl.classList.contains("revir-grid-zone");
 		var store = loadBoxStore();
 		var pData = getPageBoxData(store, pg);
 		var sv = pData.sizes[boxId];
-		if (sv) {
-			if (sv.w) {
-				hostEl.style.width = sv.w + "px";
+
+		function applyBoxSpanAndSize(sizeObj) {
+			if (isGridZone) {
+				var cs = (sizeObj && sizeObj.colSpan) ? Math.max(minCol, Math.min(GRID_COLS, Number(sizeObj.colSpan))) : GRID_COLS;
+				hostEl.style.gridColumn = "span " + cs;
+				hostEl.style.width = "";
+				hostEl.style.maxWidth = "";
+				if (spanBadge) spanBadge.textContent = cs + "/" + GRID_COLS;
+			} else if (sizeObj && sizeObj.w) {
+				hostEl.style.width = sizeObj.w + "px";
 				hostEl.style.maxWidth = "none";
 			}
-			if (sv.h) {
-				hostEl.style.height = sv.h + "px";
+			if (sizeObj && sizeObj.h) {
+				hostEl.style.height = sizeObj.h + "px";
 				hostEl.style.overflow = "auto";
 			}
 		}
-		if (hostEl.dataset.boxDecorated === "1") return;
+
+		if (hostEl.dataset.boxDecorated === "1") {
+			applyBoxSpanAndSize(sv);
+			return;
+		}
 		hostEl.dataset.boxDecorated = "1";
+
+		var swapPill = document.createElement("div");
+		swapPill.className = "revir-box-swap-pill";
+		swapPill.textContent = "🔁 Yer Değiştir";
+		hostEl.appendChild(swapPill);
 
 		// Araç çubuğu (Düzenleme modunda görünür)
 		var tb = document.createElement("div");
 		tb.className = "revir-box-toolbar";
 		tb.addEventListener("click", function(e) { e.stopPropagation(); });
 
+		var spanBadge = document.createElement("span");
+		spanBadge.className = "revir-box-span-tag";
+		if (isGridZone) {
+			var curCs = (sv && sv.colSpan) ? Math.max(minCol, Math.min(GRID_COLS, Number(sv.colSpan))) : GRID_COLS;
+			spanBadge.textContent = curCs + "/" + GRID_COLS;
+		}
+
 		var dragBtn = document.createElement("button");
 		dragBtn.type = "button";
 		dragBtn.className = "revir-box-tbtn revir-box-drag";
-		dragBtn.title = "Sürükleyip diğer kutucuğun üzerine bırakın";
+		dragBtn.title = "Sürükle: araya bırakınca iter, kutu ortasına bırakınca yer değiştirir";
 		dragBtn.textContent = "⋮⋮";
-		dragBtn.draggable = true;
-		dragBtn.addEventListener("dragstart", function(e) {
-			window.__revirDragBox = { el: hostEl, zone: zoneEl, zoneId: zoneId, isHoriz: isHoriz };
+		dragBtn.addEventListener("pointerdown", function(e) {
+			if (e.button !== 0 || !document.body.classList.contains("revir-layout-edit")) return;
+			e.preventDefault();
+			e.stopPropagation();
 			hostEl.classList.add("revir-box-dragging");
-			if (e.dataTransfer) {
-				e.dataTransfer.effectAllowed = "move";
-				try { e.dataTransfer.setData("text/plain", boxId); } catch (_de) {}
+			var activeTarget = null;
+			var dropMode = "after";
+
+			function zoneSiblings() {
+				return Array.prototype.slice.call(zoneEl.children).filter(function(ch) {
+					return ch !== hostEl && ch.dataset && ch.dataset.boxZone === zoneId;
+				});
 			}
-		});
-		dragBtn.addEventListener("dragend", function() {
-			hostEl.classList.remove("revir-box-dragging");
-			clearBoxDrops();
-			window.__revirDragBox = null;
+
+			function onDragMove(mv) {
+				clearBoxDrops();
+				activeTarget = null;
+				var sibs = zoneSiblings();
+				for (var i = 0; i < sibs.length; i++) {
+					var cand = sibs[i];
+					var r = cand.getBoundingClientRect();
+					if (mv.clientX >= r.left && mv.clientX <= r.right && mv.clientY >= r.top && mv.clientY <= r.bottom) {
+						activeTarget = cand;
+						var inCenterX = mv.clientX >= r.left + r.width * 0.25 && mv.clientX <= r.right - r.width * 0.25;
+						var inCenterY = mv.clientY >= r.top + r.height * 0.22 && mv.clientY <= r.bottom - r.height * 0.22;
+						if (inCenterX && inCenterY) {
+							dropMode = "swap";
+							cand.classList.add("revir-box-swap-target");
+						} else {
+							var before = isGridZone ? (mv.clientX < r.left + r.width / 2 && mv.clientY < r.bottom - r.height * 0.25 || mv.clientY < r.top + r.height * 0.28) : (isHoriz ? (mv.clientX < r.left + r.width / 2) : (mv.clientY < r.top + r.height / 2));
+							dropMode = before ? "before" : "after";
+							cand.classList.add(before ? "revir-box-drop-before" : "revir-box-drop-after");
+						}
+						break;
+					}
+				}
+			}
+
+			function onDragUp() {
+				window.removeEventListener("pointermove", onDragMove);
+				window.removeEventListener("pointerup", onDragUp);
+				window.removeEventListener("pointercancel", onDragUp);
+				hostEl.classList.remove("revir-box-dragging");
+				clearBoxDrops();
+				if (activeTarget && activeTarget.parentNode === zoneEl) {
+					if (dropMode === "swap") {
+						var placeholder = document.createElement("span");
+						zoneEl.insertBefore(placeholder, hostEl);
+						zoneEl.insertBefore(hostEl, activeTarget);
+						zoneEl.insertBefore(activeTarget, placeholder);
+						placeholder.parentNode.removeChild(placeholder);
+					} else if (dropMode === "before") {
+						zoneEl.insertBefore(hostEl, activeTarget);
+					} else {
+						zoneEl.insertBefore(hostEl, activeTarget.nextSibling);
+					}
+					var newOrder = Array.prototype.slice.call(zoneEl.children).filter(function(ch) { return ch.dataset && ch.dataset.boxZone === zoneId; });
+					persistZoneOrder(pg, zoneId, newOrder);
+				}
+			}
+
+			window.addEventListener("pointermove", onDragMove);
+			window.addEventListener("pointerup", onDragUp);
+			window.addEventListener("pointercancel", onDragUp);
 		});
 
 		function moveSibling(dir) {
@@ -6814,14 +6956,14 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 		var prevBtn = document.createElement("button");
 		prevBtn.type = "button";
 		prevBtn.className = "revir-box-tbtn revir-box-mv-prev";
-		prevBtn.title = isHoriz ? "Sola Taşı" : "Yukarı Taşı";
+		prevBtn.title = isHoriz ? "Sola Taşı" : "Önceye / Yukarı Taşı";
 		prevBtn.textContent = isHoriz ? "◀" : "▲";
 		prevBtn.addEventListener("click", function(e) { e.preventDefault(); e.stopPropagation(); moveSibling(-1); });
 
 		var nextBtn = document.createElement("button");
 		nextBtn.type = "button";
 		nextBtn.className = "revir-box-tbtn revir-box-mv-next";
-		nextBtn.title = isHoriz ? "Sağa Taşı" : "Aşağı Taşı";
+		nextBtn.title = isHoriz ? "Sağa Taşı" : "Sonraya / Aşağı Taşı";
 		nextBtn.textContent = isHoriz ? "▶" : "▼";
 		nextBtn.addEventListener("click", function(e) { e.preventDefault(); e.stopPropagation(); moveSibling(1); });
 
@@ -6837,6 +6979,10 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 			hostEl.style.maxWidth = "";
 			hostEl.style.height = "";
 			hostEl.style.overflow = "";
+			if (isGridZone) {
+				hostEl.style.gridColumn = "span " + GRID_COLS;
+				spanBadge.textContent = GRID_COLS + "/" + GRID_COLS;
+			}
 			var stNow = loadBoxStore();
 			var pd = getPageBoxData(stNow, pg);
 			delete pd.sizes[boxId];
@@ -6845,40 +6991,16 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 		});
 
 		tb.appendChild(dragBtn);
+		if (isGridZone) tb.appendChild(spanBadge);
 		tb.appendChild(prevBtn);
 		tb.appendChild(nextBtn);
 		tb.appendChild(rstBtn);
 		hostEl.appendChild(tb);
+		applyBoxSpanAndSize(sv);
 
-		hostEl.addEventListener("dragover", function(e) {
-			var cur = window.__revirDragBox;
-			if (!cur || cur.el === hostEl || cur.zone !== zoneEl || cur.zoneId !== zoneId) return;
-			e.preventDefault();
-			clearBoxDrops();
-			var r = hostEl.getBoundingClientRect();
-			var before = isHoriz ? (e.clientX < r.left + r.width / 2) : (e.clientY < r.top + r.height / 2);
-			hostEl.classList.add(before ? "revir-box-drop-before" : "revir-box-drop-after");
-		});
-		hostEl.addEventListener("dragleave", function() {
-			hostEl.classList.remove("revir-box-drop-before", "revir-box-drop-after");
-		});
-		hostEl.addEventListener("drop", function(e) {
-			var cur = window.__revirDragBox;
-			if (!cur || cur.el === hostEl || cur.zone !== zoneEl || cur.zoneId !== zoneId) return;
-			e.preventDefault();
-			e.stopPropagation();
-			var r = hostEl.getBoundingClientRect();
-			var before = isHoriz ? (e.clientX < r.left + r.width / 2) : (e.clientY < r.top + r.height / 2);
-			clearBoxDrops();
-			if (before) zoneEl.insertBefore(cur.el, hostEl);
-			else zoneEl.insertBefore(cur.el, hostEl.nextSibling);
-			var newOrder = Array.prototype.slice.call(zoneEl.children).filter(function(ch) { return ch.dataset && ch.dataset.boxZone === zoneId; });
-			persistZoneOrder(pg, zoneId, newOrder);
-		});
-
-		// Kenar & Köşe Boyutlandırma Tutamaçları
+		// Kenar & Köşe 12-Sütuna Kilitli Boyutlandırma Tutamaçları
 		[
-			["r", "revir-box-res-r", "Genişliği ayarlamak için sürükleyin · Sıfırlamak için çift tıklayın"],
+			["r", "revir-box-res-r", "Genişliği 12 sütunlu ızgarada ayarlamak için sürükleyin · Sıfırlamak için çift tıklayın"],
 			["b", "revir-box-res-b", "Yüksekliği ayarlamak için sürükleyin · Sıfırlamak için çift tıklayın"],
 			["se", "revir-box-res-se", "Kutucuğu köşeden sürükleyerek boyutlandırın · Sıfırlamak için çift tıklayın"]
 		].forEach(function(hcfg) {
@@ -6891,15 +7013,31 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 				e.preventDefault();
 				e.stopPropagation();
 				var rect = hostEl.getBoundingClientRect();
+				var zRect = zoneEl.getBoundingClientRect();
 				var startX = e.clientX, startY = e.clientY, startW = rect.width, startH = rect.height;
 				var live = Object.assign({}, (getPageBoxData(loadBoxStore(), pg).sizes[boxId] || {}));
 				hostEl.classList.add("revir-box-resizing");
 				function onMove(mv) {
+					var badgeTxt = "";
 					if (hcfg[0] === "r" || hcfg[0] === "se") {
-						var nw = Math.round(Math.max(180, Math.min(1800, startW + (mv.clientX - startX))));
-						hostEl.style.width = nw + "px";
-						hostEl.style.maxWidth = "none";
-						live.w = nw;
+						if (isGridZone && zRect.width > 0) {
+							var tgtW = Math.max(160, startW + (mv.clientX - startX));
+							var colUnit = (zRect.width + 12) / GRID_COLS;
+							var nSpan = Math.max(minCol, Math.min(GRID_COLS, Math.round((tgtW + 12) / colUnit)));
+							hostEl.style.gridColumn = "span " + nSpan;
+							hostEl.style.width = "";
+							hostEl.style.maxWidth = "";
+							live.colSpan = nSpan;
+							delete live.w;
+							if (spanBadge) spanBadge.textContent = nSpan + "/" + GRID_COLS;
+							badgeTxt = nSpan + "/" + GRID_COLS + " sütun (%" + Math.round((nSpan / GRID_COLS) * 100) + ")";
+						} else {
+							var nw = Math.round(Math.max(180, Math.min(1800, startW + (mv.clientX - startX))));
+							hostEl.style.width = nw + "px";
+							hostEl.style.maxWidth = "none";
+							live.w = nw;
+							badgeTxt = nw + " px";
+						}
 					}
 					if (hcfg[0] === "b" || hcfg[0] === "se") {
 						var nh = Math.round(Math.max(72, Math.min(1600, startH + (mv.clientY - startY))));
@@ -6908,14 +7046,15 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 						live.h = nh;
 					}
 					var cr = hostEl.getBoundingClientRect();
-					showResizeBadge(Math.round(cr.width) + " × " + Math.round(cr.height) + " px", mv.clientX, mv.clientY);
+					var txt = badgeTxt ? (badgeTxt + " · " + Math.round(cr.height) + " px") : (Math.round(cr.width) + " × " + Math.round(cr.height) + " px");
+					showResizeBadge(txt, mv.clientX, mv.clientY);
 				}
 				function onUp() {
 					hostEl.classList.remove("revir-box-resizing");
 					hideResizeBadge();
 					var stNow = loadBoxStore();
 					var pd = getPageBoxData(stNow, pg);
-					if (live.w || live.h) pd.sizes[boxId] = live;
+					if (live.colSpan || live.w || live.h) pd.sizes[boxId] = live;
 					else delete pd.sizes[boxId];
 					saveBoxStore(stNow);
 					window.removeEventListener("pointermove", onMove);
@@ -6935,6 +7074,11 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 				if (hcfg[0] === "r" || hcfg[0] === "se") {
 					hostEl.style.width = "";
 					hostEl.style.maxWidth = "";
+					if (isGridZone) {
+						hostEl.style.gridColumn = "span " + GRID_COLS;
+						if (spanBadge) spanBadge.textContent = GRID_COLS + "/" + GRID_COLS;
+					}
+					delete pd.sizes[boxId].colSpan;
 					delete pd.sizes[boxId].w;
 				}
 				if (hcfg[0] === "b" || hcfg[0] === "se") {
@@ -6942,7 +7086,7 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 					hostEl.style.overflow = "";
 					delete pd.sizes[boxId].h;
 				}
-				if (!pd.sizes[boxId].w && !pd.sizes[boxId].h) delete pd.sizes[boxId];
+				if (!pd.sizes[boxId].colSpan && !pd.sizes[boxId].w && !pd.sizes[boxId].h) delete pd.sizes[boxId];
 				saveBoxStore(stNow);
 			});
 			hostEl.appendChild(hEl);
@@ -6961,6 +7105,7 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 
 		function setupZone(zoneEl, zoneId, items, isHoriz) {
 			if (!zoneEl || items.length === 0) return;
+			if (!isHoriz) zoneEl.classList.add("revir-grid-zone");
 			var seen = {};
 			items.forEach(function(item) {
 				var fp = boxTextFingerprint(item);
@@ -6987,12 +7132,12 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 			});
 		}
 
-		// 1. Dikey kutucuk bölgeleri (ana sayfa, sekme panelleri, dikey sütunlar)
+		// 1. 12-Sütunlu Dikey/Izgara Kutucuk Bölgeleri (özel tuval dışındaki tüm bölümler)
 		var vZones = [mainInner].concat(
 			Array.prototype.slice.call(mainInner.querySelectorAll(".revir-tab-pane, .revir-col"))
 		);
 		vZones.forEach(function(zEl, zIdx) {
-			if (zEl.closest(".cal-leaf, .cal-grid, [data-no-box-layout='1'], #revir-modal-body")) return;
+			if (zEl.closest(".cal-leaf, .cal-grid, [data-no-box-layout='1'], [data-layout-canvas], #revir-modal-body")) return;
 			var ch = Array.prototype.slice.call(zEl.children).filter(isEligibleBoxNode);
 			if (ch.length >= 1) setupZone(zEl, "vz:" + zIdx, ch, false);
 		});
@@ -7000,7 +7145,7 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 		// 2. Yatay sütun kutucuk bölgeleri (yan yana duran 2-4 kart/metrik sütunları)
 		var hZones = Array.prototype.slice.call(mainInner.querySelectorAll(".revir-cols"));
 		hZones.forEach(function(colsEl, hIdx) {
-			if (colsEl.closest(".cal-leaf, .cal-grid, [data-no-box-layout='1'], #revir-modal-body")) return;
+			if (colsEl.closest(".cal-leaf, .cal-grid, [data-no-box-layout='1'], [data-layout-canvas], #revir-modal-body")) return;
 			if (colsEl.querySelector(":scope > .revir-sticky-col")) return;
 			var cols = Array.prototype.slice.call(colsEl.children).filter(isEligibleGridCol);
 			if (cols.length >= 2) setupZone(colsEl, "hz:" + hIdx, cols, true);
