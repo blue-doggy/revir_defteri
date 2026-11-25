@@ -21,6 +21,8 @@ PROJECT_ROOT = Path(SPECPATH).resolve()
 
 datas = [
     (str(PROJECT_ROOT / "persantil.py"), "."),
+    (str(PROJECT_ROOT / "app_navigation.py"), "."),
+    (str(PROJECT_ROOT / "report_settings_ui.py"), "."),
     (str(PROJECT_ROOT / "revir_ui.py"), "."),
     (str(PROJECT_ROOT / "gemini_assistant.py"), "."),
     (str(PROJECT_ROOT / "insulin_diabetes.py"), "."),
@@ -38,6 +40,8 @@ binaries = []
 hiddenimports = [
     "revir_ui",
     "persantil",
+    "app_navigation",
+    "report_settings_ui",
     "gemini_assistant",
     "insulin_diabetes",
     "cafeteria",

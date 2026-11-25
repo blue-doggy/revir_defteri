@@ -28,6 +28,8 @@ import revir_ui as ui
 import gemini_assistant as gai
 import insulin_diabetes as idm
 import document_studio as dstudio
+import app_navigation
+import report_settings_ui
 import cafeteria as caf
 import school_calendar
 
@@ -129,7 +131,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.32.0"
+_DEFAULT_APP_VERSION = "1.33.0"
 
 
 def _load_app_version() -> str:
@@ -160,33 +162,8 @@ EVRAKLAR_DIR.mkdir(parents=True, exist_ok=True)
 EGITIM_YILLARI_DIR.mkdir(parents=True, exist_ok=True)
 AUTO_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 
-PAGE_NAV_GROUPS: tuple[tuple[str, tuple[tuple[str, str, str, str | None], ...]], ...] = (
-	("GÜNLÜK KLİNİK", (
-		("📊 Genel Bakış", "📊", "Genel Bakış", "open_followups"),
-		("🩺 Revir Kaydı", "🩺", "Revir Kaydı", "today_visits"),
-		("💊 İlaç Takip Sistemi", "💊", "İlaç Takip", "active_meds"),
-		("💉 İnsülin & Diyabet Yönetimi", "💉", "İnsülin & Diyabet", "diabetes_profiles"),
-		("💓 Vital Takip", "💓", "Vital Takip", None),
-	)),
-	("KİŞİ & TARAMA", (
-		("👥 Öğrenciler", "👥", "Öğrenciler", None),
-		("👫 Yetişkinler", "👫", "Yetişkinler", None),
-		("🏫 Okul Taraması", "🏫", "Okul Taraması", None),
-	)),
-	("GELİŞİM & PLAN", (
-		("📋 Sağlık Profili ve Bakım Planı", "📋", "Sağlık Profili & Plan", None),
-		("📏 Ölçüm ve Gelişim", "📏", "Ölçüm & Gelişim", None),
-		("📅 Takvim & Planlama", "📅", "Takvim & Planlama", None),
-		("🍽️ Yemekhane Yönetimi", "🍽️", "Yemekhane Yönetimi", None),
-	)),
-	("BELGE & SİSTEM", (
-		("🖨️ Raporlar", "🖨️", "Raporlar", None),
-		("📁 Evraklar", "📁", "Evraklar", None),
-		("⚙️ Ayarlar", "⚙️", "Ayarlar", None),
-	)),
-)
-
-PAGES = [page_value for _group, items in PAGE_NAV_GROUPS for page_value, _icon, _label, _badge in items]
+PAGE_NAV_GROUPS = app_navigation.PAGE_NAV_GROUPS
+PAGES = app_navigation.PAGES
 
 
 _DB_PATH_CACHE: dict[int | None, Path] = {}
@@ -25640,144 +25617,13 @@ def save_report_settings(new_settings: dict[str, Any]) -> None:
 
 
 def render_report_settings_panel(*, key_prefix: str = "rep", in_dialog: bool = False) -> None:
-	"""Kişi ve sınıf raporu çıktılarının bölüm ve detay tercihlerini yönetir (diyalog + Merkezi Ayarlar ortak panel)."""
-	kp = str(key_prefix or "rep").strip() or "rep"
-	ui.markdown("### 🖨️ Rapor Çıktı & Yazdırma Ayarları")
-	ui.caption("Kişi ve sınıf raporu çıktılarında (Word `.docx` ve yazdırma) yer alacak bölümleri ve detay tercihlerini özelleştirin.")
-	cur_cfg = get_report_settings()
-
-	tab_sections, tab_fields, tab_presets = ui.tabs([
-		"📑 Rapor Bölümleri",
-		"🔍 Detay Alanları",
-		"⚡ Hızlı Şablonlar"
-	], orientation="segmented")
-
-	def _after_save(msg: str) -> None:
-		ui.success(msg)
-		if in_dialog:
-			ui.rerun(scope="fragment")
-		else:
-			ui.rerun()
-
-	with tab_presets:
-		ui.markdown("##### ⚡ Hazır Rapor Şablonları")
-		ui.caption("Tek tıkla ihtiyacınıza uygun bir rapor şablonu seçebilirsiniz:")
-		pr_c1, pr_c2 = ui.columns(2)
-		with pr_c1:
-			if ui.button("✅ Tam Kapsamlı Resmi Sağlık Raporu", use_container_width=True, help="Tüm bölümler ve geçmiş kayıtlar eksiksiz dahil edilir.", key=f"{kp}_preset_full"):
-				save_report_settings(dict(DEFAULT_REPORT_SETTINGS))
-				_after_save("Tam kapsamlı resmi rapor şablonu uygulandı!")
-			if ui.button("🩺 Yalnızca Revir & Muayene Raporu", use_container_width=True, help="Sadece kimlik, uyarılar ve revir vizit geçmişi dahil edilir.", key=f"{kp}_preset_visits"):
-				custom_s = dict(DEFAULT_REPORT_SETTINGS)
-				custom_s.update({
-					"include_health_profile": False,
-					"include_growth_summary": False,
-					"include_lab_results": False,
-					"include_measurements_history": False,
-					"include_care_plans": False,
-					"include_vaccinations": False,
-				})
-				save_report_settings(custom_s)
-				_after_save("Yalnızca revir muayene raporu şablonu uygulandı!")
-		with pr_c2:
-			if ui.button("📏 Yalnızca Büyüme & Persantil Raporu", use_container_width=True, help="DSÖ büyüme eğrileri, boy-kilo geçmişi ve persantil değerlendirmesi.", key=f"{kp}_preset_growth"):
-				custom_s = dict(DEFAULT_REPORT_SETTINGS)
-				custom_s.update({
-					"include_visits": False,
-					"include_care_plans": False,
-					"include_lab_results": False,
-					"include_vaccinations": False,
-				})
-				save_report_settings(custom_s)
-				_after_save("Büyüme ve persantil raporu şablonu uygulandı!")
-			if ui.button("📋 Özet Sağlık Künyesi (Vizitsiz Form)", use_container_width=True, help="Alerji, kronik durum, acil notu ve vital özetinden oluşan tek sayfalık form.", key=f"{kp}_preset_summary"):
-				custom_s = dict(DEFAULT_REPORT_SETTINGS)
-				custom_s.update({
-					"include_visits": False,
-					"include_care_plans": False,
-					"include_measurements_history": False,
-					"include_lab_results": False,
-				})
-				save_report_settings(custom_s)
-				_after_save("Özet sağlık künyesi şablonu uygulandı!")
-
-	with tab_sections:
-		ui.markdown("##### 📑 Rapora Dahil Edilecek Ana Bölümler")
-		ui.caption("Rapor çıktısında yer almasını istemediğiniz bölümlerin işaretini kaldırabilirsiniz:")
-		sec_c1, sec_c2 = ui.columns(2)
-		with sec_c1:
-			chk_id = ui.checkbox("👤 Öğrenci Kimlik ve Temel Bilgileri", value=cur_cfg.get("include_id_box", True), key=f"{kp}_chk_id")
-			chk_alert = ui.checkbox("⚠️ Kritik Sağlık & Alerji Uyarı Kutusu", value=cur_cfg.get("include_alert_box", True), key=f"{kp}_chk_alert")
-			chk_hp = ui.checkbox("📋 Sağlık Profili & Tarama Bilgileri", value=cur_cfg.get("include_health_profile", True), key=f"{kp}_chk_hp")
-			chk_growth = ui.checkbox("📏 DSÖ Klinik Büyüme & Persantil Taraması", value=cur_cfg.get("include_growth_summary", True), key=f"{kp}_chk_growth")
-			chk_vitals = ui.checkbox("💓 Vital Bulgular Ölçüm Geçmişi", value=cur_cfg.get("include_vitals", True), key=f"{kp}_chk_vitals")
-			chk_labs = ui.checkbox("🧪 Laboratuvar Tahlil Sonuçları", value=cur_cfg.get("include_lab_results", True), key=f"{kp}_chk_labs")
-		with sec_c2:
-			chk_meas = ui.checkbox("⚖️ Boy, Kilo ve Baş Çevresi Ölçüm Geçmişi", value=cur_cfg.get("include_measurements_history", True), key=f"{kp}_chk_meas")
-			chk_visits = ui.checkbox("🩺 Revir Başvuru ve Muayene Kayıtları", value=cur_cfg.get("include_visits", True), key=f"{kp}_chk_visits")
-			chk_cp = ui.checkbox("📝 Hemşirelik Bakım Planları (NANDA-I)", value=cur_cfg.get("include_care_plans", True), key=f"{kp}_chk_cp")
-			chk_vac = ui.checkbox("💉 Aşı ve Bağışıklama Kayıtları", value=cur_cfg.get("include_vaccinations", True), key=f"{kp}_chk_vac")
-			chk_dis = ui.checkbox("♿ Engellilik / Özel Gereksinim Profili (Varsa)", value=cur_cfg.get("include_disability_profile", True), key=f"{kp}_chk_dis")
-			chk_ai = ui.checkbox("🤖 AI Klinik Analiz & Eksik Veri Bölümü (Varsayılan)", value=cur_cfg.get("include_ai_analysis", False), key=f"{kp}_chk_ai")
-			chk_sig = ui.checkbox("✍️ Yetkili ve Veli İmza / Kaşe Bölümü", value=cur_cfg.get("include_signatures", True), key=f"{kp}_chk_sig")
-			chk_foot = ui.checkbox("ℹ️ Yasal Sorumluluk Reddi / Dipnot", value=cur_cfg.get("include_footer_disclaimer", True), key=f"{kp}_chk_foot")
-
-	with tab_fields:
-		ui.markdown("##### 🔍 Detay Bilgi ve Filtre Tercihleri")
-		fld_c1, fld_c2 = ui.columns(2)
-		with fld_c1:
-			chk_guard = ui.checkbox("📞 Veli Adı ve Telefon Bilgisini Göster", value=cur_cfg.get("show_guardian_contact", True), key=f"{kp}_chk_guard")
-			chk_bg = ui.checkbox("🩸 Kan Grubu Bilgisini Göster", value=cur_cfg.get("show_blood_group", True), key=f"{kp}_chk_bg")
-			chk_sym = ui.checkbox("🩺 Vizit Kayıtlarında Şikayet / Belirtileri Göster", value=cur_cfg.get("show_visit_complaint", True), key=f"{kp}_chk_sym")
-			chk_act = ui.checkbox("🛠️ Vizit Kayıtlarında Yapılan İşlemi Göster", value=cur_cfg.get("show_visit_action", True), key=f"{kp}_chk_act")
-		with fld_c2:
-			chk_obs = ui.checkbox("🔍 Vizit Kayıtlarında Fizik Muayene / Gözlemi Göster", value=cur_cfg.get("show_visit_observation", True), key=f"{kp}_chk_obs")
-			chk_ref = ui.checkbox("🚑 Sevk ve Yönlendirme Durumunu Göster", value=cur_cfg.get("show_visit_referral", True), key=f"{kp}_chk_ref")
-			chk_z = ui.checkbox("📊 Ölçümlerde DSÖ Z-Skorlarını (SDS) Göster", value=cur_cfg.get("show_meas_zscores", True), key=f"{kp}_chk_z")
-			chk_p = ui.checkbox("📈 Ölçümlerde Persantil Dilimlerini (%p) Göster", value=cur_cfg.get("show_meas_percentiles", True), key=f"{kp}_chk_p")
-
-		ui.markdown("---")
-		ui.markdown("###### 🕒 Vizit Kayıt Limiti")
-		limit_opts = [0, 5, 10, 15, 20, 30]
-		cur_lim = cur_cfg.get("visits_limit", 0)
-		lim_idx = limit_opts.index(cur_lim) if cur_lim in limit_opts else 0
-		sel_limit = ui.selectbox(
-			"Raporda listelenecek maksimum vizit sayısı",
-			limit_opts,
-			index=lim_idx,
-			format_func=lambda x: "Tüm Geçmiş Vizitler (Limitsiz)" if x == 0 else f"Son {x} Vizit Kaydı",
-			key=f"{kp}_sel_visits_limit"
-		)
-
-	ui.markdown("---")
-	if ui.button("💾 Rapor Çıktı Ayarlarını Kaydet", type="primary", use_container_width=True, key=f"btn_save_report_settings_{kp}"):
-		new_saved = {
-			"include_id_box": chk_id,
-			"include_alert_box": chk_alert,
-			"include_health_profile": chk_hp,
-			"include_growth_summary": chk_growth,
-			"include_vitals": chk_vitals,
-			"include_lab_results": chk_labs,
-			"include_measurements_history": chk_meas,
-			"include_visits": chk_visits,
-			"include_care_plans": chk_cp,
-			"include_vaccinations": chk_vac,
-			"include_disability_profile": chk_dis,
-			"include_ai_analysis": chk_ai,
-			"include_signatures": chk_sig,
-			"include_footer_disclaimer": chk_foot,
-			"show_guardian_contact": chk_guard,
-			"show_blood_group": chk_bg,
-			"show_visit_complaint": chk_sym,
-			"show_visit_action": chk_act,
-			"show_visit_observation": chk_obs,
-			"show_visit_referral": chk_ref,
-			"show_meas_zscores": chk_z,
-			"show_meas_percentiles": chk_p,
-			"visits_limit": sel_limit,
-		}
-		save_report_settings(new_saved)
-		_after_save("Rapor çıktı ayarları başarıyla kaydedildi!")
+	report_settings_ui.render_report_settings_panel(
+		get_report_settings=get_report_settings,
+		save_report_settings=save_report_settings,
+		default_report_settings=DEFAULT_REPORT_SETTINGS,
+		key_prefix=key_prefix,
+		in_dialog=in_dialog,
+	)
 
 
 @ui.dialog("⚙️ Rapor Çıktı ve Yazdırma Ayarları", width="large", mode="drawer")
@@ -28560,6 +28406,10 @@ def _render_screening_report_workspace(
 	cfg = get_active_report_config()
 	all_classes = [c for c in get_classes() if c != "Sivil / Diğer"]
 	scope_code, _, _ = _normalize_scope_mode(cfg.get("student_scope"), bool(cfg.get("only_risky", False)))
+	wizard_enabled = key_prefix == "dyn_rep"
+	wizard_step_key = f"{key_prefix}_wizard_step"
+	raw_wizard_step = ui.session_state.get(wizard_step_key, 0) if wizard_enabled else 0
+	wizard_step = raw_wizard_step if isinstance(raw_wizard_step, int) and raw_wizard_step in (0, 1, 2) else 0
 
 	if show_config_button:
 		top_c1, top_c2 = ui.columns([3.2, 1.8])
@@ -28582,9 +28432,22 @@ def _render_screening_report_workspace(
 			f"Kapsam: **{'Sadece Riskliler' if scope_code == 'risky_only' else ('Tam Sınıf Listesi' if scope_code == 'all_class' else 'Sadece Verisi Olanlar')}**"
 		)
 
+	if wizard_enabled:
+		step_labels = ["Kapsam ve Tarih", "Önizleme ve Değerlendirme", "Dışa Aktarma"]
+		ui.progress((wizard_step + 1) / len(step_labels))
+		ui.markdown(f"#### Adım {wizard_step + 1}/3 · {step_labels[wizard_step]}")
+
 	# Sınıf seçici
 	if fixed_classes:
 		selected_classes = [c for c in fixed_classes if c in all_classes]
+	elif wizard_enabled and wizard_step > 0:
+		if ui.session_state.get(f"{key_prefix}_cls_mode") == "Belirli Sınıfları Seç":
+			selected_classes = [
+				c for c in (ui.session_state.get(f"{key_prefix}_cls_select") or [])
+				if c in all_classes
+			]
+		else:
+			selected_classes = []
 	else:
 		pref_classes = ui.session_state.pop("dyn_rep_pref_classes", None) if key_prefix == "dyn_rep" else None
 		if pref_classes:
@@ -28617,12 +28480,18 @@ def _render_screening_report_workspace(
 
 	# Tarih / Dönem seçici (3 Mod: Belirli Günler, Tarih Aralığı, En Güncel Kayıtlar)
 	avail_dates = get_available_screening_and_measurement_dates(selected_classes)
-	date_mode_choice = ui.radio(
-		"Tarama Tarihi / Dönem Modu",
-		["📅 Belirli Günler", "📆 Tarih Aralığı", "✨ En Güncel Kayıtlar"],
-		horizontal=True,
-		key=f"{key_prefix}_date_mode",
-	)
+	date_mode_options = ["📅 Belirli Günler", "📆 Tarih Aralığı", "✨ En Güncel Kayıtlar"]
+	if wizard_enabled and wizard_step > 0:
+		date_mode_choice = ui.session_state.get(f"{key_prefix}_date_mode", date_mode_options[0])
+		if date_mode_choice not in date_mode_options:
+			date_mode_choice = date_mode_options[0]
+	else:
+		date_mode_choice = ui.radio(
+			"Tarama Tarihi / Dönem Modu",
+			date_mode_options,
+			horizontal=True,
+			key=f"{key_prefix}_date_mode",
+		)
 
 	selected_dates: list[str] = []
 	d_start: date | None = None
@@ -28633,6 +28502,9 @@ def _render_screening_report_workspace(
 		date_mode_param = "Belirli Günler"
 		if not avail_dates:
 			ui.warning("Seçili sınıf(lar) için kayıtlı okul taraması, ölçüm veya vital verisi bulunamadı.")
+			if wizard_enabled and wizard_step > 0 and ui.button("↩️ Kapsam ve tarihi düzenle", key=f"{key_prefix}_wizard_dates_back"):
+				ui.session_state[wizard_step_key] = 0
+				ui.rerun()
 			return
 		date_lbl_map = {d["date"]: d["label"] for d in avail_dates}
 		date_opts = [d["date"] for d in avail_dates]
@@ -28642,12 +28514,15 @@ def _render_screening_report_workspace(
 			ui.session_state[mod_a_key] = cleaned_mod_a or ([date_opts[0]] if date_opts else [])
 		else:
 			ui.session_state[mod_a_key] = [date_opts[0]] if date_opts else []
-		selected_dates = ui.multiselect(
-			"Kayıtlı Tarama / Ölçüm Günleri",
-			options=date_opts,
-			format_func=lambda d: date_lbl_map.get(d, d),
-			key=mod_a_key,
-		)
+		if wizard_enabled and wizard_step > 0:
+			selected_dates = list(ui.session_state.get(mod_a_key) or [])
+		else:
+			selected_dates = ui.multiselect(
+				"Kayıtlı Tarama / Ölçüm Günleri",
+				options=date_opts,
+				format_func=lambda d: date_lbl_map.get(d, d),
+				key=mod_a_key,
+			)
 		if not selected_dates:
 			ui.info("👆 Rapor oluşturmak için en az bir tarama günü seçin.")
 			return
@@ -28655,11 +28530,26 @@ def _render_screening_report_workspace(
 		date_mode_param = "Tarih Aralığı"
 		min_d = date.fromisoformat(avail_dates[-1]["date"]) if avail_dates else (date.today() - timedelta(days=30))
 		max_d = date.fromisoformat(avail_dates[0]["date"]) if avail_dates else date.today()
-		dc1, dc2 = ui.columns(2)
-		with dc1:
-			d_start = ui.date_input("Başlangıç Tarihi", value=min_d, key=f"{key_prefix}_mod_b_start")
-		with dc2:
-			d_end = ui.date_input("Bitiş Tarihi", value=max_d, key=f"{key_prefix}_mod_b_end")
+		if wizard_enabled and wizard_step > 0:
+			def _stored_date(key: str, fallback: date) -> date:
+				value = ui.session_state.get(key, fallback)
+				if isinstance(value, datetime):
+					return value.date()
+				if isinstance(value, date):
+					return value
+				try:
+					return date.fromisoformat(str(value))
+				except ValueError:
+					return fallback
+
+			d_start = _stored_date(f"{key_prefix}_mod_b_start", min_d)
+			d_end = _stored_date(f"{key_prefix}_mod_b_end", max_d)
+		else:
+			dc1, dc2 = ui.columns(2)
+			with dc1:
+				d_start = ui.date_input("Başlangıç Tarihi", value=min_d, key=f"{key_prefix}_mod_b_start")
+			with dc2:
+				d_end = ui.date_input("Bitiş Tarihi", value=max_d, key=f"{key_prefix}_mod_b_end")
 		if d_start > d_end:
 			ui.error("Başlangıç tarihi bitiş tarihinden büyük olamaz.")
 			return
@@ -28670,7 +28560,14 @@ def _render_screening_report_workspace(
 		]
 	else:
 		date_mode_param = "En Güncel Kayıtlar"
-		ui.info("Her öğrencinin sistemde kayıtlı **en güncel** ölçüm ve tarama verisi otomatik olarak bir araya getirilir.")
+		if not wizard_enabled or wizard_step == 0:
+			ui.info("Her öğrencinin sistemde kayıtlı **en güncel** ölçüm ve tarama verisi otomatik olarak bir araya getirilir.")
+
+	if wizard_enabled and wizard_step == 0:
+		if ui.button("➡️ Önizlemeye Geç", type="primary", use_container_width=True, key=f"{key_prefix}_wizard_next_preview"):
+			ui.session_state[wizard_step_key] = 1
+			ui.rerun()
+		return
 
 	report_df, meta = build_custom_screening_report_data(
 		selected_classes=selected_classes,
@@ -28692,148 +28589,177 @@ def _render_screening_report_workspace(
 
 	if report_df.empty:
 		ui.warning("Seçilen tarih ve filtre kriterlerine göre görüntülenecek öğrenci kaydı bulunamadı.")
+		if wizard_enabled and wizard_step > 0 and ui.button("↩️ Kapsam ve tarihi düzenle", key=f"{key_prefix}_wizard_empty_back"):
+			ui.session_state[wizard_step_key] = 0
+			ui.rerun()
 		return
 
-	ui.markdown("#### 📋 Dinamik Rapor Önizlemesi (Boş Sütunlar Otomatik Kaldırıldı · Riskli Hücreler Renkli)")
-	max_h = 360 if compact else 540
-	tbl_h = min(max_h, max(200, 48 + len(report_df) * 35))
-	try:
-		styled_preview = _build_dynamic_screening_styler(report_df)
-		ui.dataframe(styled_preview, width="stretch", hide_index=True, height=tbl_h)
-	except Exception:
-		ui.dataframe(report_df, width="stretch", hide_index=True, height=tbl_h)
+	if not wizard_enabled or wizard_step == 1:
+		ui.markdown("#### 📋 Dinamik Rapor Önizlemesi (Boş Sütunlar Otomatik Kaldırıldı · Riskli Hücreler Renkli)")
+		max_h = 360 if compact else 540
+		tbl_h = min(max_h, max(200, 48 + len(report_df) * 35))
+		try:
+			styled_preview = _build_dynamic_screening_styler(report_df)
+			ui.dataframe(styled_preview, width="stretch", hide_index=True, height=tbl_h)
+		except Exception:
+			ui.dataframe(report_df, width="stretch", hide_index=True, height=tbl_h)
 
-	if risk_rows and not compact:
-		with ui.expander("📌 Tarama ve Ölçüm Sonucu Risk / Yönlendirme Özeti", expanded=total_risks > 0):
-			ui.dataframe(pd.DataFrame(risk_rows), width="stretch", hide_index=True)
+		if risk_rows and not compact:
+			with ui.expander("📌 Tarama ve Ölçüm Sonucu Risk / Yönlendirme Özeti", expanded=total_risks > 0):
+				ui.dataframe(pd.DataFrame(risk_rows), width="stretch", hide_index=True)
 
 	# Gemini AI Toplu Tarama Analizi & Eksik Veri Bölümü (Aç/Kapat + Serbest/Talimatlı Düzenleme)
 	scr_ai_inc_key = f"{key_prefix}_ai_inc"
 	scr_ai_txt_key = f"{key_prefix}_ai_txt"
 	scr_ai_inst_key = f"{key_prefix}_ai_inst"
-	is_gai_scr, gai_key_scr, gai_model_scr = _get_active_gemini_config()
-	with ui.container(border=True):
-		sa_l, sa_r = ui.columns([3.2, 1.3])
-		with sa_l:
-			ui.markdown("##### 🤖 Gemini AI Toplu Tarama Değerlendirmesi & Eksik Veri Analizi")
-		with sa_r:
-			scr_ai_on = ui.toggle(
-				"✨ Raporlara Dahil Et",
-				value=bool(ui.session_state.get(scr_ai_inc_key, False)),
-				key=scr_ai_inc_key,
-				help="Açıldığında aşağıdaki analiz ve eksik veri bölümü Word, Excel ve HTML/PDF çıktılarına otomatik eklenir.",
-			)
-		if scr_ai_on:
-			# Deterministik eksik veri denetimi (seçili tablo üzerinden)
-			scr_missing_audit: list[str] = []
-			for col_c in report_df.columns:
-				if col_c in ("Okul No", "Ad Soyad", "Sınıf / Şube"):
-					continue
-				s_col = report_df[col_c].astype(str).str.strip()
-				empty_cnt = int(s_col.isin(["", "—", "-", "None", "nan", "Ölçülmedi / Gelmedi", "Belirtilmedi"]).sum())
-				if empty_cnt > 0:
-					pct_e = round(empty_cnt / max(1, len(report_df)) * 100.0, 1)
-					if pct_e >= 10.0 or empty_cnt >= 3:
-						scr_missing_audit.append(f"'{col_c}' sütununda {empty_cnt} öğrencinin verisi eksik / girilmemiş (%{pct_e})")
-			try:
-				with connect_db() as conn_dis_scr:
-					dis_in_scope = conn_dis_scr.execute("SELECT COUNT(*) FROM students WHERE COALESCE(has_disability,0)=1").fetchone()[0]
-				if dis_in_scope > 0:
-					scr_missing_audit.append(f"Kurumda kayıtlı {dis_in_scope} engelli / özel gereksinimli öğrenci bulunuyor (raporda uyarlama ve izlem vurgusu önerilir)")
-			except Exception:
-				dis_in_scope = 0
+	if not wizard_enabled or wizard_step == 1:
+		is_gai_scr, gai_key_scr, gai_model_scr = _get_active_gemini_config()
+		with ui.container(border=True):
+			sa_l, sa_r = ui.columns([3.2, 1.3])
+			with sa_l:
+				ui.markdown("##### 🤖 Gemini AI Toplu Tarama Değerlendirmesi & Eksik Veri Analizi")
+			with sa_r:
+				scr_ai_on = ui.toggle(
+					"✨ Raporlara Dahil Et",
+					value=bool(ui.session_state.get(scr_ai_inc_key, False)),
+					key=scr_ai_inc_key,
+					help="Açıldığında aşağıdaki analiz ve eksik veri bölümü Word, Excel ve HTML/PDF çıktılarına otomatik eklenir.",
+				)
+			if scr_ai_on:
+					# Deterministik eksik veri denetimi (seçili tablo üzerinden)
+				scr_missing_audit: list[str] = []
+				for col_c in report_df.columns:
+					if col_c in ("Okul No", "Ad Soyad", "Sınıf / Şube"):
+						continue
+					s_col = report_df[col_c].astype(str).str.strip()
+					empty_cnt = int(s_col.isin(["", "—", "-", "None", "nan", "Ölçülmedi / Gelmedi", "Belirtilmedi"]).sum())
+					if empty_cnt > 0:
+						pct_e = round(empty_cnt / max(1, len(report_df)) * 100.0, 1)
+						if pct_e >= 10.0 or empty_cnt >= 3:
+							scr_missing_audit.append(f"'{col_c}' sütununda {empty_cnt} öğrencinin verisi eksik / girilmemiş (%{pct_e})")
+				try:
+					with connect_db() as conn_dis_scr:
+						dis_in_scope = conn_dis_scr.execute("SELECT COUNT(*) FROM students WHERE COALESCE(has_disability,0)=1").fetchone()[0]
+					if dis_in_scope > 0:
+						scr_missing_audit.append(f"Kurumda kayıtlı {dis_in_scope} engelli / özel gereksinimli öğrenci bulunuyor (raporda uyarlama ve izlem vurgusu önerilir)")
+				except Exception:
+					dis_in_scope = 0
 
-			if scr_missing_audit:
-				ui.caption("🔍 **Otomatik Eksik Veri Denetimi:** " + " · ".join(scr_missing_audit[:5]))
+				if scr_missing_audit:
+					ui.caption("🔍 **Otomatik Eksik Veri Denetimi:** " + " · ".join(scr_missing_audit[:5]))
 
-			scr_inst = ui.text_input(
-				"💬 Gemini'ye Özel Odak / Düzenleme Talimatı (Opsiyonel)",
-				placeholder="Örn: Okul müdürlüğüne sunulacak resmi dilde özetle | Beslenme ve görme risklerini vurgula | Daha kısa maddeli yap",
-				key=scr_ai_inst_key,
-			)
-			sb1, sb2, sb_brief, sb3 = ui.columns([1.45, 1.25, 1.35, 0.85])
-			with sb1:
-				scr_gen_btn = ui.button("✨ Gemini ile Analiz Oluştur", type="primary", disabled=not is_gai_scr, use_container_width=True, key=f"{key_prefix}_btn_ai_gen")
-			with sb2:
-				scr_rev_btn = ui.button("🪄 Talimatla Düzenlet", type="secondary", disabled=(not is_gai_scr) or (not str(ui.session_state.get(scr_ai_txt_key) or "").strip()), use_container_width=True, key=f"{key_prefix}_btn_ai_rev")
-			with sb_brief:
-				scr_brief_btn = ui.button("📋 1 Sayfalık Yönetici Brifingi", type="secondary", disabled=not is_gai_scr, use_container_width=True, key=f"{key_prefix}_btn_ai_brief")
-			with sb3:
-				if ui.button("🗑️ Temizle", type="secondary", use_container_width=True, key=f"{key_prefix}_btn_ai_clr"):
-					ui.session_state[scr_ai_txt_key] = ""
-					ui.rerun()
+				scr_inst = ui.text_input(
+					"💬 Gemini'ye Özel Odak / Düzenleme Talimatı (Opsiyonel)",
+					placeholder="Örn: Okul müdürlüğüne sunulacak resmi dilde özetle | Beslenme ve görme risklerini vurgula | Daha kısa maddeli yap",
+					key=scr_ai_inst_key,
+				)
+				sb1, sb2, sb_brief, sb3 = ui.columns([1.45, 1.25, 1.35, 0.85])
+				with sb1:
+					scr_gen_btn = ui.button("✨ Gemini ile Analiz Oluştur", type="primary", disabled=not is_gai_scr, use_container_width=True, key=f"{key_prefix}_btn_ai_gen")
+				with sb2:
+					scr_rev_btn = ui.button("🪄 Talimatla Düzenlet", type="secondary", disabled=(not is_gai_scr) or (not str(ui.session_state.get(scr_ai_txt_key) or "").strip()), use_container_width=True, key=f"{key_prefix}_btn_ai_rev")
+				with sb_brief:
+					scr_brief_btn = ui.button("📋 1 Sayfalık Yönetici Brifingi", type="secondary", disabled=not is_gai_scr, use_container_width=True, key=f"{key_prefix}_btn_ai_brief")
+				with sb3:
+					if ui.button("🗑️ Temizle", type="secondary", use_container_width=True, key=f"{key_prefix}_btn_ai_clr"):
+						ui.session_state[scr_ai_txt_key] = ""
+						ui.rerun()
 
-			cohort_sum = {
-				"listelenen_ogrenci_sayisi": len(report_df),
-				"siniflar": meta.get("selected_classes") or [],
-				"tarih_araligi": _format_dyn_dates_header(meta, meta.get("selected_dates")),
-				"risk_ozeti": [{"kategori": r.get("Kategori"), "sayi": r.get("Öğrenci Sayısı")} for r in risk_rows],
-				"kurum_engelli_ozel_gereksinimli_sayisi": int(dis_in_scope),
-			}
+				cohort_sum = {
+					"listelenen_ogrenci_sayisi": len(report_df),
+					"siniflar": meta.get("selected_classes") or [],
+					"tarih_araligi": _format_dyn_dates_header(meta, meta.get("selected_dates")),
+					"risk_ozeti": [{"kategori": r.get("Kategori"), "sayi": r.get("Öğrenci Sayısı")} for r in risk_rows],
+					"kurum_engelli_ozel_gereksinimli_sayisi": int(dis_in_scope),
+				}
 
-			if scr_gen_btn and is_gai_scr:
-				with ui.spinner("Gemini toplu tarama verilerini ve eksik alanları analiz ediyor..."):
-					ok_sa, txt_sa, used_sa = gai.generate_screening_batch_ai_analysis(
-						api_key=gai_key_scr,
-						model=gai_model_scr,
-						cohort_summary=cohort_sum,
-						missing_audit=scr_missing_audit,
-						custom_instruction=scr_inst,
-					)
-				if ok_sa:
-					ui.session_state[scr_ai_txt_key] = txt_sa
-					ui.success(f"✅ Toplu tarama analizi Gemini ({used_sa}) ile oluşturuldu ve Word/Excel/HTML çıktılara bağlandı!")
-					ui.rerun()
-				else:
-					ui.error(f"Gemini AI hatası: {txt_sa}")
-
-			if scr_brief_btn and is_gai_scr:
-				with ui.spinner("Gemini 1 sayfalık okul yönetimi brifingini hazırlıyor..."):
-					ok_br, txt_br, used_br = gai.generate_executive_briefing_with_gemini(
-						api_key=gai_key_scr,
-						model=gai_model_scr,
-						briefing_scope="Okul Sağlık Taraması ve Persantil Değerlendirme Özeti",
-						stats_or_cohort=cohort_sum,
-						missing_audit=scr_missing_audit,
-						school_name=cfg.get("school_name", "Okul Reviri"),
-						custom_instruction=scr_inst,
-					)
-				if ok_br:
-					ui.session_state[scr_ai_txt_key] = txt_br
-					ui.success(f"✅ 1 sayfalık yönetici brifingi Gemini ({used_br}) ile oluşturuldu ve rapor çıktısına bağlandı!")
-					ui.rerun()
-				else:
-					ui.error(f"Gemini AI hatası: {txt_br}")
-
-			if scr_rev_btn and is_gai_scr:
-				cur_sa_txt = str(ui.session_state.get(scr_ai_txt_key) or "").strip()
-				if not clean_text(scr_inst):
-					ui.warning("Lütfen yukarıya düzenleme talimatınızı yazın.")
-				else:
-					with ui.spinner("Gemini metni talimatınıza göre düzenliyor..."):
-						ok_sr, txt_sr, used_sr = gai.revise_report_ai_text(
+				if scr_gen_btn and is_gai_scr:
+					with ui.spinner("Gemini toplu tarama verilerini ve eksik alanları analiz ediyor..."):
+						ok_sa, txt_sa, used_sa = gai.generate_screening_batch_ai_analysis(
 							api_key=gai_key_scr,
 							model=gai_model_scr,
-							current_text=cur_sa_txt,
-							instruction=scr_inst,
+							cohort_summary=cohort_sum,
+							missing_audit=scr_missing_audit,
+							custom_instruction=scr_inst,
 						)
-					if ok_sr:
-						ui.session_state[scr_ai_txt_key] = txt_sr
-						ui.success(f"✅ Metin Gemini ({used_sr}) ile düzenlendi!")
+					if ok_sa:
+						ui.session_state[scr_ai_txt_key] = txt_sa
+						ui.success(f"✅ Toplu tarama analizi Gemini ({used_sa}) ile oluşturuldu ve Word/Excel/HTML çıktılara bağlandı!")
 						ui.rerun()
 					else:
-						ui.error(f"Gemini AI hatası: {txt_sr}")
+						ui.error(f"Gemini AI hatası: {txt_sa}")
 
-			scr_ai_edited = ui.text_area(
-				"📝 Toplu Rapora Eklenecek Değerlendirme & Eksik Veri Metni (Doğrudan düzenleyebilirsiniz)",
-				height=165,
-				placeholder="Yukarıdan '✨ Gemini ile Analiz Oluştur' tuşuna basın veya kendi değerlendirmenizi yazın...",
-				key=scr_ai_txt_key,
-			)
-			meta["ai_narrative"] = (scr_ai_edited or "").strip()
-		else:
-			ui.caption("🔕 Toplu tarama çıktılarına (Word / Excel / HTML) Gemini AI bölümü şu an eklenmiyor. İsterseniz sağ üstteki anahtardan açabilirsiniz.")
-			meta["ai_narrative"] = ""
+				if scr_brief_btn and is_gai_scr:
+					with ui.spinner("Gemini 1 sayfalık okul yönetimi brifingini hazırlıyor..."):
+						ok_br, txt_br, used_br = gai.generate_executive_briefing_with_gemini(
+							api_key=gai_key_scr,
+							model=gai_model_scr,
+							briefing_scope="Okul Sağlık Taraması ve Persantil Değerlendirme Özeti",
+							stats_or_cohort=cohort_sum,
+							missing_audit=scr_missing_audit,
+							school_name=cfg.get("school_name", "Okul Reviri"),
+							custom_instruction=scr_inst,
+						)
+					if ok_br:
+						ui.session_state[scr_ai_txt_key] = txt_br
+						ui.success(f"✅ 1 sayfalık yönetici brifingi Gemini ({used_br}) ile oluşturuldu ve rapor çıktısına bağlandı!")
+						ui.rerun()
+					else:
+						ui.error(f"Gemini AI hatası: {txt_br}")
+
+				if scr_rev_btn and is_gai_scr:
+					cur_sa_txt = str(ui.session_state.get(scr_ai_txt_key) or "").strip()
+					if not clean_text(scr_inst):
+						ui.warning("Lütfen yukarıya düzenleme talimatınızı yazın.")
+					else:
+						with ui.spinner("Gemini metni talimatınıza göre düzenliyor..."):
+							ok_sr, txt_sr, used_sr = gai.revise_report_ai_text(
+								api_key=gai_key_scr,
+								model=gai_model_scr,
+								current_text=cur_sa_txt,
+								instruction=scr_inst,
+							)
+						if ok_sr:
+							ui.session_state[scr_ai_txt_key] = txt_sr
+							ui.success(f"✅ Metin Gemini ({used_sr}) ile düzenlendi!")
+							ui.rerun()
+						else:
+							ui.error(f"Gemini AI hatası: {txt_sr}")
+
+				scr_ai_edited = ui.text_area(
+					"📝 Toplu Rapora Eklenecek Değerlendirme & Eksik Veri Metni (Doğrudan düzenleyebilirsiniz)",
+					height=165,
+					placeholder="Yukarıdan '✨ Gemini ile Analiz Oluştur' tuşuna basın veya kendi değerlendirmenizi yazın...",
+					key=scr_ai_txt_key,
+				)
+				meta["ai_narrative"] = (scr_ai_edited or "").strip()
+			else:
+				ui.caption("🔕 Toplu tarama çıktılarına (Word / Excel / HTML) Gemini AI bölümü şu an eklenmiyor. İsterseniz sağ üstteki anahtardan açabilirsiniz.")
+				meta["ai_narrative"] = ""
+	else:
+		meta["ai_narrative"] = (
+			str(ui.session_state.get(scr_ai_txt_key) or "").strip()
+			if ui.session_state.get(scr_ai_inc_key, False)
+			else ""
+		)
+
+	if wizard_enabled and wizard_step == 1:
+		prev_col, next_col = ui.columns(2)
+		with prev_col:
+			if ui.button("↩️ Kapsamı düzenle", use_container_width=True, key=f"{key_prefix}_wizard_back_scope"):
+				ui.session_state[wizard_step_key] = 0
+				ui.rerun()
+		with next_col:
+			if ui.button("➡️ Dışa aktarmaya geç", type="primary", use_container_width=True, key=f"{key_prefix}_wizard_next_export"):
+				ui.session_state[wizard_step_key] = 2
+				ui.rerun()
+		return
+
+	if wizard_enabled and wizard_step == 2:
+		ui.info("Önizlemesi onaylanan rapor için aşağıdaki biçimlerden birini indirin.")
+		if ui.button("↩️ Önizlemeye dön", key=f"{key_prefix}_wizard_back_preview"):
+			ui.session_state[wizard_step_key] = 1
+			ui.rerun()
 
 	docx_bytes = export_custom_screening_report_docx(report_df, meta, cfg)
 	xlsx_bytes = export_custom_screening_report_excel(report_df, meta, cfg)

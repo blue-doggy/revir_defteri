@@ -115,6 +115,57 @@ class TestPersantilCoreAndUI(unittest.TestCase):
         self.assertIn("Kişi Dosyası Rapor Ayarları", main_html)
         self.assertNotIn("Kişi Raporu Ayarları", main_html)
 
+    def test_screening_report_wizard_gates_preview_and_export(self):
+        sample_df = pd.DataFrame([{"Ad Soyad": "Örnek Öğrenci", "Durum": "Normal"}])
+        sample_meta = {"risk_summary": [], "selected_classes": [], "selected_dates": ["2026-11-22"]}
+        with (
+            mock.patch.object(
+                persantil,
+                "get_available_screening_and_measurement_dates",
+                return_value=[{"date": "2026-11-22", "label": "22.11.2026"}],
+            ),
+            mock.patch.object(
+                persantil,
+                "build_custom_screening_report_data",
+                return_value=(sample_df, sample_meta),
+            ) as build_report,
+            mock.patch.object(persantil, "export_custom_screening_report_docx", return_value=b"docx") as export_docx,
+            mock.patch.object(persantil, "export_custom_screening_report_excel", return_value=b"xlsx") as export_xlsx,
+            mock.patch.object(persantil, "export_custom_screening_report_html", return_value="<html></html>") as export_html,
+        ):
+            scope_output = revir_ui.run_action_headless(
+                persantil.render_dynamic_screening_reports_tab,
+                {"action": "render"},
+            )
+            self.assertIn("Adım 1/3", scope_output["main_html"])
+            self.assertIn("Önizlemeye Geç", scope_output["main_html"])
+            build_report.assert_not_called()
+            export_docx.assert_not_called()
+            export_xlsx.assert_not_called()
+            export_html.assert_not_called()
+
+            preview_output = revir_ui.run_action_headless(
+                persantil.render_dynamic_screening_reports_tab,
+                {"action": "click", "key": "dyn_rep_wizard_next_preview"},
+            )
+            self.assertIn("Adım 2/3", preview_output["main_html"])
+            self.assertIn("Dinamik Rapor Önizlemesi", preview_output["main_html"])
+            build_report.assert_called_once()
+            self.assertEqual(build_report.call_args.kwargs["selected_dates"], ["2026-11-22"])
+            export_docx.assert_not_called()
+            export_xlsx.assert_not_called()
+            export_html.assert_not_called()
+
+            export_output = revir_ui.run_action_headless(
+                persantil.render_dynamic_screening_reports_tab,
+                {"action": "click", "key": "dyn_rep_wizard_next_export"},
+            )
+            self.assertIn("Adım 3/3", export_output["main_html"])
+            self.assertIn("Word (.docx) İndir", export_output["main_html"])
+            self.assertEqual(export_docx.call_count, 1)
+            self.assertEqual(export_xlsx.call_count, 1)
+            self.assertEqual(export_html.call_count, 1)
+
     def test_dashboard_distinguishes_failed_checks_from_clear_status(self):
         failures = (
             mock.patch.object(persantil, "get_scheduled_doses_for_date", side_effect=RuntimeError("test")),
