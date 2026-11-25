@@ -3502,6 +3502,8 @@ html, body {
 .revir-tab-btn.active { color: var(--teal); border-bottom-color: var(--teal); background: rgba(13,148,136,0.08); font-weight: 700; }
 .revir-tab-pane { display: none; }
 .revir-tab-pane.active { display: block; }
+.revir-tab-pane:not(.active),
+.revir-tab-pane.revir-grid-zone:not(.active) { display: none !important; }
 
 .revir-tabs-seg .revir-tab-bar-seg {
 	display: inline-flex; flex-wrap: wrap; gap: 4px;
@@ -4163,6 +4165,9 @@ body.revir-busy .revir-btn { cursor: progress; }
 	align-items: stretch;
 	grid-auto-flow: row;
 	width: 100%;
+}
+.revir-tab-pane.revir-grid-zone:not(.active) {
+	display: none !important;
 }
 .revir-grid-zone > * { grid-column: 1 / -1; min-width: 0; }
 body.revir-layout-edit .revir-grid-zone {
@@ -5313,7 +5318,9 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 		var tablist = document.getElementById(groupId);
 		var currentButton = tablist ? tablist.querySelector('.revir-tab-btn[aria-selected="true"]') : null;
 		if (currentButton && parseInt(currentButton.dataset.tabIdx, 10) === idx) return;
-		var shouldRerender = Boolean(tablist && tablist.closest('.revir-tabs[data-rerender-on-tab="true"]'));
+		// Yalnızca ilgili sekme grubunun kendi lazy niteliğine bak (üst lazy sekme grubuna tırmanma)
+		var ownTabsWrap = tablist ? tablist.closest(".revir-tabs") : null;
+		var shouldRerender = Boolean(ownTabsWrap && ownTabsWrap.getAttribute("data-rerender-on-tab") === "true");
 		document.querySelectorAll('.revir-tab-btn[data-tab-group="' + groupId + '"]').forEach(function(b) {
 			var selected = parseInt(b.dataset.tabIdx, 10) === idx;
 			b.classList.toggle("active", selected);
@@ -5325,6 +5332,12 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 			p.classList.toggle("active", selected);
 			p.setAttribute("aria-hidden", String(!selected));
 		});
+		if (!shouldRerender) {
+			setTimeout(function() {
+				if (window.__revirInitResizableTables) window.__revirInitResizableTables();
+				if (window.__revirInitBoxLayout) window.__revirInitBoxLayout();
+			}, 0);
+		}
 		fetch("/api/ui_state", {
 			method: "POST",
 			headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },

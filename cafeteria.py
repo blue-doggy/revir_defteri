@@ -271,7 +271,218 @@ DINER_ROLE_TYPES: list[str] = [
 	"Personel",
 	"Burslu / Ücretsiz",
 	"Misafir",
+	"Veli",
+	"Yönetici / İdare",
+	"Memur",
+	"Sözleşmeli / İŞKUR / Hizmetli",
+	"Stajyer",
 ]
+
+CAFETERIA_FEE_GROUP_CATALOG: dict[str, list[str]] = {
+	"🎓 Öğrenciler": ["Öğrenci"],
+	"👩‍🏫 Öğretmenler": [
+		"Öğretmen",
+		"Sınıf Öğretmeni",
+		"Okul Öncesi Öğretmeni",
+		"Özel Eğitim Öğretmeni",
+		"Rehberlik / PDR Öğretmeni",
+		"Türkçe Öğretmeni",
+		"Türk Dili ve Edebiyatı Öğretmeni",
+		"Matematik Öğretmeni",
+		"İlköğretim Matematik Öğretmeni",
+		"Fen Bilimleri Öğretmeni",
+		"Fizik Öğretmeni",
+		"Kimya Öğretmeni",
+		"Biyoloji Öğretmeni",
+		"Sosyal Bilgiler Öğretmeni",
+		"Tarih Öğretmeni",
+		"Coğrafya Öğretmeni",
+		"Felsefe Öğretmeni",
+		"İngilizce Öğretmeni",
+		"Almanca Öğretmeni",
+		"Arapça Öğretmeni",
+		"Din Kültürü ve Ahlak Bilgisi Öğretmeni",
+		"Meslek Dersleri Öğretmeni",
+		"Bilişim Teknolojileri Öğretmeni",
+		"Beden Eğitimi Öğretmeni",
+		"Görsel Sanatlar Öğretmeni",
+		"Müzik Öğretmeni",
+		"Teknoloji ve Tasarım Öğretmeni",
+		"Ücretli Öğretmen",
+		"Usta Öğretici",
+	],
+	"🏫 Okul & Yurt Yönetimi": [
+		"Müdür",
+		"Müdür Başyardımcısı",
+		"Müdür Yardımcısı",
+		"Yurt Müdürü",
+		"Yurt Müdür Yardımcısı",
+		"Yurt Yönetim Memuru",
+		"Belletici / Belletmen",
+		"Atölye / Bölüm Şefi",
+		"Yönetici / İdare",
+	],
+	"🧑‍💼 Memur, İdari & Teknik Kadro": [
+		"Personel",
+		"Memur",
+		"VHKİ Memuru",
+		"Bilgisayar İşletmeni",
+		"Mutemet",
+		"Ayniyat / Ambar Memuru",
+		"Sekreter / Büro Memuru",
+		"Kütüphane Memuru",
+		"Teknisyen / Tekniker",
+		"Sağlık Personeli / Hemşire",
+		"Diyetisyen",
+		"Kaloriferci",
+		"Şoför",
+	],
+	"👷 Sözleşmeli, İŞKUR, Hizmetli & Stajyer": [
+		"Sözleşmeli Personel",
+		"İŞKUR Personeli",
+		"Sözleşmeli / İŞKUR / Hizmetli",
+		"Hizmetli",
+		"Güvenlik Personeli",
+		"Aşçı / Mutfak Personeli",
+		"Stajyer",
+	],
+	"👨‍👩‍👧 Veliler & Misafirler": [
+		"Veli",
+		"Misafir",
+		"Ziyaretçi / Diğer",
+	],
+}
+
+ALL_CAFETERIA_FEE_GROUPS: list[str] = list(CAFETERIA_FEE_GROUP_CATALOG.keys())
+ALL_CAFETERIA_FEE_TITLES: list[str] = [
+	ttl for grp_titles in CAFETERIA_FEE_GROUP_CATALOG.values() for ttl in grp_titles
+]
+_TITLE_TO_FEE_GROUP_FOLD: dict[str, str] = {
+	re.sub(r"\s+", " ", ttl.lower().translate(str.maketrans("çğıöşüâîû", "cgiosuaiu"))).strip(): grp
+	for grp, grp_titles in CAFETERIA_FEE_GROUP_CATALOG.items()
+	for ttl in grp_titles
+}
+
+
+def _parse_str_list_setting(raw_val: Any) -> list[str]:
+	txt = str(raw_val or "").strip()
+	if not txt:
+		return []
+	if txt.startswith("["):
+		try:
+			parsed = json.loads(txt)
+			if isinstance(parsed, list):
+				return [str(x).strip() for x in parsed if str(x).strip()]
+		except Exception:
+			pass
+	return [p.strip() for p in re.split(r"[\n,|;]+", txt) if p.strip()]
+
+
+def resolve_diner_role_group_and_title(
+	record: dict[str, Any] | None = None,
+	*,
+	role_type: str = "",
+	role_title: str = "",
+	person_type: str = "",
+	notes: str = "",
+) -> tuple[str, str]:
+	"""Kişi/abone kaydından (Ana Tahsilat Grubu, Meslek/Ünvan) ikilisini tutarlı biçimde çıkarır."""
+	rec = record or {}
+	r_type = str(role_type or rec.get("role_type") or "").strip()
+	r_title = str(role_title or rec.get("role_title") or "").strip()
+	p_type = str(person_type or rec.get("revir_person_type") or rec.get("person_type") or "").strip()
+	r_notes = str(notes or rec.get("revir_notes") or "").strip()
+
+	eff_title = r_title
+	if (not eff_title or eff_title in ("Personel", "Sivil / diğer kişi")) and r_notes:
+		eff_title = r_notes
+	if not eff_title:
+		if r_type and r_type not in ("Burslu / Ücretsiz",):
+			eff_title = r_type
+		elif p_type and "renci" in p_type.lower():
+			eff_title = "Öğrenci"
+		elif p_type and p_type != "Sivil / diğer kişi":
+			eff_title = p_type
+		else:
+			eff_title = "Personel"
+
+	tf = _tr_fold(eff_title)
+	if tf in _TITLE_TO_FEE_GROUP_FOLD:
+		return _TITLE_TO_FEE_GROUP_FOLD[tf], eff_title
+	if "ogrenci" in tf or (r_type == "Burslu / Ücretsiz" and (not p_type or "ogrenci" in _tr_fold(p_type))):
+		return "🎓 Öğrenciler", eff_title
+	if "veli" in tf or "misafir" in tf or "ziyaretci" in tf:
+		return "👨‍👩‍👧 Veliler & Misafirler", eff_title
+	if any(k in tf for k in ("mudur", "bellet", "idare", "sef")):
+		return "🏫 Okul & Yurt Yönetimi", eff_title
+	if any(k in tf for k in ("ogretmen", "ogretici", "pdr", "rehber")):
+		return "👩‍🏫 Öğretmenler", eff_title
+	if any(k in tf for k in ("iskur", "sozlesmeli", "hizmetli", "stajyer", "guvenlik", "asci", "mutfak")):
+		return "👷 Sözleşmeli, İŞKUR, Hizmetli & Stajyer", eff_title
+	if any(k in tf for k in ("memur", "vhki", "isletmen", "mutemet", "ayniyat", "sekreter", "kutuphane", "teknis", "teknik", "saglik", "hemsire", "diyetisyen", "kalorifer", "sofor", "personel")):
+		return "🧑‍💼 Memur, İdari & Teknik Kadro", eff_title
+	if r_type in _TITLE_TO_FEE_GROUP_FOLD:
+		return _TITLE_TO_FEE_GROUP_FOLD[r_type] if r_type in _TITLE_TO_FEE_GROUP_FOLD else _TITLE_TO_FEE_GROUP_FOLD.get(_tr_fold(r_type), "🧑‍💼 Memur, İdari & Teknik Kadro"), eff_title
+	if _tr_fold(r_type) in _TITLE_TO_FEE_GROUP_FOLD:
+		return _TITLE_TO_FEE_GROUP_FOLD[_tr_fold(r_type)], eff_title
+	if p_type and "ogrenci" not in _tr_fold(p_type):
+		return "🧑‍💼 Memur, İdari & Teknik Kadro", eff_title
+	return "🎓 Öğrenciler", eff_title
+
+
+def parse_fee_collection_policy(app_cfg: dict[str, str] | None = None) -> dict[str, Any]:
+	"""Yemekhane Ayarları'ndan tahsilat yetkisi verilen grup, ünvan ve tarife kurallarını çözümler."""
+	cfg = app_cfg or {}
+	configured = str(cfg.get("cafeteria_fee_scope_configured") or "").strip() == "1"
+	custom_titles = _parse_str_list_setting(cfg.get("cafeteria_fee_custom_titles"))
+
+	if configured:
+		raw_groups = _parse_str_list_setting(cfg.get("cafeteria_fee_groups"))
+		eligible_groups = [g for g in raw_groups if g in CAFETERIA_FEE_GROUP_CATALOG]
+	else:
+		eligible_groups = list(ALL_CAFETERIA_FEE_GROUPS)
+
+	included_titles = _parse_str_list_setting(cfg.get("cafeteria_fee_included_titles"))
+	excluded_titles = _parse_str_list_setting(cfg.get("cafeteria_fee_excluded_titles"))
+
+	# Özel eklenen ünvanlar seçenek havuzuna eklenir; açıkça hariç tutulmadıkça seçili gruba veya ek ünvana katılabilir
+	available_titles = list(dict.fromkeys([*ALL_CAFETERIA_FEE_TITLES, *custom_titles]))
+	include_guardians = str(cfg.get("cafeteria_include_student_guardians") or "1").strip() != "0"
+
+	stu_p = max(0.0, _safe_float(cfg.get("cafeteria_default_meal_price"), 75.0))
+	stf_p = max(0.0, _safe_float(cfg.get("cafeteria_default_staff_price"), 90.0))
+	gst_p = max(0.0, _safe_float(cfg.get("cafeteria_default_guest_price"), stf_p))
+
+	return {
+		"configured": configured,
+		"eligible_groups": eligible_groups,
+		"eligible_groups_set": set(eligible_groups),
+		"included_titles": included_titles,
+		"included_titles_fold": {_tr_fold(t) for t in included_titles if t},
+		"excluded_titles": excluded_titles,
+		"excluded_titles_fold": {_tr_fold(t) for t in excluded_titles if t},
+		"custom_titles": custom_titles,
+		"available_titles": available_titles,
+		"include_student_guardians": include_guardians,
+		"student_price": stu_p,
+		"staff_price": stf_p,
+		"guest_price": gst_p,
+	}
+
+
+def is_diner_fee_eligible(diner_or_record: dict[str, Any], policy: dict[str, Any]) -> bool:
+	"""Verilen kişinin Ayarlar'da seçili grup/meslek/ünvan kapsamında ücret tahsilatına açık olup olmadığını döndürür."""
+	if bool(diner_or_record.get("fee_exempt")) or str(diner_or_record.get("role_type") or "").strip() == "Burslu / Ücretsiz":
+		return False
+	grp, eff_title = resolve_diner_role_group_and_title(diner_or_record)
+	if not policy.get("configured"):
+		return True
+	t_fold = _tr_fold(eff_title)
+	if t_fold in (policy.get("excluded_titles_fold") or set()):
+		return False
+	if t_fold in (policy.get("included_titles_fold") or set()):
+		return True
+	return grp in (policy.get("eligible_groups_set") or set())
 
 TR_ALLERGEN_OPTIONS: list[str] = [
 	"",
@@ -639,6 +850,8 @@ def ensure_cafeteria_tables(connection: sqlite3.Connection) -> None:
 	diner_cols = {row["name"] for row in connection.execute("PRAGMA table_info(cafeteria_diners)")}
 	if "end_date" not in diner_cols:
 		connection.execute("ALTER TABLE cafeteria_diners ADD COLUMN end_date TEXT DEFAULT ''")
+	if "role_title" not in diner_cols:
+		connection.execute("ALTER TABLE cafeteria_diners ADD COLUMN role_title TEXT DEFAULT ''")
 	fee_cols = {row["name"] for row in connection.execute("PRAGMA table_info(cafeteria_monthly_fees)")}
 	if "carry_forward_debt" not in fee_cols:
 		connection.execute("ALTER TABLE cafeteria_monthly_fees ADD COLUMN carry_forward_debt REAL NOT NULL DEFAULT 0.0")
@@ -4890,6 +5103,7 @@ def upsert_diner(
 	student_id: int | None = None,
 	full_name: str,
 	role_type: str = "Öğrenci",
+	role_title: str = "",
 	class_or_dept: str = "",
 	daily_meals_count: int = 1,
 	fee_exempt: bool = False,
@@ -4904,6 +5118,8 @@ def upsert_diner(
 	act_int = 1 if is_active else 0
 	meals_n = max(1, min(3, int(daily_meals_count or 1)))
 	sid_val = int(student_id) if student_id else None
+	rt_clean = str(role_type or "Öğrenci").strip() or "Öğrenci"
+	title_clean = str(role_title or "").strip() or (rt_clean if rt_clean != "Burslu / Ücretsiz" else "Öğrenci")
 
 	with connect_db_fn() as conn:
 		ensure_cafeteria_tables(conn)
@@ -4916,20 +5132,37 @@ def upsert_diner(
 			did = int(existing["id"])
 			conn.execute(
 				"""UPDATE cafeteria_diners
-				   SET student_id=?, full_name=?, role_type=?, class_or_dept=?, daily_meals_count=?,
+				   SET student_id=?, full_name=?, role_type=?, role_title=?, class_or_dept=?, daily_meals_count=?,
 				       fee_exempt=?, allergies_override=?, is_active=?, notes=?
 				   WHERE id=?""",
-				(sid_val, fn, role_type, class_or_dept, meals_n, ex_int, allergies_override.strip(), act_int, notes.strip(), did),
+				(sid_val, fn, rt_clean, title_clean, class_or_dept, meals_n, ex_int, allergies_override.strip(), act_int, notes.strip(), did),
 			)
 			return did
 		cur = conn.execute(
 			"""INSERT INTO cafeteria_diners(
-				student_id, full_name, role_type, class_or_dept, daily_meals_count,
+				student_id, full_name, role_type, role_title, class_or_dept, daily_meals_count,
 				fee_exempt, allergies_override, is_active, start_date, notes
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-			(sid_val, fn, role_type, class_or_dept, meals_n, ex_int, allergies_override.strip(), act_int, date.today().isoformat(), notes.strip()),
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+			(sid_val, fn, rt_clean, title_clean, class_or_dept, meals_n, ex_int, allergies_override.strip(), act_int, date.today().isoformat(), notes.strip()),
 		)
 		return int(cur.lastrowid)
+
+
+def _map_school_person_role(person_type: str, revir_notes: str) -> tuple[str, str]:
+	"""Öğrenci/Yetişkin kaydından yemekhane `role_type` ve ayrıntılı `role_title` çıkarır."""
+	ptype = str(person_type or "Öğrenci").strip()
+	if "renci" in ptype.lower():
+		return "Öğrenci", "Öğrenci"
+	grp, eff_title = resolve_diner_role_group_and_title(person_type=ptype, notes=revir_notes)
+	if grp == "👩‍🏫 Öğretmenler":
+		r_type = "Öğretmen"
+	elif grp == "👨‍👩‍👧 Veliler & Misafirler":
+		r_type = "Veli" if "veli" in _tr_fold(eff_title) else "Misafir"
+	elif grp == "🏫 Okul & Yurt Yönetimi":
+		r_type = "Yönetici / İdare"
+	else:
+		r_type = "Personel"
+	return r_type, eff_title
 
 
 def import_school_people_as_diners(
@@ -4938,7 +5171,7 @@ def import_school_people_as_diners(
 	*,
 	daily_meals_count: int = 1,
 ) -> int:
-	"""Revir veritabanındaki öğrenci/personel kayıtlarını yemek yiyenler listesine bağlar."""
+	"""Revir veritabanındaki öğrenci/personel kayıtlarını gerçek meslek/ünvan bilgisiyle yemek yiyenler listesine bağlar."""
 	added = 0
 	if not person_ids:
 		return 0
@@ -4946,7 +5179,8 @@ def import_school_people_as_diners(
 		ensure_cafeteria_tables(conn)
 		ph = ",".join("?" for _ in person_ids)
 		rows = conn.execute(
-			f"""SELECT s.id, s.full_name, s.person_type, COALESCE(c.name, '—') AS class_name,
+			f"""SELECT s.id, s.full_name, s.person_type, COALESCE(s.notes, '') AS revir_notes,
+					   COALESCE(c.name, '—') AS class_name,
 					   COALESCE(hp.allergies, '') AS allergies
 				FROM students s
 				LEFT JOIN classes c ON c.id = s.class_id
@@ -4955,18 +5189,24 @@ def import_school_people_as_diners(
 			[int(x) for x in person_ids],
 		).fetchall()
 		for r in rows:
-			exists = conn.execute("SELECT id FROM cafeteria_diners WHERE student_id=?", (int(r["id"]),)).fetchone()
+			role, role_title = _map_school_person_role(str(r["person_type"] or "Öğrenci"), str(r["revir_notes"] or ""))
+			dept_lbl = str(r["class_name"] or "—")
+			if dept_lbl in ("—", "Sivil / Diğer") and role_title and role_title != "Öğrenci":
+				dept_lbl = role_title
+			exists = conn.execute("SELECT id, role_title FROM cafeteria_diners WHERE student_id=?", (int(r["id"]),)).fetchone()
 			if exists:
-				conn.execute("UPDATE cafeteria_diners SET is_active=1 WHERE id=?", (int(exists["id"]),))
+				new_rt = str(exists["role_title"] or "").strip() or role_title
+				conn.execute(
+					"UPDATE cafeteria_diners SET is_active=1, role_type=?, role_title=? WHERE id=?",
+					(role, new_rt, int(exists["id"])),
+				)
 				continue
-			ptype = str(r["person_type"] or "Öğrenci")
-			role = "Öğrenci" if ptype == "Öğrenci" else "Personel"
 			conn.execute(
 				"""INSERT INTO cafeteria_diners(
-					student_id, full_name, role_type, class_or_dept, daily_meals_count,
+					student_id, full_name, role_type, role_title, class_or_dept, daily_meals_count,
 					fee_exempt, allergies_override, is_active, start_date, notes
-				) VALUES (?, ?, ?, ?, ?, 0, ?, 1, ?, '')""",
-				(int(r["id"]), r["full_name"], role, r["class_name"], max(1, int(daily_meals_count)), r["allergies"], date.today().isoformat()),
+				) VALUES (?, ?, ?, ?, ?, ?, 0, ?, 1, ?, '')""",
+				(int(r["id"]), r["full_name"], role, role_title, dept_lbl, max(1, int(daily_meals_count)), r["allergies"], date.today().isoformat()),
 			)
 			added += 1
 	return added
@@ -4975,13 +5215,154 @@ def import_school_people_as_diners(
 def get_diners(connect_db_fn: Callable[[], sqlite3.Connection], active_only: bool = True) -> list[dict[str, Any]]:
 	with connect_db_fn() as conn:
 		ensure_cafeteria_tables(conn)
-		sql = """SELECT d.*, COALESCE(hp.allergies, '') AS revir_allergies
+		sql = """SELECT d.*, COALESCE(hp.allergies, '') AS revir_allergies,
+						COALESCE(s.person_type, '') AS revir_person_type,
+						COALESCE(s.notes, '') AS revir_notes,
+						COALESCE(s.guardian_name, '') AS guardian_name,
+						COALESCE(s.guardian_phone, '') AS guardian_phone
 				 FROM cafeteria_diners d
+				 LEFT JOIN students s ON s.id = d.student_id
 				 LEFT JOIN health_profiles hp ON hp.student_id = d.student_id"""
 		if active_only:
 			sql += " WHERE d.is_active=1"
 		sql += " ORDER BY d.class_or_dept ASC, d.full_name ASC"
-		return [dict(r) for r in conn.execute(sql).fetchall()]
+		out: list[dict[str, Any]] = []
+		for r in conn.execute(sql).fetchall():
+			item = dict(r)
+			grp, eff_title = resolve_diner_role_group_and_title(item)
+			item["fee_group"] = grp
+			item["effective_role_title"] = eff_title
+			if not str(item.get("role_title") or "").strip():
+				item["role_title"] = eff_title
+			out.append(item)
+		return out
+
+
+def get_fee_collection_candidates(
+	connect_db_fn: Callable[[], sqlite3.Connection],
+	app_cfg: dict[str, str] | None = None,
+	*,
+	group_filter: str = "Tümü",
+	balances: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+	"""
+	Ayarlar'da ücret tahsilatına açılan grup/meslek/ünvanlara uyan aktif aboneleri ve
+	henüz yemek listesine eklenmemiş okul/veli kayıtlarını birleşik biçimde döndürür.
+	"""
+	policy = parse_fee_collection_policy(app_cfg)
+	bal_by_did = {int(b["diner_id"]): b for b in (balances or []) if b.get("diner_id") is not None}
+	diners = get_diners(connect_db_fn, active_only=True)
+	linked_sids: set[int] = set()
+	active_name_fold: set[str] = set()
+	candidates: list[dict[str, Any]] = []
+
+	for d in diners:
+		if d.get("student_id"):
+			linked_sids.add(int(d["student_id"]))
+		active_name_fold.add(_tr_fold(d.get("full_name")))
+		if not is_diner_fee_eligible(d, policy):
+			continue
+		grp = str(d.get("fee_group") or "🧑‍💼 Memur, İdari & Teknik Kadro")
+		if group_filter and group_filter != "Tümü" and grp != group_filter:
+			continue
+		did = int(d["id"])
+		b = bal_by_did.get(did) or {}
+		candidates.append({
+			"candidate_key": f"diner:{did}",
+			"source_kind": "diner",
+			"diner_id": did,
+			"student_id": d.get("student_id"),
+			"full_name": str(d["full_name"]),
+			"fee_group": grp,
+			"role_title": str(d.get("effective_role_title") or d.get("role_title") or d.get("role_type") or ""),
+			"class_or_dept": str(d.get("class_or_dept") or ""),
+			"guardian_name": str(d.get("guardian_name") or ""),
+			"expected_amount": float(b.get("expected_amount") or 0.0),
+			"paid_amount": float(b.get("paid_amount") or 0.0),
+			"remaining_amount": float(b.get("remaining_amount") or 0.0),
+			"status_label": str(b.get("status_label") or "Tahakkuk Yok"),
+		})
+
+	with connect_db_fn() as conn:
+		ensure_cafeteria_tables(conn)
+		all_sids_in_caf = {
+			int(r["student_id"])
+			for r in conn.execute("SELECT student_id FROM cafeteria_diners WHERE student_id IS NOT NULL").fetchall()
+		}
+		stu_rows = conn.execute(
+			"""SELECT s.id, s.full_name, s.person_type, COALESCE(s.notes, '') AS revir_notes,
+					  COALESCE(s.guardian_name, '') AS guardian_name,
+					  COALESCE(c.name, '—') AS class_name
+			   FROM students s
+			   LEFT JOIN classes c ON c.id = s.class_id
+			   ORDER BY s.person_type ASC, c.name ASC, s.full_name ASC"""
+		).fetchall()
+
+	seen_guardians: set[str] = set()
+	for sr in stu_rows:
+		sid = int(sr["id"])
+		ptype = str(sr["person_type"] or "Öğrenci")
+		notes = str(sr["revir_notes"] or "")
+		cls_nm = str(sr["class_name"] or "—")
+		g_name = re.sub(r"\s+", " ", str(sr["guardian_name"] or "").strip())
+
+		if sid not in all_sids_in_caf and sid not in linked_sids:
+			r_type, eff_title = _map_school_person_role(ptype, notes)
+			probe = {
+				"full_name": sr["full_name"],
+				"role_type": r_type,
+				"role_title": eff_title,
+				"revir_person_type": ptype,
+				"revir_notes": notes,
+				"fee_exempt": 0,
+			}
+			grp, eff_title = resolve_diner_role_group_and_title(probe)
+			if is_diner_fee_eligible(probe, policy) and (not group_filter or group_filter == "Tümü" or grp == group_filter):
+				dept = cls_nm if cls_nm not in ("—", "Sivil / Diğer") else eff_title
+				candidates.append({
+					"candidate_key": f"school:{sid}",
+					"source_kind": "school_person",
+					"diner_id": None,
+					"student_id": sid,
+					"full_name": str(sr["full_name"]),
+					"fee_group": grp,
+					"role_title": eff_title,
+					"class_or_dept": dept,
+					"guardian_name": g_name,
+					"expected_amount": 0.0,
+					"paid_amount": 0.0,
+					"remaining_amount": 0.0,
+					"status_label": "Rehber · Yeni Abone",
+				})
+
+		if g_name and policy.get("include_student_guardians"):
+			g_probe = {"full_name": g_name, "role_type": "Veli", "role_title": "Veli", "fee_exempt": 0}
+			g_fold = _tr_fold(g_name)
+			if (
+				g_fold not in active_name_fold
+				and g_fold not in seen_guardians
+				and is_diner_fee_eligible(g_probe, policy)
+				and (not group_filter or group_filter == "Tümü" or group_filter == "👨‍👩‍👧 Veliler & Misafirler")
+			):
+				seen_guardians.add(g_fold)
+				candidates.append({
+					"candidate_key": f"guardian:{sid}",
+					"source_kind": "student_guardian",
+					"diner_id": None,
+					"student_id": sid,
+					"full_name": g_name,
+					"fee_group": "👨‍👩‍👧 Veliler & Misafirler",
+					"role_title": "Veli",
+					"class_or_dept": f"Veli ({sr['full_name']} · {cls_nm})",
+					"guardian_name": g_name,
+					"expected_amount": 0.0,
+					"paid_amount": 0.0,
+					"remaining_amount": 0.0,
+					"status_label": "Öğrenci Velisi",
+				})
+
+	candidates.sort(key=lambda c: (0 if c["source_kind"] == "diner" else 1, -c["remaining_amount"], _tr_fold(c["full_name"])))
+	return candidates
 
 
 def deactivate_diner_by_id(connect_db_fn: Callable[[], sqlite3.Connection], diner_id: int, end_date: str = "") -> None:
@@ -5022,6 +5403,7 @@ def generate_or_refresh_monthly_fees(
 	*,
 	student_meal_price: float,
 	staff_meal_price: float | None = None,
+	guest_meal_price: float | None = None,
 	workdays_override: int | None = None,
 	reset_planned_days: bool = False,
 ) -> int:
@@ -5038,6 +5420,7 @@ def generate_or_refresh_monthly_fees(
 
 	stu_p = max(0.0, float(student_meal_price or 0.0))
 	stf_p = max(0.0, float(staff_meal_price)) if staff_meal_price is not None else stu_p
+	gst_p = max(0.0, float(guest_meal_price)) if guest_meal_price is not None else (stu_p if staff_meal_price is None else stf_p)
 	diners = get_diners(connect_db_fn, active_only=True)
 	now_iso = datetime.now().isoformat(timespec="minutes")
 	count = 0
@@ -5047,7 +5430,15 @@ def generate_or_refresh_monthly_fees(
 		for dn in diners:
 			did = int(dn["id"])
 			is_exempt = bool(dn.get("fee_exempt")) or dn.get("role_type") == "Burslu / Ücretsiz"
-			unit_p = 0.0 if is_exempt else (stu_p if dn.get("role_type") in ("Öğrenci", "Misafir") else stf_p)
+			grp = dn.get("fee_group") or resolve_diner_role_group_and_title(dn)[0]
+			if is_exempt:
+				unit_p = 0.0
+			elif grp == "🎓 Öğrenciler":
+				unit_p = stu_p
+			elif grp == "👨‍👩‍👧 Veliler & Misafirler":
+				unit_p = stu_p if (dn.get("role_type") == "Misafir" and guest_meal_price is None) else gst_p
+			else:
+				unit_p = stf_p
 			cur_row = conn.execute(
 				"SELECT * FROM cafeteria_monthly_fees WHERE year_month=? AND diner_id=?",
 				(ym, did),
@@ -5249,9 +5640,14 @@ def get_cash_summary_and_diner_balances(
 	with connect_db_fn() as conn:
 		ensure_cafeteria_tables(conn)
 		fee_rows = conn.execute(
-			"""SELECT f.*, d.full_name, d.role_type, d.class_or_dept, d.fee_exempt
+			"""SELECT f.*, d.full_name, d.role_type, COALESCE(d.role_title, '') AS role_title,
+					  d.class_or_dept, d.fee_exempt,
+					  COALESCE(s.person_type, '') AS revir_person_type,
+					  COALESCE(s.notes, '') AS revir_notes,
+					  COALESCE(s.guardian_name, '') AS guardian_name
 			   FROM cafeteria_monthly_fees f
 			   JOIN cafeteria_diners d ON d.id = f.diner_id
+			   LEFT JOIN students s ON s.id = d.student_id
 			   WHERE f.year_month=?
 			   ORDER BY d.class_or_dept ASC, d.full_name ASC""",
 			(ym,),
@@ -5308,6 +5704,9 @@ def get_cash_summary_and_diner_balances(
 		d["remaining_amount"] = max(0.0, rem)
 		d["status_label"] = st
 		d["carry_forward_debt"] = round(float(d.get("carry_forward_debt") or 0.0), 2)
+		grp_b, title_b = resolve_diner_role_group_and_title(d)
+		d["fee_group"] = grp_b
+		d["effective_role_title"] = title_b
 		lp = last_pay_info.get(did, ("", ""))
 		d["last_delivered_by"] = lp[0]
 		d["last_payment_date"] = lp[1]
@@ -8163,8 +8562,10 @@ def _render_tab_diners_and_cash(ctx_api: dict[str, Any], sel_ym: str, app_cfg: d
 	mask_fn = ctx_api["mask_kvkk_value"]
 	is_on, api_key, model = ctx_api["_get_active_gemini_config"]()
 
-	ui.markdown("### 👥 Yemek Yiyenler, Aylık Öğün Ücreti Hesabı & Kasa Muhasebesi")
+	ui.markdown("### 💵 Ücret Tahsilatı, Kasa Muhasebesi & Yemek Yiyenler")
 	cash = get_cash_summary_and_diner_balances(connect_db_fn, sel_ym)
+	policy = parse_fee_collection_policy(app_cfg)
+	def_meals_cnt = parse_service_schedule_from_cfg(app_cfg)["meals_per_day"]
 
 	# Üst Kasa & Tahakkuk KPI Kartları
 	c1, c2, c3, c4, c5 = ui.columns(5)
@@ -8174,209 +8575,150 @@ def _render_tab_diners_and_cash(ctx_api: dict[str, Any], sel_ym: str, app_cfg: d
 	c4.metric("Okula Teslim (-)", f"{cash['vault_total_handover']:,.2f} ₺")
 	c5.metric("💵 Şu An Kasadaki Para", f"{cash['vault_balance']:,.2f} ₺", delta=f"Toplam Giren: {cash['vault_total_in']:,.2f} ₺")
 
-	# 1. Yemek Yiyen Ekleme, Tahakkuk, Kasa & Bütçe Alt Sekmeleri
-	t_diners, t_fees, t_cash, t_budget = ui.tabs([
-		"🧑‍🎓 Yemek Yiyen Kişiler",
-		"🧮 İş Günü × Öğün Ücreti & Devir",
-		"💵 Ücret Tahsilatı (Getiren İsim) & Kasa",
-		"📊 Gelir–Gider Bütçe Dengesi & AI",
+	# 1. Tahsilat Öncelikli Sekme Düzeni (İlk Açılışta Ücret Tahsilatı & Kasa Gelir)
+	t_cash, t_diners, t_fees, t_budget = ui.tabs([
+		"💵 Ücret Tahsilatı & Kasa",
+		"🧑‍🎓 Yemek Yiyenler & Aboneler",
+		"🧮 Aylık Hesap (İş Günü × Öğün & Devir)",
+		"📊 Gelir–Gider Bütçe & Rapor",
 	])
 
 	diners = get_diners(connect_db_fn, active_only=True)
 	all_diners_inc_inactive = get_diners(connect_db_fn, active_only=False)
 	inactive_diners = [d for d in all_diners_inc_inactive if not d.get("is_active")]
 
-	with t_diners:
-		with ui.expander("➕ Revirden Öğrenci/Personel Bağla veya Yeni Yemek Yiyen Ekle", expanded=not bool(diners)):
-			ac1, ac2 = ui.columns(2)
-			with ac1:
-				with connect_db_fn() as conn:
-					stu_all = conn.execute(
-						"SELECT s.id, s.full_name, COALESCE(c.name, '—') AS cls FROM students s LEFT JOIN classes c ON c.id=s.class_id ORDER BY c.name, s.full_name"
-					).fetchall()
-				linked_sids = {int(d["student_id"]) for d in all_diners_inc_inactive if d.get("student_id")}
-				link_opts = {
-					f"{mask_fn(r['full_name'], 'name')} · {r['cls']}": int(r["id"])
-					for r in stu_all
-					if int(r["id"]) not in linked_sids
-				}
-				def_meals_cnt = parse_service_schedule_from_cfg(app_cfg)["meals_per_day"]
-				picked_links = ui.multiselect("Kayıtlı Öğrenci / Personel Seç", list(link_opts.keys()), key="caf_link_stu_ms")
-				link_meals = ui.number_input("Günlük Öğün Sayısı", min_value=1, max_value=3, value=def_meals_cnt, key="caf_link_meals")
-				if ui.button("📥 Seçilenleri Yemek Listesine Ekle", type="primary", use_container_width=True, disabled=not picked_links, key="caf_btn_link_stu"):
-					cnt_add = import_school_people_as_diners(connect_db_fn, [link_opts[k] for k in picked_links], daily_meals_count=int(link_meals))
-					ui.success(f"✅ {cnt_add} kişi yemek yiyenler listesine eklendi.")
-					ui.rerun()
-			with ac2:
-				with ui.form("caf_form_add_diner", clear_on_submit=True):
-					fn_new = ui.text_input("Serbest Kişi Adı Soyadı*")
-					r_new = ui.selectbox("Statü", DINER_ROLE_TYPES)
-					d_new = ui.text_input("Sınıf / Bölüm", placeholder="Örn: 3-A veya Mutfak")
-					m_new = ui.number_input("Günlük Öğün", min_value=1, max_value=3, value=def_meals_cnt)
-					ex_new = ui.checkbox("Ücretsiz / Burslu")
-					if ui.form_submit_button("➕ Listeye Ekle", use_container_width=True):
-						if not clean_name_valid(fn_new):
-							ui.warning("Ad soyad yazın.")
-						else:
-							upsert_diner(connect_db_fn, full_name=fn_new, role_type=r_new, class_or_dept=d_new, daily_meals_count=int(m_new), fee_exempt=ex_new)
-							ui.success(f"✅ {fn_new} yemek listesine eklendi.")
-							ui.rerun()
-
-		if diners:
-			df_din = pd.DataFrame([
-				{
-					"Ad Soyad": mask_fn(d["full_name"], "name"),
-					"Statü": d["role_type"],
-					"Sınıf/Birim": d.get("class_or_dept") or "—",
-					"Günlük Öğün": d["daily_meals_count"],
-					"Ücret Muaf": "Evet" if d.get("fee_exempt") else "Hayır",
-					"Bilinen Alerji": d.get("revir_allergies") or d.get("allergies_override") or "—",
-				}
-				for d in diners
-			])
-			ui.dataframe(df_din, hide_index=True, use_container_width=True)
-			with ui.expander("⏸️ Aboneyi Pasife Al (Geçmişi Korur) / Kalıcı Sil"):
-				d_del_map = {f"#{d['id']} — {mask_fn(d['full_name'], 'name')} ({d.get('class_or_dept') or d['role_type']})": int(d["id"]) for d in diners}
-				sel_dd = ui.selectbox("İşlem Yapılacak Abone", list(d_del_map.keys()), key="caf_del_diner_sel")
-				d_act1, d_act2 = ui.columns(2)
-				with d_act1:
-					if ui.button("⏸️ Aboneliği Pasife Al (Önerilen)", type="primary", use_container_width=True, key="caf_deact_diner_btn"):
-						deactivate_diner_by_id(connect_db_fn, d_del_map[sel_dd])
-						ui.success("Abone pasife alındı; önceki ay tahakkuk ve tahsilat geçmişi korundu.")
-						ui.rerun()
-				with d_act2:
-					if ui.button("🗑️ Kaydı Kalıcı Sil (Hareketsizler)", type="secondary", use_container_width=True, key="caf_del_diner_btn"):
-						try:
-							delete_diner_by_id(connect_db_fn, d_del_map[sel_dd], force=False)
-							ui.success("Abone kalıcı olarak silindi.")
-							ui.rerun()
-						except Exception as exc:
-							ui.warning(str(exc))
-
-		if inactive_diners:
-			with ui.expander(f"♻️ Pasif / Ayrılan Aboneler ({len(inactive_diners)})"):
-				in_opts = {f"#{d['id']} — {mask_fn(d['full_name'], 'name')} (Bitiş: {d.get('end_date') or '—'})": int(d["id"]) for d in inactive_diners}
-				sel_react = ui.selectbox("Tekrar Aktifleştirilecek Kişi", list(in_opts.keys()), key="caf_react_sel")
-				if ui.button("▶ Tekrar Aktif Listeye Al", key="caf_react_btn"):
-					reactivate_diner_by_id(connect_db_fn, in_opts[sel_react])
-					ui.success("Abone yeniden aktifleştirildi.")
-					ui.rerun()
-
-	with t_fees:
-		days_info = get_month_workdays_info(connect_db_fn, sel_ym)
-		auto_wd = sum(1 for d in days_info if d.get("is_workday"))
-		fc1, fc2, fc3, fc4, fc5 = ui.columns([1.2, 1.2, 1.0, 1.2, 1.2])
-		stu_price = fc1.number_input("Öğrenci 1 Öğün Ücreti (₺)", min_value=0.0, step=5.0, value=_safe_float(app_cfg.get("cafeteria_default_meal_price"), 75.0), key="caf_fee_stu_p")
-		stf_price = fc2.number_input("Öğretmen/Personel Öğün Ücreti (₺)", min_value=0.0, step=5.0, value=_safe_float(app_cfg.get("cafeteria_default_staff_price"), 90.0), key="caf_fee_stf_p")
-		wd_override = fc3.number_input("Ayın İş Günü Sayısı", min_value=0, max_value=31, value=auto_wd, key="caf_fee_wd_inp")
-		with fc4:
-			ui.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
-			if ui.button("🧮 Ücretleri Hesapla", type="primary", use_container_width=True, key="caf_btn_calc_fees"):
-				n_f = generate_or_refresh_monthly_fees(
-					connect_db_fn,
-					sel_ym,
-					student_meal_price=float(stu_price),
-					staff_meal_price=float(stf_price),
-					workdays_override=int(wd_override),
-				)
-				ui.success(f"✅ {n_f} kişi için {int(wd_override)} iş günü üzerinden {_fmt_ym(sel_ym)} ücretleri hesaplandı.")
-				ui.rerun()
-		with fc5:
-			ui.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
-			if ui.button("📲 Önceki Aydan Devir", type="secondary", use_container_width=True, key="caf_btn_carry_fwd", disabled=not bool(cash["balances"])):
-				yy_f, mm_f = int(sel_ym[:4]), int(sel_ym[5:7])
-				py_f, pm_f = (yy_f - 1, 12) if mm_f == 1 else (yy_f, mm_f - 1)
-				prev_ym_s = f"{py_f:04d}-{pm_f:02d}"
-				cf_n = carry_forward_unpaid_balances(connect_db_fn, prev_ym_s, sel_ym)
-				ui.success(f"✅ {_fmt_ym(prev_ym_s)} döneminden {cf_n} kişinin kalan bakiyesi devredildi.")
-				ui.rerun()
-
-		if cash["balances"]:
-			df_bal = pd.DataFrame([
-				{
-					"fee_id": int(b["id"]),
-					"Ad Soyad": mask_fn(b["full_name"], "name"),
-					"Statü": b["role_type"],
-					"Sınıf/Birim": b.get("class_or_dept") or "—",
-					"Planlı Gün": int(b["planned_days"]),
-					"Günlük Öğün": int(b["meals_per_day"]),
-					"Öğün (₺)": float(b["unit_meal_price"]),
-					"Devreden (₺)": float(b.get("carry_forward_debt") or 0.0),
-					"İndirim (₺)": float(b["discount_or_adjustment"]),
-					"Beklenen (₺)": float(b["expected_amount"]),
-					"Ödenen (₺)": float(b["paid_amount"]),
-					"Kalan (₺)": float(b["remaining_amount"]),
-					"Son Getiren": mask_fn(b.get("last_delivered_by") or "—", "name") if b.get("last_delivered_by") else "—",
-					"Durum": b["status_label"],
-				}
-				for b in cash["balances"]
-			])
-			ed_bal = ui.data_editor(
-				df_bal,
-				hide_index=True,
-				use_container_width=True,
-				key="caf_fees_editor",
-				column_config={
-					"fee_id": None,
-					"Ad Soyad": ui.column_config.TextColumn("Ad Soyad", disabled=True),
-					"Statü": ui.column_config.TextColumn("Statü", disabled=True),
-					"Sınıf/Birim": ui.column_config.TextColumn("Sınıf/Birim", disabled=True),
-					"Planlı Gün": ui.column_config.NumberColumn("Katılım Günü", min_value=0, max_value=31, step=1),
-					"Günlük Öğün": ui.column_config.NumberColumn("Öğün", min_value=1, max_value=3, step=1),
-					"Öğün (₺)": ui.column_config.NumberColumn("Öğün (₺)", min_value=0.0, step=5.0),
-					"Devreden (₺)": ui.column_config.NumberColumn("Devreden (₺)", step=10.0),
-					"İndirim (₺)": ui.column_config.NumberColumn("İndirim (₺)", step=10.0),
-					"Beklenen (₺)": ui.column_config.NumberColumn("Beklenen (₺)", disabled=True),
-					"Ödenen (₺)": ui.column_config.NumberColumn("Ödenen (₺)", disabled=True),
-					"Kalan (₺)": ui.column_config.NumberColumn("Kalan (₺)", disabled=True),
-					"Son Getiren": ui.column_config.TextColumn("Son Getiren", disabled=True),
-					"Durum": ui.column_config.TextColumn("Durum", disabled=True),
-				},
-			)
-			if ui.button("💾 Gün / Devir / Ücret Düzeltmelerini Kaydet", type="secondary", use_container_width=True, key="caf_btn_save_fee_edits"):
-				for _, r_f in ed_bal.iterrows():
-					update_monthly_fee_row(
-						connect_db_fn,
-						int(r_f["fee_id"]),
-						planned_days=int(r_f["Planlı Gün"]),
-						meals_per_day=int(r_f["Günlük Öğün"]),
-						unit_meal_price=float(r_f["Öğün (₺)"]),
-						discount_or_adjustment=float(r_f["İndirim (₺)"]),
-						carry_forward_debt=float(r_f["Devreden (₺)"]),
-					)
-				ui.success("✅ Kişi bazlı katılım günü, devir ve ücret düzeltmeleri güncellendi.")
-				ui.rerun()
-		else:
-			ui.info(f"{_fmt_ym(sel_ym)} için henüz aylık aidat oluşturulmamış. Önce kişi ekleyin ve '🧮 Ücretleri Hesapla' butonuna basın.")
-
 	with t_cash:
+		# Aktif Tahsilat Grupları Bilgi Şeridi & Hızlı Grup Filtresi
+		pol_badges = (
+			" · ".join(f"**{g}**" for g in policy["eligible_groups"])
+			if policy["eligible_groups"]
+			else "⚠️ Hiçbir ana grup seçili değil (yalnız ek ünvanlar)"
+		)
+		extra_inc_note = f" | ➕ Ek Ünvan: {', '.join(policy['included_titles'])}" if policy["included_titles"] else ""
+		extra_exc_note = f" | ⛔ Hariç: {', '.join(policy['excluded_titles'])}" if policy["excluded_titles"] else ""
+		ui.caption(f"🎯 **Ücret Tahsilatına Açık Gruplar:** {pol_badges}{extra_inc_note}{extra_exc_note}")
+
+		pf1, pf2, pf3 = ui.columns([1.4, 1.8, 1.1], vertical_alignment="center")
+		grp_filter_opts = ["Tümü", *policy["eligible_groups"]]
+		sel_cash_grp = pf1.selectbox("Grup Filtresi", grp_filter_opts, key="caf_cash_grp_flt")
+		cash_q_raw = pf2.text_input("Tahsilat Listesinde Ara (Ad / Ünvan / Sınıf / Veli)", key="caf_cash_q_flt", placeholder="İsim, sınıf veya ünvan yazın...")
+		with pf3:
+			ui.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+			if ui.button("⚙️ Tahsilat Gruplarını Ayarla ↗", key="caf_goto_fee_cfg_btn", use_container_width=True):
+				ui.session_state["_force_tab_label"] = "⚙️ Yemekhane Ayarları & Excel"
+				ui.rerun()
+
+		all_candidates = get_fee_collection_candidates(
+			connect_db_fn,
+			app_cfg,
+			group_filter=sel_cash_grp,
+			balances=cash["balances"],
+		)
+		cash_q_fold = _tr_fold(cash_q_raw)
+		if cash_q_fold:
+			candidates = [
+				c for c in all_candidates
+				if cash_q_fold in _tr_fold(c.get("full_name"))
+				or cash_q_fold in _tr_fold(c.get("role_title"))
+				or cash_q_fold in _tr_fold(c.get("class_or_dept"))
+				or cash_q_fold in _tr_fold(c.get("guardian_name"))
+				or cash_q_fold in _tr_fold(c.get("fee_group"))
+			]
+		else:
+			candidates = all_candidates
+
+		cand_map: dict[str, dict[str, Any]] = {}
+		for c in candidates:
+			nm_m = mask_fn(c["full_name"], "name")
+			role_s = c["role_title"]
+			cls_s = f" · {c['class_or_dept']}" if c["class_or_dept"] and c["class_or_dept"] != role_s else ""
+			if c["source_kind"] == "diner":
+				if c["remaining_amount"] > 0:
+					st_s = f" · Kalan: {c['remaining_amount']:,.0f} ₺"
+				else:
+					st_s = f" · {c['status_label']}"
+			else:
+				st_s = f" · [{c['status_label']}]"
+			lbl_base = f"{nm_m} ({role_s}{cls_s}{st_s})"
+			lbl = lbl_base if lbl_base not in cand_map else f"{lbl_base} #{c['candidate_key']}"
+			cand_map[lbl] = c
+
+		def _materialize_candidate_diner_id(cand: dict[str, Any]) -> int | None:
+			if cand["source_kind"] == "diner" and cand.get("diner_id"):
+				return int(cand["diner_id"])
+			if cand["source_kind"] == "school_person" and cand.get("student_id"):
+				sid_i = int(cand["student_id"])
+				import_school_people_as_diners(connect_db_fn, [sid_i], daily_meals_count=def_meals_cnt)
+				with connect_db_fn() as _mc:
+					r_d = _mc.execute("SELECT id FROM cafeteria_diners WHERE student_id=?", (sid_i,)).fetchone()
+					return int(r_d["id"]) if r_d else None
+			if cand["source_kind"] == "student_guardian":
+				return upsert_diner(
+					connect_db_fn,
+					full_name=str(cand["full_name"]),
+					role_type="Veli",
+					role_title="Veli",
+					class_or_dept=str(cand.get("class_or_dept") or "Veli"),
+					daily_meals_count=def_meals_cnt,
+					fee_exempt=False,
+				)
+			return None
+
 		pay_col, out_col = ui.columns(2)
-		diner_opts = {f"{mask_fn(d['full_name'], 'name')} ({d.get('class_or_dept') or d['role_type']})": int(d["id"]) for d in diners}
 		with pay_col:
 			with ui.container(border=True):
 				ui.markdown("##### 💰 Ücret Tahsilatı Al (Kasaya Giren)")
+				empty_cand_lbl = "— Seçili Tahsilat Gruplarında Kişi Bulunamadı —"
+				p_cand_lbl = ui.selectbox(
+					"Kimin Adına Ödeniyor* (Ayarlarda Seçili Gruplar)",
+					list(cand_map.keys()) or [empty_cand_lbl],
+					key="caf_pay_diner",
+				)
+				sel_cand = cand_map.get(p_cand_lbl)
+				if sel_cand:
+					ck_now = sel_cand["candidate_key"]
+					if ui.session_state.get("_caf_pay_prev_ck") != ck_now:
+						ui.session_state["_caf_pay_prev_ck"] = ck_now
+						ui.session_state["caf_pay_amt"] = round(float(sel_cand.get("remaining_amount") or 0.0), 2)
+						if sel_cand.get("guardian_name") and sel_cand["source_kind"] != "student_guardian":
+							ui.session_state["caf_pay_deliv"] = str(sel_cand["guardian_name"])
+						elif sel_cand["fee_group"] != "🎓 Öğrenciler":
+							ui.session_state["caf_pay_deliv"] = str(sel_cand["full_name"])
+						else:
+							ui.session_state["caf_pay_deliv"] = ""
+
+					rem_txt = (
+						f"Beklenen: **{sel_cand['expected_amount']:,.2f} ₺** · "
+						f"Ödenen: **{sel_cand['paid_amount']:,.2f} ₺** · "
+						f"Kalan: **{sel_cand['remaining_amount']:,.2f} ₺**"
+						if sel_cand["expected_amount"] > 0
+						else f"Durum: **{sel_cand['status_label']}** (Tahsilat alınınca otomatik abone kaydedilir)"
+					)
+					ui.info(f"**{sel_cand['fee_group']}** · Ünvan/Sınıf: **{sel_cand['role_title']}** — {rem_txt}")
+
 				with ui.form("caf_form_in_pay", clear_on_submit=True):
-					p_diner_lbl = ui.selectbox("Kimin Adına Ödeniyor*", list(diner_opts.keys()) or ["— Önce Kişi Ekleyin —"], key="caf_pay_diner")
 					p_deliv = ui.text_input("Ücreti Getiren İsim*", placeholder="Örn: Veli Fatma Demir veya Öğrt. Ayşe", key="caf_pay_deliv")
 					pc1, pc2, pc3 = ui.columns(3)
 					p_amt = pc1.number_input("Verilen Miktar (₺)*", min_value=0.0, step=50.0, value=0.0, key="caf_pay_amt")
 					p_meth = pc2.selectbox("Yöntem", ["Nakit", "IBAN / Havale", "Kart"], key="caf_pay_meth")
 					p_dt = pc3.date_input("Tarih", value=date.today(), key="caf_pay_dt")
 					p_note = ui.text_input("Makbuz No / Not", key="caf_pay_note")
-					if ui.form_submit_button("✅ Tahsilatı Kasaya İşle", type="primary", use_container_width=True, disabled=not diner_opts):
+					if ui.form_submit_button("✅ Tahsilatı Kasaya İşle", type="primary", use_container_width=True, disabled=sel_cand is None):
 						try:
-							did_p = diner_opts.get(p_diner_lbl)
+							did_p = _materialize_candidate_diner_id(sel_cand) if sel_cand else None
 							record_cash_transaction(
 								connect_db_fn,
 								tx_date=p_dt.isoformat(),
 								tx_type="IN_PAYMENT",
 								amount=float(p_amt),
 								diner_id=did_p,
+								for_person_name=str(sel_cand["full_name"]) if sel_cand else "",
 								delivered_by_name=p_deliv,
 								payment_method=p_meth,
 								notes=p_note,
 								year_month=sel_ym,
 							)
+							ui.session_state.pop("_caf_pay_prev_ck", None)
 							ui.success(f"✅ {float(p_amt):,.2f} ₺ tahsilat kasaya kaydedildi.")
 							ui.rerun()
 						except Exception as exc:
@@ -8385,6 +8727,7 @@ def _render_tab_diners_and_cash(ctx_api: dict[str, Any], sel_ym: str, app_cfg: d
 		with out_col:
 			with ui.container(border=True):
 				ui.markdown("##### 🏛️ Okula Teslim / Kasadan Çıkan Para")
+				ui.caption(f"💵 Güncel Kasa Mevcudu: **{cash['vault_balance']:,.2f} ₺** · Dönem Okula Teslim: **{cash['month_handover']:,.2f} ₺**")
 				with ui.form("caf_form_out_hand", clear_on_submit=True):
 					o_kind = ui.selectbox("Çıkış Türü", ["Okula Teslim Edilen (OUT_SCHOOL_HANDOVER)", "İade / Kasa Harcaması (OUT_REFUND_OR_PETTY)"], key="caf_out_kind")
 					o_recv = ui.text_input("Teslim Alan Yetkili / Açıklama*", placeholder="Örn: Okul Müdürü / Müd. Yrd.", key="caf_out_recv")
@@ -8412,20 +8755,19 @@ def _render_tab_diners_and_cash(ctx_api: dict[str, Any], sel_ym: str, app_cfg: d
 						except Exception as exc:
 							ui.error(str(exc))
 
-		if diners:
-			with ui.expander("👨‍👩‍👧‍👦 Toplu / Kardeş Ödemesi Dağıt (Tek Getiren → Birden Fazla Öğrenci)"):
+		if cand_map:
+			with ui.expander("👨‍👩‍👧‍👦 Toplu / Kardeş Ödemesi Dağıt (Yalnız İzinli Gruplar → Birden Fazla Kişi)"):
 				bc1, bc2, bc3 = ui.columns(3)
 				b_deliv = bc1.text_input("Ücreti Getiren Veli / İsim*", key="caf_bulk_deliv", placeholder="Örn: Veli Ahmet Kaya")
 				b_meth = bc2.selectbox("Ödeme Yöntemi", ["Nakit", "IBAN / Havale", "Kart"], key="caf_bulk_meth")
 				b_dt = bc3.date_input("Ödeme Tarihi", value=date.today(), key="caf_bulk_dt")
-				rem_map = {int(b["diner_id"]): float(b["remaining_amount"]) for b in cash["balances"]}
-				b_sel = ui.multiselect("Ödeme Dağıtılacak Kişiler*", list(diner_opts.keys()), key="caf_bulk_diners")
+				b_sel = ui.multiselect("Ödeme Dağıtılacak Kişiler*", list(cand_map.keys()), key="caf_bulk_diners")
 				if b_sel:
 					df_alloc = pd.DataFrame([
 						{
-							"diner_id": diner_opts[lbl],
+							"cand_key": cand_map[lbl]["candidate_key"],
 							"Kişi": lbl,
-							"Dağıtılacak Tutar (₺)": rem_map.get(diner_opts[lbl], 0.0),
+							"Dağıtılacak Tutar (₺)": cand_map[lbl]["remaining_amount"],
 							"Not": "",
 						}
 						for lbl in b_sel
@@ -8435,13 +8777,20 @@ def _render_tab_diners_and_cash(ctx_api: dict[str, Any], sel_ym: str, app_cfg: d
 						hide_index=True,
 						use_container_width=True,
 						key="caf_bulk_alloc_ed",
-						column_config={"diner_id": None, "Kişi": ui.column_config.TextColumn("Kişi", disabled=True)},
+						column_config={"cand_key": None, "Kişi": ui.column_config.TextColumn("Kişi", disabled=True)},
 					)
 					if ui.button("✅ Toplu / Kardeş Tahsilatlarını Kaydet", type="primary", key="caf_btn_bulk_pay"):
-						alloc_rows = [
-							{"diner_id": int(r["diner_id"]), "amount": float(r["Dağıtılacak Tutar (₺)"] or 0), "notes": str(r.get("Not") or "")}
-							for _, r in ed_alloc.iterrows()
-						]
+						cand_by_key = {c["candidate_key"]: c for c in candidates}
+						alloc_rows = []
+						for _, r in ed_alloc.iterrows():
+							c_obj = cand_by_key.get(str(r["cand_key"]))
+							did_m = _materialize_candidate_diner_id(c_obj) if c_obj else None
+							alloc_rows.append({
+								"diner_id": did_m,
+								"for_person_name": str(c_obj["full_name"]) if c_obj else "",
+								"amount": float(r["Dağıtılacak Tutar (₺)"] or 0),
+								"notes": str(r.get("Not") or ""),
+							})
 						ids_new = record_bulk_sibling_payments(
 							connect_db_fn,
 							tx_date=b_dt.isoformat(),
@@ -8453,7 +8802,7 @@ def _render_tab_diners_and_cash(ctx_api: dict[str, Any], sel_ym: str, app_cfg: d
 						ui.success(f"✅ {len(ids_new)} kişi için toplu tahsilat kaydedildi.")
 						ui.rerun()
 
-		if is_on and diners:
+		if is_on and all_candidates:
 			with ui.expander("🤖 Gemini AI ile Toplu Ödeme Mesajı / Listesi Oku (Önizlemeli)"):
 				pay_msg_txt = ui.text_area("Öğretmen / Veli Ödeme Mesajı veya Listesi", height=80, placeholder="Örn: Ali Yılmaz'ın annesi Fatma 1500 TL nakit getirdi, Ece Demir IBAN 1500 TL...", key="caf_ai_pay_txt")
 				if ui.button("✨ Ödeme Listesini Ayrıştır", key="caf_btn_ai_parse_pay"):
@@ -8477,11 +8826,12 @@ def _render_tab_diners_and_cash(ctx_api: dict[str, Any], sel_ym: str, app_cfg: d
 				if isinstance(pay_prev, list) and pay_prev:
 					ui.dataframe(pd.DataFrame(pay_prev), hide_index=True, use_container_width=True)
 					if ui.button("✅ Onayla ve Ayrıştırılan Ödemeleri Kasaya İşle", type="primary", key="caf_btn_commit_ai_pay"):
-						by_nm = {_tr_fold(d["full_name"]): int(d["id"]) for d in diners}
+						by_nm = {_tr_fold(c["full_name"]): c for c in all_candidates}
 						ins_c = 0
 						for it in pay_prev:
 							p_nm = str(it.get("for_person_name") or "").strip()
-							did_m = by_nm.get(_tr_fold(p_nm))
+							c_match = by_nm.get(_tr_fold(p_nm))
+							did_m = _materialize_candidate_diner_id(c_match) if c_match else None
 							amt_m = _safe_float(it.get("amount"), 0.0)
 							if amt_m > 0:
 								record_cash_transaction(
@@ -8582,6 +8932,196 @@ def _render_tab_diners_and_cash(ctx_api: dict[str, Any], sel_ym: str, app_cfg: d
 		else:
 			ui.caption("Bu dönem için henüz tahsilat veya teslim kaydı yok.")
 
+	with t_diners:
+		with ui.expander("➕ Revirden Öğrenci / Öğretmen / Personel / Veli Bağla veya Yeni Ekle", expanded=not bool(diners)):
+			ac1, ac2 = ui.columns(2)
+			with ac1:
+				with connect_db_fn() as conn:
+					stu_all = conn.execute(
+						"""SELECT s.id, s.full_name, s.person_type, COALESCE(s.notes, '') AS revir_notes,
+								  COALESCE(c.name, '—') AS cls
+						   FROM students s LEFT JOIN classes c ON c.id=s.class_id
+						   ORDER BY s.person_type, c.name, s.full_name"""
+					).fetchall()
+				linked_sids = {int(d["student_id"]) for d in all_diners_inc_inactive if d.get("student_id")}
+				link_grp_flt = ui.selectbox("Kişi Grubu Filtresi", ["Tümü", *ALL_CAFETERIA_FEE_GROUPS], key="caf_link_grp_flt")
+				link_opts: dict[str, int] = {}
+				for r in stu_all:
+					sid_i = int(r["id"])
+					if sid_i in linked_sids:
+						continue
+					_, eff_t = _map_school_person_role(str(r["person_type"] or "Öğrenci"), str(r["revir_notes"] or ""))
+					grp_r, eff_t = resolve_diner_role_group_and_title(person_type=str(r["person_type"] or ""), notes=str(r["revir_notes"] or ""))
+					if link_grp_flt != "Tümü" and grp_r != link_grp_flt:
+						continue
+					dept_txt = r["cls"] if r["cls"] not in ("—", "Sivil / Diğer") else eff_t
+					link_opts[f"{mask_fn(r['full_name'], 'name')} · {eff_t} ({dept_txt})"] = sid_i
+
+				picked_links = ui.multiselect("Kayıtlı Kişi Seç (Öğrenci / Öğretmen / İdare / Personel / Veli)", list(link_opts.keys()), key="caf_link_stu_ms")
+				link_meals = ui.number_input("Günlük Öğün Sayısı", min_value=1, max_value=3, value=def_meals_cnt, key="caf_link_meals")
+				if ui.button("📥 Seçilenleri Yemek Listesine Ekle", type="primary", use_container_width=True, disabled=not picked_links, key="caf_btn_link_stu"):
+					cnt_add = import_school_people_as_diners(connect_db_fn, [link_opts[k] for k in picked_links], daily_meals_count=int(link_meals))
+					ui.success(f"✅ {cnt_add} kişi yemek yiyenler listesine eklendi.")
+					ui.rerun()
+			with ac2:
+				with ui.form("caf_form_add_diner", clear_on_submit=True):
+					fn_new = ui.text_input("Serbest Kişi Adı Soyadı*")
+					r_new = ui.selectbox("Ana Statü", DINER_ROLE_TYPES)
+					t_new = ui.selectbox("Meslek Grubu / Ünvan", ["(Statü ile Aynı)", *policy["available_titles"]])
+					d_new = ui.text_input("Sınıf / Bölüm", placeholder="Örn: 3-A, Mutfak veya Veli")
+					m_new = ui.number_input("Günlük Öğün", min_value=1, max_value=3, value=def_meals_cnt)
+					ex_new = ui.checkbox("Ücretsiz / Burslu")
+					if ui.form_submit_button("➕ Listeye Ekle", use_container_width=True):
+						if not clean_name_valid(fn_new):
+							ui.warning("Ad soyad yazın.")
+						else:
+							final_title = r_new if t_new == "(Statü ile Aynı)" else t_new
+							upsert_diner(
+								connect_db_fn,
+								full_name=fn_new,
+								role_type=r_new,
+								role_title=final_title,
+								class_or_dept=d_new,
+								daily_meals_count=int(m_new),
+								fee_exempt=ex_new,
+							)
+							ui.success(f"✅ {fn_new} ({final_title}) yemek listesine eklendi.")
+							ui.rerun()
+
+		if diners:
+			df_din = pd.DataFrame([
+				{
+					"Ad Soyad": mask_fn(d["full_name"], "name"),
+					"Ana Grup": d.get("fee_group") or "—",
+					"Ünvan / Meslek": d.get("effective_role_title") or d.get("role_title") or d["role_type"],
+					"Sınıf/Birim": d.get("class_or_dept") or "—",
+					"Günlük Öğün": d["daily_meals_count"],
+					"Tahsilat Durumu": (
+						"🟡 Muaf (Burslu)"
+						if (d.get("fee_exempt") or d["role_type"] == "Burslu / Ücretsiz")
+						else ("✅ Tahsilata Açık" if is_diner_fee_eligible(d, policy) else "⛔ Ayar Dışı")
+					),
+					"Bilinen Alerji": d.get("revir_allergies") or d.get("allergies_override") or "—",
+				}
+				for d in diners
+			])
+			ui.dataframe(df_din, hide_index=True, use_container_width=True)
+			with ui.expander("⏸️ Aboneyi Pasife Al (Geçmişi Korur) / Kalıcı Sil"):
+				d_del_map = {f"#{d['id']} — {mask_fn(d['full_name'], 'name')} ({d.get('effective_role_title') or d['role_type']})": int(d["id"]) for d in diners}
+				sel_dd = ui.selectbox("İşlem Yapılacak Abone", list(d_del_map.keys()), key="caf_del_diner_sel")
+				d_act1, d_act2 = ui.columns(2)
+				with d_act1:
+					if ui.button("⏸️ Aboneliği Pasife Al (Önerilen)", type="primary", use_container_width=True, key="caf_deact_diner_btn"):
+						deactivate_diner_by_id(connect_db_fn, d_del_map[sel_dd])
+						ui.success("Abone pasife alındı; önceki ay tahakkuk ve tahsilat geçmişi korundu.")
+						ui.rerun()
+				with d_act2:
+					if ui.button("🗑️ Kaydı Kalıcı Sil (Hareketsizler)", type="secondary", use_container_width=True, key="caf_del_diner_btn"):
+						try:
+							delete_diner_by_id(connect_db_fn, d_del_map[sel_dd], force=False)
+							ui.success("Abone kalıcı olarak silindi.")
+							ui.rerun()
+						except Exception as exc:
+							ui.warning(str(exc))
+
+		if inactive_diners:
+			with ui.expander(f"♻️ Pasif / Ayrılan Aboneler ({len(inactive_diners)})"):
+				in_opts = {f"#{d['id']} — {mask_fn(d['full_name'], 'name')} (Bitiş: {d.get('end_date') or '—'})": int(d["id"]) for d in inactive_diners}
+				sel_react = ui.selectbox("Tekrar Aktifleştirilecek Kişi", list(in_opts.keys()), key="caf_react_sel")
+				if ui.button("▶ Tekrar Aktif Listeye Al", key="caf_react_btn"):
+					reactivate_diner_by_id(connect_db_fn, in_opts[sel_react])
+					ui.success("Abone yeniden aktifleştirildi.")
+					ui.rerun()
+
+	with t_fees:
+		days_info = get_month_workdays_info(connect_db_fn, sel_ym)
+		auto_wd = sum(1 for d in days_info if d.get("is_workday"))
+		fc1, fc2, fc3, fc4, fc5, fc6 = ui.columns([1.1, 1.1, 1.1, 0.9, 1.1, 1.1])
+		stu_price = fc1.number_input("Öğrenci Öğün (₺)", min_value=0.0, step=5.0, value=policy["student_price"], key="caf_fee_stu_p")
+		stf_price = fc2.number_input("Öğretmen/Personel Öğün (₺)", min_value=0.0, step=5.0, value=policy["staff_price"], key="caf_fee_stf_p")
+		gst_price = fc3.number_input("Veli/Misafir Öğün (₺)", min_value=0.0, step=5.0, value=policy["guest_price"], key="caf_fee_gst_p")
+		wd_override = fc4.number_input("İş Günü", min_value=0, max_value=31, value=auto_wd, key="caf_fee_wd_inp")
+		with fc5:
+			ui.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+			if ui.button("🧮 Ücretleri Hesapla", type="primary", use_container_width=True, key="caf_btn_calc_fees"):
+				n_f = generate_or_refresh_monthly_fees(
+					connect_db_fn,
+					sel_ym,
+					student_meal_price=float(stu_price),
+					staff_meal_price=float(stf_price),
+					guest_meal_price=float(gst_price),
+					workdays_override=int(wd_override),
+				)
+				ui.success(f"✅ {n_f} kişi için {int(wd_override)} iş günü üzerinden {_fmt_ym(sel_ym)} ücretleri hesaplandı.")
+				ui.rerun()
+		with fc6:
+			ui.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+			if ui.button("📲 Önceki Aydan Devir", type="secondary", use_container_width=True, key="caf_btn_carry_fwd", disabled=not bool(cash["balances"])):
+				yy_f, mm_f = int(sel_ym[:4]), int(sel_ym[5:7])
+				py_f, pm_f = (yy_f - 1, 12) if mm_f == 1 else (yy_f, mm_f - 1)
+				prev_ym_s = f"{py_f:04d}-{pm_f:02d}"
+				cf_n = carry_forward_unpaid_balances(connect_db_fn, prev_ym_s, sel_ym)
+				ui.success(f"✅ {_fmt_ym(prev_ym_s)} döneminden {cf_n} kişinin kalan bakiyesi devredildi.")
+				ui.rerun()
+
+		if cash["balances"]:
+			df_bal = pd.DataFrame([
+				{
+					"fee_id": int(b["id"]),
+					"Ad Soyad": mask_fn(b["full_name"], "name"),
+					"Ünvan / Meslek": b.get("effective_role_title") or b["role_type"],
+					"Sınıf/Birim": b.get("class_or_dept") or "—",
+					"Planlı Gün": int(b["planned_days"]),
+					"Günlük Öğün": int(b["meals_per_day"]),
+					"Öğün (₺)": float(b["unit_meal_price"]),
+					"Devreden (₺)": float(b.get("carry_forward_debt") or 0.0),
+					"İndirim (₺)": float(b["discount_or_adjustment"]),
+					"Beklenen (₺)": float(b["expected_amount"]),
+					"Ödenen (₺)": float(b["paid_amount"]),
+					"Kalan (₺)": float(b["remaining_amount"]),
+					"Son Getiren": mask_fn(b.get("last_delivered_by") or "—", "name") if b.get("last_delivered_by") else "—",
+					"Durum": b["status_label"],
+				}
+				for b in cash["balances"]
+			])
+			ed_bal = ui.data_editor(
+				df_bal,
+				hide_index=True,
+				use_container_width=True,
+				key="caf_fees_editor",
+				column_config={
+					"fee_id": None,
+					"Ad Soyad": ui.column_config.TextColumn("Ad Soyad", disabled=True),
+					"Ünvan / Meslek": ui.column_config.TextColumn("Ünvan / Meslek", disabled=True),
+					"Sınıf/Birim": ui.column_config.TextColumn("Sınıf/Birim", disabled=True),
+					"Planlı Gün": ui.column_config.NumberColumn("Katılım Günü", min_value=0, max_value=31, step=1),
+					"Günlük Öğün": ui.column_config.NumberColumn("Öğün", min_value=1, max_value=3, step=1),
+					"Öğün (₺)": ui.column_config.NumberColumn("Öğün (₺)", min_value=0.0, step=5.0),
+					"Devreden (₺)": ui.column_config.NumberColumn("Devreden (₺)", step=10.0),
+					"İndirim (₺)": ui.column_config.NumberColumn("İndirim (₺)", step=10.0),
+					"Beklenen (₺)": ui.column_config.NumberColumn("Beklenen (₺)", disabled=True),
+					"Ödenen (₺)": ui.column_config.NumberColumn("Ödenen (₺)", disabled=True),
+					"Kalan (₺)": ui.column_config.NumberColumn("Kalan (₺)", disabled=True),
+					"Son Getiren": ui.column_config.TextColumn("Son Getiren", disabled=True),
+					"Durum": ui.column_config.TextColumn("Durum", disabled=True),
+				},
+			)
+			if ui.button("💾 Gün / Devir / Ücret Düzeltmelerini Kaydet", type="secondary", use_container_width=True, key="caf_btn_save_fee_edits"):
+				for _, r_f in ed_bal.iterrows():
+					update_monthly_fee_row(
+						connect_db_fn,
+						int(r_f["fee_id"]),
+						planned_days=int(r_f["Planlı Gün"]),
+						meals_per_day=int(r_f["Günlük Öğün"]),
+						unit_meal_price=float(r_f["Öğün (₺)"]),
+						discount_or_adjustment=float(r_f["İndirim (₺)"]),
+						carry_forward_debt=float(r_f["Devreden (₺)"]),
+					)
+				ui.success("✅ Kişi bazlı katılım günü, devir ve ücret düzeltmeleri güncellendi.")
+				ui.rerun()
+		else:
+			ui.info(f"{_fmt_ym(sel_ym)} için henüz aylık aidat oluşturulmamış. '🧑‍🎓 Yemek Yiyenler & Aboneler' sekmesinden kişi ekleyin veya doğrudan '🧮 Ücretleri Hesapla' butonuna basın.")
+
 	with t_budget:
 		pnl = get_budget_and_pnl_summary(connect_db_fn, sel_ym)
 		ui.markdown(f"#### 📊 {_fmt_ym(sel_ym)} ve Genel Yemekhane Gelir – Gider Bütçe Dengesi")
@@ -8601,7 +9141,7 @@ def _render_tab_diners_and_cash(ctx_api: dict[str, Any], sel_ym: str, app_cfg: d
 			with ui.expander("🤖 Gemini AI Mali Analiz, Enflasyon Uyarısı & KVKK-Uyumlu Veli Hatırlatma Şablonu"):
 				if ui.button("✨ Aylık Bütçe & Fiyat Artışlarını AI ile Analiz Et", type="primary", key="caf_btn_ai_fin"):
 					unpaid_s = [
-						{"class_or_dept": b.get("class_or_dept"), "role": b["role_type"], "remaining_tl": b["remaining_amount"], "status": b["status_label"]}
+						{"class_or_dept": b.get("class_or_dept"), "role": b.get("effective_role_title") or b["role_type"], "remaining_tl": b["remaining_amount"], "status": b["status_label"]}
 						for b in cash["balances"]
 						if float(b.get("remaining_amount") or 0) > 0
 					]
@@ -8779,6 +9319,137 @@ def render_cafeteria_settings_panel(ctx_api: dict[str, Any], app_cfg: dict[str, 
 					ctx_api["clear_all_data_caches"]()
 				ui.success("✅ Yemekhane çalışma düzeni, Ramazan modu, renk tonu, yemek saatleri ve imza ayarları kaydedildi.")
 				ui.rerun()
+
+	fee_policy = parse_fee_collection_policy(app_cfg)
+	with ui.container(border=True):
+		ui.markdown("#### 💰 Ücret Tahsilatı Yapılacak Gruplar, Meslek Grupları & Ünvanlar")
+		ui.caption("Ücret Tahsilatı ekranında hangi grup, meslek ve ünvanların isimlerinin listeleneceğini seçin. Seçilmeyen grup ve muaf/hariç ünvanlar tahsilat ekranında gösterilmez.")
+
+		fp_c1, fp_c2, fp_c3 = ui.columns(3)
+		with fp_c1:
+			if ui.button("🌐 Tüm Okul Gruplarından Al", key=f"{kp}_fee_preset_all", use_container_width=True) and callable(save_cfg_fn):
+				save_cfg_fn({
+					"cafeteria_fee_scope_configured": "1",
+					"cafeteria_fee_groups": json.dumps(ALL_CAFETERIA_FEE_GROUPS, ensure_ascii=False),
+					"cafeteria_fee_included_titles": "[]",
+					"cafeteria_fee_excluded_titles": "[]",
+				})
+				ui.session_state.pop(f"{kp}_fee_policy_fp", None)
+				if callable(ctx_api.get("clear_all_data_caches")):
+					ctx_api["clear_all_data_caches"]()
+				ui.success("✅ Tüm okul grupları tahsilat kapsamına alındı.")
+				ui.rerun()
+		with fp_c2:
+			if ui.button("🎓👩‍🏫 Yalnız Öğrenci + Öğretmen", key=f"{kp}_fee_preset_stu_tch", use_container_width=True) and callable(save_cfg_fn):
+				save_cfg_fn({
+					"cafeteria_fee_scope_configured": "1",
+					"cafeteria_fee_groups": json.dumps(["🎓 Öğrenciler", "👩‍🏫 Öğretmenler"], ensure_ascii=False),
+					"cafeteria_fee_included_titles": "[]",
+					"cafeteria_fee_excluded_titles": "[]",
+				})
+				ui.session_state.pop(f"{kp}_fee_policy_fp", None)
+				if callable(ctx_api.get("clear_all_data_caches")):
+					ctx_api["clear_all_data_caches"]()
+				ui.success("✅ Tahsilat kapsamı yalnızca Öğrenciler ve Öğretmenler olarak ayarlandı.")
+				ui.rerun()
+		with fp_c3:
+			if ui.button("🎓 Yalnızca Öğrenciler", key=f"{kp}_fee_preset_stu", use_container_width=True) and callable(save_cfg_fn):
+				save_cfg_fn({
+					"cafeteria_fee_scope_configured": "1",
+					"cafeteria_fee_groups": json.dumps(["🎓 Öğrenciler"], ensure_ascii=False),
+					"cafeteria_fee_included_titles": "[]",
+					"cafeteria_fee_excluded_titles": "[]",
+				})
+				ui.session_state.pop(f"{kp}_fee_policy_fp", None)
+				if callable(ctx_api.get("clear_all_data_caches")):
+					ctx_api["clear_all_data_caches"]()
+				ui.success("✅ Tahsilat kapsamı yalnızca Öğrenciler olarak ayarlandı.")
+				ui.rerun()
+
+		pol_fp = json.dumps([
+			fee_policy["eligible_groups"],
+			fee_policy["included_titles"],
+			fee_policy["excluded_titles"],
+			fee_policy["custom_titles"],
+			fee_policy["include_student_guardians"],
+			fee_policy["student_price"],
+			fee_policy["staff_price"],
+			fee_policy["guest_price"],
+		], ensure_ascii=False)
+		if ui.session_state.get(f"{kp}_fee_policy_fp") != pol_fp:
+			ui.session_state[f"{kp}_fee_policy_fp"] = pol_fp
+			ui.session_state[f"{kp}_fee_groups"] = list(fee_policy["eligible_groups"])
+			ui.session_state[f"{kp}_fee_inc_titles"] = list(fee_policy["included_titles"])
+			ui.session_state[f"{kp}_fee_exc_titles"] = list(fee_policy["excluded_titles"])
+			ui.session_state[f"{kp}_fee_custom_titles"] = ", ".join(fee_policy["custom_titles"])
+			ui.session_state[f"{kp}_fee_inc_guard"] = bool(fee_policy["include_student_guardians"])
+
+		with ui.form(f"{kp}_form_fee_policy"):
+			sel_fee_groups = ui.multiselect(
+				"Ücret Tahsil Edilecek Ana Gruplar (Öğrenciler, Öğretmenler, İdare, Memur, Personel, Veliler)",
+				ALL_CAFETERIA_FEE_GROUPS,
+				default=fee_policy["eligible_groups"],
+				key=f"{kp}_fee_groups",
+			)
+			tt1, tt2 = ui.columns(2)
+			with tt1:
+				sel_inc_titles = ui.multiselect(
+					"➕ Ek Olarak Dahil Edilecek Meslek / Ünvanlar",
+					fee_policy["available_titles"],
+					default=[t for t in fee_policy["included_titles"] if t in fee_policy["available_titles"]],
+					key=f"{kp}_fee_inc_titles",
+					help="Ana grubu seçili olmasa bile ücreti alınacak tekil meslek ve ünvanlar (ör. yalnız Müdür Yardımcısı veya Hizmetli).",
+				)
+			with tt2:
+				sel_exc_titles = ui.multiselect(
+					"⛔ Hariç / Ücretsiz Tutulacak Meslek / Ünvanlar",
+					fee_policy["available_titles"],
+					default=[t for t in fee_policy["excluded_titles"] if t in fee_policy["available_titles"]],
+					key=f"{kp}_fee_exc_titles",
+					help="Ana grubu seçili olduğu halde tahsilat dışında bırakılacak ünvanlar (ör. Stajyer, Aşçı / Mutfak Personeli).",
+				)
+
+			custom_titles_in = ui.text_input(
+				"🏷️ Özel Meslek / Ünvan Ekle (Virgülle ayırın)",
+				value=", ".join(fee_policy["custom_titles"]),
+				placeholder="Örn: Etüt Öğretmeni, Rehber Öğrenci Velisi, Özel Şoför",
+				key=f"{kp}_fee_custom_titles",
+			)
+			pr1, pr2, pr3 = ui.columns(3)
+			fp_stu_p = pr1.number_input("Öğrenci Öğün Ücreti (₺)", min_value=0.0, step=5.0, value=fee_policy["student_price"], key=f"{kp}_fp_stu_p")
+			fp_stf_p = pr2.number_input("Öğretmen / Yönetim / Personel Öğün (₺)", min_value=0.0, step=5.0, value=fee_policy["staff_price"], key=f"{kp}_fp_stf_p")
+			fp_gst_p = pr3.number_input("Veli / Misafir Öğün Ücreti (₺)", min_value=0.0, step=5.0, value=fee_policy["guest_price"], key=f"{kp}_fp_gst_p")
+
+			inc_guard_chk = ui.checkbox(
+				"👨‍👩‍👧 'Veliler & Misafirler' grubu açıkken öğrenci kayıtlarındaki Veli Adı kişilerini tahsilat listesine dahil et",
+				value=fee_policy["include_student_guardians"],
+				key=f"{kp}_fee_inc_guard",
+			)
+
+			if ui.form_submit_button("💾 Tahsilat Gruplarını & Ünvan Ayarlarını Kaydet", type="primary", use_container_width=True) and callable(save_cfg_fn):
+				clean_custom = _parse_str_list_setting(custom_titles_in)
+				save_cfg_fn({
+					"cafeteria_fee_scope_configured": "1",
+					"cafeteria_fee_groups": json.dumps(list(sel_fee_groups), ensure_ascii=False),
+					"cafeteria_fee_included_titles": json.dumps(list(sel_inc_titles), ensure_ascii=False),
+					"cafeteria_fee_excluded_titles": json.dumps(list(sel_exc_titles), ensure_ascii=False),
+					"cafeteria_fee_custom_titles": ", ".join(clean_custom),
+					"cafeteria_include_student_guardians": "1" if inc_guard_chk else "0",
+					"cafeteria_default_meal_price": str(fp_stu_p),
+					"cafeteria_default_staff_price": str(fp_stf_p),
+					"cafeteria_default_guest_price": str(fp_gst_p),
+				})
+				ui.session_state.pop(f"{kp}_fee_policy_fp", None)
+				ui.session_state.pop("caf_cfg_form_fp", None)
+				ui.session_state.pop("cfg_caf_cfg_form_fp", None)
+				if callable(ctx_api.get("clear_all_data_caches")):
+					ctx_api["clear_all_data_caches"]()
+				ui.success("✅ Ücret tahsilatı yapılacak gruplar, meslek/ünvan filtreleri ve tarifeler kaydedildi.")
+				ui.rerun()
+
+		with ui.expander("📋 Kayıtlı Grup → Meslek / Ünvan Kataloğu", expanded=False):
+			for grp_lbl, grp_items in CAFETERIA_FEE_GROUP_CATALOG.items():
+				ui.caption(f"**{grp_lbl}:** {', '.join(grp_items)}")
 
 	with ui.expander("🏫 A4 Menü İçin Resmi Okul Logosu / Mühür Yükle (PNG/JPG)", expanded=False):
 		has_logo = bool(str(app_cfg.get("cafeteria_school_logo_b64") or "").strip())

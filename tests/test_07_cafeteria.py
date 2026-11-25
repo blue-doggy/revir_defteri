@@ -2265,6 +2265,105 @@ MİKTAR | BİRİM | MALIN CİNSİ | FİYAT | TUTAR
         self.assertEqual(m_empty.call_count, 0)
         self.assertIn("belge", res_e["error"].lower())
 
+    def test_fee_group_title_policy_filtering_and_cash_first_tab_flow(self):
+        # 1. Seed diverse school roles + guardian in students table
+        with self.connect() as c:
+            c.execute("UPDATE students SET guardian_name='Veli Ayşe Kaya' WHERE id=?", (self.stu_id,))
+            c.execute("INSERT OR IGNORE INTO classes(name) VALUES ('Sivil / Diğer')")
+            civ_cid = c.execute("SELECT id FROM classes WHERE name='Sivil / Diğer'").fetchone()[0]
+            md_id = c.execute(
+                "INSERT INTO students(class_id, person_type, full_name, sex, notes) VALUES (?, 'Sivil / diğer kişi', 'Hakan MüdürYrd', 'E', 'Müdür Yardımcısı')",
+                (civ_cid,),
+            ).lastrowid
+            hz_id = c.execute(
+                "INSERT INTO students(class_id, person_type, full_name, sex, notes) VALUES (?, 'Sivil / diğer kişi', 'Kemal Hizmetli', 'E', 'Hizmetli')",
+                (civ_cid,),
+            ).lastrowid
+            stj_id = c.execute(
+                "INSERT INTO students(class_id, person_type, full_name, sex, notes) VALUES (?, 'Sivil / diğer kişi', 'Elif Stajyer', 'K', 'Stajyer')",
+                (civ_cid,),
+            ).lastrowid
+            veli_id = c.execute(
+                "INSERT INTO students(class_id, person_type, full_name, sex, notes) VALUES (?, 'Sivil / diğer kişi', 'Murat Veli', 'E', 'Veli')",
+                (civ_cid,),
+            ).lastrowid
+            c.commit()
+
+        # Import people -> verify real titles & fee groups resolved cleanly
+        caf.import_school_people_as_diners(self.connect, [self.stu_id, self.teacher_id, md_id, hz_id, stj_id, veli_id])
+        diners_by_nm = {d["full_name"]: d for d in caf.get_diners(self.connect)}
+        self.assertEqual(diners_by_nm["Zeynep Öğretmen"]["effective_role_title"], "Öğretmen")
+        self.assertEqual(diners_by_nm["Zeynep Öğretmen"]["fee_group"], "👩‍🏫 Öğretmenler")
+        self.assertEqual(caf.resolve_diner_role_group_and_title(person_type="Sivil / diğer kişi", notes="Matematik Öğretmeni"), ("👩‍🏫 Öğretmenler", "Matematik Öğretmeni"))
+        self.assertEqual(diners_by_nm["Hakan MüdürYrd"]["fee_group"], "🏫 Okul & Yurt Yönetimi")
+        self.assertEqual(diners_by_nm["Kemal Hizmetli"]["fee_group"], "👷 Sözleşmeli, İŞKUR, Hizmetli & Stajyer")
+        self.assertEqual(diners_by_nm["Murat Veli"]["fee_group"], "👨‍👩‍👧 Veliler & Misafirler")
+
+        # 2. Restrict fee collection in settings: Öğrenciler + Öğretmenler + Hizmetli (exclude Stajyer/Yönetim/Veliler)
+        restricted_cfg = {
+            "cafeteria_fee_scope_configured": "1",
+            "cafeteria_fee_groups": json.dumps(["🎓 Öğrenciler", "👩‍🏫 Öğretmenler"], ensure_ascii=False),
+            "cafeteria_fee_included_titles": json.dumps(["Hizmetli"], ensure_ascii=False),
+            "cafeteria_fee_excluded_titles": json.dumps(["Stajyer"], ensure_ascii=False),
+            "cafeteria_include_student_guardians": "0",
+        }
+        cands = caf.get_fee_collection_candidates(self.connect, restricted_cfg)
+        cand_names = {c["full_name"] for c in cands}
+        self.assertEqual(cand_names, {"Ali Kaya", "Zeynep Öğretmen", "Kemal Hizmetli"})
+        self.assertNotIn("Hakan MüdürYrd", cand_names)
+        self.assertNotIn("Elif Stajyer", cand_names)
+        self.assertNotIn("Murat Veli", cand_names)
+        self.assertNotIn("Veli Ayşe Kaya", cand_names)
+
+        # 3. Enable Veliler + student guardians -> standalone Veli AND student guardian appear
+        parent_cfg = {
+            "cafeteria_fee_scope_configured": "1",
+            "cafeteria_fee_groups": json.dumps(["👨‍👩‍👧 Veliler & Misafirler"], ensure_ascii=False),
+            "cafeteria_include_student_guardians": "1",
+        }
+        parent_names = {c["full_name"] for c in caf.get_fee_collection_candidates(self.connect, parent_cfg)}
+        self.assertEqual(parent_names, {"Murat Veli", "Veli Ayşe Kaya"})
+
+        # 4. Headless UI: first active tab of Yemek Yiyenler & Kasa MUST be Ücret Tahsilatı & Kasa
+        revir_ui.reset_session()
+        ctx_api = {
+            "connect_db": persantil.connect_db,
+            "get_app_settings": persantil.get_app_settings,
+            "save_app_settings": persantil.save_app_settings,
+            "_get_active_gemini_config": lambda: (False, "", ""),
+            "mask_kvkk_value": persantil.mask_kvkk_value,
+            "clear_all_data_caches": persantil.clear_all_data_caches,
+            "is_section_visible": persantil.is_section_visible,
+        }
+        persantil.save_app_settings(restricted_cfg)
+        cur_cfg = persantil.get_app_settings()
+        out_cash = revir_ui.run_action_headless(
+            lambda: caf._render_tab_diners_and_cash(ctx_api, "2026-11", cur_cfg),
+            {"action": "render"},
+        )
+        cash_html = str(out_cash.get("main_html") or "")
+        # First active pane (active class on tab 0) contains Ücret Tahsilatı Al
+        first_pane = cash_html.split('class="revir-tab-pane active"', 1)[1].split('class="revir-tab-pane"', 1)[0]
+        self.assertIn("Ücret Tahsilatı Al", first_pane)
+        # Payment dropdown contains ONLY eligible candidates, NOT excluded titles
+        pay_block = first_pane.split('data-key="caf_pay_diner"', 1)[1].split('caf_form_in_pay', 1)[0]
+        self.assertIn("Ali Kaya", pay_block)
+        self.assertIn("Zeynep Öğretmen", pay_block)
+        self.assertIn("Kemal Hizmetli", pay_block)
+        self.assertNotIn("Hakan MüdürYrd", pay_block)
+        self.assertNotIn("Elif Stajyer", pay_block)
+        self.assertNotIn("Murat Veli", pay_block)
+
+        # 5. Settings panel preset button updates DB fee groups cleanly
+        revir_ui.reset_session()
+        revir_ui.run_action_headless(
+            lambda: caf.render_cafeteria_settings_panel(ctx_api, persantil.get_app_settings(), key_prefix="caf"),
+            {"action": "click", "key": "caf_fee_preset_stu"},
+        )
+        saved_pol = caf.parse_fee_collection_policy(persantil.get_app_settings())
+        self.assertTrue(saved_pol["configured"])
+        self.assertEqual(saved_pol["eligible_groups"], ["🎓 Öğrenciler"])
+
 
 if __name__ == "__main__":
     unittest.main()

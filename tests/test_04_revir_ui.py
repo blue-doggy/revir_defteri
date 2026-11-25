@@ -196,6 +196,8 @@ class TestRevirUI(unittest.TestCase):
                     "revir-box-span-tag",
                     "inferMinGridCols",
                     "container-type: inline-size",
+                    ".revir-tab-pane.revir-grid-zone:not(.active)",
+                    "ownTabsWrap",
                     "@media (max-width: 760px)",
                     "revir-settings-status-grid",
                     "window.__revirTabKey",
@@ -246,6 +248,25 @@ class TestRevirUI(unittest.TestCase):
         second_html = str(second.get("main_html") or "")
         self.assertIn("İkinci panel içeriği", second_html)
         self.assertNotIn("İlk panel içeriği", second_html)
+
+        # Nested non-lazy tabs inside a lazy outer tab must keep distinct tab groups & inactive panes hidden
+        def _nested_app():
+            outer = revir_ui.tabs(["Ana 1", "Ana 2"], lazy=True)
+            def _pane0():
+                inner = revir_ui.tabs(["İç A", "İç B"], lazy=False)
+                with inner[0]:
+                    revir_ui.text("İçerik A")
+                with inner[1]:
+                    revir_ui.text("İçerik B")
+            outer.render(0, _pane0)
+            outer.render(1, lambda: revir_ui.text("Ana 2 içeriği"))
+
+        nested_out = revir_ui.run_action_headless(_nested_app, {"action": "render"})
+        nested_html = str(nested_out.get("main_html") or "")
+        self.assertEqual(nested_html.count('data-rerender-on-tab="true"'), 1)
+        self.assertIn("İçerik A", nested_html)
+        self.assertIn("İçerik B", nested_html)
+        self.assertIn(".revir-tab-pane.revir-grid-zone:not(.active)", revir_ui._SHELL_HTML)
 
     def test_native_audio_controller_status(self):
         ctrl = revir_ui._NativeAudioController()
