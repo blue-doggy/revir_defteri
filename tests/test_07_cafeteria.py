@@ -619,6 +619,7 @@ class TestCafeteriaModule(unittest.TestCase):
         self.assertIn("Menü Planlayıcı", main_html)
         self.assertIn("Yemekler Bankası", main_html)
         self.assertNotIn("Aylar Arası Planlama Merkezi", main_html)
+        self.assertLess(main_html.index("Aktif Ay"), main_html.index("Düzenlenecek Haftayı Seçin"))
 
         ctx_api = {
             "connect_db": persantil.connect_db,

@@ -6119,8 +6119,16 @@ def _render_tab_dishes(ctx_api: dict[str, Any]) -> None:
 			open_dish_editor_dialog(ctx_api, clicked_did)
 
 
-def _render_tab_menu_planner(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict[str, str]) -> None:
+def _render_tab_menu_planner(
+	ctx_api: dict[str, Any],
+	sel_ym: str,
+	app_cfg: dict[str, str],
+	month_options: list[str] | None = None,
+) -> None:
 	connect_db_fn = ctx_api["connect_db"]
+	if month_options is None:
+		month_options, _ = _month_options(connect_db_fn)
+	ui.session_state["caf_global_sel_ym"] = sel_ym
 	is_on, api_key, model = ctx_api["_get_active_gemini_config"]()
 	mask_fn = ctx_api.get("mask_kvkk_value") or (lambda v, *_a, **_kw: str(v or ""))
 
@@ -6357,11 +6365,19 @@ def _render_tab_menu_planner(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict
 	if ui.session_state.get("caf_menu_week_month") != sel_ym or ui.session_state.get("caf_menu_wk_pick") not in wk_labels:
 		ui.session_state["caf_menu_week_month"] = sel_ym
 		ui.session_state["caf_menu_wk_pick"] = wk_labels[0]
-	w_col1, w_col2, w_col3, w_col4 = ui.columns([1.8, 1.1, 1.1, 1.2], vertical_alignment="center")
+	w_col1, w_col2, w_col3, w_col4, w_col5 = ui.columns([1.1, 1.8, 1.15, 1.15, 1.2], vertical_alignment="center")
 	with w_col1:
+		ui.selectbox(
+			"Aktif Ay",
+			month_options,
+			index=month_options.index(sel_ym) if sel_ym in month_options else 0,
+			format_func=_fmt_ym,
+			key="caf_global_sel_ym",
+		)
+	with w_col2:
 		picked_wk_lbl = ui.selectbox("Düzenlenecek Haftayı Seçin (İş Günleri)", wk_labels, key="caf_menu_wk_pick")
 	wk_idx = wk_labels.index(picked_wk_lbl) if picked_wk_lbl in wk_labels else 0
-	with w_col2:
+	with w_col3:
 		if ui.button("💾 Bu Haftanın Tümünü Kaydet", type="primary", use_container_width=True, key="caf_btn_save_wk_all"):
 			cnt_w = 0
 			for d in weeks[wk_idx]:
@@ -6383,7 +6399,7 @@ def _render_tab_menu_planner(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict
 						cnt_w += 1
 			ui.success(f"✅ Seçili haftada {cnt_w} öğün güncellendi.")
 			ui.rerun()
-	with w_col3:
+	with w_col4:
 		if wk_idx > 0 and ui.button("📋 Önceki Haftayı Kopyala", type="secondary", use_container_width=True, key="caf_btn_copy_prev_wk"):
 			pairs = [(s["date_iso"], t["date_iso"]) for s, t in zip(weeks[wk_idx - 1], weeks[wk_idx])]
 			c_cnt = copy_menu_plans(connect_db_fn, date_pairs=pairs, meal_slots=active_slots, overwrite=True, sync_to_diabetes=auto_sync_diab)
@@ -6398,7 +6414,7 @@ def _render_tab_menu_planner(ctx_api: dict[str, Any], sel_ym: str, app_cfg: dict
 			c_cnt = copy_menu_plans(connect_db_fn, date_pairs=pairs, meal_slots=active_slots, overwrite=False, sync_to_diabetes=auto_sync_diab)
 			ui.success(f"✅ Geçen aydan {c_cnt} öğün bu aya dağıtıldı.")
 			ui.rerun()
-	with w_col4:
+	with w_col5:
 		if ui.button("💉 Tüm Ayı Diyabete Eşitle", type="secondary", use_container_width=True, key="caf_btn_sync_diab_all"):
 			cnt_s = sync_cafeteria_month_to_diabetes(connect_db_fn, sel_ym)
 			ui.success(f"✅ {cnt_s} öğün İnsülin & Diyabet Yönetimi modülüyle eşitlendi.")
@@ -8816,19 +8832,13 @@ def render_cafeteria_management_page(ctx_api: dict[str, Any]) -> None:
 
 	app_cfg = ctx_api["get_app_settings"]()
 	ym_opts, cur_ym = _month_options(connect_db_fn)
+	sel_ym = ui.session_state.get("caf_global_sel_ym", cur_ym)
+	if sel_ym not in ym_opts:
+		sel_ym = cur_ym
+		ui.session_state["caf_global_sel_ym"] = sel_ym
 
-	hdr_l, hdr_r = ui.columns([2.6, 1.2], vertical_alignment="center")
-	with hdr_l:
-		ui.markdown("## 🍽️ Yemekhane, Menü Planlama, Gider & Kasa Yönetimi")
-		ui.caption("Yemekler bankası (AI malzeme/kalori/alerjen), iş günü bazlı öğün planı, imzalı A4 çıktı, gelen ürün/fatura giderleri ve öğrenci/kasa muhasebesi.")
-	with hdr_r:
-		sel_ym = ui.selectbox(
-			"Aktif Ay",
-			ym_opts,
-			index=ym_opts.index(cur_ym) if cur_ym in ym_opts else 0,
-			format_func=_fmt_ym,
-			key="caf_global_sel_ym",
-		)
+	ui.markdown("## 🍽️ Yemekhane, Menü Planlama, Gider & Kasa Yönetimi")
+	ui.caption("Yemekler bankası (AI malzeme/kalori/alerjen), iş günü bazlı öğün planı, imzalı A4 çıktı, gelen ürün/fatura giderleri ve öğrenci/kasa muhasebesi.")
 
 	tab_menu, tab_dishes, tab_purch, tab_cash, tab_cfg = ui.tabs([
 		"🗓️ Menü Planlayıcı & A4 Çıktı",
@@ -8838,7 +8848,7 @@ def render_cafeteria_management_page(ctx_api: dict[str, Any]) -> None:
 		"⚙️ Yemekhane Ayarları & Excel",
 	])
 	with tab_menu:
-		_render_tab_menu_planner(ctx_api, sel_ym, app_cfg)
+		_render_tab_menu_planner(ctx_api, sel_ym, app_cfg, ym_opts)
 	with tab_dishes:
 		_render_tab_dishes(ctx_api)
 	with tab_purch:
