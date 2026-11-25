@@ -137,7 +137,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return (Path(meipass_raw) if meipass_raw else _BUNDLE_DIR) / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.35.5"
+_DEFAULT_APP_VERSION = "1.35.6"
 
 
 def _load_app_version() -> str:
@@ -1375,6 +1375,64 @@ def render_draggable_resizable_canvas(
 			}
 		}
 	};
+	const LAYOUT_GAP = 12;
+	const findSwapTarget = (movedCard) => {
+		const mr=movedCard.getBoundingClientRect();
+		let best=null;
+		cards.forEach((candidate,id)=>{
+			if(candidate===movedCard||candidate.classList.contains("layout-hidden"))return;
+			const rr=candidate.getBoundingClientRect();
+			const ox=Math.max(0,Math.min(mr.right,rr.right)-Math.max(mr.left,rr.left));
+			const oy=Math.max(0,Math.min(mr.bottom,rr.bottom)-Math.max(mr.top,rr.top));
+			const overlap=ox*oy;
+			const candidateArea=Math.max(1,rr.width*rr.height);
+			const ratio=overlap/candidateArea;
+			if(ratio>=0.28){
+				const mx=(mr.left+mr.right)/2,my=(mr.top+mr.bottom)/2;
+				const cx=(rr.left+rr.right)/2,cy=(rr.top+rr.bottom)/2;
+				const distance=Math.hypot(mx-cx,my-cy);
+				if(!best||distance<best.distance)best={card:candidate,distance,ratio};
+			}
+		});
+		return best?best.card:null;
+	};
+	const swapLayoutGeometry = (first, second) => {
+		const firstGeometry={left:first.style.left,top:first.style.top,width:first.style.width,height:first.style.height,z:first.style.zIndex,accent:first.dataset.layoutAccent};
+		const secondGeometry={left:second.style.left,top:second.style.top,width:second.style.width,height:second.style.height,z:second.style.zIndex,accent:second.dataset.layoutAccent};
+		const apply=(card,geometry)=>{
+			card.style.left=geometry.left;
+			card.style.top=geometry.top;
+			card.style.width=geometry.width;
+			card.style.height=geometry.height;
+			card.style.zIndex=geometry.z;
+			card.dataset.layoutAccent=geometry.accent||"#0d9488";
+			card.style.borderTop="4px solid "+card.dataset.layoutAccent;
+		};
+		apply(first,secondGeometry);
+		apply(second,firstGeometry);
+	};
+	const separateCardFromNeighbors = (movedCard) => {
+		const canvasRect=canvas.getBoundingClientRect();
+		let cardRect=movedCard.getBoundingClientRect();
+		cards.forEach((other)=>{
+			if(other===movedCard||other.classList.contains("layout-hidden"))return;
+			let otherRect=other.getBoundingClientRect();
+			const vertical=Math.min(cardRect.bottom,otherRect.bottom)-Math.max(cardRect.top,otherRect.top);
+			const horizontal=Math.min(cardRect.right,otherRect.right)-Math.max(cardRect.left,otherRect.left);
+			if(vertical>0&&horizontal>0){
+				const movedCenter=(cardRect.left+cardRect.right)/2;
+				const otherCenter=(otherRect.left+otherRect.right)/2;
+				if(movedCenter<otherCenter){
+					const desired=otherRect.left-LAYOUT_GAP-cardRect.width;
+					movedCard.style.left=Math.max(0,Math.round(desired-canvasRect.left))+"px";
+				}else{
+					const desired=otherRect.right+LAYOUT_GAP;
+					movedCard.style.left=Math.min(canvasRect.width-cardRect.width,Math.max(0,Math.round(desired-canvasRect.left)))+"px";
+				}
+				cardRect=movedCard.getBoundingClientRect();
+			}
+		});
+	};
 	const historyPush=()=>{engine.undo.push(JSON.stringify(Object.fromEntries(Array.from(cards,([id,el])=>[id,{left:el.style.left,top:el.style.top,width:el.style.width,height:el.style.height,z:el.style.zIndex,hidden:el.classList.contains("layout-hidden"),accent:el.dataset.layoutAccent}]))));if(engine.undo.length>30)engine.undo.shift()};
 	const decorate=(card,id,item)=>{
 		card.classList.toggle("layout-edit",!!cfg.edit);
@@ -1410,8 +1468,15 @@ def render_draggable_resizable_canvas(
 				const move=ev=>{const dx=ev.clientX-sx,dy=ev.clientY-sy;
 					if(mode==="drag"){card.style.left=Math.max(0,left+dx)+"px";card.style.top=Math.max(0,top+dy)+"px"}
 					else {let nl=left,nt=top,nw=w,nh=h;if(side.includes("e"))nw=Math.max(180,w+dx);if(side.includes("s"))nh=Math.max(90,h+dy);if(side.includes("w")){nw=Math.max(180,w-dx);nl=left+(w-nw)}if(side.includes("n")){nh=Math.max(90,h-dy);nt=top+(h-nh)}card.style.left=Math.max(0,nl)+"px";card.style.top=Math.max(0,nt)+"px";card.style.width=nw+"px";card.style.height=nh+"px"}
-					clearGuides();applySnap(card,mode,side);setCanvasHeight()};
-				const up=()=>{window.removeEventListener("pointermove",move);window.removeEventListener("pointerup",up);clearGuides();sync();setCanvasHeight()};
+					clearGuides();applySnap(card,mode,side);
+					setCanvasHeight()};
+				const up=()=>{window.removeEventListener("pointermove",move);window.removeEventListener("pointerup",up);clearGuides();
+					if(mode==="drag"){
+						const target=findSwapTarget(card);
+						if(target)swapLayoutGeometry(card,target);
+						else separateCardFromNeighbors(card);
+					}
+					sync();setCanvasHeight()};
 				window.addEventListener("pointermove",move);window.addEventListener("pointerup",up,{once:true});
 			});
 		}
@@ -1430,7 +1495,7 @@ def render_draggable_resizable_canvas(
 				if(Math.abs(card.offsetLeft+card.offsetWidth-right)<=10)card.style.left=(right-card.offsetWidth)+"px";
 			}
 		});
-		visible.forEach(card=>{card.style.left=(Math.round(card.offsetLeft/10)*10)+"px";card.style.top=(Math.round(card.offsetTop/10)*10)+"px"});
+		visible.forEach(card=>{card.style.left=(Math.round(card.offsetLeft/12)*12)+"px";card.style.top=(Math.round(card.offsetTop/12)*12)+"px"});
 		sync();
 	}
 	if(cfg.restore){const card=cards.get(cfg.restore);if(card)card.classList.remove("layout-hidden")}
