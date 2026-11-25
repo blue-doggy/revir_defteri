@@ -3992,7 +3992,7 @@ body.modal-open #revir-fab-btn:hover { opacity: 1; }
 	animation: revirSpin 0.7s linear infinite; display: inline-block;
 }
 @keyframes revirSpin { to { transform: rotate(360deg); } }
-body.revir-busy .revir-btn { pointer-events: none; }
+body.revir-busy .revir-btn { cursor: progress; }
 #revir-toast {
 	position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 99999;
 	background: #0f172a; color: #ffffff; padding: 10px 18px; border-radius: 10px;
@@ -4388,7 +4388,8 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 	var pendingInputs = {};
 	var pendingEditorCells = [];
 	var inflight = false;
-	var queuedReq = null;
+	var queuedReqs = [];
+	var activeClickKey = null;
 	var lastFocusedEditorId = null;
 	var modalDirty = false;
 	var modalBackdropWarned = false;
@@ -4496,11 +4497,28 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 
 	function sendAction(payload, opts) {
 		opts = opts || {};
+		payload = Object.assign({}, payload);
+		var clickKey = payload.action === "click" && payload.key ? String(payload.key) : null;
+		if (clickKey && (
+			clickKey === activeClickKey ||
+			queuedReqs.some(function(req) {
+				return req.payload.action === "click" && String(req.payload.key || "") === clickKey;
+			})
+		)) {
+			return;
+		}
+
+		payload.pending_inputs = Object.assign({}, payload.pending_inputs || {}, pendingInputs);
+		payload.pending_editor_cells = (payload.pending_editor_cells || []).concat(pendingEditorCells);
+		pendingInputs = {};
+		pendingEditorCells = [];
+
 		if (inflight) {
-			queuedReq = { payload: payload, opts: opts };
+			queuedReqs.push({ payload: payload, opts: opts });
 			return;
 		}
 		inflight = true;
+		activeClickKey = clickKey;
 		setBusy(true);
 
 		var mainEl = document.getElementById("revir-main");
@@ -4508,11 +4526,6 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 		var savedMainScroll = mainEl ? mainEl.scrollTop : 0;
 		var savedDlgScroll = dlgBody ? dlgBody.scrollTop : 0;
 		var savedSbScroll = (document.getElementById("revir-sidebar") || {}).scrollTop || 0;
-
-		payload.pending_inputs = Object.assign({}, pendingInputs);
-		payload.pending_editor_cells = pendingEditorCells.slice();
-		pendingInputs = {};
-		pendingEditorCells = [];
 
 		fetch("/api/action", {
 			method: "POST",
@@ -4529,10 +4542,10 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 		})
 		.finally(function() {
 			inflight = false;
+			activeClickKey = null;
 			setBusy(false);
-			if (queuedReq) {
-				var nxt = queuedReq;
-				queuedReq = null;
+			if (queuedReqs.length) {
+				var nxt = queuedReqs.shift();
 				sendAction(nxt.payload, nxt.opts);
 			}
 		});
