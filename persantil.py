@@ -137,7 +137,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return (Path(meipass_raw) if meipass_raw else _BUNDLE_DIR) / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.35.6"
+_DEFAULT_APP_VERSION = "1.36.0"
 
 
 def _load_app_version() -> str:
@@ -9307,12 +9307,16 @@ def get_students_column_config() -> dict:
 		"id": None,
 		"📂 Dosya": ui.column_config.TextColumn(
 			"📂 Dosya",
-			help="Öğrencinin Kişi Dosyasını (Detay & İşlem) açmak için tıklayın",
+			help="Kişi Dosyasını (Detay & İşlem) açmak için tıklayın",
 			width="small",
 		),
 		"Ad Soyad": ui.column_config.TextColumn(
 			"Ad Soyad",
-			help="Öğrenci dosyasına ulaşmak için öğrenci adına tıklayın",
+			help="Kişi dosyasına ulaşmak için adına tıklayın",
+		),
+		"Görev / Statü": ui.column_config.TextColumn(
+			"Görev / Statü",
+			help="Okul / yurttaki görevi, öğretmenlik branşı veya çalışma statüsü",
 		),
 		"Yaş": ui.column_config.TextColumn("Yaş"),
 		"Yaş (Ay)": ui.column_config.NumberColumn("Yaş (Ay)", format="%d ay"),
@@ -10374,6 +10378,112 @@ def render_shared_person_summary(person: sqlite3.Row, section_key: str = "") -> 
 		if alert_banner_html:
 			ui.markdown(alert_banner_html, unsafe_allow_html=True)
 
+
+
+_CUSTOM_ADULT_ROLE_OPTION = "➕ Diğer / Elle Yaz..."
+
+ADULT_ROLE_STATUS_OPTIONS: list[str] = [
+	# Okul & Yurt Yönetimi
+	"Müdür",
+	"Müdür Başyardımcısı",
+	"Müdür Yardımcısı",
+	"Yurt Müdürü",
+	"Yurt Müdür Yardımcısı",
+	"Yurt Yönetim Memuru",
+	"Belletici / Belletmen",
+	"Atölye / Bölüm Şefi",
+	# Öğretmenlik & Branşlar
+	"Öğretmen",
+	"Sınıf Öğretmeni",
+	"Okul Öncesi Öğretmeni",
+	"Özel Eğitim Öğretmeni",
+	"Rehberlik / PDR Öğretmeni",
+	"Türkçe Öğretmeni",
+	"Türk Dili ve Edebiyatı Öğretmeni",
+	"Matematik Öğretmeni",
+	"İlköğretim Matematik Öğretmeni",
+	"Fen Bilimleri Öğretmeni",
+	"Fizik Öğretmeni",
+	"Kimya Öğretmeni",
+	"Biyoloji Öğretmeni",
+	"Sosyal Bilgiler Öğretmeni",
+	"Tarih Öğretmeni",
+	"Coğrafya Öğretmeni",
+	"Felsefe Öğretmeni",
+	"İngilizce Öğretmeni",
+	"Almanca Öğretmeni",
+	"Arapça Öğretmeni",
+	"Din Kültürü ve Ahlak Bilgisi Öğretmeni",
+	"Meslek Dersleri Öğretmeni",
+	"Bilişim Teknolojileri Öğretmeni",
+	"Beden Eğitimi Öğretmeni",
+	"Görsel Sanatlar Öğretmeni",
+	"Müzik Öğretmeni",
+	"Teknoloji ve Tasarım Öğretmeni",
+	"Ücretli Öğretmen",
+	"Usta Öğretici",
+	# Memur, İdari ve Teknik Kadro
+	"Memur",
+	"VHKİ Memuru",
+	"Bilgisayar İşletmeni",
+	"Mutemet",
+	"Ayniyat / Ambar Memuru",
+	"Sekreter / Büro Memuru",
+	"Kütüphane Memuru",
+	"Teknisyen / Tekniker",
+	"Sağlık Personeli / Hemşire",
+	"Diyetisyen",
+	"Kaloriferci",
+	"Şoför",
+	# Sözleşmeli, İŞKUR, Hizmetli & Stajyer
+	"Sözleşmeli Personel",
+	"İŞKUR Personeli",
+	"Hizmetli",
+	"Güvenlik Personeli",
+	"Aşçı / Mutfak Personeli",
+	"Stajyer",
+	# Diğer Okul İlişkili Yetişkinler
+	"Veli",
+	"Ziyaretçi / Diğer",
+]
+
+
+def _render_adult_role_selector(
+	label: str = "Görev / Statü",
+	current_value: str | None = None,
+	*,
+	key_prefix: str,
+	container: Any = None,
+	default_role: str = "Öğretmen",
+	allow_inline_custom: bool = True,
+	allow_blank: bool = False,
+) -> str:
+	"""Yetişkin/personel için okul/yurt yönetimi, memur türleri, öğretmenlik branşları ve çalışma statülerini seçtirir."""
+	host = container if container is not None else ui
+	cur = clean_text(current_value)
+	opts = list(ADULT_ROLE_STATUS_OPTIONS)
+	if allow_blank and "Belirtilmedi" not in opts:
+		opts = ["Belirtilmedi", *opts]
+	if cur and cur not in opts:
+		opts = [cur, *opts]
+	sel_opts = [*opts, _CUSTOM_ADULT_ROLE_OPTION] if allow_inline_custom else opts
+	if cur:
+		target_val = cur
+	elif allow_blank:
+		target_val = "Belirtilmedi"
+	else:
+		target_val = default_role if default_role in sel_opts else sel_opts[0]
+	default_idx = sel_opts.index(target_val) if target_val in sel_opts else 0
+	picked = host.selectbox(label, sel_opts, index=default_idx, key=f"{key_prefix}_sel")
+	if allow_inline_custom and picked == _CUSTOM_ADULT_ROLE_OPTION:
+		custom_val = host.text_input(
+			"Özel Görev / Branş",
+			value="",
+			placeholder="Örn: Müzik Stajyeri veya Makine Öğretmeni",
+			key=f"{key_prefix}_custom",
+		)
+		return clean_text(custom_val) or cur
+	return "" if (allow_blank and picked == "Belirtilmedi") else clean_text(picked)
 
 
 BLOOD_GROUP_OPTIONS = ["Belirtilmedi", "A Rh+", "A Rh-", "B Rh+", "B Rh-", "AB Rh+", "AB Rh-", "0 Rh+", "0 Rh-"]
@@ -15754,7 +15864,14 @@ def _render_dossier_tab_edit_demographics(person: sqlite3.Row, person_id: int, h
 			f_role = ""
 		else:
 			f_sno = ""
-			f_role = ed_c3.text_input("Görev / Statü", value=person["notes"] or "", key=f"dossier_ed_role_{person_id}")
+			f_role = _render_adult_role_selector(
+				"Görev / Statü",
+				person["notes"] or "",
+				key_prefix=f"dossier_ed_role_{person_id}",
+				container=ed_c3,
+				allow_inline_custom=False,
+				allow_blank=True,
+			)
 
 		ed_c4, ed_c5, ed_c6 = ui.columns(3)
 		cur_sex = {"K": "Kız", "E": "Erkek"}.get(person["sex"], "Belirtilmedi")
@@ -15779,7 +15896,17 @@ def _render_dossier_tab_edit_demographics(person: sqlite3.Row, person_id: int, h
 		f_guard = ed_c7.text_input("Veli / Yakını Adı", value=cur_g, key=f"dossier_ed_guard_{person_id}")
 		f_phone = ed_c8.text_input("İletişim Telefonu", value=cur_ph, placeholder="Örn: 05321234567 veya +90 532...", key=f"dossier_ed_phone_{person_id}")
 
-		f_addr = ui.text_input("Açık Adres / Mahalle / Not", value=person["notes"] or "", key=f"dossier_ed_addr_{person_id}")
+		if f_ptype == "Öğrenci":
+			f_addr = ui.text_input("Açık Adres / Mahalle / Not", value=person["notes"] or "", key=f"dossier_ed_addr_{person_id}")
+			f_custom_role = ""
+		else:
+			f_addr = ""
+			f_custom_role = ui.text_input(
+				"Özel Görev / Branş (Listede yoksa isteğe bağlı yazın)",
+				value="",
+				placeholder="Listeden seçtiyseniz boş bırakabilirsiniz",
+				key=f"dossier_ed_custom_role_{person_id}",
+			)
 
 		ui.markdown("###### 📍 Yerleşim Yeri (Ülke / İl / İlçe / Köy)")
 		l_c1, l_c2, l_c3, l_c4 = ui.columns(4)
@@ -15828,7 +15955,7 @@ def _render_dossier_tab_edit_demographics(person: sqlite3.Row, person_id: int, h
 			resolved_class = "Sivil / Diğer" if f_ptype != "Öğrenci" else f_class.strip()
 			clean_sex = {"Kız": "K", "Erkek": "E"}.get(f_sex)
 			clean_birth = f_birth.isoformat() if f_birth else None
-			clean_notes = f_addr.strip() if f_ptype == "Öğrenci" else (f_role.strip() or f_addr.strip())
+			clean_notes = f_addr.strip() if f_ptype == "Öğrenci" else (f_custom_role.strip() or f_role.strip() or f_addr.strip())
 			clean_phone_demo = normalize_phone(f_phone)
 			new_has_dis_flag = 1 if f_has_dis_lbl == "♿ Engeli / Özel Gereksinimi Var" else 0
 			with connect_db() as connection:
@@ -18919,10 +19046,10 @@ def open_new_profile_dialog(default_person_type: str = "Öğrenci") -> None:
 			role_note = ui.text_input("Açık Adres / Mahalle / Sokak (İsteğe bağlı)", placeholder="Örn. Gevher Hatun Mah. 1782 Sok. No:7", key=f"new_stu_addr_{new_nonce}")
 		else:
 			class_name = ""
-			role_note = ui.selectbox(
+			role_note = _render_adult_role_selector(
 				"Görev / Statü",
-				["Öğretmen", "İdari Personel", "Destek / Güvenlik Personeli", "Veli", "Ziyaretçi / Diğer"],
-				key=f"new_role_{new_nonce}",
+				key_prefix=f"new_role_{new_nonce}",
+				default_role="Öğretmen",
 			)
 		full_name = ui.text_input("Ad soyad *", key=f"new_name_{new_nonce}")
 		if person_type == "Öğrenci":
@@ -19135,7 +19262,13 @@ def open_edit_profile_dialog(edit_id: int, key_suffix: str = "modal") -> None:
 		else:
 			edit_class = ""
 			ui.text_input("Kayıt grubu", value="Sivil / Diğer", disabled=True, key="edit_group_display")
-			edit_notes = ui.text_input("Görev / Statü", key="edit_notes")
+			edit_notes = _render_adult_role_selector(
+				"Görev / Statü",
+				ui.session_state.get("edit_notes", ""),
+				key_prefix=f"edit_role_{edit_id}_{key_suffix}",
+				allow_blank=True,
+			)
+			ui.session_state["edit_notes"] = edit_notes
 		edit_name = ui.text_input("Ad soyad", key="edit_full_name")
 		if edit_type == "Öğrenci":
 			edit_number = ui.text_input("Okul numarası", key="edit_student_no")
@@ -19499,7 +19632,6 @@ def render_civilians() -> None:
 		ui.success(ui.session_state.pop("profile_saved_toast"))
 
 	civilians = get_students_enriched("Sivil / Diğer", person_type="Sivil").reset_index(drop=True)
-	display_civilians = civilians.drop(columns=["Kayıt Türü", "Sınıf", "Okul No", "Baş Çevresi (cm)", "Adres / Mahalle"], errors="ignore") if not civilians.empty else civilians
 
 	if is_section_visible("civilians_search"):
 		role_col, civ_search_col, pick_col = ui.columns([0.9, 1.1, 1.8])
@@ -19540,16 +19672,13 @@ def render_civilians() -> None:
 			else:
 				c_hits = {int(r[0]) for r in _cfconn.execute("SELECT id FROM students WHERE guardian_phone IS NULL OR trim(guardian_phone) = ''").fetchall()}
 		civilians = civilians[civilians["id"].isin(c_hits)].reset_index(drop=True)
-	display_civilians = civilians.drop(columns=["Kayıt Türü", "Sınıf", "Okul No", "Baş Çevresi (cm)", "Adres / Mahalle"], errors="ignore") if not civilians.empty else civilians
-	if not display_civilians.empty:
-		display_civilians = display_civilians.copy()
-		if "📂 Dosya" not in display_civilians.columns:
-			display_civilians.insert(0, "📂 Dosya", "📂 Aç")
+	visible_civ_cols = [c for c in ("id", "Ad Soyad", "Görev / Statü") if c in civilians.columns]
+	display_civilians = civilians[visible_civ_cols].copy() if not civilians.empty else civilians
 
 	if is_section_visible("civilians_table"):
 		cv_bar_l, cv_bar_r = ui.columns([3.4, 1.2], vertical_alignment="center")
 		with cv_bar_l:
-			ui.caption(f"Toplam **{len(civilians)}** yetişkin / personel ({civ_clin_filter}) · **📂 Aç** sütununa tıklayarak Kişi Dosyasını açabilirsiniz.")
+			ui.caption(f"Toplam **{len(civilians)}** yetişkin / personel ({civ_clin_filter}) · Satıra tıklayarak seçin, **Ad Soyad** sütununa tıklayarak Kişi Dosyasını açın.")
 		with cv_bar_r:
 			if not civilians.empty:
 				def _make_filtered_civs_xlsx(_df=civilians.drop(columns=["id"], errors="ignore").copy()):
@@ -19566,7 +19695,7 @@ def render_civilians() -> None:
 					use_container_width=True,
 				)
 		if civilians.empty:
-			ui.info("Henüz kayıtlı yetişkin kişi veya personel bulunmuyor. Sağ üstteki '➕ Yeni Kayıt' butonuna tıklayarak ekleyebilirsiniz.")
+			ui.info("Henüz kayıtlı yetişkin kişi veya personel bulunmuyor. Sağ üstteki '➕ Yeni Yetişkin' butonuna tıklayarak ekleyebilirsiniz.")
 		else:
 			if is_kvkk_privacy_active():
 				ui.info("🛡️ **KVKK Gizlilik Modu Aktif:** Ekrandaki isim, telefon ve klinik veriler maskelenmiştir.")
@@ -19588,7 +19717,7 @@ def render_civilians() -> None:
 			for c in selected_civ_cells:
 				c_row = c[0] if isinstance(c, (tuple, list)) else (c.get("row") if isinstance(c, dict) else None)
 				c_col = c[1] if isinstance(c, (tuple, list)) else (c.get("column") if isinstance(c, dict) else None)
-				if c_col in ("📂 Dosya", "Dosya", "📂") and c_row is not None and 0 <= int(c_row) < len(civilians):
+				if c_col in ("📂 Dosya", "Dosya", "📂", "Ad Soyad") and c_row is not None and 0 <= int(c_row) < len(civilians):
 					dosya_clicked_row = int(c_row)
 					break
 
@@ -19946,7 +20075,11 @@ def _render_express_adult_registration() -> None:
 		with ex_c1:
 			ex_name = ui.text_input("Ad Soyad *", placeholder="Örn: Ayşe Yılmaz", key="exp_adult_name")
 		with ex_c2:
-			ex_role = ui.selectbox("Görev / Statü", ["Öğretmen", "Veli", "İdari Personel", "Destek / Güvenlik Personeli", "Ziyaretçi / Diğer"], key="exp_adult_role")
+			ex_role = _render_adult_role_selector(
+				"Görev / Statü",
+				key_prefix="exp_adult_role",
+				default_role="Öğretmen",
+			)
 		with ex_c3:
 			ex_phone = smart_text_input("Telefon (İsteğe bağlı)", "phone", key="exp_adult_phone", placeholder="0532...", in_form=False)
 		with ex_c4:

@@ -1,7 +1,7 @@
 ; ============================================================================
 ; Okul Revir Defteri ve Sağlık Takip Sistemi - Akıllı Güncelleme Destekli Kurulum Scripti
 ; Sabit Kurulum Dizini: C:\RevirDefteri
-; Çıktı: installer\RevirDefteri_Kurulum_v1.35.6.exe
+; Çıktı: installer\RevirDefteri_Kurulum_v1.36.0.exe
 ; ============================================================================
 
 #define MyAppName "Okul Revir Defteri ve Sağlık Takip Sistemi"
@@ -16,7 +16,7 @@
   #define MyAppVersion Trim(FileRead(MyAppVersionFile))
   #expr FileClose(MyAppVersionFile)
 #else
-  #define MyAppVersion "1.35.6"
+  #define MyAppVersion "1.36.0"
 #endif
 
 [Setup]

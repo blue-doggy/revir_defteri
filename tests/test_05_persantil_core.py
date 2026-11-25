@@ -593,5 +593,77 @@ class TestPersantilCoreAndUI(unittest.TestCase):
         self.assertNotIn("disabled", ov_btn_tag)
 
 
+    def test_10_adults_table_columns_and_role_status_options(self):
+        with self.connect() as c:
+            c.execute("INSERT INTO classes(name) VALUES ('Sivil / Diğer')")
+            c.execute(
+                """INSERT INTO students(class_id, full_name, sex, birth_date, guardian_phone, notes, person_type)
+                   VALUES (1, 'Mehmet Demir', 'E', '1985-04-10', '05321234567', 'Müdür Yardımcısı', 'Sivil / diğer kişi')"""
+            )
+            c.execute(
+                """INSERT INTO students(class_id, full_name, sex, birth_date, guardian_phone, notes, person_type)
+                   VALUES (1, 'Zeynep Kaya', 'K', '1992-09-12', '05339876543', 'Matematik Öğretmeni', 'Sivil / diğer kişi')"""
+            )
+            c.commit()
+
+        # 1. Adults table shows ONLY Ad Soyad and Görev / Statü columns
+        revir_ui.reset_session()
+        out = revir_ui.run_action_headless(persantil.render_civilians, {"action": "render"})
+        html = out["main_html"]
+        self.assertIn("Ad Soyad", html)
+        self.assertIn("Görev / Statü", html)
+        self.assertIn("Mehmet Demir", html)
+        self.assertIn("Müdür Yardımcısı", html)
+        self.assertIn("Matematik Öğretmeni", html)
+        for hidden_col in ("Boy (cm)", "Kilo (kg)", "Doğum Tarihi", "Cinsiyet", "VKİ (BMI)", "📂 Dosya", "05321234567"):
+            self.assertNotIn(hidden_col, html)
+
+        # 2. Clicking Ad Soyad on row opens person dossier dialog
+        out_click = revir_ui.run_action_headless(
+            persantil.render_civilians,
+            {"action": "df_select", "key": "civilian_roster_table_0", "value": {"rows": [0], "cells": [[0, "Ad Soyad"]]}},
+        )
+        self.assertIsNotNone(out_click.get("dialog_html"))
+        self.assertIn("Mehmet Demir", out_click.get("dialog_html") or "")
+
+        # 3. Role / status options include school & dorm management, memur types, teacher branches, İŞKUR, sözleşmeli, hizmetli, stajyer
+        required_roles = (
+            "Müdür",
+            "Müdür Yardımcısı",
+            "Yurt Müdürü",
+            "Yurt Müdür Yardımcısı",
+            "Yurt Yönetim Memuru",
+            "Memur",
+            "VHKİ Memuru",
+            "Mutemet",
+            "Sınıf Öğretmeni",
+            "Türkçe Öğretmeni",
+            "Matematik Öğretmeni",
+            "İngilizce Öğretmeni",
+            "Rehberlik / PDR Öğretmeni",
+            "İŞKUR Personeli",
+            "Sözleşmeli Personel",
+            "Hizmetli",
+            "Stajyer",
+        )
+        for role_lbl in required_roles:
+            self.assertIn(role_lbl, persantil.ADULT_ROLE_STATUS_OPTIONS)
+
+        # 4. New profile dialog & express bar render new roles cleanly
+        revir_ui.reset_session()
+        out_new = revir_ui.run_action_headless(lambda: persantil.open_new_profile_dialog("Sivil / diğer kişi"), {"action": "render"})
+        new_html = (out_new.get("dialog_html") or "") + (out_new.get("main_html") or "")
+        self.assertIn("Yurt Müdürü", new_html)
+        self.assertIn("İŞKUR Personeli", new_html)
+        self.assertIn("Stajyer", new_html)
+
+        revir_ui.reset_session()
+        out_exp = revir_ui.run_action_headless(persantil._render_express_adult_registration, {"action": "render"})
+        exp_html = out_exp.get("main_html") or ""
+        self.assertIn("Hizmetli", exp_html)
+        self.assertIn("Sözleşmeli Personel", exp_html)
+        self.assertIn("Matematik Öğretmeni", exp_html)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

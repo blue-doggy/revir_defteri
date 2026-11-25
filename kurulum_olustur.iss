@@ -11,7 +11,7 @@
 ; ============================================================================
 
 #define MyAppName "Okul Revir Defteri"
-#define MyAppVersion "1.35.6"
+#define MyAppVersion "1.36.0"
 #define MyAppPublisher "Okul Sağlığı & Revir Bilgi Sistemi"
 #define MyAppExeName "RevirDefteri.exe"
 #define SourceDistDir "dist\RevirDefteri"
