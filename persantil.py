@@ -30,6 +30,7 @@ import insulin_diabetes as idm
 import document_studio as dstudio
 import app_navigation
 import report_settings_ui
+import report_workflow_ui
 import cafeteria as caf
 import school_calendar
 
@@ -131,7 +132,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return _BUNDLE_DIR / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.34.0"
+_DEFAULT_APP_VERSION = "1.35.0"
 
 
 def _load_app_version() -> str:
@@ -28434,8 +28435,7 @@ def _render_screening_report_workspace(
 
 	if wizard_enabled:
 		step_labels = ["Kapsam ve Tarih", "Önizleme ve Değerlendirme", "Dışa Aktarma"]
-		ui.progress((wizard_step + 1) / len(step_labels))
-		ui.markdown(f"#### Adım {wizard_step + 1}/3 · {step_labels[wizard_step]}")
+		report_workflow_ui.render_step_indicator(wizard_step, step_labels)
 
 	# Sınıf seçici
 	if fixed_classes:
@@ -28757,6 +28757,17 @@ def _render_screening_report_workspace(
 
 	if wizard_enabled and wizard_step == 2:
 		ui.info("Önizlemesi onaylanan rapor için aşağıdaki biçimlerden birini indirin.")
+		report_workflow_ui.render_confirmation_summary(
+			"Tarih bazlı toplu tarama ve persantil raporu",
+			[
+				("Sınıf kapsamı", ", ".join(meta.get("selected_classes") or []) or "Tüm sınıflar"),
+				("Tarih / dönem", _format_dyn_dates_header(meta, meta.get("selected_dates"))),
+				("Rapor şablonu", str(cfg.get("preset_name") or "Özel")),
+				("Kayıt / sütun / risk", f"{len(report_df)} / {len(report_df.columns)} / {total_risks}"),
+				("Gemini değerlendirmesi", "Dahil" if ui.session_state.get(scr_ai_inc_key, False) else "Hariç"),
+				("Çıktılar", "Word, Excel ve yazdırılabilir HTML"),
+			],
+		)
 		if ui.button("↩️ Önizlemeye dön", key=f"{key_prefix}_wizard_back_preview"):
 			ui.session_state[wizard_step_key] = 1
 			ui.rerun()
@@ -30278,8 +30289,7 @@ def _render_meb_activity_report_tab() -> None:
 	raw_step = ui.session_state.get(wizard_step_key, 0)
 	wizard_step = raw_step if isinstance(raw_step, int) and not isinstance(raw_step, bool) and raw_step in (0, 1, 2) else 0
 	step_labels = ["Dönem ve Notlar", "Önizleme", "Dışa Aktarma"]
-	ui.progress((wizard_step + 1) / len(step_labels))
-	ui.markdown(f"##### Adım {wizard_step + 1}/3 · {step_labels[wizard_step]}")
+	report_workflow_ui.render_step_indicator(wizard_step, step_labels)
 
 	active_ay = get_active_academic_year()
 	try:
@@ -30472,6 +30482,17 @@ def _render_meb_activity_report_tab() -> None:
 	if ui.button("↩️ Önizlemeye dön", key="meb_rep_wizard_back_preview"):
 		ui.session_state[wizard_step_key] = 1
 		ui.rerun()
+	report_workflow_ui.render_confirmation_summary(
+		"MEB okul sağlığı ve revir faaliyet raporu",
+		[
+			("Rapor dönemi", f"{meb_start:%d.%m.%Y} – {meb_end:%d.%m.%Y}"),
+			("Eğitim-öğretim yılı", str(active_ay.get("name") or "Aktif eğitim-öğretim yılı")),
+			("Öğrenci / başvuru / sevk", f"{stats['students_total']} / {stats['visits_total']} / {stats['referral_cnt']}"),
+			("WHO değerlendirmesi", str(stats["bmi_eval_total"])),
+			("AI değerlendirme notu", "Dahil" if meb_ai_on and meb_notes.strip() else "Standart kurum notu"),
+			("Çıktı", "Resmi faaliyet raporu · Word (.docx)"),
+		],
+	)
 	ui.download_button(
 		"📥 MEB Dönem / Yıl Sonu Resmi Faaliyet Raporunu İndir (.docx)",
 		data=build_meb_annual_activity_report_docx(meb_start, meb_end, extra_notes=meb_notes),
@@ -30627,8 +30648,7 @@ def _render_classic_reports_content(all_classes: list[str], report_cfg: dict) ->
 	raw_step = ui.session_state.get(wizard_step_key, 0)
 	wizard_step = raw_step if isinstance(raw_step, int) and not isinstance(raw_step, bool) and raw_step in (0, 1, 2) else 0
 	step_labels = ["Rapor kapsamı", "Önizleme", "Dışa Aktarma"]
-	ui.progress((wizard_step + 1) / len(step_labels))
-	ui.markdown(f"##### Adım {wizard_step + 1}/3 · {step_labels[wizard_step]}")
+	report_workflow_ui.render_step_indicator(wizard_step, step_labels)
 
 	col_m1, col_m2 = ui.columns([1.2, 2.5])
 	if wizard_step == 0:
@@ -30785,6 +30805,15 @@ button {{ padding: 9px 18px; background: #176b68; color: white; border: none; bo
 			clean_cls_slug = re.sub(r"[^A-Za-z0-9_-]+", "_", sel_cls_for_report).strip("_")
 
 			if wizard_step == 2:
+				report_workflow_ui.render_confirmation_summary(
+					"Sınıf sağlık dosyası raporu",
+					[
+						("Sınıf", str(sel_cls_for_report)),
+						("Öğrenci sayısı", str(len(class_students))),
+						("Gemini değerlendirmeleri", "Dahil" if cls_ai_inc else "Hariç"),
+						("Çıktı", "Birleştirilmiş Word (.docx) ve yazdırılabilir HTML önizlemesi"),
+					],
+				)
 				if ui.button("↩️ Önizlemeye dön", key="classic_rep_wizard_back_preview"):
 					ui.session_state[wizard_step_key] = 1
 					ui.rerun()
@@ -30968,6 +30997,15 @@ button {{ padding: 9px 18px; background: #176b68; color: white; border: none; bo
 			print_html = css_header + single_body + "</body>\n</html>"
 			print_name = re.sub(r"[^A-Za-z0-9_-]+", "_", student["full_name"]).strip("_") or "kisi"
 			if wizard_step == 2:
+				report_workflow_ui.render_confirmation_summary(
+					"Kişi sağlık dosyası raporu",
+					[
+						("Kişi", str(mask_kvkk_value(student["full_name"], "name"))),
+						("Kayıt türü / sınıf", f"{student['person_type']} / {student['class_name'] or 'Sınıf belirtilmedi'}"),
+						("Gemini değerlendirmesi", "Dahil" if rep_ai_inc else "Hariç"),
+						("Çıktı", "Word (.docx) ve yazdırılabilir HTML önizlemesi"),
+					],
+				)
 				if ui.button("↩️ Önizlemeye dön", key="classic_rep_wizard_back_preview_person"):
 					ui.session_state[wizard_step_key] = 1
 					ui.rerun()
@@ -31063,6 +31101,14 @@ button {{ padding: 9px 18px; background: #176b68; color: white; border: none; bo
 		return workbook_download(all_students, all_visits, all_measurements, all_vitals, all_labs, all_profiles, all_plans)
 
 	if wizard_step == 2:
+		report_workflow_ui.render_confirmation_summary(
+			"Kurum geneli sağlık çalışma kitabı",
+			[
+				("Kapsam", "Aktif eğitim-öğretim yılı veritabanındaki kurum kayıtları"),
+				("İçerik", "Kişiler, revir, ölçümler, vital bulgular, tahliller ve bakım planları"),
+				("Çıktı", "Excel çalışma kitabı (.xlsx)"),
+			],
+		)
 		ui.download_button(
 			"📊 Tüm kişi, persantil, revir, vital, tahlil ve bakım planlarını Excel indir",
 			_build_full_school_workbook_lazy,

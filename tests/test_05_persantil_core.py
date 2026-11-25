@@ -161,6 +161,8 @@ class TestPersantilCoreAndUI(unittest.TestCase):
                 {"action": "click", "key": "dyn_rep_wizard_next_export"},
             )
             self.assertIn("Adım 3/3", export_output["main_html"])
+            self.assertIn("Son Kontrol", export_output["main_html"])
+            self.assertIn("Rapor şablonu", export_output["main_html"])
             self.assertIn("Word (.docx) İndir", export_output["main_html"])
             self.assertEqual(export_docx.call_count, 1)
             self.assertEqual(export_xlsx.call_count, 1)
@@ -209,6 +211,8 @@ class TestPersantilCoreAndUI(unittest.TestCase):
                 {"action": "click", "key": "meb_rep_wizard_next_export"},
             )
             self.assertIn("Adım 3/3", export_output["main_html"])
+            self.assertIn("Son Kontrol", export_output["main_html"])
+            self.assertIn("Rapor dönemi", export_output["main_html"])
             self.assertIn("MEB Dönem / Yıl Sonu Resmi Faaliyet Raporunu İndir", export_output["main_html"])
             build_docx.assert_called_once()
 
@@ -250,6 +254,8 @@ class TestPersantilCoreAndUI(unittest.TestCase):
                 {"action": "click", "key": "classic_rep_wizard_next_export_class"},
             )
             self.assertIn("Adım 3/3", class_export["main_html"])
+            self.assertIn("Son Kontrol", class_export["main_html"])
+            self.assertIn("Öğrenci sayısı", class_export["main_html"])
             self.assertIn("Tüm Sınıfın Word Raporunu İndir", class_export["main_html"])
             build_class_docx.assert_not_called()
 
@@ -275,6 +281,8 @@ class TestPersantilCoreAndUI(unittest.TestCase):
                 {"action": "click", "key": "classic_rep_wizard_next_export_person"},
             )
             self.assertIn("Adım 3/3", person_export["main_html"])
+            self.assertIn("Son Kontrol", person_export["main_html"])
+            self.assertIn("Rapor türü", person_export["main_html"])
             self.assertIn("Kişi Sağlık Raporunu İndir", person_export["main_html"])
             build_person_docx.assert_not_called()
 
