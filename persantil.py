@@ -138,7 +138,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return (Path(meipass_raw) if meipass_raw else _BUNDLE_DIR) / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.39.0"
+_DEFAULT_APP_VERSION = "1.40.0"
 
 
 def _load_app_version() -> str:
@@ -32413,32 +32413,27 @@ def render_academic_year_settings() -> None:
 
 
 def get_evrak_cover_font(size: int = 14, bold: bool = False):
-	font_paths = [
-		r"C:\Windows\Fonts\segoeui.ttf",
-		r"C:\Windows\Fonts\arial.ttf",
-		r"C:\Windows\Fonts\tahoma.ttf",
-	]
-	if bold:
-		font_paths = [
-			r"C:\Windows\Fonts\segouib.ttf",
-			r"C:\Windows\Fonts\arialbd.ttf",
-			r"C:\Windows\Fonts\tahomabd.ttf",
-		] + font_paths
-	from PIL import ImageFont
-	for p in font_paths:
-		if Path(p).exists():
-			try:
-				return ImageFont.truetype(p, size)
-			except Exception:
-				pass
-	return ImageFont.load_default()
+	return dstudio.get_cover_pil_font(size=size, bold=bold)
 
 
 def get_document_cover_path(file_path: Path) -> Path:
 	thumb_dir = EVRAKLAR_DIR / ".thumbnails"
 	thumb_dir.mkdir(parents=True, exist_ok=True)
 	f_hash = sha256(file_path.name.encode("utf-8")).hexdigest()[:16]
-	return thumb_dir / f"cov_{f_hash}.jpg"
+	return thumb_dir / f"cov_v2_{f_hash}.jpg"
+
+
+def _cleanup_document_cover_files(file_path: Path) -> None:
+	thumb_dir = EVRAKLAR_DIR / ".thumbnails"
+	if not thumb_dir.exists():
+		return
+	f_hash = sha256(file_path.name.encode("utf-8")).hexdigest()[:16]
+	for p_cand in (thumb_dir / f"cov_v2_{f_hash}.jpg", thumb_dir / f"cov_{f_hash}.jpg"):
+		try:
+			if p_cand.exists():
+				p_cand.unlink(missing_ok=True)
+		except Exception:
+			pass
 
 
 def get_or_create_document_cover(file_path: Path, force: bool = False) -> Path | None:
@@ -32447,188 +32442,15 @@ def get_or_create_document_cover(file_path: Path, force: bool = False) -> Path |
 	thumb_path = get_document_cover_path(file_path)
 	if not force and thumb_path.exists():
 		try:
-			if thumb_path.stat().st_mtime >= file_path.stat().st_mtime and thumb_path.stat().st_size > 0:
+			if thumb_path.stat().st_mtime >= file_path.stat().st_mtime and thumb_path.stat().st_size > 256:
 				return thumb_path
 		except Exception:
 			pass
-
-	ext = file_path.suffix.lower()
-	import pymupdf
-	from PIL import Image, ImageDraw
-	import zipfile
-
 	try:
-		# 1. PDF: Render exact 1st page at 72 DPI, save as compact JPEG
-		if ext == ".pdf":
-			doc = pymupdf.open(file_path)
-			if len(doc) > 0:
-				page = doc[0]
-				pix = page.get_pixmap(dpi=72)
-				pix.pil_save(str(thumb_path), format="JPEG", quality=80)
-				doc.close()
-				del doc, page, pix
-				return thumb_path
-			doc.close()
-			del doc
-
-		# 2. Images: Thumbnail as JPEG
-		elif ext in [".png", ".jpg", ".jpeg", ".webp"]:
-			img = Image.open(file_path)
-			img.thumbnail((320, 440), Image.Resampling.LANCZOS)
-			img.convert("RGB").save(str(thumb_path), format="JPEG", quality=80)
-			img.close()
-			del img
+		snap_bytes = dstudio.render_document_first_page_snapshot(file_path, output_jpg_path=thumb_path)
+		if snap_bytes and thumb_path.exists() and thumb_path.stat().st_size > 0:
 			return thumb_path
-
-		# 3. Word Documents (.docx)
-		elif ext == ".docx":
-			has_embedded = False
-			try:
-				with zipfile.ZipFile(file_path) as z:
-					for name in z.namelist():
-						if name.startswith("word/media/image1.") and any(name.endswith(e) for e in [".png", ".jpg", ".jpeg"]):
-							img_data = z.read(name)
-							test_im = Image.open(io.BytesIO(img_data))
-							test_im.thumbnail((320, 440), Image.Resampling.LANCZOS)
-							test_im.convert("RGB").save(str(thumb_path), format="JPEG", quality=80)
-							test_im.close()
-							del test_im
-							has_embedded = True
-							break
-			except Exception:
-				pass
-
-			if not has_embedded:
-				w, h = 320, 440
-				img = Image.new("RGB", (w, h), "#ffffff")
-				draw = ImageDraw.Draw(img)
-				draw.rectangle([(0, 0), (w - 1, h - 1)], outline="#cbd5e1", width=2)
-				draw.rectangle([(0, 0), (w, 32)], fill="#0284c7")
-				draw.text((12, 8), "📘 MICROSOFT WORD BELGESİ", fill="#ffffff", font=get_evrak_cover_font(11, bold=True))
-
-				title_text = file_path.stem if len(file_path.stem) <= 30 else file_path.stem[:27] + "..."
-				draw.text((14, 42), title_text, fill="#0f172a", font=get_evrak_cover_font(13, bold=True))
-				draw.line([(14, 64), (w - 14, 64)], fill="#e2e8f0", width=1)
-
-				content_lines = []
-				try:
-					if not _ensure_docx_loaded() or docx is None:
-						raise ImportError("python-docx")
-					d = docx.Document(file_path)
-					for p in d.paragraphs:
-						t = p.text.strip()
-						if t and t not in content_lines:
-							content_lines.append(t)
-					for table in d.tables:
-						for row in table.rows:
-							row_txt = " | ".join(c.text.strip() for c in row.cells if c.text.strip())
-							if row_txt and row_txt not in content_lines:
-								content_lines.append(row_txt)
-					del d
-				except Exception:
-					pass
-
-				f_body = get_evrak_cover_font(9, bold=False)
-				y_pos = 75
-				for line in content_lines[:12]:
-					if y_pos > h - 45:
-						break
-					disp_line = line if len(line) <= 42 else line[:39] + "..."
-					draw.text((16, y_pos), disp_line, fill="#334155", font=f_body)
-					y_pos += 18
-
-				while y_pos < h - 45:
-					draw.line([(16, y_pos + 5), (w - 24, y_pos + 5)], fill="#f1f5f9", width=1)
-					y_pos += 16
-
-				draw.rectangle([(0, h - 26), (w, h)], fill="#f8fafc")
-				draw.line([(0, h - 26), (w, h - 26)], fill="#e2e8f0", width=1)
-				draw.text((12, h - 19), "📄 1. Sayfa Önizlemesi · Resmi Revir Belgesi", fill="#64748b", font=get_evrak_cover_font(9, bold=False))
-				img.save(str(thumb_path), format="JPEG", quality=80)
-				img.close()
-				del img
-			return thumb_path
-
-		# 4. Excel Spreadsheets (.xlsx / .xls)
-		elif ext in [".xlsx", ".xls"]:
-			w, h = 320, 440
-			img = Image.new("RGB", (w, h), "#ffffff")
-			draw = ImageDraw.Draw(img)
-			draw.rectangle([(0, 0), (w - 1, h - 1)], outline="#cbd5e1", width=2)
-			draw.rectangle([(0, 0), (w, 32)], fill="#16a34a")
-			draw.text((12, 8), "📗 MICROSOFT EXCEL TABLOSU", fill="#ffffff", font=get_evrak_cover_font(11, bold=True))
-
-			title_text = file_path.stem if len(file_path.stem) <= 30 else file_path.stem[:27] + "..."
-			draw.text((14, 42), title_text, fill="#0f172a", font=get_evrak_cover_font(13, bold=True))
-			draw.line([(14, 64), (w - 14, 64)], fill="#e2e8f0", width=1)
-
-			sheet_rows = []
-			try:
-				import openpyxl
-				wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
-				ws = wb.active
-				for r in ws.iter_rows(values_only=True):
-					row_vals = [str(c).strip() for c in r if c is not None and str(c).strip()]
-					if row_vals:
-						sheet_rows.append(row_vals[:4])
-					if len(sheet_rows) >= 12:
-						break
-				wb.close()
-				del wb
-			except Exception:
-				pass
-
-			col_widths = [30, 85, 95, 85]
-			col_letters = ["A", "B", "C", "D"]
-			y_tbl = 75
-			draw.rectangle([(14, y_tbl), (w - 14, y_tbl + 20)], fill="#f1f5f9", outline="#cbd5e1")
-			f_col = get_evrak_cover_font(9, bold=True)
-			x_cur = 16
-			for i, cw in enumerate(col_widths):
-				draw.text((x_cur + 3, y_tbl + 4), col_letters[i], fill="#475569", font=f_col)
-				x_cur += cw
-				if i < 3:
-					draw.line([(x_cur, y_tbl), (x_cur, y_tbl + 20)], fill="#cbd5e1", width=1)
-
-			y_tbl += 20
-			f_cell = get_evrak_cover_font(9, bold=False)
-			for r_idx, row in enumerate(sheet_rows):
-				if y_tbl > h - 40:
-					break
-				row_bg = "#ffffff" if r_idx % 2 == 0 else "#f8fafc"
-				draw.rectangle([(14, y_tbl), (w - 14, y_tbl + 18)], fill=row_bg, outline="#e2e8f0")
-			x_cur = 16
-			for c_idx, cw in enumerate(col_widths):
-				val = row[c_idx] if c_idx < len(row) else ""
-				val_disp = val if len(val) <= 12 else val[:10] + ".."
-				draw.text((x_cur + 3, y_tbl + 3), val_disp, fill="#1e293b", font=f_cell)
-				x_cur += cw
-				if c_idx < 3:
-					draw.line([(x_cur, y_tbl), (x_cur, y_tbl + 18)], fill="#e2e8f0", width=1)
-				y_tbl += 18
-
-			draw.rectangle([(0, h - 26), (w, h)], fill="#f8fafc")
-			draw.line([(0, h - 26), (w, h - 26)], fill="#e2e8f0", width=1)
-			draw.text((12, h - 19), "📊 Tablo Veri Önizlemesi · 1. Sayfa", fill="#64748b", font=get_evrak_cover_font(9, bold=False))
-			img.save(str(thumb_path), format="JPEG", quality=80)
-			img.close()
-			del img
-			return thumb_path
-
-		# 5. Default/Generic
-		else:
-			w, h = 320, 440
-			img = Image.new("RGB", (w, h), "#ffffff")
-			draw = ImageDraw.Draw(img)
-			draw.rectangle([(0, 0), (w - 1, h - 1)], outline="#cbd5e1", width=2)
-			draw.rectangle([(0, 0), (w, 32)], fill="#64748b")
-			draw.text((12, 8), "📄 RESMİ EVRAK DOSYASI", fill="#ffffff", font=get_evrak_cover_font(11, bold=True))
-			draw.text((14, 50), file_path.name[:28], fill="#0f172a", font=get_evrak_cover_font(13, bold=True))
-			img.save(str(thumb_path), format="JPEG", quality=80)
-			img.close()
-			del img
-			return thumb_path
-
+		return None
 	except Exception:
 		return None
 
@@ -32672,35 +32494,81 @@ def open_document_preview_dialog(file_path: Path) -> None:
 	stat = file_path.stat()
 	f_size_str = format_file_size(stat.st_size)
 	f_date_str = datetime.fromtimestamp(stat.st_mtime).strftime("%d.%m.%Y %H:%M")
-	is_editable_doc = ext in (".pdf", ".docx", ".xlsx", ".txt", ".csv")
+	is_editable_doc = ext in (".pdf", ".docx", ".xlsx", ".txt", ".csv", ".png", ".jpg", ".jpeg", ".webp")
 	is_gai_on, gai_key, gai_model = _get_active_gemini_config()
+	prev_h8 = sha256(file_path.name.encode()).hexdigest()[:8]
+	mime_t = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
 
-	h_c1, h_c2 = ui.columns([6.0, 4.0])
-	with h_c1:
-		ui.markdown(f"#### 📄 {file_path.name}")
-		ui.caption(f"📏 Boyut: **{f_size_str}** · 🕒 Tarih: **{f_date_str}** · 🏷️ Tür: **{ext.upper().strip('.')}**")
-	with h_c2:
-		mime_t = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
-		if is_editable_doc:
-			hb1, hb2 = ui.columns(2)
-			with hb1:
-				ed_lbl = "✍️ PDF Form Doldur" if ext == ".pdf" else "🛠️ Belgeyi Düzenle"
-				if ui.button(ed_lbl, type="primary", use_container_width=True, key=f"prev_open_studio_{sha256(file_path.name.encode()).hexdigest()[:8]}"):
-					open_document_studio_dialog(file_path)
-			with hb2:
-				ui.download_button("📥 İndir", data=lambda _p=file_path: _p.read_bytes(), file_name=file_path.name, mime=mime_t, type="secondary", use_container_width=True, key=f"prev_dl_btn_{sha256(file_path.name.encode()).hexdigest()[:8]}")
-		else:
-			ui.download_button("📥 Bilgisayara İndir", data=lambda _p=file_path: _p.read_bytes(), file_name=file_path.name, mime=mime_t, type="primary", use_container_width=True, key=f"prev_dl_btn_{sha256(file_path.name.encode()).hexdigest()[:8]}")
+	ui.markdown(f"#### 📄 {file_path.name}")
+	ui.caption(f"📏 Boyut: **{f_size_str}** · 🕒 Tarih: **{f_date_str}** · 🏷️ Tür: **{ext.upper().strip('.')}**")
+
+	has_gai_doc = bool(is_gai_on and ext in (".pdf", ".png", ".jpg", ".jpeg", ".webp", ".txt", ".csv", ".docx", ".xlsx"))
+	sum_clicked = False
+	doc_sum_key = f"gai_doc_sum_{file_path.name}"
+
+	btn_specs_count = (1 if is_editable_doc else 0) + 3 + (2 if has_gai_doc else 0)
+	act_cols = ui.columns(btn_specs_count, class_name="revir-doc-prev-actions")
+	c_idx = 0
+	if is_editable_doc:
+		with act_cols[c_idx]:
+			ed_lbl = "✍️ PDF / A4 Düzenle" if ext == ".pdf" else "🛠️ A4 Düzenle"
+			if ui.button(ed_lbl, type="primary", use_container_width=True, key=f"prev_open_studio_{prev_h8}"):
+				open_document_studio_dialog(file_path)
+		c_idx += 1
+	with act_cols[c_idx]:
+		ui.download_button(
+			"📥 İndir",
+			data=lambda _p=file_path: _p.read_bytes(),
+			file_name=file_path.name,
+			mime=mime_t,
+			type="secondary",
+			use_container_width=True,
+			key=f"prev_dl_btn_{prev_h8}",
+		)
+	c_idx += 1
+	with act_cols[c_idx]:
+		with ui.popover("✏️ Ad Değiştir", use_container_width=True, help="Dosya Adını Değiştir"):
+			ui.markdown("##### ✏️ Yeniden Adlandır")
+			prev_new_stem = ui.text_input("Yeni Dosya Adı", value=file_path.stem, key=f"prev_ren_inp_{prev_h8}")
+			if ui.button("Kaydet", type="primary", key=f"prev_ren_save_{prev_h8}", use_container_width=True):
+				if prev_new_stem.strip():
+					safe_stem = re.sub(r'[\\/*?:"<>|]', "_", prev_new_stem.strip())
+					new_target = EVRAKLAR_DIR / f"{safe_stem}{ext}"
+					if new_target != file_path:
+						if new_target.exists():
+							ui.error("Bu isimde bir dosya zaten var!")
+						else:
+							_cleanup_document_cover_files(file_path)
+							file_path.rename(new_target)
+							get_or_create_document_cover(new_target, force=True)
+							ui.close_dialog()
+							ui.success(f"Dosya adı güncellendi: `{new_target.name}`")
+							ui.rerun()
+	c_idx += 1
+	with act_cols[c_idx]:
+		with ui.popover("🗑️ Sil", use_container_width=True, help="Dosyayı Depodan Sil"):
+			ui.markdown("##### ⚠️ Dosyayı Sil")
+			ui.warning(f"**{file_path.name}** kalıcı olarak silinecek.")
+			if ui.button("Evet, Sil", type="secondary", key=f"prev_del_yes_{prev_h8}", use_container_width=True):
+				try:
+					_cleanup_document_cover_files(file_path)
+					file_path.unlink(missing_ok=True)
+					ui.close_dialog()
+					ui.success("Dosya silindi.")
+					ui.rerun()
+				except Exception as e:
+					ui.error(f"Silme hatası: {e}")
+	c_idx += 1
+	if has_gai_doc:
+		with act_cols[c_idx]:
+			sum_clicked = ui.button("✨ AI Özetle", key=f"btn_gai_doc_sum_{file_path.name}", use_container_width=True)
+		c_idx += 1
+		with act_cols[c_idx]:
+			if ui.button("👤 Öğrenciye İşle", type="secondary", key=f"btn_gai_doc_imp_{file_path.name}", use_container_width=True):
+				open_smart_document_importer_dialog(initial_file_path=file_path)
 
 	ui.divider()
-	if is_gai_on and ext in (".pdf", ".png", ".jpg", ".jpeg", ".webp", ".txt", ".csv", ".docx", ".xlsx"):
-		doc_sum_key = f"gai_doc_sum_{file_path.name}"
-		ga_b1, ga_b2 = ui.columns([1.2, 1.0])
-		with ga_b1:
-			sum_clicked = ui.button("✨ Gemini AI ile Bu Belgeyi Özetle", key=f"btn_gai_doc_sum_{file_path.name}", use_container_width=True)
-		with ga_b2:
-			if ui.button("👤 Belgeyi Oku & Öğrenciye İşle", type="secondary", key=f"btn_gai_doc_imp_{file_path.name}", use_container_width=True):
-				open_smart_document_importer_dialog(initial_file_path=file_path)
+	if has_gai_doc:
 		if sum_clicked:
 			ext_txt = ""
 			if ext == ".pdf":
@@ -32840,8 +32708,8 @@ def open_document_preview_dialog(file_path: Path) -> None:
 			b64_c = base64.b64encode(cov.read_bytes()).decode("ascii")
 			ui.markdown(
 				f"<div class='revir-a4-stage'>"
-				f"<span class='revir-a4-page-badge'>📄 A4 Kapak Önizleme</span>"
-				f"<div class='revir-a4-sheet-img'><img src='data:image/png;base64,{b64_c}' alt='Kapak'/></div>"
+				f"<span class='revir-a4-page-badge'>📄 A4 1. Sayfa Önizleme</span>"
+				f"<div class='revir-a4-sheet-img'><img src='data:image/jpeg;base64,{b64_c}' alt='Kapak'/></div>"
 				f"</div>",
 				unsafe_allow_html=True,
 			)
@@ -33078,15 +32946,16 @@ def render_documents_depot() -> None:
 						ext_label = item['ext'].upper().strip('.')
 						ui.caption(f"🏷️ `{ext_label}` · 📏 {format_file_size(item['size'])} · 🕒 {item['mtime_dt'].strftime('%d.%m.%Y %H:%M')}")
 					with col_actions:
-						can_edit_doc = item["ext"] in (".pdf", ".docx", ".xlsx", ".txt", ".csv")
+						can_edit_doc = item["ext"] in (".pdf", ".docx", ".xlsx", ".txt", ".csv", ".png", ".jpg", ".jpeg", ".webp")
+						row_cls_l = "revir-doc-action-row" if can_edit_doc else "revir-doc-action-row is-4"
 						if can_edit_doc:
-							la0, la1, la2, la3, la4 = ui.columns([1, 1, 1, 1, 1])
+							la0, la1, la2, la3, la4 = ui.columns([1, 1, 1, 1, 1], class_name=row_cls_l)
 							with la0:
-								ed_tip = "PDF Form Tara & Yazı Yaz" if item["ext"] == ".pdf" else "Ofis Stüdyosunda Düzenle"
+								ed_tip = "A4 Üstünde Form/Yazı/İmza Düzenle" if item["ext"] == ".pdf" else "A4 Stüdyosunda Düzenle"
 								if ui.button("🛠️", key=f"btn_edit_list_{item_hash}", help=ed_tip, type="primary", use_container_width=True):
 									open_document_studio_dialog(item["path"])
 						else:
-							la1, la2, la3, la4 = ui.columns([1, 1, 1, 1])
+							la1, la2, la3, la4 = ui.columns([1, 1, 1, 1], class_name=row_cls_l)
 						with la1:
 							if ui.button("👁️", key=f"btn_prev_list_{item_hash}", help="Evrakı Aç / Önizle", use_container_width=True):
 								open_document_preview_dialog(item["path"])
@@ -33105,9 +32974,7 @@ def render_documents_depot() -> None:
 											if new_target.exists():
 												ui.error("Bu isimde bir dosya zaten var!")
 											else:
-												old_cov = get_document_cover_path(item["path"])
-												if old_cov.exists():
-													old_cov.unlink(missing_ok=True)
+												_cleanup_document_cover_files(item["path"])
 												item["path"].rename(new_target)
 												get_or_create_document_cover(new_target, force=True)
 												ui.success("Dosya adı güncellendi.")
@@ -33118,9 +32985,7 @@ def render_documents_depot() -> None:
 								ui.warning(f"**{item['name']}** dosyası silinecek. Emin misiniz?")
 								if ui.button("Evet, Sil", type="secondary", key=f"btn_del_list_{item_hash}", use_container_width=True):
 									try:
-										cov_p = get_document_cover_path(item["path"])
-										if cov_p.exists():
-											cov_p.unlink(missing_ok=True)
+										_cleanup_document_cover_files(item["path"])
 										item["path"].unlink()
 										ui.success("Dosya silindi.")
 										ui.rerun()
@@ -33143,15 +33008,20 @@ def render_documents_depot() -> None:
 					with cols[idx]:
 						item_hash = sha256(item['name'].encode()).hexdigest()[:12]
 						with ui.container(border=True):
-							# Render First Page Cover Photo!
+							# Okunaklı A4 1. Sayfa / Tablo Kapak Önizlemesi
 							cover_path = get_or_create_document_cover(item["path"])
 							if cover_path and cover_path.exists():
 								try:
-									ui.image(str(cover_path), use_container_width=True)
+									b64_cov = base64.b64encode(cover_path.read_bytes()).decode("ascii")
+									ui.markdown(
+										f"<div class='revir-doc-card-thumb'>"
+										f"<img src='data:image/jpeg;base64,{b64_cov}' alt='{html.escape(item['name'])}'/>"
+										f"</div>",
+										unsafe_allow_html=True,
+									)
 								except Exception:
 									ui.markdown("📄 Evrak Önizlemesi")
 							else:
-								# Clean fallback card
 								ui.markdown(
 									f"""<div style='background:#f1f5f9; border:1px solid #cbd5e1; border-radius:8px; padding:22px 10px; text-align:center;'>
 										<div style='font-size:32px;'>📄</div>
@@ -33164,13 +33034,17 @@ def render_documents_depot() -> None:
 							ui.markdown(f"<div style='font-weight:700; font-size:13.5px; margin-top:8px; word-break:break-all;' title='{html.escape(item['name'])}'>{html.escape(short_name)}</div>", unsafe_allow_html=True)
 							ui.caption(f"📏 {format_file_size(item['size'])} · 🕒 {item['mtime_dt'].strftime('%d.%m.%Y %H:%M')}")
 
-							can_edit_card = item["ext"] in (".pdf", ".docx", ".xlsx", ".txt", ".csv")
+							can_edit_card = item["ext"] in (".pdf", ".docx", ".xlsx", ".txt", ".csv", ".png", ".jpg", ".jpeg", ".webp")
+							row_cls_c = "revir-doc-action-row" if can_edit_card else "revir-doc-action-row is-4"
 							if can_edit_card:
-								ed_card_lbl = "✍️ PDF Tara & Doldur" if item["ext"] == ".pdf" else "🛠️ Belgeyi Düzenle"
-								if ui.button(ed_card_lbl, key=f"btn_studio_card_{item_hash}", type="primary", use_container_width=True):
-									open_document_studio_dialog(item["path"])
+								act_c_ed, act_col0, act_col1, act_col2, act_col3 = ui.columns([1, 1, 1, 1, 1], class_name=row_cls_c)
+								with act_c_ed:
+									ed_tip_c = "A4 Üstünde Düzenle / Form & İmza" if item["ext"] == ".pdf" else "A4 Stüdyosunda Düzenle"
+									if ui.button("🛠️", key=f"btn_studio_card_{item_hash}", help=ed_tip_c, type="primary", use_container_width=True):
+										open_document_studio_dialog(item["path"])
+							else:
+								act_col0, act_col1, act_col2, act_col3 = ui.columns([1, 1, 1, 1], class_name=row_cls_c)
 
-							act_col0, act_col1, act_col2, act_col3 = ui.columns([1, 1, 1, 1])
 							with act_col0:
 								if ui.button("👁️", key=f"btn_prev_{item_hash}", help="Evrakı Önizle / Oku", use_container_width=True):
 									open_document_preview_dialog(item["path"])
@@ -33197,10 +33071,7 @@ def render_documents_depot() -> None:
 												if new_target.exists():
 													ui.error("Bu isimde bir dosya zaten var!")
 												else:
-													# Remove old cover
-													old_cov = get_document_cover_path(item["path"])
-													if old_cov.exists():
-														old_cov.unlink(missing_ok=True)
+													_cleanup_document_cover_files(item["path"])
 													item["path"].rename(new_target)
 													get_or_create_document_cover(new_target, force=True)
 													ui.success("Dosya adı güncellendi.")
@@ -33211,9 +33082,7 @@ def render_documents_depot() -> None:
 									ui.warning(f"**{item['name']}** dosyası kalıcı olarak silinecek. Emin misiniz?")
 									if ui.button("Evet, Sil", type="secondary", key=f"btn_confirm_del_{item_hash}", use_container_width=True):
 										try:
-											cov_p = get_document_cover_path(item["path"])
-											if cov_p.exists():
-												cov_p.unlink(missing_ok=True)
+											_cleanup_document_cover_files(item["path"])
 											item["path"].unlink()
 											ui.success("Dosya silindi.")
 											ui.rerun()

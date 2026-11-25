@@ -1333,7 +1333,7 @@ class _UIContainer:
 		ctx = _get_ctx()
 		ctx.session.page_title = str(page_title or "Revir Defteri")
 
-	def columns(self, spec: int | Sequence[int | float], *, gap: str = "small", vertical_alignment: str = "top", sticky_first_col: bool = False, sticky_last_col: bool = False) -> list[_UIContainer]:
+	def columns(self, spec: int | Sequence[int | float], *, gap: str = "small", vertical_alignment: str = "top", sticky_first_col: bool = False, sticky_last_col: bool = False, class_name: str = "") -> list[_UIContainer]:
 		ctx = _get_ctx()
 		if isinstance(spec, int):
 			weights = [1.0] * max(1, spec)
@@ -1345,12 +1345,14 @@ class _UIContainer:
 		align_css = {"top": "start", "center": "center", "bottom": "end"}.get(vertical_alignment, "start")
 
 		# Yer tutucu liste; render sırasında son HTML birleştirilir
-		placeholder = _LazyColumnsNode(col_lists, grid_tpl, gap_px, align_css, sticky_first_col=sticky_first_col, sticky_last_col=sticky_last_col)
+		placeholder = _LazyColumnsNode(col_lists, grid_tpl, gap_px, align_css, sticky_first_col=sticky_first_col, sticky_last_col=sticky_last_col, class_name=class_name)
 		ctx.current_nodes().append(placeholder)  # type: ignore[arg-type]
 		return [_UIContainer(target_list=cl) for cl in col_lists]
 
-	def container(self, *, border: bool = False, height: int | None = None) -> _UIContainer:
+	def container(self, *, border: bool = False, height: int | None = None, class_name: str = "") -> _UIContainer:
 		cls = "revir-container revir-card" if border else "revir-container"
+		if str(class_name or "").strip():
+			cls = f"{cls} {html_lib.escape(str(class_name).strip(), quote=True)}"
 		style = f' style="height:{int(height)}px; overflow-y:auto;"' if height else ""
 		return _UIContainer(wrapper_open=f'<div class="{cls}"{style}>', wrapper_close="</div>")
 
@@ -2528,13 +2530,14 @@ class _UIContainer:
 
 
 class _LazyColumnsNode:
-	def __init__(self, col_lists: list[list[str]], grid_tpl: str, gap_px: str, align_css: str, *, sticky_first_col: bool = False, sticky_last_col: bool = False) -> None:
+	def __init__(self, col_lists: list[list[str]], grid_tpl: str, gap_px: str, align_css: str, *, sticky_first_col: bool = False, sticky_last_col: bool = False, class_name: str = "") -> None:
 		self.col_lists = col_lists
 		self.grid_tpl = grid_tpl
 		self.gap_px = gap_px
 		self.align_css = align_css
 		self.sticky_first_col = sticky_first_col
 		self.sticky_last_col = sticky_last_col
+		self.class_name = str(class_name or "").strip()
 
 	def render(self) -> str:
 		col_parts: list[str] = []
@@ -2543,7 +2546,8 @@ class _LazyColumnsNode:
 			is_st = (self.sticky_first_col and idx == 0) or (self.sticky_last_col and idx == last_i)
 			cls = "revir-col revir-sticky-col" if is_st else "revir-col"
 			col_parts.append(f'<div class="{cls}">{_flatten_nodes(cl)}</div>')
-		return f'<div class="revir-cols revir-cols-{len(self.col_lists)}" style="grid-template-columns:{self.grid_tpl}; gap:{self.gap_px}; align-items:{self.align_css};">{"".join(col_parts)}</div>'
+		extra = f" {html_lib.escape(self.class_name, quote=True)}" if self.class_name else ""
+		return f'<div class="revir-cols revir-cols-{len(self.col_lists)}{extra}" style="grid-template-columns:{self.grid_tpl}; gap:{self.gap_px}; align-items:{self.align_css};">{"".join(col_parts)}</div>'
 
 
 class _TabContainers(list[_UIContainer]):
@@ -4258,6 +4262,57 @@ body.revir-layout-edit .revir-box-res-se { display: block; opacity: 0.92; }
 }
 @media (max-width: 760px) {
 	.revir-grid-zone > .revir-box-host { grid-column: 1 / -1 !important; width: auto !important; height: auto !important; }
+}
+/* Depo Kart & Önizleme Yatay Eylem Çubuğu — dar kutularda bile tek satırda yan yana kalır */
+.revir-cols.revir-doc-action-row,
+.revir-cols.revir-cols-5.revir-doc-action-row {
+	display: grid !important;
+	grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
+	gap: 4px !important;
+	align-items: stretch !important;
+	margin-top: 8px;
+}
+.revir-cols.revir-doc-action-row.is-4,
+.revir-cols.revir-cols-4.revir-doc-action-row {
+	grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+}
+.revir-cols.revir-doc-action-row > .revir-col { min-width: 0 !important; }
+.revir-cols.revir-doc-action-row .revir-btn,
+.revir-cols.revir-doc-action-row .revir-popover-trigger,
+.revir-cols.revir-doc-action-row .revir-pop-trigger {
+	padding: 6px 2px !important;
+	font-size: 13px !important;
+	min-height: 32px !important;
+	white-space: nowrap !important;
+}
+.revir-cols.revir-doc-prev-actions {
+	display: flex !important;
+	flex-wrap: nowrap !important;
+	gap: 8px !important;
+	align-items: stretch !important;
+	overflow-x: auto !important;
+	padding: 2px 0;
+}
+.revir-cols.revir-doc-prev-actions > .revir-col {
+	flex: 1 1 0 !important;
+	min-width: 96px !important;
+}
+.revir-doc-card-thumb {
+	background: #f1f5f9;
+	border: 1px solid #cbd5e1;
+	border-radius: 8px;
+	padding: 6px;
+	overflow: hidden;
+	box-shadow: inset 0 1px 0 rgba(255,255,255,0.7);
+}
+.revir-doc-card-thumb img {
+	width: 100%;
+	max-height: 245px;
+	object-fit: contain;
+	border-radius: 4px;
+	background: #ffffff;
+	box-shadow: 0 2px 8px rgba(15,23,42,0.12);
+	display: block;
 }
 #revir-layout-bar {
 	position: fixed; bottom: 18px; left: 24px; z-index: 3390;
