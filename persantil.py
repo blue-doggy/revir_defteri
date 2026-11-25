@@ -34,6 +34,7 @@ import report_workflow_ui
 import cafeteria as caf
 import school_calendar
 import medication_prospectus as mprosp
+import infirmary_supply as invsup
 
 LOGGER = logging.getLogger(__name__)
 
@@ -138,7 +139,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return (Path(meipass_raw) if meipass_raw else _BUNDLE_DIR) / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.40.0"
+_DEFAULT_APP_VERSION = "1.41.0"
 
 
 def _load_app_version() -> str:
@@ -2449,6 +2450,7 @@ def initialize_db() -> None:
 			CREATE INDEX IF NOT EXISTS idx_fridge_temp_logs_date ON fridge_temp_logs(log_date);
 			"""
 		)
+		invsup.ensure_supply_schema(connection)
 		cls_cols = {row["name"] for row in connection.execute("PRAGMA table_info(classes)")}
 		if "teacher_name" not in cls_cols:
 			connection.execute("ALTER TABLE classes ADD COLUMN teacher_name TEXT")
@@ -2754,6 +2756,11 @@ _YEAR_FRESH_TABLES: tuple[str, ...] = (
 	"cafeteria_purchases",
 	"cafeteria_menu_plans",
 	"cafeteria_diners",
+	"kit_inspection_logs",
+	"first_aid_kit_items",
+	"first_aid_kits",
+	"medical_devices",
+	"supply_movements",
 	"infirmary_inventory",
 	"fridge_temp_logs",
 	"calendar_events",
@@ -12760,19 +12767,24 @@ def render_gemini_isolation_ai_panel(active_iso: list[dict], outbreaks: list[dic
 					)
 
 
-def render_gemini_inventory_ai_panel(alerts: dict[str, list[dict]], total_items: int) -> None:
+def render_gemini_inventory_ai_panel(
+	alerts: dict[str, list[dict]],
+	total_items: int,
+	*,
+	extra_context: dict[str, Any] | None = None,
+) -> None:
 	is_on, api_key, model = _get_active_gemini_config()
-	if not is_on or total_items <= 0:
+	if not is_on or (total_items <= 0 and not extra_context):
 		return
 	with ui.container(border=True):
 		c_l, c_r = ui.columns([2.5, 1.5], vertical_alignment="center")
 		with c_l:
 			ui.markdown("##### 🤖 Gemini AI Stok Önceliklendirme & Resmi İstem/İmha Tutanağı", unsafe_allow_html=True)
-			ui.caption("Kritik eşik altı ve miadı (SKT) yaklaşan/geçen ürünleri yorumlayıp resmi talep veya imha tutanağı taslağı oluşturur.")
+			ui.caption("Kritik eşik altı, çanta eksikleri, 30 günlük tüketim hızı ve miadı (SKT) yaklaşan/geçen ürünleri yorumlayıp resmi talep veya imha tutanağı taslağı oluşturur.")
 		with c_r:
 			if ui.button("📋 İstem & SKT Tutanağı Üret", type="secondary", use_container_width=True, key="btn_gai_inv_report"):
 				cfg = get_app_settings()
-				with ui.spinner("Gemini AI envanter ve SKT alarmlarını analiz ediyor..."):
+				with ui.spinner("Gemini AI envanter, çanta eksikleri ve SKT alarmlarını analiz ediyor..."):
 					ok_iv, iv_res, used_iv = gai.analyze_inventory_and_procurement_with_gemini(
 						api_key=api_key,
 						model=model,
@@ -12780,6 +12792,7 @@ def render_gemini_inventory_ai_panel(alerts: dict[str, list[dict]], total_items:
 						total_items=total_items,
 						school_name=cfg.get("school_name", "Okul Reviri"),
 						nurse_name=cfg.get("nurse_name", "Okul Revir Sorumlusu"),
+						extra_context=extra_context,
 					)
 				ui.session_state["gai_inv_ai_res"] = {"ok": ok_iv, "data": iv_res, "model": used_iv}
 
@@ -18876,9 +18889,13 @@ def render_overview() -> None:
 			try:
 				_ov_inv_al = get_infirmary_inventory_alerts(days_horizon=14)
 				_ov_inv_warn = len(_ov_inv_al["expired"]) + len(_ov_inv_al["critical_stock"])
+				_ov_kits_warn = len([k for k in invsup.list_first_aid_kits(connect_db) if k.get("needs_attention")])
+				_ov_devs_warn = len([d for d in invsup.list_medical_devices(connect_db) if d.get("needs_attention")])
 			except Exception:
 				LOGGER.exception("Genel Bakış: stok ve son kullanma tarihi uyarıları kontrol edilemedi")
 				_ov_inv_warn = None
+				_ov_kits_warn = 0
+				_ov_devs_warn = 0
 				dashboard_check_errors.append("stok ve son kullanma tarihi uyarıları")
 			try:
 				_ov_cc = get_fridge_temp_logs(limit=1)
@@ -18902,6 +18919,10 @@ def render_overview() -> None:
 				_prio_chips.append(f"<span class='revir-status-chip info'>⏳ {_ov_open_fups} Açık İzlem / Sevk</span>")
 			if _ov_inv_warn is not None and _ov_inv_warn > 0:
 				_prio_chips.append(f"<span class='revir-status-chip danger'>📦 {_ov_inv_warn} Kritik / SKT Stok</span>")
+			if _ov_kits_warn > 0:
+				_prio_chips.append(f"<span class='revir-status-chip warning'>🧰 {_ov_kits_warn} Çanta Denetimi / Eksiği</span>")
+			if _ov_devs_warn > 0:
+				_prio_chips.append(f"<span class='revir-status-chip warning'>🩺 {_ov_devs_warn} Cihaz Kalibrasyon / Pil</span>")
 			if _ov_cc_bad is True:
 				_prio_chips.append("<span class='revir-status-chip danger'>❄️ Soğuk Zincir Sapması!</span>")
 			if _prio_chips:
@@ -20726,7 +20747,7 @@ def _render_unified_visit_workspace(person: sqlite3.Row) -> None:
 						f"{m['medication_name']} ({m['med_type']}) — Kalan: {m['remaining_volume']} {m['stock_unit']} [#{m['id']}]": m
 						for m in meds_inventory
 					}
-					sel_med_str = ui.selectbox("Verilen İlaç / Malzeme", ["İlaç verilmedi", *list(med_lookup.keys())], key=f"{pfx}_med_sel_{pid}")
+					sel_med_str = ui.selectbox("Verilen Kişisel İlaç (Öğrenci / Personel İlaç Dolabı)", ["İlaç verilmedi", *list(med_lookup.keys())], key=f"{pfx}_med_sel_{pid}")
 					med_amount_given = 0.0
 					if sel_med_str != "İlaç verilmedi":
 						m_c1, m_c2 = ui.columns(2)
@@ -20734,6 +20755,33 @@ def _render_unified_visit_workspace(person: sqlite3.Row) -> None:
 							med_amount_given = ui.number_input("Düşülecek Doz / Adet", min_value=0.1, max_value=100.0, value=1.0, step=0.5, key=f"{pfx}_med_amt_{pid}")
 						with m_c2:
 							ui.caption("Kaydedildiğinde seçili ilacın kalan stoğundan otomatik düşülür ve gözlem notuna işlenir.")
+
+					ui.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+					active_sup_items = [
+						it for it in get_infirmary_inventory()
+						if float(it.get("quantity") or 0.0) > 0 and (clean_text(it.get("quarantine_status")) or "Aktif") == "Aktif"
+					]
+					sup_lookup = {
+						f"{it['item_name']} — Kalan: {float(it['quantity'] or 0):g} {it.get('unit') or 'Adet'} [#{it['id']}]": it
+						for it in active_sup_items
+					}
+					sc_1, sc_2 = ui.columns([2.2, 1.0])
+					with sc_1:
+						sel_sup_list = ui.multiselect(
+							"🩹 Kullanılan Revir Sarf / İlk Yardım Malzemesi (Çoklu Seçim)",
+							list(sup_lookup.keys()),
+							key=f"{pfx}_sup_sel_{pid}",
+							placeholder="Örn: Steril Gazlı Bez, Serum Fizyolojik, Flaster...",
+						)
+					with sc_2:
+						sup_amount_each = ui.number_input(
+							"Her Kalem İçin Adet / Miktar",
+							min_value=0.5,
+							max_value=50.0,
+							value=1.0,
+							step=0.5,
+							key=f"{pfx}_sup_amt_{pid}",
+						)
 
 				loc_c1, loc_c2 = ui.columns(2)
 				with loc_c1:
@@ -20808,10 +20856,19 @@ def _render_unified_visit_workspace(person: sqlite3.Row) -> None:
 								mconn.execute("UPDATE student_medications SET remaining_volume=? WHERE id=?", (new_rem, m_obj["id"]))
 						auto_notes.append(f"[İlaç/Sarf: {m_obj['medication_name']} ({med_amount_given:g} {m_obj['stock_unit']})]")
 
+					used_supplies_to_deduct: list[tuple[dict[str, Any], float]] = []
+					for sup_lbl in (sel_sup_list or []):
+						if sup_lbl in sup_lookup and float(sup_amount_each or 0) > 0:
+							s_obj = sup_lookup[sup_lbl]
+							used_amt = min(float(sup_amount_each), float(s_obj.get("quantity") or 0.0))
+							if used_amt > 0:
+								used_supplies_to_deduct.append((s_obj, used_amt))
+								auto_notes.append(f"[Sarf: {s_obj['item_name']} ({used_amt:g} {s_obj.get('unit') or 'Adet'})]")
+
 					final_obs = " · ".join(filter(None, [observation.strip(), *auto_notes]))
 					fup_status_val = _infer_visit_follow_up_status(referral, follow_up)
 					with connect_db() as connection:
-						connection.execute(
+						v_cur = connection.execute(
 							"""INSERT INTO visits(student_id, visit_date, visit_time, complaint, symptoms, observation,
 							   action, guardian_contacted, referral, follow_up,
 							   follow_up_status, incident_location, witness_teacher)
@@ -20822,6 +20879,22 @@ def _render_unified_visit_workspace(person: sqlite3.Row) -> None:
 								fup_status_val, incident_location, witness_teacher.strip() or None,
 							),
 						)
+						new_visit_id = int(v_cur.lastrowid)
+					if used_supplies_to_deduct:
+						_cfg_sup = get_app_settings()
+						_nurse_sup = clean_text(_cfg_sup.get("nurse_name")) or "Okul Revir Sorumlusu"
+						for s_obj, u_amt in used_supplies_to_deduct:
+							invsup.record_supply_movement(
+								connect_db,
+								inventory_id=int(s_obj["id"]),
+								movement_type="Sarf / Kullanım",
+								delta_qty=-float(u_amt),
+								student_id=pid,
+								visit_id=new_visit_id,
+								performed_by=_nurse_sup,
+								reason=f"Revir başvurusu: {complaint}",
+								movement_date=visit_date.isoformat(),
+							)
 					sync_after_person_mutation(pid)
 
 					for k_clear in (
@@ -20829,7 +20902,7 @@ def _render_unified_visit_workspace(person: sqlite3.Row) -> None:
 						obs_key, ref_key, fu_key, f"{pfx}_loc_{pid}", f"{pfx}_wit_{pid}", f"{pfx}_gc_{pid}",
 						f"{pfx}_temp_{pid}", f"{pfx}_spo2_{pid}", f"{pfx}_pulse_{pid}", f"{pfx}_glu_{pid}",
 						f"{pfx}_sys_{pid}", f"{pfx}_dia_{pid}", f"{pfx}_height_{pid}", f"{pfx}_weight_{pid}",
-						f"{pfx}_hc_{pid}", f"{pfx}_med_sel_{pid}",
+						f"{pfx}_hc_{pid}", f"{pfx}_med_sel_{pid}", f"{pfx}_sup_sel_{pid}", f"{pfx}_sup_amt_{pid}",
 					):
 						ui.session_state.pop(k_clear, None)
 
@@ -21763,48 +21836,12 @@ def open_edit_medication_dialog(medication_id: int) -> None:
 
 
 def get_infirmary_inventory() -> list[dict]:
-	with connect_db() as connection:
-		rows = connection.execute(
-			"""SELECT id, item_name, category, quantity, unit, min_threshold,
-					  expiry_date, storage_location, notes, updated_at
-			   FROM infirmary_inventory
-			   ORDER BY COALESCE(category, ''), item_name, id"""
-		).fetchall()
-	return [dict(r) for r in rows]
+	return invsup.get_enriched_inventory(connect_db)
 
 
 def load_default_infirmary_inventory() -> int:
-	"""Varsayılan 15 kalem okul reviri sarf malzemesini (eksik olanları) veritabanına yükler."""
-	now_iso = datetime.now().isoformat(timespec="minutes")
-	inserted = 0
-	with connect_db() as connection:
-		existing_names = {
-			str(r["item_name"]).strip().lower()
-			for r in connection.execute("SELECT item_name FROM infirmary_inventory").fetchall()
-			if r["item_name"]
-		}
-		for item in DEFAULT_INFIRMARY_SUPPLY_ITEMS:
-			nm = item["item_name"]
-			if nm.strip().lower() in existing_names:
-				continue
-			connection.execute(
-				"""INSERT INTO infirmary_inventory(
-					item_name, category, quantity, unit, min_threshold,
-					expiry_date, storage_location, notes, updated_at
-				) VALUES (?, ?, ?, ?, ?, NULL, ?, NULL, ?)""",
-				(
-					nm,
-					item["category"],
-					float(item["quantity"]),
-					item["unit"],
-					float(item["min_threshold"]),
-					item.get("storage_location"),
-					now_iso,
-				),
-			)
-			existing_names.add(nm.strip().lower())
-			inserted += 1
-	return inserted
+	"""Varsayılan MEB standart okul reviri sarf malzemesini (eksik olanları) veritabanına yükler."""
+	return invsup.seed_extended_meb_catalog(connect_db, DEFAULT_INFIRMARY_SUPPLY_ITEMS)
 
 
 def add_infirmary_inventory_item(
@@ -21823,11 +21860,13 @@ def add_infirmary_inventory_item(
 	exp_norm = parse_birth_date(expiry_date) if clean_text(expiry_date) else None
 	now_iso = datetime.now().isoformat(timespec="minutes")
 	with connect_db() as connection:
+		invsup.ensure_supply_schema(connection)
 		cur = connection.execute(
 			"""INSERT INTO infirmary_inventory(
 				item_name, category, quantity, unit, min_threshold,
-				expiry_date, storage_location, notes, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+				expiry_date, storage_location, notes, updated_at,
+				target_stock, quarantine_status
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Aktif')""",
 			(
 				clean_nm,
 				clean_text(category) or "Diğer",
@@ -21838,6 +21877,7 @@ def add_infirmary_inventory_item(
 				clean_text(storage_location) or None,
 				clean_text(notes) or None,
 				now_iso,
+				max(10.0, float(min_threshold or 5.0) * 2.0),
 			),
 		)
 		return int(cur.lastrowid)
@@ -21845,6 +21885,8 @@ def add_infirmary_inventory_item(
 
 def delete_infirmary_inventory_item(item_id: int) -> None:
 	with connect_db() as connection:
+		invsup.ensure_supply_schema(connection)
+		connection.execute("DELETE FROM supply_movements WHERE inventory_id=?", (int(item_id),))
 		connection.execute("DELETE FROM infirmary_inventory WHERE id=?", (int(item_id),))
 
 
@@ -21855,6 +21897,7 @@ def save_infirmary_inventory_edits(edited_df: pd.DataFrame) -> int:
 	now_iso = datetime.now().isoformat(timespec="minutes")
 	saved = 0
 	with connect_db() as connection:
+		invsup.ensure_supply_schema(connection)
 		for _, row in edited_df.iterrows():
 			raw_id = row.get("id")
 			nm = clean_text(row.get("Malzeme Adı"))
@@ -21866,8 +21909,15 @@ def save_infirmary_inventory_edits(edited_df: pd.DataFrame) -> int:
 			unit_s = clean_text(row.get("Birim")) or "Adet"
 			thr_raw = numeric_value(row.get("Kritik Eşik"))
 			thr = max(0.0, float(thr_raw)) if thr_raw is not None else 5.0
+			tgt_raw = numeric_value(row.get("Hedef Stok")) if "Hedef Stok" in edited_df.columns else None
+			tgt = max(0.0, float(tgt_raw)) if tgt_raw is not None else max(10.0, thr * 2.0)
+			cost_raw = numeric_value(row.get("Birim Maliyet (TL)")) if "Birim Maliyet (TL)" in edited_df.columns else None
+			unit_cost = max(0.0, float(cost_raw)) if cost_raw is not None else 0.0
 			exp_raw = clean_text(row.get("SKT (YYYY-AA-GG)"))
 			exp_norm = (parse_birth_date(exp_raw) or exp_raw[:10]) if exp_raw else None
+			lot_s = clean_text(row.get("Parti/Lot")) or None if "Parti/Lot" in edited_df.columns else None
+			bar_s = clean_text(row.get("Barkod")) or None if "Barkod" in edited_df.columns else None
+			sup_s = clean_text(row.get("Tedarikçi")) or None if "Tedarikçi" in edited_df.columns else None
 			loc = clean_text(row.get("Saklama Yeri")) or None
 			notes = clean_text(row.get("Notlar")) or None
 
@@ -21883,17 +21933,20 @@ def save_infirmary_inventory_edits(edited_df: pd.DataFrame) -> int:
 				connection.execute(
 					"""UPDATE infirmary_inventory
 					   SET item_name=?, category=?, quantity=?, unit=?, min_threshold=?,
+						   target_stock=?, unit_cost=?, lot_number=COALESCE(?, lot_number),
+						   barcode=COALESCE(?, barcode), supplier_name=COALESCE(?, supplier_name),
 						   expiry_date=?, storage_location=?, notes=?, updated_at=?
 					   WHERE id=?""",
-					(nm, cat, qty, unit_s, thr, exp_norm, loc, notes, now_iso, iid),
+					(nm, cat, qty, unit_s, thr, tgt, unit_cost, lot_s, bar_s, sup_s, exp_norm, loc, notes, now_iso, iid),
 				)
 			else:
 				connection.execute(
 					"""INSERT INTO infirmary_inventory(
-						item_name, category, quantity, unit, min_threshold,
-						expiry_date, storage_location, notes, updated_at
-					) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-					(nm, cat, qty, unit_s, thr, exp_norm, loc, notes, now_iso),
+						item_name, category, quantity, unit, min_threshold, target_stock,
+						unit_cost, lot_number, barcode, supplier_name,
+						expiry_date, storage_location, notes, updated_at, quarantine_status
+					) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Aktif')""",
+					(nm, cat, qty, unit_s, thr, tgt, unit_cost, lot_s, bar_s, sup_s, exp_norm, loc, notes, now_iso),
 				)
 			saved += 1
 	return saved
@@ -21908,6 +21961,9 @@ def get_infirmary_inventory_alerts(days_horizon: int = 30, ref_date: date | None
 	expired: list[dict] = []
 	expiring_soon: list[dict] = []
 	for it in items:
+		q_st = clean_text(it.get("quarantine_status")) or "Aktif"
+		if q_st == "İmha Edildi":
+			continue
 		qty = float(it.get("quantity") or 0.0)
 		thr = float(it.get("min_threshold") or 0.0)
 		if qty <= thr:
@@ -21928,16 +21984,21 @@ def _inventory_row_status_label(item: dict, ref_date: date | None = None) -> tup
 	soon_iso = (base_d + timedelta(days=30)).isoformat()
 	flags = []
 	is_alert = False
+	q_st = clean_text(item.get("quarantine_status")) or "Aktif"
+	if q_st != "Aktif":
+		flags.append(q_st)
+		is_alert = True
 	qty = float(item.get("quantity") or 0.0)
 	thr = float(item.get("min_threshold") or 0.0)
-	if qty <= 0:
-		flags.append("TÜKENDİ")
-		is_alert = True
-	elif qty <= thr:
-		flags.append("Kritik Stok")
-		is_alert = True
+	if q_st == "Aktif":
+		if qty <= 0:
+			flags.append("TÜKENDİ")
+			is_alert = True
+		elif qty <= thr:
+			flags.append("Kritik Stok")
+			is_alert = True
 	exp_s = clean_text(item.get("expiry_date"))
-	if exp_s:
+	if exp_s and q_st == "Aktif":
 		exp_day = (parse_birth_date(exp_s) or exp_s)[:10]
 		if exp_day < today_iso:
 			flags.append("SKT GEÇMİŞ")
@@ -21969,13 +22030,17 @@ def build_infirmary_inventory_docx() -> bytes:
 		f"Sayım / Kontrol Tarihi: {today_d.strftime('%d.%m.%Y')}  ·  Toplam Kalem: {len(items)}",
 	)
 
+	readiness = invsup.compute_infirmary_readiness_summary(connect_db, days_horizon=30)
+	proc_plan = invsup.build_procurement_plan(connect_db)
 	summary_rows = [
-		("Toplam Kayıtlı Malzeme Çeşidi", f"{len(items)} kalem"),
+		("İlk Yardım Hazırlık Skoru", f"%{readiness['readiness_score']} ({readiness['readiness_tier']})"),
+		("Toplam Kayıtlı Malzeme Çeşidi", f"{len(items)} kalem (Aktif Değer: {readiness['total_value_tl']:,.2f} TL)"),
 		("Kritik / Biten Stok Sayısı", f"{len(alerts['critical_stock'])} kalem (miktar ≤ eşik)"),
-		("Miadı (SKT) Dolmuş Malzeme", f"{len(alerts['expired'])} kalem"),
-		("30 Gün İçinde Miadı Dolacak", f"{len(alerts['expiring_soon'])} kalem"),
+		("Miadı (SKT) Dolmuş / ≤30 Gün", f"{len(alerts['expired'])} dolmuş · {len(alerts['expiring_soon'])} yaklaşan"),
+		("İlk Yardım Çantaları & Tıbbi Cihazlar", f"{len(readiness['kits'])} çanta ({len(readiness['kits_attention'])} uyarı) · {len(readiness['devices'])} cihaz ({len(readiness['devices_attention'])} uyarı)"),
+		("Önerilen Satın Alma Tahmini Bütçesi", f"{proc_plan['total_budget_tl']:,.2f} TL ({proc_plan['item_count']} kalem)"),
 	]
-	_add_kv_docx_section_table(doc, "1. DEPO SAYIM VE MİAD DURUM ÖZETİ", summary_rows)
+	_add_kv_docx_section_table(doc, "1. DEPO SAYIM, HAZIRLIK VE MİAD DURUM ÖZETİ", summary_rows)
 
 	p_h = doc.add_paragraph()
 	p_h.paragraph_format.space_before = Pt(8)
@@ -22055,6 +22120,16 @@ def build_infirmary_inventory_docx() -> bytes:
 			for u in urgent_items
 		]
 		_add_kv_docx_section_table(doc, "3. ACİL İSTEM / TEDARİK GEREKTİREN KALEMLER", u_rows)
+
+	if readiness["kits"]:
+		k_rows = [
+			(
+				f"{k['kit_name']} ({k.get('location') or '—'})",
+				f"Kontrol: {_format_iso_tr(k.get('last_checked_date')) if k.get('last_checked_date') else 'Bekliyor'} · Eksik: {k.get('missing_count', 0)} · SKT Geçen: {k.get('expired_count', 0)} · Durum: {k.get('last_status') or '—'}",
+			)
+			for k in readiness["kits"]
+		]
+		_add_kv_docx_section_table(doc, "4. İLK YARDIM ÇANTALARI VE ACİL KİT DENETİMİ", k_rows)
 
 	_add_signature_docx_block(
 		doc,
@@ -22248,150 +22323,22 @@ def build_fridge_temp_monthly_docx(year_month: str | None = None) -> bytes:
 	return buf.getvalue()
 
 
-def _render_med_tab_infirmary_inventory() -> None:
-	ui.markdown("#### 🩹 Revir Sarf Malzeme & İlk Yardım Dolabı Stok/Miad (SKT) Takibi")
-	alerts = get_infirmary_inventory_alerts(days_horizon=30)
-
-	if alerts["expired"] or alerts["expiring_soon"] or alerts["critical_stock"]:
-		ac1, ac2 = ui.columns(2)
-		with ac1:
-			if alerts["critical_stock"]:
-				crit_names = ", ".join(f"{x['item_name']} ({float(x['quantity'] or 0):g} {x.get('unit') or ''})" for x in alerts["critical_stock"])
-				ui.error(f"🚨 **Kritik Stok Uyarısı ({len(alerts['critical_stock'])} Kalem):** {crit_names}")
-			else:
-				ui.success("🟢 Tüm sarf malzemeler kritik stok eşiğinin üzerinde.")
-		with ac2:
-			exp_msgs = []
-			if alerts["expired"]:
-				exp_msgs.append("⛔ **Miadı Geçmiş:** " + ", ".join(f"{x['item_name']} ({_format_iso_tr(x.get('expiry_date'))})" for x in alerts["expired"]))
-			if alerts["expiring_soon"]:
-				exp_msgs.append("⏳ **30 Gün İçinde Dolacak:** " + ", ".join(f"{x['item_name']} ({_format_iso_tr(x.get('expiry_date'))})" for x in alerts["expiring_soon"]))
-			if exp_msgs:
-				ui.warning("  \n".join(exp_msgs))
-			else:
-				ui.success("🟢 Miadı (SKT) yaklaşan veya geçmiş sarf malzeme yok.")
-	else:
-		items_cnt = len(get_infirmary_inventory())
-		if items_cnt > 0:
-			ui.success("🟢 Tüm revir sarf malzemeleri yeterli stokta ve SKT açısından uygun.")
-
-	act_c1, act_c2 = ui.columns(2)
-	with act_c1:
-		if ui.button("📦 Varsayılan 15 Kalem Okul Reviri Malzeme Listesini Yükle", type="secondary", use_container_width=True, key="btn_load_default_inventory"):
-			added_n = load_default_infirmary_inventory()
-			ui.session_state["inf_inv_editor_seed"] = ui.session_state.get("inf_inv_editor_seed", 0) + 1
-			if added_n > 0:
-				ui.success(f"✅ {added_n} yeni varsayılan okul reviri malzemesi envantere eklendi.")
-			else:
-				ui.info("Varsayılan 15 kalemin tamamı zaten envanterde kayıtlı.")
-			ui.rerun()
-	with act_c2:
-		ui.download_button(
-			"🖨️ Revir Eksik Malzeme İstem / Depo Sayım Tutanağı (.docx)",
-			data=build_infirmary_inventory_docx(),
-			file_name=f"Revir_Sarf_Malzeme_Sayim_Istem_{date.today().isoformat()}.docx",
-			mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-			type="primary",
-			use_container_width=True,
-			key="btn_dl_inventory_docx",
-		)
-
-	inv_items = get_infirmary_inventory()
-	render_gemini_inventory_ai_panel(alerts, len(inv_items))
-	if inv_items:
-		inv_rows = []
-		for it in inv_items:
-			st_lbl, _ = _inventory_row_status_label(it)
-			inv_rows.append({
-				"id": int(it["id"]),
-				"Malzeme Adı": it["item_name"],
-				"Kategori": clean_text(it.get("category")) or "Diğer",
-				"Miktar": float(it.get("quantity") or 0.0),
-				"Birim": clean_text(it.get("unit")) or "Adet",
-				"Kritik Eşik": float(it.get("min_threshold") or 0.0),
-				"SKT (YYYY-AA-GG)": clean_text(it.get("expiry_date")) or "",
-				"Saklama Yeri": clean_text(it.get("storage_location")) or "",
-				"Notlar": clean_text(it.get("notes")) or "",
-				"Durum": st_lbl,
-			})
-		inv_df = pd.DataFrame(inv_rows)
-		inv_seed = ui.session_state.get("inf_inv_editor_seed", 0)
-		edited_inv_df = ui.data_editor(
-			inv_df,
-			key=f"inf_inv_data_editor_{inv_seed}",
-			use_container_width=True,
-			hide_index=True,
-			num_rows="dynamic",
-			column_config={
-				"id": None,
-				"Malzeme Adı": ui.column_config.TextColumn("Malzeme Adı", required=True),
-				"Kategori": ui.column_config.SelectboxColumn("Kategori", options=INFIRMARY_INVENTORY_CATEGORIES),
-				"Miktar": ui.column_config.NumberColumn("Miktar", min_value=0.0, step=1.0),
-				"Birim": ui.column_config.TextColumn("Birim"),
-				"Kritik Eşik": ui.column_config.NumberColumn("Kritik Eşik", min_value=0.0, step=1.0),
-				"SKT (YYYY-AA-GG)": ui.column_config.TextColumn("SKT (YYYY-AA-GG)", help="Örn: 2027-06-30 veya 30.06.2027"),
-				"Saklama Yeri": ui.column_config.TextColumn("Saklama Yeri"),
-				"Notlar": ui.column_config.TextColumn("Notlar"),
-				"Durum": ui.column_config.TextColumn("Durum", disabled=True),
-			},
-		)
-		if ui.button("💾 Stok & SKT Değişikliklerini Kaydet", type="primary", key="btn_save_inf_inv_edits", use_container_width=True):
-			saved_n = save_infirmary_inventory_edits(edited_inv_df)
-			ui.session_state["inf_inv_editor_seed"] = inv_seed + 1
-			ui.success(f"✅ {saved_n} sarf malzeme kaydı güncellendi.")
-			ui.rerun()
-	else:
-		ui.info("Henüz envanterde sarf malzeme bulunmuyor. Yukarıdaki butondan varsayılan 15 kalemi yükleyebilir veya aşağıdan yeni malzeme ekleyebilirsiniz.")
-
-	with ui.expander("➕ Yeni Sarf Malzeme Kalemi Ekle"):
-		with ui.form("form_add_inf_inventory_item", clear_on_submit=True):
-			ic1, ic2, ic3 = ui.columns([2, 1.4, 1.2])
-			with ic1:
-				n_name = ui.text_input("Malzeme Adı*", placeholder="Örn: Steril Serum Fizyolojik", key="inv_add_name")
-			with ic2:
-				n_cat = ui.selectbox("Kategori", INFIRMARY_INVENTORY_CATEGORIES, key="inv_add_cat")
-			with ic3:
-				n_unit = ui.text_input("Birim", value="Adet", placeholder="Kutu, Rulo, Adet...", key="inv_add_unit")
-
-			ic4, ic5, ic6, ic7 = ui.columns([1, 1, 1.2, 1.5])
-			with ic4:
-				n_qty = ui.number_input("Mevcut Miktar", min_value=0.0, step=1.0, value=10.0, key="inv_add_qty")
-			with ic5:
-				n_thr = ui.number_input("Kritik Eşik", min_value=0.0, step=1.0, value=3.0, key="inv_add_thr")
-			with ic6:
-				n_exp_use = ui.checkbox("SKT Gir", value=False, key="inv_add_exp_chk")
-				n_exp_d = ui.date_input("Son Kullanma Tarihi", value=date.today() + timedelta(days=365), key="inv_add_exp") if n_exp_use else None
-			with ic7:
-				n_loc = ui.text_input("Saklama Yeri", placeholder="İlk Yardım Dolabı", key="inv_add_loc")
-
-			n_note = ui.text_input("Not (Opsiyonel)", key="inv_add_note")
-			if ui.form_submit_button("💾 Malzemeyi Envantere Ekle", type="primary", use_container_width=True):
-				if not clean_text(n_name):
-					ui.error("Lütfen malzeme adını yazın.")
-				else:
-					add_infirmary_inventory_item(
-						item_name=n_name,
-						category=n_cat,
-						quantity=float(n_qty),
-						unit=n_unit,
-						min_threshold=float(n_thr),
-						expiry_date=n_exp_d.isoformat() if n_exp_d else None,
-						storage_location=n_loc,
-						notes=n_note,
-					)
-					ui.session_state["inf_inv_editor_seed"] = ui.session_state.get("inf_inv_editor_seed", 0) + 1
-					ui.success(f"'{clean_text(n_name)}' revir envanterine eklendi.")
-					ui.rerun()
-
-	if inv_items:
-		with ui.expander("🗑️ Envanterden Malzeme Sil"):
-			del_opts = {f"#{int(it['id'])} — {it['item_name']} ({float(it.get('quantity') or 0):g} {it.get('unit') or ''})": int(it["id"]) for it in inv_items}
-			sel_del = ui.selectbox("Silinecek Malzeme", list(del_opts.keys()), key="inv_del_sel")
-			if ui.button("Seçili Malzemeyi Sil", key="inv_del_btn", type="secondary"):
-				delete_infirmary_inventory_item(del_opts[sel_del])
-				ui.session_state["inf_inv_editor_seed"] = ui.session_state.get("inf_inv_editor_seed", 0) + 1
-				ui.success("Malzeme envanterden silindi.")
-				ui.rerun()
+def _render_med_tab_infirmary_inventory(nurse_name: str = "") -> None:
+	if not clean_text(nurse_name):
+		nurse_name = clean_text(get_app_settings().get("nurse_name")) or "Revir Sorumlusu"
+	invsup.render_infirmary_supply_studio({
+		"connect_db": connect_db,
+		"INFIRMARY_INVENTORY_CATEGORIES": INFIRMARY_INVENTORY_CATEGORIES,
+		"nurse_name": nurse_name,
+		"get_app_settings": get_app_settings,
+		"load_default_infirmary_inventory": load_default_infirmary_inventory,
+		"build_infirmary_inventory_docx": build_infirmary_inventory_docx,
+		"_inventory_row_status_label": _inventory_row_status_label,
+		"save_infirmary_inventory_edits": save_infirmary_inventory_edits,
+		"add_infirmary_inventory_item": add_infirmary_inventory_item,
+		"delete_infirmary_inventory_item": delete_infirmary_inventory_item,
+		"render_gemini_inventory_ai_panel": render_gemini_inventory_ai_panel,
+	})
 
 
 def _render_med_tab_cold_chain(nurse_name: str) -> None:
@@ -23121,7 +23068,7 @@ def render_medication_tracker() -> None:
 		)
 
 	with tab_supply:
-		_render_med_tab_infirmary_inventory()
+		_render_med_tab_infirmary_inventory(nurse_name)
 
 	with tab_cold_chain:
 		_render_med_tab_cold_chain(nurse_name)

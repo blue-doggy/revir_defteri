@@ -2842,8 +2842,9 @@ def analyze_inventory_and_procurement_with_gemini(
 	total_items: int,
 	school_name: str = "Okul Reviri",
 	nurse_name: str = "Okul Revir Sorumlusu",
+	extra_context: dict[str, Any] | None = None,
 ) -> tuple[bool, dict[str, Any], str]:
-	"""Revir sarf malzeme ve ilk yardım dolabı kritik stok / miad (SKT) verilerinden önceliklendirme ve resmi istem tutanağı üretir."""
+	"""Revir sarf malzeme, ilk yardım çantaları, tüketim hızı ve SKT verilerinden önceliklendirme ile resmi istem tutanağı üretir."""
 	safe_alerts = {
 		"critical_stock": [
 			{"ad": x.get("item_name"), "miktar": x.get("quantity"), "esik": x.get("min_threshold"), "birim": x.get("unit"), "kat": x.get("category")}
@@ -2858,10 +2859,11 @@ def analyze_inventory_and_procurement_with_gemini(
 			for x in (alerts.get("expiring_soon") or [])[:30]
 		],
 	}
-	prompt = f"""Bir okul revirinin malzeme envanter ve SKT alarmlarını değerlendirerek satın alma önceliği, tıbbi atık/imha uyarısı ve Okul Müdürlüğüne hitaben resmi malzeme istem tutanağı hazırla.
+	extra_txt = f"\n[HAZIRLIK, ÇANTA EKSİĞİ VE 30G TÜKETİM ÖZETİ]: {json.dumps(extra_context, ensure_ascii=False)}" if extra_context else ""
+	prompt = f"""Bir okul revirinin malzeme envanter, çanta denetimi, tüketim hızı ve SKT alarmlarını değerlendirerek satın alma önceliği, tıbbi atık/imha uyarısı ve Okul Müdürlüğüne hitaben resmi malzeme istem tutanağı hazırla.
 
 [KURUM]: {school_name} | Revir Sorumlusu: {nurse_name} | Toplam Envanter Kalemi: {total_items}
-[STOK & SKT UYARILARI]: {json.dumps(safe_alerts, ensure_ascii=False)}
+[STOK & SKT UYARILARI]: {json.dumps(safe_alerts, ensure_ascii=False)}{extra_txt}
 
 SADECE şu JSON yapısını döndür:
 {{
