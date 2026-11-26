@@ -980,6 +980,8 @@ class _AppSession:
 		self.topbar_action_handler: Callable | None = None
 		self.cmd_search_handler: Callable | None = None
 		self.cmd_exec_handler: Callable | None = None
+		self.media_player_config: dict[str, Any] = {"visible": False}
+		self.media_player_handler: Callable | None = None
 
 	@property
 	def active_dialog(self) -> _ActiveDialog | None:
@@ -2781,6 +2783,13 @@ def configure_command_palette(search_handler: Callable | None = None, exec_handl
 		ctx.session.cmd_exec_handler = exec_handler
 
 
+def configure_media_player(config: dict[str, Any], action_handler: Callable | None = None) -> None:
+	ctx = _get_ctx()
+	ctx.session.media_player_config = dict(config or {})
+	if action_handler is not None:
+		ctx.session.media_player_handler = action_handler
+
+
 # Kök konteyner ve modül düzeyinde API dışa aktarımları
 _root = _UIContainer()
 sidebar = _UIContainer(is_sidebar=True)
@@ -3135,6 +3144,7 @@ def _execute_render_cycle(app_fn: Callable[[], None], session: _AppSession, payl
 			"floating_chat_title": session.floating_chat_title,
 			"floating_chat_label": session.floating_chat_label,
 			"floating_chat_chips": session.floating_chat_chips,
+			"media_player": session.media_player_config,
 		}
 		session.last_html_payload = result
 		return result
@@ -4486,10 +4496,145 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 	font-weight: 800;
 }
 #revir-chat-send-btn:hover { background: var(--teal-hover, #0f766e); }
+
+/* Yan Menü Kalıcı Radyo & MP3 Çalar (Sayfa Geçişlerinde Kesintisiz) */
+.revir-media-dock {
+	margin: 10px 0 10px 0;
+	padding: 9px 10px;
+	border-radius: 12px;
+	border: 1px solid var(--line);
+	background: var(--card-bg);
+	box-shadow: 0 2px 8px rgba(15, 23, 42, 0.05);
+	display: flex;
+	flex-direction: column;
+	gap: 7px;
+	transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.revir-media-dock.is-playing {
+	border-color: rgba(13, 148, 136, 0.45);
+	box-shadow: 0 3px 12px rgba(13, 148, 136, 0.12);
+}
+.revir-media-dock.hidden { display: none !important; }
+.revir-mp-mini-rail {
+	display: none;
+	align-items: center;
+	justify-content: center;
+}
+.revir-mp-mini-btn {
+	width: 42px; height: 42px; border-radius: 11px;
+	border: 1px solid var(--line); background: var(--sidebar-bg); color: var(--text-main);
+	cursor: pointer; font-size: 17px; display: inline-flex; align-items: center; justify-content: center;
+	transition: all 0.15s ease;
+}
+.revir-media-dock.is-playing .revir-mp-mini-btn {
+	border-color: var(--teal); background: var(--mint); color: var(--teal);
+	box-shadow: 0 0 0 2px rgba(13, 148, 136, 0.18);
+}
+.revir-sidebar.collapsed .revir-media-dock {
+	padding: 4px; border: none; background: transparent; box-shadow: none; margin: 6px 0;
+}
+.revir-sidebar.collapsed .revir-mp-expanded-body { display: none !important; }
+.revir-sidebar.collapsed .revir-mp-mini-rail { display: flex !important; }
+
+.revir-mp-top {
+	display: flex; align-items: center; justify-content: space-between; gap: 5px;
+}
+.revir-mp-modes {
+	display: inline-flex; flex: 1; background: var(--sidebar-bg);
+	border: 1px solid var(--line); border-radius: 8px; padding: 2px; gap: 2px;
+}
+.revir-mp-mode-btn {
+	flex: 1; border: none; background: transparent; color: var(--text-muted);
+	font-family: inherit; font-size: 11.2px; font-weight: 700; padding: 4px 5px;
+	border-radius: 6px; cursor: pointer; white-space: nowrap; transition: all 0.15s ease;
+}
+.revir-mp-mode-btn.active {
+	background: var(--card-bg); color: var(--teal);
+	box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
+}
+.revir-mp-icon-act {
+	width: 27px; height: 27px; border-radius: 7px;
+	border: 1px solid var(--line); background: var(--sidebar-bg); color: var(--text-main);
+	cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
+	font-size: 13px; flex-shrink: 0; transition: all 0.15s ease;
+}
+.revir-mp-icon-act:hover { border-color: var(--teal); color: var(--teal); background: var(--mint); }
+.revir-mp-sel {
+	width: 100%; height: 28px; border-radius: 7px;
+	border: 1px solid var(--line); background: var(--input-bg); color: var(--input-text);
+	font-family: inherit; font-size: 11.5px; font-weight: 600; padding: 0 6px;
+	outline: none; cursor: pointer;
+}
+.revir-mp-sel:focus { border-color: var(--teal); }
+.revir-mp-now {
+	display: flex; align-items: center; justify-content: space-between; gap: 6px;
+	background: var(--sidebar-bg); border-radius: 7px; padding: 4px 7px;
+	border: 1px solid rgba(148, 163, 184, 0.22); min-height: 26px;
+}
+.revir-mp-marquee-vp {
+	flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; position: relative;
+}
+.revir-mp-marquee-txt {
+	display: inline-block; font-size: 11.5px; font-weight: 700; color: var(--text-heading);
+	white-space: nowrap;
+}
+.revir-mp-marquee-txt.scrolling {
+	padding-left: 100%;
+	animation: revirMpMarquee 13s linear infinite;
+}
+.revir-mp-marquee-vp:hover .revir-mp-marquee-txt.scrolling {
+	animation-play-state: paused;
+}
+@keyframes revirMpMarquee {
+	0% { transform: translateX(0); }
+	100% { transform: translateX(-100%); }
+}
+.revir-mp-badge {
+	font-size: 10px; font-weight: 800; padding: 2px 6px; border-radius: 999px;
+	background: var(--card-bg); color: var(--text-muted); border: 1px solid var(--line);
+	white-space: nowrap; flex-shrink: 0; font-variant-numeric: tabular-nums;
+}
+.revir-mp-badge.live {
+	color: #dc2626; border-color: rgba(220, 38, 38, 0.32); background: rgba(220, 38, 38, 0.08);
+}
+.revir-mp-seek-wrap { display: none; align-items: center; }
+.revir-mp-seek-wrap.visible { display: flex; }
+.revir-mp-seek {
+	width: 100%; height: 4px; margin: 0; cursor: pointer; accent-color: var(--teal);
+}
+.revir-mp-ctrls {
+	display: flex; align-items: center; justify-content: space-between; gap: 3px;
+}
+.revir-mp-cbtn {
+	width: 27px; height: 27px; border-radius: 7px;
+	border: 1px solid var(--line); background: var(--sidebar-bg); color: var(--text-main);
+	cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
+	font-size: 12px; padding: 0; flex-shrink: 0; transition: all 0.14s ease;
+}
+.revir-mp-cbtn:hover { border-color: var(--teal); color: var(--teal); }
+.revir-mp-cbtn.play-main {
+	width: 31px; height: 29px; border-radius: 8px;
+	background: var(--teal); color: #ffffff; border-color: var(--teal); font-size: 13px;
+}
+.revir-mp-cbtn.play-main:hover { background: var(--teal-hover); color: #ffffff; }
+.revir-mp-cbtn.active-tog {
+	border-color: var(--teal); color: var(--teal); background: var(--mint);
+}
+.revir-mp-vol-wrap {
+	display: flex; align-items: center; gap: 3px; flex: 1; min-width: 54px; max-width: 82px; margin-left: 2px;
+}
+.revir-mp-vol-ico {
+	background: none; border: none; padding: 0; cursor: pointer; font-size: 12.5px;
+	color: var(--text-muted); line-height: 1; flex-shrink: 0;
+}
+.revir-mp-vol {
+	width: 100%; height: 4px; margin: 0; cursor: pointer; accent-color: var(--teal);
+}
 </style>
 <div id="revir-dynamic-styles">__REVIR_INIT_STYLES__</div>
 </head>
 <body>
+<audio id="revir-persistent-audio" preload="none" style="display:none;"></audio>
 <div id="revir-busy-bar"></div>
 <div id="revir-loading-pill"><span class="revir-spin-dot"></span><span>İşlem yürütülüyor...</span></div>
 <button id="revir-sidebar-open" class="revir-sidebar-open-btn" type="button" title="Menüyü Aç" aria-label="Yan menüyü aç" onclick="window.__revirSetSidebar(false)">❯</button>
@@ -4808,7 +4953,14 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 		var sb = document.getElementById("revir-sidebar");
 		var sbBtn = document.getElementById("revir-sidebar-open");
 		if (sb) {
+			var existingMpDock = document.getElementById("revir-media-dock");
+			if (existingMpDock && existingMpDock.parentNode === sb) {
+				sb.removeChild(existingMpDock);
+			}
 			sb.innerHTML = data.sidebar_html || "";
+			if (window.__revirMountAndSyncMediaPlayer) {
+				window.__revirMountAndSyncMediaPlayer(sb, data.media_player);
+			}
 			if (data.sidebar_collapsed) {
 				sb.classList.add("collapsed");
 				if (sbBtn) sbBtn.classList.add("visible");
@@ -7221,6 +7373,693 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 	}
 	window.__revirInitBoxLayout = initBoxLayout;
 
+	/* =========================================================================
+	   KALICI YAN MENÜ RADYO & YEREL MP3 ÇALAR + MEDYA TUŞLARI MOTORU
+	   ========================================================================= */
+	(function initPersistentMediaPlayer() {
+		var MP_STORAGE_KEY = "revir_mp_state_v1";
+		var audioEl = document.getElementById("revir-persistent-audio");
+		var dockEl = null;
+		var mpServerCfg = { visible: false, stations: [], tracks: [], music_folder: "", music_folder_name: "muzikler" };
+		var mpState = {
+			mode: "radio",
+			volume: 0.75,
+			muted: false,
+			shuffle: false,
+			stationId: "",
+			trackId: ""
+		};
+		var shuffleHistory = [];
+		var currentCandidateUrls = [];
+		var currentCandidateIdx = 0;
+		var isSeeking = false;
+		var lastMediaCmdAt = 0;
+		var canNativeHls = false;
+
+		try {
+			var savedMp = JSON.parse(localStorage.getItem(MP_STORAGE_KEY) || "{}");
+			if (savedMp && typeof savedMp === "object") {
+				if (savedMp.mode === "radio" || savedMp.mode === "folder") mpState.mode = savedMp.mode;
+				if (typeof savedMp.volume === "number" && savedMp.volume >= 0 && savedMp.volume <= 1) mpState.volume = savedMp.volume;
+				if (typeof savedMp.muted === "boolean") mpState.muted = savedMp.muted;
+				if (typeof savedMp.shuffle === "boolean") mpState.shuffle = savedMp.shuffle;
+				if (typeof savedMp.stationId === "string") mpState.stationId = savedMp.stationId;
+				if (typeof savedMp.trackId === "string") mpState.trackId = savedMp.trackId;
+			}
+		} catch (_e) {}
+
+		if (audioEl) {
+			audioEl.volume = mpState.volume;
+			audioEl.muted = mpState.muted;
+			try {
+				var c1 = audioEl.canPlayType("application/vnd.apple.mpegurl");
+				var c2 = audioEl.canPlayType("audio/mpegurl");
+				canNativeHls = !!(c1 || c2);
+			} catch (_he) { canNativeHls = false; }
+		}
+
+		function saveMpState() {
+			try { localStorage.setItem(MP_STORAGE_KEY, JSON.stringify(mpState)); } catch (_e) {}
+		}
+
+		function fmtTime(sec) {
+			if (!isFinite(sec) || sec < 0) return "00:00";
+			var s = Math.floor(sec);
+			var m = Math.floor(s / 60);
+			var r = s % 60;
+			return (m < 10 ? "0" : "") + m + ":" + (r < 10 ? "0" : "") + r;
+		}
+
+		function getStations() { return Array.isArray(mpServerCfg.stations) ? mpServerCfg.stations : []; }
+		function getTracks() { return Array.isArray(mpServerCfg.tracks) ? mpServerCfg.tracks : []; }
+
+		function getActiveStation() {
+			var list = getStations();
+			if (!list.length) return null;
+			for (var i = 0; i < list.length; i++) {
+				if (list[i].id === mpState.stationId) return list[i];
+			}
+			mpState.stationId = list[0].id;
+			return list[0];
+		}
+
+		function getActiveTrack() {
+			var list = getTracks();
+			if (!list.length) return null;
+			for (var i = 0; i < list.length; i++) {
+				if (list[i].id === mpState.trackId) return list[i];
+			}
+			mpState.trackId = list[0].id;
+			return list[0];
+		}
+
+		function buildStationUrlChain(st) {
+			if (!st) return [];
+			var urls = [];
+			var isHls = !!(st.is_hls || String(st.url || "").toLowerCase().indexOf(".m3u8") !== -1);
+			if (isHls && !canNativeHls && st.hls_proxy_url) {
+				urls.push(st.hls_proxy_url);
+			}
+			if (st.url) urls.push(st.url);
+			if (Array.isArray(st.backup_urls)) {
+				st.backup_urls.forEach(function(bu) {
+					if (bu && urls.indexOf(bu) === -1) urls.push(bu);
+				});
+			}
+			if (st.hls_proxy_url && urls.indexOf(st.hls_proxy_url) === -1) {
+				urls.push(st.hls_proxy_url);
+			}
+			return urls;
+		}
+
+		function updateMediaSessionMeta() {
+			if (!("mediaSession" in navigator) || typeof MediaMetadata === "undefined") return;
+			try {
+				var title = "Revir Ses Modülü";
+				var artist = "Revir Defteri";
+				if (mpState.mode === "radio") {
+					var st = getActiveStation();
+					if (st) {
+						title = st.name;
+						artist = st.category || "Canlı Radyo (HTTPS)";
+					}
+				} else {
+					var tr = getActiveTrack();
+					if (tr) {
+						title = tr.title;
+						artist = tr.folder ? ("📁 " + tr.folder) : ("📁 " + (mpServerCfg.music_folder_name || "Klasörüm"));
+					}
+				}
+				navigator.mediaSession.metadata = new MediaMetadata({
+					title: title,
+					artist: artist,
+					album: "Revir Defteri"
+				});
+				navigator.mediaSession.playbackState = (audioEl && !audioEl.paused) ? "playing" : "paused";
+			} catch (_mse) {}
+		}
+
+		function ensureDockElement() {
+			if (dockEl) return dockEl;
+			dockEl = document.createElement("div");
+			dockEl.id = "revir-media-dock";
+			dockEl.className = "revir-media-dock hidden";
+			dockEl.setAttribute("data-no-box-layout", "1");
+			dockEl.innerHTML =
+				'<div class="revir-mp-mini-rail">' +
+					'<button type="button" class="revir-mp-mini-btn" id="revir-mp-mini-btn" title="Radyo / Müzik Oynat-Duraklat">📻</button>' +
+				'</div>' +
+				'<div class="revir-mp-expanded-body" style="display:flex;flex-direction:column;gap:6px;">' +
+					'<div class="revir-mp-top">' +
+						'<div class="revir-mp-modes">' +
+							'<button type="button" class="revir-mp-mode-btn active" data-mp-mode="radio">📻 Radyo</button>' +
+							'<button type="button" class="revir-mp-mode-btn" data-mp-mode="folder">🎵 Klasörüm</button>' +
+						'</div>' +
+						'<button type="button" class="revir-mp-icon-act" id="revir-mp-aux-btn" title="Çevrimiçi HTTPS Radyoları Yenile">🌐</button>' +
+					'</div>' +
+					'<select class="revir-mp-sel" id="revir-mp-select" aria-label="İstasyon veya Parça Seçin"></select>' +
+					'<div class="revir-mp-now">' +
+						'<div class="revir-mp-marquee-vp"><span class="revir-mp-marquee-txt" id="revir-mp-title">Hazır</span></div>' +
+						'<span class="revir-mp-badge" id="revir-mp-badge">HAZIR</span>' +
+					'</div>' +
+					'<div class="revir-mp-seek-wrap" id="revir-mp-seek-wrap">' +
+						'<input type="range" class="revir-mp-seek" id="revir-mp-seek" min="0" max="1000" value="0" title="İleri / Geri Sar"/>' +
+					'</div>' +
+					'<div class="revir-mp-ctrls">' +
+						'<button type="button" class="revir-mp-cbtn" id="revir-mp-prev" title="Önceki (⏮)">⏮</button>' +
+						'<button type="button" class="revir-mp-cbtn play-main" id="revir-mp-play" title="Oynat / Duraklat (⏯)">▶</button>' +
+						'<button type="button" class="revir-mp-cbtn" id="revir-mp-next" title="Sonraki (⏭)">⏭</button>' +
+						'<button type="button" class="revir-mp-cbtn" id="revir-mp-stop" title="Durdur (⏹)">⏹</button>' +
+						'<button type="button" class="revir-mp-cbtn" id="revir-mp-shuf" title="Karışık Çal (Shuffle)">🔀</button>' +
+						'<div class="revir-mp-vol-wrap">' +
+							'<button type="button" class="revir-mp-vol-ico" id="revir-mp-mute" title="Sesi Kapat / Aç">🔊</button>' +
+							'<input type="range" class="revir-mp-vol" id="revir-mp-vol" min="0" max="100" value="75" title="Ses Düzeyi"/>' +
+						'</div>' +
+					'</div>' +
+				'</div>';
+
+			dockEl.querySelectorAll("[data-mp-mode]").forEach(function(btn) {
+				btn.addEventListener("click", function(e) {
+					e.stopPropagation();
+					var nextMode = btn.getAttribute("data-mp-mode");
+					if (nextMode && nextMode !== mpState.mode) {
+						var wasPlaying = !!(audioEl && !audioEl.paused);
+						mpState.mode = nextMode;
+						saveMpState();
+						if (audioEl) {
+							audioEl.pause();
+							audioEl.removeAttribute("src");
+							audioEl.load();
+						}
+						renderDockState(true);
+						if (wasPlaying) playCurrentSelection();
+					}
+				});
+			});
+
+			dockEl.querySelector("#revir-mp-aux-btn").addEventListener("click", function(e) {
+				e.stopPropagation();
+				if (mpState.mode === "radio") {
+					refreshOnlineStations();
+				} else {
+					pickMusicFolderInteractive();
+				}
+			});
+
+			dockEl.querySelector("#revir-mp-select").addEventListener("change", function(e) {
+				var val = e.target.value;
+				if (mpState.mode === "radio") mpState.stationId = val;
+				else mpState.trackId = val;
+				saveMpState();
+				playCurrentSelection();
+			});
+
+			dockEl.querySelector("#revir-mp-play").addEventListener("click", function(e) {
+				e.stopPropagation();
+				togglePlayPause();
+			});
+			dockEl.querySelector("#revir-mp-mini-btn").addEventListener("click", function(e) {
+				e.stopPropagation();
+				togglePlayPause();
+			});
+			dockEl.querySelector("#revir-mp-prev").addEventListener("click", function(e) {
+				e.stopPropagation();
+				stepTrack(-1);
+			});
+			dockEl.querySelector("#revir-mp-next").addEventListener("click", function(e) {
+				e.stopPropagation();
+				stepTrack(1);
+			});
+			dockEl.querySelector("#revir-mp-stop").addEventListener("click", function(e) {
+				e.stopPropagation();
+				stopPlayback();
+			});
+			dockEl.querySelector("#revir-mp-shuf").addEventListener("click", function(e) {
+				e.stopPropagation();
+				mpState.shuffle = !mpState.shuffle;
+				saveMpState();
+				renderDockState(false);
+				showToast(mpState.shuffle ? "🔀 Karışık çalma açıldı" : "➡️ Sıralı çalma aktif");
+			});
+
+			var volInp = dockEl.querySelector("#revir-mp-vol");
+			volInp.value = String(Math.round(mpState.volume * 100));
+			volInp.addEventListener("input", function(e) {
+				var v = Math.max(0, Math.min(100, parseInt(e.target.value || "75", 10))) / 100.0;
+				mpState.volume = v;
+				if (v > 0 && mpState.muted) mpState.muted = false;
+				if (audioEl) {
+					audioEl.volume = v;
+					audioEl.muted = mpState.muted;
+				}
+				saveMpState();
+				updateVolumeIcons();
+			});
+
+			dockEl.querySelector("#revir-mp-mute").addEventListener("click", function(e) {
+				e.stopPropagation();
+				mpState.muted = !mpState.muted;
+				if (audioEl) audioEl.muted = mpState.muted;
+				saveMpState();
+				updateVolumeIcons();
+			});
+
+			var seekInp = dockEl.querySelector("#revir-mp-seek");
+			seekInp.addEventListener("pointerdown", function() { isSeeking = true; });
+			seekInp.addEventListener("input", function(e) {
+				if (mpState.mode !== "folder" || !audioEl || !isFinite(audioEl.duration) || audioEl.duration <= 0) return;
+				var badgeEl = dockEl.querySelector("#revir-mp-badge");
+				var previewSec = (parseFloat(e.target.value) / 1000.0) * audioEl.duration;
+				if (badgeEl) badgeEl.textContent = fmtTime(previewSec) + " / " + fmtTime(audioEl.duration);
+			});
+			seekInp.addEventListener("change", function(e) {
+				isSeeking = false;
+				if (mpState.mode !== "folder" || !audioEl || !isFinite(audioEl.duration) || audioEl.duration <= 0) return;
+				audioEl.currentTime = (parseFloat(e.target.value) / 1000.0) * audioEl.duration;
+			});
+
+			return dockEl;
+		}
+
+		function updateVolumeIcons() {
+			if (!dockEl) return;
+			var muteBtn = dockEl.querySelector("#revir-mp-mute");
+			if (!muteBtn) return;
+			if (mpState.muted || mpState.volume === 0) muteBtn.textContent = "🔇";
+			else if (mpState.volume < 0.45) muteBtn.textContent = "🔉";
+			else muteBtn.textContent = "🔊";
+		}
+
+		function renderDockState(rebuildOptions) {
+			if (!dockEl) return;
+			if (!mpServerCfg || !mpServerCfg.visible) {
+				dockEl.classList.add("hidden");
+				return;
+			}
+			dockEl.classList.remove("hidden");
+
+			var isPlaying = !!(audioEl && !audioEl.paused && audioEl.currentSrc);
+			dockEl.classList.toggle("is-playing", isPlaying);
+
+			var miniBtn = dockEl.querySelector("#revir-mp-mini-btn");
+			if (miniBtn) {
+				miniBtn.textContent = isPlaying ? "⏸" : (mpState.mode === "radio" ? "📻" : "🎵");
+			}
+
+			dockEl.querySelectorAll("[data-mp-mode]").forEach(function(b) {
+				b.classList.toggle("active", b.getAttribute("data-mp-mode") === mpState.mode);
+			});
+
+			var auxBtn = dockEl.querySelector("#revir-mp-aux-btn");
+			if (auxBtn) {
+				if (mpState.mode === "radio") {
+					auxBtn.textContent = "🌐";
+					auxBtn.title = "MEB Uyumlu HTTPS Radyo Listesini Güncelle (443 Portu)";
+				} else {
+					auxBtn.textContent = "📁";
+					auxBtn.title = "Müzik Klasörü Seç (Aktif: " + (mpServerCfg.music_folder || "muzikler") + ")";
+				}
+			}
+
+			var selEl = dockEl.querySelector("#revir-mp-select");
+			if (selEl && rebuildOptions) {
+				selEl.innerHTML = "";
+				if (mpState.mode === "radio") {
+					var stations = getStations();
+					if (!stations.length) {
+						var optEmptyR = document.createElement("option");
+						optEmptyR.value = "";
+						optEmptyR.textContent = "İstasyon bulunamadı";
+						selEl.appendChild(optEmptyR);
+					} else {
+						var activeSt = getActiveStation();
+						stations.forEach(function(st) {
+							var o = document.createElement("option");
+							o.value = st.id;
+							o.textContent = "📻 " + st.name;
+							if (activeSt && st.id === activeSt.id) o.selected = true;
+							selEl.appendChild(o);
+						});
+					}
+				} else {
+					var tracks = getTracks();
+					if (!tracks.length) {
+						var optEmptyF = document.createElement("option");
+						optEmptyF.value = "";
+						optEmptyF.textContent = "📁 Klasörde ses dosyası yok (📁 ile seçin)";
+						selEl.appendChild(optEmptyF);
+					} else {
+						var activeTr = getActiveTrack();
+						tracks.forEach(function(tr, idx) {
+							var o2 = document.createElement("option");
+							o2.value = tr.id;
+							o2.textContent = (idx + 1) + ". " + tr.title;
+							if (activeTr && tr.id === activeTr.id) o2.selected = true;
+							selEl.appendChild(o2);
+						});
+					}
+				}
+			} else if (selEl) {
+				var targetVal = mpState.mode === "radio" ? (getActiveStation() || {}).id : (getActiveTrack() || {}).id;
+				if (targetVal && selEl.value !== targetVal) selEl.value = targetVal;
+			}
+
+			var titleEl = dockEl.querySelector("#revir-mp-title");
+			var badgeEl = dockEl.querySelector("#revir-mp-badge");
+			var seekWrap = dockEl.querySelector("#revir-mp-seek-wrap");
+			var playBtn = dockEl.querySelector("#revir-mp-play");
+			var shufBtn = dockEl.querySelector("#revir-mp-shuf");
+
+			if (playBtn) playBtn.textContent = isPlaying ? "⏸" : "▶";
+			if (shufBtn) {
+				shufBtn.classList.toggle("active-tog", !!mpState.shuffle);
+				shufBtn.style.display = mpState.mode === "folder" ? "inline-flex" : "none";
+			}
+			if (seekWrap) {
+				seekWrap.classList.toggle("visible", mpState.mode === "folder" && getTracks().length > 0);
+			}
+
+			var nowText = "Hazır";
+			if (mpState.mode === "radio") {
+				var stNow = getActiveStation();
+				nowText = stNow ? (stNow.name + (stNow.category ? " · " + stNow.category : "")) : "İstasyon seçin";
+				if (badgeEl) {
+					badgeEl.textContent = isPlaying ? "● CANLI" : "RADYO";
+					badgeEl.classList.toggle("live", isPlaying);
+				}
+			} else {
+				var trNow = getActiveTrack();
+				nowText = trNow ? (trNow.title + (trNow.folder ? " (" + trNow.folder + ")" : "")) : ("📁 " + (mpServerCfg.music_folder_name || "muzikler") + " klasörü boş");
+				if (badgeEl) {
+					badgeEl.classList.remove("live");
+					if (isPlaying && audioEl && isFinite(audioEl.duration) && audioEl.duration > 0) {
+						badgeEl.textContent = fmtTime(audioEl.currentTime) + " / " + fmtTime(audioEl.duration);
+					} else {
+						badgeEl.textContent = getTracks().length ? (getTracks().length + " MP3") : "BOŞ";
+					}
+				}
+			}
+
+			if (titleEl && titleEl.textContent !== nowText) {
+				titleEl.textContent = nowText;
+				titleEl.classList.toggle("scrolling", nowText.length > 24);
+			}
+			updateVolumeIcons();
+			updateMediaSessionMeta();
+		}
+
+		function startAudioWithCandidates(urls) {
+			if (!audioEl || !urls || !urls.length) return;
+			currentCandidateUrls = urls.slice();
+			currentCandidateIdx = 0;
+			audioEl.src = currentCandidateUrls[0];
+			var p = audioEl.play();
+			if (p && typeof p.catch === "function") {
+				p.catch(function(_err) {
+					tryNextCandidateOrFail();
+				});
+			}
+		}
+
+		function tryNextCandidateOrFail() {
+			if (!audioEl) return;
+			if (currentCandidateIdx + 1 < currentCandidateUrls.length) {
+				currentCandidateIdx += 1;
+				audioEl.src = currentCandidateUrls[currentCandidateIdx];
+				var p = audioEl.play();
+				if (p && typeof p.catch === "function") {
+					p.catch(function() { tryNextCandidateOrFail(); });
+				}
+				return;
+			}
+			renderDockState(false);
+			if (mpState.mode === "radio") {
+				showToast("⚠️ Radyo akışına bağlanılamadı (ağ/sertifika kısıtlaması olabilir).", "warn");
+			} else {
+				showToast("⚠️ Ses dosyası oynatılamadı.", "warn");
+			}
+		}
+
+		function playCurrentSelection() {
+			if (!audioEl) return;
+			if (mpState.mode === "radio") {
+				var st = getActiveStation();
+				if (!st) {
+					showToast("⚠️ Çalınacak radyo istasyonu bulunamadı.", "warn");
+					return;
+				}
+				var chain = buildStationUrlChain(st);
+				startAudioWithCandidates(chain);
+			} else {
+				var tr = getActiveTrack();
+				if (!tr) {
+					showToast("📁 Seçili klasörde ses dosyası yok. Klasör simgesine tıklayıp MP3 klasörü seçin.", "warn");
+					return;
+				}
+				shuffleHistory.push(tr.id);
+				if (shuffleHistory.length > 60) shuffleHistory.shift();
+				startAudioWithCandidates([tr.url]);
+			}
+			renderDockState(false);
+		}
+
+		function togglePlayPause() {
+			if (!audioEl) return;
+			if (!audioEl.paused && audioEl.currentSrc) {
+				audioEl.pause();
+				renderDockState(false);
+				return;
+			}
+			if (audioEl.src && audioEl.currentSrc && mpState.mode === "folder" && audioEl.currentTime > 0) {
+				var p = audioEl.play();
+				if (p && typeof p.catch === "function") p.catch(function() { playCurrentSelection(); });
+				return;
+			}
+			playCurrentSelection();
+		}
+
+		function stopPlayback() {
+			if (!audioEl) return;
+			currentCandidateUrls = [];
+			currentCandidateIdx = 0;
+			audioEl.pause();
+			try { audioEl.currentTime = 0; } catch (_e) {}
+			if (mpState.mode === "radio") {
+				audioEl.removeAttribute("src");
+				audioEl.load();
+			}
+			renderDockState(false);
+		}
+
+		function stepTrack(delta) {
+			if (mpState.mode === "radio") {
+				var stations = getStations();
+				if (!stations.length) return;
+				var curSt = getActiveStation();
+				var sIdx = 0;
+				for (var i = 0; i < stations.length; i++) {
+					if (curSt && stations[i].id === curSt.id) { sIdx = i; break; }
+				}
+				var nextSIdx = (sIdx + delta + stations.length) % stations.length;
+				mpState.stationId = stations[nextSIdx].id;
+				saveMpState();
+				renderDockState(false);
+				playCurrentSelection();
+				return;
+			}
+
+			var tracks = getTracks();
+			if (!tracks.length) return;
+			var curTr = getActiveTrack();
+			var tIdx = 0;
+			for (var j = 0; j < tracks.length; j++) {
+				if (curTr && tracks[j].id === curTr.id) { tIdx = j; break; }
+			}
+			if (mpState.shuffle && tracks.length > 1) {
+				if (delta < 0 && shuffleHistory.length > 1) {
+					shuffleHistory.pop();
+					var prevId = shuffleHistory.pop();
+					if (prevId) mpState.trackId = prevId;
+				} else {
+					var pool = tracks.filter(function(t) { return !curTr || t.id !== curTr.id; });
+					var pick = pool[Math.floor(Math.random() * pool.length)] || tracks[0];
+					mpState.trackId = pick.id;
+				}
+			} else {
+				var nextTIdx = (tIdx + delta + tracks.length) % tracks.length;
+				mpState.trackId = tracks[nextTIdx].id;
+			}
+			saveMpState();
+			renderDockState(false);
+			playCurrentSelection();
+		}
+
+		function postMediaPlayerApi(bodyObj, onDone) {
+			fetch("/api/media_player", {
+				method: "POST",
+				headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
+				body: JSON.stringify(bodyObj || {})
+			})
+			.then(function(r) { return r.json(); })
+			.then(function(res) { if (onDone) onDone(res); })
+			.catch(function(err) { showToast("⚠️ Medya işlemi başarısız: " + err, "warn"); });
+		}
+
+		function refreshOnlineStations() {
+			showToast("🌐 MEB uyumlu HTTPS istasyonlar taranıyor...");
+			postMediaPlayerApi({ action: "refresh_online_stations" }, function(res) {
+				if (res && res.media_player) {
+					mpServerCfg = res.media_player;
+					renderDockState(true);
+					showToast("✅ " + (mpServerCfg.station_count || 0) + " HTTPS radyo istasyonu hazır.");
+				}
+			});
+		}
+
+		function pickMusicFolderInteractive() {
+			if (window.pywebview && window.pywebview.api && typeof window.pywebview.api.select_music_folder === "function") {
+				window.pywebview.api.select_music_folder(mpServerCfg.music_folder || "")
+				.then(function(res) {
+					if (res && res.selected && res.path) {
+						postMediaPlayerApi({ action: "set_folder", path: res.path }, function(apiRes) {
+							if (apiRes && apiRes.media_player) {
+								mpServerCfg = apiRes.media_player;
+								mpState.trackId = "";
+								saveMpState();
+								renderDockState(true);
+								showToast("📁 Müzik klasörü seçildi (" + (mpServerCfg.track_count || 0) + " parça)");
+							}
+						});
+					}
+				})
+				.catch(function() {
+					postMediaPlayerApi({ action: "pick_folder" }, function(apiRes) {
+						if (apiRes && apiRes.media_player) {
+							mpServerCfg = apiRes.media_player;
+							mpState.trackId = "";
+							saveMpState();
+							renderDockState(true);
+							showToast("📁 Müzik klasörü güncellendi (" + (mpServerCfg.track_count || 0) + " parça)");
+						}
+					});
+				});
+				return;
+			}
+			postMediaPlayerApi({ action: "pick_folder" }, function(apiRes) {
+				if (apiRes && apiRes.selected && apiRes.media_player) {
+					mpServerCfg = apiRes.media_player;
+					mpState.trackId = "";
+					saveMpState();
+					renderDockState(true);
+					showToast("📁 Müzik klasörü seçildi (" + (mpServerCfg.track_count || 0) + " parça)");
+				}
+			});
+		}
+
+		if (audioEl) {
+			audioEl.addEventListener("play", function() { renderDockState(false); });
+			audioEl.addEventListener("pause", function() { renderDockState(false); });
+			audioEl.addEventListener("ended", function() {
+				if (mpState.mode === "folder" && getTracks().length > 0) {
+					stepTrack(1);
+				} else {
+					renderDockState(false);
+				}
+			});
+			audioEl.addEventListener("error", function() {
+				if (currentCandidateUrls.length > 0) {
+					tryNextCandidateOrFail();
+				}
+			});
+			audioEl.addEventListener("timeupdate", function() {
+				if (!dockEl || mpState.mode !== "folder" || isSeeking) return;
+				if (!isFinite(audioEl.duration) || audioEl.duration <= 0) return;
+				var seekInp = dockEl.querySelector("#revir-mp-seek");
+				var badgeEl = dockEl.querySelector("#revir-mp-badge");
+				if (seekInp) seekInp.value = String(Math.round((audioEl.currentTime / audioEl.duration) * 1000));
+				if (badgeEl) badgeEl.textContent = fmtTime(audioEl.currentTime) + " / " + fmtTime(audioEl.duration);
+			});
+		}
+
+		/* Katman 1: HTML5 Media Session API (Windows Medya Paneli & Medya Tuşları) */
+		if ("mediaSession" in navigator) {
+			var handlers = [
+				["play", function() { window.__revirMediaControl("play"); }],
+				["pause", function() { window.__revirMediaControl("pause"); }],
+				["previoustrack", function() { window.__revirMediaControl("prev"); }],
+				["nexttrack", function() { window.__revirMediaControl("next"); }],
+				["stop", function() { window.__revirMediaControl("stop"); }],
+				["seekto", function(details) {
+					if (audioEl && mpState.mode === "folder" && details && typeof details.seekTime === "number") {
+						audioEl.currentTime = details.seekTime;
+					}
+				}]
+			];
+			handlers.forEach(function(pair) {
+				try { navigator.mediaSession.setActionHandler(pair[0], pair[1]); } catch (_e) {}
+			});
+		}
+
+		/* Pencere Odaktayken Donanım Medya Tuşları Yedeği */
+		window.addEventListener("keydown", function(ev) {
+			if (!mpServerCfg || !mpServerCfg.visible) return;
+			if (ev.key === "MediaPlayPause") { ev.preventDefault(); window.__revirMediaControl("play_pause"); }
+			else if (ev.key === "MediaTrackNext") { ev.preventDefault(); window.__revirMediaControl("next"); }
+			else if (ev.key === "MediaTrackPrevious") { ev.preventDefault(); window.__revirMediaControl("prev"); }
+			else if (ev.key === "MediaStop") { ev.preventDefault(); window.__revirMediaControl("stop"); }
+		});
+
+		/* Katman 2: Masaüstü Odak Dışı / Arka Plan Global Medya Tuşu Köprüsü (Debounce Korumalı) */
+		window.__revirMediaControl = function(cmd) {
+			if (!mpServerCfg || !mpServerCfg.visible) return false;
+			var nowMs = Date.now();
+			if (nowMs - lastMediaCmdAt < 320) return false;
+			lastMediaCmdAt = nowMs;
+
+			if (cmd === "play_pause") togglePlayPause();
+			else if (cmd === "play") { if (audioEl && audioEl.paused) togglePlayPause(); }
+			else if (cmd === "pause") { if (audioEl && !audioEl.paused) audioEl.pause(); }
+			else if (cmd === "next") stepTrack(1);
+			else if (cmd === "prev") stepTrack(-1);
+			else if (cmd === "stop") stopPlayback();
+			return true;
+		};
+
+		window.__revirPickMusicFolderFromSettings = function() {
+			pickMusicFolderInteractive();
+		};
+
+		window.__revirMountAndSyncMediaPlayer = function(sidebarEl, nextCfg) {
+			var dock = ensureDockElement();
+			if (sidebarEl) {
+				var closeBtn = sidebarEl.querySelector(".revir-sidebar-close-btn");
+				if (closeBtn && closeBtn.parentNode === sidebarEl) {
+					sidebarEl.insertBefore(dock, closeBtn);
+				} else {
+					sidebarEl.appendChild(dock);
+				}
+			}
+			if (nextCfg && typeof nextCfg === "object") {
+				var prevSig = JSON.stringify([
+					mpServerCfg.music_folder,
+					(mpServerCfg.stations || []).map(function(s) { return s.id; }),
+					(mpServerCfg.tracks || []).map(function(t) { return t.id; })
+				]);
+				mpServerCfg = nextCfg;
+				var newSig = JSON.stringify([
+					mpServerCfg.music_folder,
+					(mpServerCfg.stations || []).map(function(s) { return s.id; }),
+					(mpServerCfg.tracks || []).map(function(t) { return t.id; })
+				]);
+				if (!mpServerCfg.visible && audioEl && !audioEl.paused) {
+					stopPlayback();
+				}
+				renderDockState(prevSig !== newSig || !dock.dataset.initialized);
+				dock.dataset.initialized = "1";
+			}
+		};
+	})();
+
 	var INITIAL_DATA = __REVIR_INITIAL_JSON__;
 	function bootInitial() {
 		if (INITIAL_DATA && INITIAL_DATA.main_html) {
@@ -7698,6 +8537,30 @@ class LocalUIServer:
 						self._send_bytes(HTTPStatus.OK, "application/json; charset=utf-8", json.dumps({"ok": True, "items": items}, ensure_ascii=False).encode("utf-8"))
 					except Exception as exc:
 						self._send_bytes(HTTPStatus.OK, "application/json; charset=utf-8", json.dumps({"ok": False, "items": [], "error": str(exc)}, ensure_ascii=False).encode("utf-8"))
+					return
+
+				if path == "/api/media_player":
+					try:
+						payload = self._read_json()
+						mp_handler = server_ref.session.media_player_handler
+						if not callable(mp_handler):
+							self._send_bytes(
+								HTTPStatus.OK,
+								"application/json; charset=utf-8",
+								json.dumps({"ok": False, "media_player": server_ref.session.media_player_config}, ensure_ascii=False).encode("utf-8"),
+							)
+							return
+						mp_res = mp_handler(payload) or {}
+						if isinstance(mp_res, dict) and isinstance(mp_res.get("media_player"), dict):
+							with server_ref.session.lock:
+								server_ref.session.media_player_config = mp_res["media_player"]
+						self._send_bytes(HTTPStatus.OK, "application/json; charset=utf-8", json.dumps(mp_res, ensure_ascii=False).encode("utf-8"))
+					except Exception as exc:
+						self._send_bytes(
+							HTTPStatus.OK,
+							"application/json; charset=utf-8",
+							json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False).encode("utf-8"),
+						)
 					return
 
 				if path == "/api/gemini_chat_clear":

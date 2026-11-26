@@ -36,6 +36,7 @@ import school_dormitory as sdorm
 import school_calendar
 import medication_prospectus as mprosp
 import infirmary_supply as invsup
+import media_player as mplayer
 
 LOGGER = logging.getLogger(__name__)
 
@@ -140,7 +141,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return (Path(meipass_raw) if meipass_raw else _BUNDLE_DIR) / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.43.0"
+_DEFAULT_APP_VERSION = "1.44.0"
 
 
 def _load_app_version() -> str:
@@ -323,6 +324,9 @@ DEFAULT_APP_SETTINGS: dict[str, str] = {
 	"cafeteria_time_snack": "15:00 - 15:30",
 	"cafeteria_ramazan_mode": "0",
 	"cafeteria_ramazan_province": "",
+	"show_sidebar_media_player": "1",
+	"custom_music_folder": "",
+	"custom_radio_stations_json": "[]",
 }
 
 INCIDENT_LOCATIONS = [
@@ -34097,9 +34101,10 @@ def render_settings() -> None:
 		# GRUP 2: GÖRÜNÜM & DÜZEN
 		# ======================================================================
 		elif active_sec == "🎨 Görünüm & Düzen":
-			t_thm, t_lay = ui.tabs([
+			t_thm, t_lay, t_mp = ui.tabs([
 				"🎨 Tema & Tipografi",
 				"🧩 Kutucuk & Pencere Düzeni",
+				"📻 Radyo & Müzik Çalar",
 			], orientation="segmented")
 
 			with t_thm:
@@ -34234,6 +34239,101 @@ def render_settings() -> None:
 						'</div>',
 						unsafe_allow_html=True,
 					)
+
+			with t_mp:
+				ui.markdown("### 📻 Yan Menü Radyo & Yerel MP3 Çalar")
+				ui.caption(
+					"MEB / Fatih internet hattı ile tam uyumlu (yalnızca standart HTTPS / 443 portu) canlı radyo ve "
+					"yerel klasörden kesintisiz MP3/WAV/OGG/M4A/FLAC çalar ayarlarını yönetin. Sayfa geçişlerinde müzik kesilmez."
+				)
+				with ui.container(border=True):
+					mp_vis_val = ui.toggle(
+						"📻 Sol yan menünün alt kısmında Radyo & Müzik Çalar modülünü göster",
+						value=(str(current_cfg.get("show_sidebar_media_player", "1")).strip() != "0"),
+						key="cfg_show_sidebar_media_player_toggle",
+					)
+					cur_custom_dir = str(current_cfg.get("custom_music_folder", "")).strip()
+					resolved_mp_dir = mplayer.resolve_music_folder(cur_custom_dir, APP_DIR)
+					mp_tracks_now = mplayer.get_local_media_server().scan_folder(resolved_mp_dir)
+					ui.caption(
+						f"📁 **Aktif Müzik Klasörü:** `{resolved_mp_dir}` · "
+						f"**Bulunan Ses Dosyası:** `{len(mp_tracks_now)}` adet (`.mp3`, `.wav`, `.ogg`, `.m4a`, `.flac`)"
+					)
+					mp_dir_inp = ui.text_input(
+						"📁 Özel Müzik Klasörü Yolu (boş bırakılırsa uygulama içindeki `muzikler/` klasörü kullanılır)",
+						value=cur_custom_dir,
+						placeholder=str(APP_DIR / "muzikler"),
+						key="cfg_custom_music_folder_input",
+					)
+					mp_b1, mp_b2, mp_b3 = ui.columns([1.4, 1.2, 1.2])
+					with mp_b1:
+						if ui.button("💾 Görünürlük ve Klasör Ayarını Kaydet", type="primary", key="btn_save_mp_settings", use_container_width=True):
+							typed_dir = mp_dir_inp.strip()
+							if typed_dir and not Path(typed_dir).expanduser().is_dir():
+								ui.error(f"Belirtilen klasör bulunamadı: {typed_dir}")
+							else:
+								norm_dir = str(Path(typed_dir).expanduser().resolve()) if typed_dir else ""
+								save_app_settings({
+									"show_sidebar_media_player": "1" if mp_vis_val else "0",
+									"custom_music_folder": norm_dir,
+								})
+								if norm_dir:
+									mplayer.get_local_media_server().scan_folder(Path(norm_dir), force=True)
+								ui.success("✅ Radyo ve müzik çalar ayarları kaydedildi.")
+								ui.rerun()
+					with mp_b2:
+						ui.markdown(
+							'<button type="button" class="revir-btn revir-btn-secondary" style="width:100%;" onclick="window.__revirPickMusicFolderFromSettings && window.__revirPickMusicFolderFromSettings()">📁 Klasör Seçiciyi Aç</button>',
+							unsafe_allow_html=True,
+						)
+					with mp_b3:
+						if ui.button("🔄 Klasörü Yeniden Tara", type="secondary", key="btn_rescan_mp_folder", use_container_width=True):
+							rescanned = mplayer.get_local_media_server().scan_folder(resolved_mp_dir, force=True)
+							ui.success(f"🔄 Klasör tarandı: {len(rescanned)} ses dosyası listeye alındı.")
+							ui.rerun()
+
+				with ui.container(border=True):
+					ui.markdown("#### 🌐 Özel HTTPS (443 Portu) Radyo İstasyonu Ekle")
+					ui.caption("MEB ağında kesintisiz çalışması için yalnızca `https://` ile başlayan ve özel port (`:8000`, `:8080` vb.) içermeyen `.m3u8`, `.mp3` veya `.aac` akış adresleri kabul edilir.")
+					custom_stations = mplayer.parse_custom_stations_json(current_cfg.get("custom_radio_stations_json", "[]"))
+					cs_c1, cs_c2, cs_c3 = ui.columns([1.3, 2.0, 0.9])
+					with cs_c1:
+						new_st_name = ui.text_input("İstasyon Adı", placeholder="Örn: Okul Radyosu / TRT", key="cfg_mp_new_st_name")
+					with cs_c2:
+						new_st_url = ui.text_input("HTTPS Yayın URL'si (443 Portu)", placeholder="https://ornek.com/canli.m3u8", key="cfg_mp_new_st_url")
+					with cs_c3:
+						ui.write("")
+						if ui.button("➕ İstasyon Ekle", type="primary", key="btn_add_custom_radio_st", use_container_width=True):
+							st_nm = new_st_name.strip()
+							st_u = new_st_url.strip()
+							if not st_nm or not st_u:
+								ui.warning("Lütfen istasyon adını ve HTTPS yayın adresini girin.")
+							elif not mplayer.is_meb_safe_stream_url(st_u):
+								ui.error("Geçersiz akış adresi! MEB ağı uyumluluğu için adres `https://` ile başlamalı ve standart dışı port (`:8000`, `:8080` vb.) içermemelidir.")
+							else:
+								custom_stations.append({"name": st_nm, "url": st_u, "category": "Özel İstasyon"})
+								save_app_settings({"custom_radio_stations_json": json.dumps(custom_stations, ensure_ascii=False)})
+								ui.success(f"📻 '{st_nm}' istasyon listesine eklendi.")
+								ui.rerun()
+					if custom_stations:
+						ui.dataframe(
+							pd.DataFrame([{"İstasyon": s["name"], "Yayın URL (HTTPS)": s["url"]} for s in custom_stations]),
+							width="stretch",
+							hide_index=True,
+						)
+						del_c1, del_c2 = ui.columns([2.2, 1.0])
+						with del_c1:
+							del_opts = {f"{s['name']} ({s['url']})": i for i, s in enumerate(custom_stations)}
+							sel_del_lbl = ui.selectbox("Silinecek Özel İstasyon", list(del_opts.keys()), key="cfg_mp_del_st_sel")
+						with del_c2:
+							ui.write("")
+							if ui.button("🗑️ Seçili İstasyonu Sil", type="secondary", key="btn_del_custom_radio_st", use_container_width=True):
+								del_idx = del_opts[sel_del_lbl]
+								removed_nm = custom_stations[del_idx]["name"]
+								custom_stations.pop(del_idx)
+								save_app_settings({"custom_radio_stations_json": json.dumps(custom_stations, ensure_ascii=False)})
+								ui.success(f"🗑️ '{removed_nm}' silindi.")
+								ui.rerun()
 
 		# ======================================================================
 		# GRUP 3: TAKVİM & YEMEKHANE
@@ -35507,6 +35607,58 @@ PAGE_RENDERERS: dict[str, Callable[[], None]] = {
 }
 
 
+def _build_media_player_ui_config(app_cfg: dict[str, str]) -> dict[str, Any]:
+	payload = mplayer.build_sidebar_media_player_payload(app_cfg, APP_DIR, include_online_stations=False)
+	cached_online = ui.session_state.get("_cached_online_radio_stations")
+	if payload.get("visible") and isinstance(cached_online, list) and cached_online:
+		seen_u = {str(s.get("url") or "") for s in payload.get("stations", [])}
+		merged_st = list(payload.get("stations") or [])
+		for extra_st in cached_online:
+			u = str(extra_st.get("url") or "")
+			if u and u not in seen_u and mplayer.is_meb_safe_stream_url(u):
+				seen_u.add(u)
+				merged_st.append(extra_st)
+		payload["stations"] = merged_st
+		payload["station_count"] = len(merged_st)
+	return payload
+
+
+def _handle_media_player_action(payload: dict[str, Any]) -> dict[str, Any]:
+	act = str((payload or {}).get("action") or "").strip()
+	cfg_now = get_app_settings()
+	if act == "set_folder":
+		raw_p = str(payload.get("path") or "").strip()
+		if raw_p and Path(raw_p).expanduser().is_dir():
+			resolved_s = str(Path(raw_p).expanduser().resolve())
+			save_app_settings({"custom_music_folder": resolved_s})
+			cfg_now = get_app_settings()
+			mp_cfg = mplayer.build_sidebar_media_player_payload(cfg_now, APP_DIR, force_rescan=True)
+			return {"ok": True, "selected": True, "media_player": mp_cfg}
+		return {"ok": False, "error": "Geçerli bir klasör seçilmedi."}
+
+	if act == "pick_folder":
+		cur_dir = str(mplayer.resolve_music_folder(cfg_now.get("custom_music_folder", ""), APP_DIR))
+		chosen = mplayer.pick_music_folder_native(cur_dir)
+		if chosen and Path(chosen).is_dir():
+			save_app_settings({"custom_music_folder": chosen})
+			cfg_now = get_app_settings()
+			mp_cfg = mplayer.build_sidebar_media_player_payload(cfg_now, APP_DIR, force_rescan=True)
+			return {"ok": True, "selected": True, "media_player": mp_cfg}
+		return {"ok": True, "selected": False, "media_player": _build_media_player_ui_config(cfg_now)}
+
+	if act == "refresh_online_stations":
+		online_found = mplayer.fetch_online_meb_safe_stations(timeout=2.5)
+		ui.session_state["_cached_online_radio_stations"] = online_found
+		mp_cfg = _build_media_player_ui_config(cfg_now)
+		return {"ok": True, "online_added": len(online_found), "media_player": mp_cfg}
+
+	if act == "refresh_tracks":
+		mp_cfg = mplayer.build_sidebar_media_player_payload(cfg_now, APP_DIR, force_rescan=True)
+		return {"ok": True, "media_player": mp_cfg}
+
+	return {"ok": True, "media_player": _build_media_player_ui_config(cfg_now)}
+
+
 def main() -> None:
 	fav_icon = get_app_icon()
 	ui.set_page_config(page_title="Revir Defteri", page_icon=fav_icon, layout="wide", initial_sidebar_state="expanded")
@@ -35555,6 +35707,7 @@ def main() -> None:
 	ui.configure_box_layout(str(app_cfg.get("box_layout_enabled", "1")).strip() != "0")
 	ui.configure_topbar(_build_topbar_html(cur_page_val, active_person, is_dark, _ai_on, _ai_m, has_ai_key=bool(_ai_key)), action_handler=_handle_topbar_action)
 	ui.configure_command_palette(search_handler=_handle_cmd_search, exec_handler=_handle_cmd_exec)
+	ui.configure_media_player(_build_media_player_ui_config(app_cfg), action_handler=_handle_media_player_action)
 
 	# Yan menü canlı bildirim rozetleri
 	today_vis_badge = 0

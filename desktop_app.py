@@ -11,6 +11,7 @@ Okul Revir Defteri ve Sağlık Takip Sistemi - Saf Python Masaüstü Yöneticisi
 from __future__ import annotations
 
 import atexit
+import ctypes
 import json
 import os
 import signal
@@ -34,7 +35,7 @@ def _ensure_standard_streams() -> None:
 
 _ensure_standard_streams()
 
-_DEFAULT_APP_VERSION = "1.43.0"
+_DEFAULT_APP_VERSION = "1.44.0"
 
 
 def _load_app_version() -> str:
@@ -260,6 +261,83 @@ class _RevirDesktopBridge:
 		except Exception as exc:
 			return {"saved": False, "error": str(exc)}
 
+	def select_music_folder(self, current_dir: str = "") -> dict:
+		"""Yerel klasör seçici penceresini açar ve seçilen müzik klasörü yolunu döndürür."""
+		win = self._window_holder.get("window")
+		start_dir = str(current_dir or "").strip()
+		if not start_dir or not os.path.isdir(start_dir):
+			start_dir = str(Path.home())
+		if win is not None:
+			try:
+				import webview
+				dlg_type = getattr(getattr(webview, "FileDialog", None), "FOLDER", None) or getattr(webview, "FOLDER_DIALOG", 20)
+				dest = win.create_file_dialog(dlg_type, directory=start_dir)
+				if not dest:
+					return {"selected": False, "cancelled": True}
+				chosen = Path(dest[0] if isinstance(dest, (list, tuple)) else dest).resolve()
+				if chosen.is_dir():
+					return {"selected": True, "path": str(chosen)}
+			except Exception:
+				pass
+		try:
+			import media_player
+			fallback_dir = media_player.pick_music_folder_native(start_dir)
+			if fallback_dir:
+				return {"selected": True, "path": fallback_dir}
+		except Exception as exc:
+			return {"selected": False, "error": str(exc)}
+		return {"selected": False, "cancelled": True}
+
+
+def _start_windows_media_key_listener(window_holder: dict, stop_event: threading.Event) -> threading.Thread | None:
+	"""
+	Windows'ta pywebview penceresi simge durumuna küçültüldüğünde veya arka plandayken bile
+	fiziksel klavye multimedya tuşlarını (Play/Pause, Next, Previous, Stop) yakalayıp
+	window.__revirMediaControl(...) köprüsüne iletir.
+	"""
+	if sys.platform != "win32":
+		return None
+	try:
+		user32 = ctypes.windll.user32
+	except Exception:
+		return None
+
+	vk_map = (
+		(0xB3, "play_pause"),  # VK_MEDIA_PLAY_PAUSE
+		(0xB0, "next"),        # VK_MEDIA_NEXT_TRACK
+		(0xB1, "prev"),        # VK_MEDIA_PREV_TRACK
+		(0xB2, "stop"),        # VK_MEDIA_STOP
+	)
+
+	def _worker() -> None:
+		prev_down = {vk: False for vk, _ in vk_map}
+		# Başlangıçtaki basılı durumları temizle
+		for vk, _ in vk_map:
+			try:
+				prev_down[vk] = bool(user32.GetAsyncKeyState(vk) & 0x8000)
+			except Exception:
+				prev_down[vk] = False
+
+		while not stop_event.wait(0.075):
+			win = window_holder.get("window")
+			if win is None:
+				continue
+			for vk, cmd in vk_map:
+				try:
+					is_down = bool(user32.GetAsyncKeyState(vk) & 0x8000)
+				except Exception:
+					is_down = False
+				if is_down and not prev_down[vk]:
+					try:
+						win.evaluate_js(f"window.__revirMediaControl && window.__revirMediaControl('{cmd}')")
+					except Exception:
+						pass
+				prev_down[vk] = is_down
+
+	th = threading.Thread(target=_worker, daemon=True, name="RevirGlobalMediaKeyListener")
+	th.start()
+	return th
+
 
 def _load_window_state(data_dir: Path) -> dict[str, int]:
 	"""Son kullanılan pencere boyutunu ve konumunu yerel dosyadan yükler."""
@@ -330,6 +408,7 @@ def launch_desktop_app() -> int:
 	app_url = server.start()
 
 	window_holder: dict = {"window": None}
+	media_key_stop = threading.Event()
 	cleanup_lock = threading.Lock()
 	cleaned = {"done": False}
 
@@ -338,7 +417,14 @@ def launch_desktop_app() -> int:
 			if cleaned["done"]:
 				return
 			cleaned["done"] = True
+		media_key_stop.set()
 		_save_window_state(data_dir, window_holder.get("window"))
+		try:
+			import media_player
+			if getattr(media_player, "_GLOBAL_MEDIA_SERVER", None) is not None:
+				media_player._GLOBAL_MEDIA_SERVER.stop()
+		except Exception:
+			pass
 		server.stop()
 		release_single_instance_lock()
 
@@ -376,6 +462,7 @@ def launch_desktop_app() -> int:
 
 	window = webview.create_window(**create_kwargs)
 	window_holder["window"] = window
+	_start_windows_media_key_listener(window_holder, media_key_stop)
 	window.events.closing += lambda: _save_window_state(data_dir, window)
 	window.events.closed += _cleanup
 	try:
