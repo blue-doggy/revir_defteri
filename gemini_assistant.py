@@ -3160,6 +3160,22 @@ SADECE aşağıdaki JSON şemasını döndür:
 	}, used_m
 
 
+SEASONAL_TR_MENU_HINTS: dict[int, str] = {
+	1: "Ocak (Kış): Pırasa, ıspanak, karnabahar, lahana, kereviz, havuç, kuru baklagiller, tarhana/ezogelin, portakal/mandalina/elma, balık.",
+	2: "Şubat (Kış): Pazı, ıspanak, brokoli, karnabahar, pırasa, mercimek/nohut, ayva/portakal/muz.",
+	3: "Mart (Geçiş): Ispanak, havuç, pancar, kuru baklagil, yayla/mercimek çorbası, elma/portakal.",
+	4: "Nisan (İlkbahar): Enginar, bakla, bezelye, taze yeşillikler, mevsim salatası, çilek/elma.",
+	5: "Mayıs (İlkbahar): Bezelye, taze fasulye, kabak, enginar, semizotu, cacık/ayran, çilek/erik.",
+	6: "Haziran (Yaz Başı): Taze fasulye, kabak, patlıcan, dolmalık biber, semizotu, soğuk ayran aşı/cacık, kayısı/kiraz.",
+	7: "Temmuz (Yaz): Taze fasulye, kabak, patlıcan, bamya, domates/salatalık, yoğurtlu mezeler, karpuz/kavun/şeftali.",
+	8: "Ağustos (Yaz): Bamya, biber dolması, patlıcan, kabak, mısır, üzüm/karpuz/şeftali.",
+	9: "Eylül (Sonbahar): Taze fasulye, patlıcan, kabak, mantar, mercimek, üzüm/incir/elma/armut, palamut.",
+	10: "Ekim (Sonbahar): Karnabahar, ıspanak, pırasa, havuç, mantar, mercimek/kuru fasulye, mandalina/nar/elma, balık.",
+	11: "Kasım (Sonbahar/Kış): Ispanak, pırasa, karnabahar, lahana, kereviz, balkabağı, kuru baklagil, mandalina/portakal/ayva, balık.",
+	12: "Aralık (Kış): Lahana, pırasa, ıspanak, kereviz, havuç, balkabağı, tarhana/mercimek, portakal/mandalina/nar.",
+}
+
+
 def generate_monthly_cafeteria_menu_with_gemini(
 	*,
 	api_key: str,
@@ -3169,23 +3185,38 @@ def generate_monthly_cafeteria_menu_with_gemini(
 	meal_slots: list[str],
 	available_dishes: list[dict[str, Any]],
 	custom_instruction: str = "",
+	existing_plans_context: list[dict[str, Any]] | None = None,
+	max_plate_budget_tl: float = 0.0,
 ) -> tuple[bool, dict[str, Any], str]:
-	"""Seçili ayın iş günleri için mevcut Yemekler Bankası öncelikli dengeli yemekhane menüsü oluşturur."""
+	"""Seçili ayın iş günleri için mevcut Yemekler Bankası ve mevsim sebze/meyveleri öncelikli dengeli yemekhane menüsü oluşturur."""
+	try:
+		mm_num = int(str(year_month or "2026-10")[5:7])
+	except Exception:
+		mm_num = 10
+	season_hint = SEASONAL_TR_MENU_HINTS.get(mm_num, "")
+	budget_line = f"\n[TABAK BAŞI BÜTÇE TAVANI]: En fazla ~{max_plate_budget_tl:g} ₺/porsiyon (ekonomik ve besleyici denge kur)." if max_plate_budget_tl > 0 else ""
+	existing_line = (
+		f"\n[AYDA ZATEN PLANLANMIŞ DİĞER GÜNLER (Ardışık tekrara düşmemek için dikkate al, bu tarihleri çıktıya tekrar yazma)]: {json.dumps(existing_plans_context[:25], ensure_ascii=False)}"
+		if existing_plans_context
+		else ""
+	)
 	prompt = f"""Bir okul beslenme uzmanı olarak aşağıdaki iş günleri ve öğünler için dengeli, çeşitli ve çocuklar için sağlıklı Türkçe yemekhane menüsü oluştur.
 Öncelikle `[KAYITLI YEMEKLER BANKASI]` listesindeki yemek adlarını kullan; eksik çeşit gerekiyorsa uygun gerçekçi Türk okul yemeği isimleri ve tahmini kalori/karbonhidrat ekle.
+Ardışık iş günlerinde aynı çorbayı veya aynı ana karbonhidratı (üst üste pirinç pilavı / hamur işi) tekrarlama; haftada en az 1-2 kez kurubaklagil ve mevsim sebzesi bulundur.
 
 [AY]: {year_month}
+[MEVSİMSEL ÜRÜN REHBERİ]: {season_hint}
 [ÖĞÜN SLOTLARI]: {json.dumps(meal_slots, ensure_ascii=False)}
-[İŞ GÜNLERİ]: {json.dumps(workdays_list[:25], ensure_ascii=False)}
-[KAYITLI YEMEKLER BANKASI]: {json.dumps(available_dishes[:60], ensure_ascii=False)}
-[ÖZEL TALİMAT]: {custom_instruction or 'Her güne dengeli çorba + ana yemek + yardımcı yemek/salata/içecek dağıt.'}
+[PLANLANACAK İŞ GÜNLERİ]: {json.dumps(workdays_list[:26], ensure_ascii=False)}
+[KAYITLI YEMEKLER BANKASI]: {json.dumps(available_dishes[:70], ensure_ascii=False)}{budget_line}{existing_line}
+[ÖZEL TALİMAT]: {custom_instruction or 'Her öğüne niteliğine uygun (ör. öğle için çorba + ana yemek + yardımcı yemek + yoğurt/salata/meyve; kahvaltı/ara öğün için uygun kahvaltılık veya besleyici ara öğün) dengeli çeşit dağıt.'}
 
 SADECE aşağıdaki JSON yapısını döndür:
 {{
   "plans": [
     {{
       "plan_date": "YYYY-MM-DD",
-      "meal_slot": "Öğle Yemeği",
+      "meal_slot": "{meal_slots[0] if meal_slots else 'Öğle Yemeği'}",
       "dishes": [
         {{"name": "Mercimek Çorbası", "kcal": 170, "carbs_g": 24, "allergen": ""}},
         {{"name": "İzmir Köfte", "kcal": 320, "carbs_g": 18, "allergen": "Gluten (Buğday/Arpa)"}}

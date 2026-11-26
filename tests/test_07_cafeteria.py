@@ -2364,6 +2364,268 @@ MİKTAR | BİRİM | MALIN CİNSİ | FİYAT | TUTAR
         self.assertTrue(saved_pol["configured"])
         self.assertEqual(saved_pol["eligible_groups"], ["🎓 Öğrenciler"])
 
+    def test_custom_renamed_meals_a4_page_modes_ramazan_date_sub_and_smart_planner(self):
+        # 1. Custom meal creation + existing meal renaming with DB plan migration
+        d_soup = caf.upsert_dish_with_ingredients(
+            self.connect,
+            name="Mercimek Çorbası",
+            category="Çorba",
+            ingredients=[{"ingredient_name": "Kırmızı Mercimek", "amount": 60.0, "unit": "g", "kcal_portion": 180.0, "carbs_portion_g": 28.0, "allergen_tag": ""}],
+        )
+        d_borek = caf.upsert_dish_with_ingredients(
+            self.connect,
+            name="Peynirli Börek",
+            category="Pilav / Makarna / Börek",
+            ingredients=[
+                {"ingredient_name": "Yufka", "amount": 80.0, "unit": "g", "kcal_portion": 260.0, "carbs_portion_g": 42.0, "allergen_tag": "Gluten"},
+                {"ingredient_name": "Beyaz Peynir", "amount": 40.0, "unit": "g", "kcal_portion": 110.0, "carbs_portion_g": 1.0, "allergen_tag": "Süt"},
+            ],
+        )
+        d_pilav = caf.upsert_dish_with_ingredients(
+            self.connect,
+            name="Pirinç Pilavı",
+            category="Pilav / Makarna / Börek",
+            ingredients=[{"ingredient_name": "Pirinç", "amount": 75.0, "unit": "g", "kcal_portion": 250.0, "carbs_portion_g": 52.0, "allergen_tag": ""}],
+        )
+
+        # Plan under default "Sabah Kahvaltısı", then rename to "Kuşluk Kahvaltısı" -> plan MUST migrate
+        caf.upsert_menu_plan_slot(self.connect, plan_date="2026-10-05", meal_slot="Sabah Kahvaltısı", dish_ids=[d_borek])
+        res_ren = caf.rename_meal_slot(
+            self.connect,
+            persantil.save_app_settings,
+            persantil.get_app_settings(),
+            "Sabah Kahvaltısı",
+            "Kuşluk Kahvaltısı",
+            new_time="09:30 - 10:00",
+        )
+        self.assertTrue(res_ren["ok"])
+        self.assertEqual(res_ren["migrated_plans"], 1)
+
+        # Add a brand-new user-defined custom meal slot
+        res_add_c = caf.add_custom_meal_slot(
+            self.connect,
+            persantil.save_app_settings,
+            persantil.get_app_settings(),
+            "Gece Etüt Ara Öğünü",
+            meal_time="20:30 - 21:00",
+            diabetes_slot="Sahur / Gece",
+            activate=True,
+        )
+        self.assertTrue(res_add_c["ok"])
+
+        cfg_custom = persantil.get_app_settings()
+        sched_c = caf.parse_service_schedule_from_cfg(cfg_custom)
+        self.assertIn("Kuşluk Kahvaltısı", sched_c["available_slots"])
+        self.assertIn("Gece Etüt Ara Öğünü", sched_c["available_slots"])
+        self.assertEqual(sched_c["meal_times"]["Kuşluk Kahvaltısı"], "09:30 - 10:00")
+        self.assertEqual(sched_c["meal_times"]["Gece Etüt Ara Öğünü"], "20:30 - 21:00")
+
+        # Plan 3 distinct meals on 2026-10-05 (including allergy alt_menu_note) & sync to diabetes
+        caf.upsert_menu_plan_slot(
+            self.connect,
+            plan_date="2026-10-05",
+            meal_slot="Öğle Yemeği",
+            dish_ids=[d_soup, d_pilav],
+            alt_menu_note="Çölyaklı öğrenciye haşlama patates",
+            sync_to_diabetes=True,
+        )
+        caf.upsert_menu_plan_slot(
+            self.connect,
+            plan_date="2026-10-05",
+            meal_slot="Gece Etüt Ara Öğünü",
+            dish_ids=[d_soup],
+            sync_to_diabetes=True,
+        )
+        diab_oct = idm.get_school_menus_for_month(self.connect, "2026-10")
+        self.assertTrue(any(m["menu_date"] == "2026-10-05" and m["meal_type"] == "Sahur / Gece" for m in diab_oct))
+
+        active_3 = ["Kuşluk Kahvaltısı", "Öğle Yemeği", "Gece Etüt Ara Öğünü"]
+        plans_oct = caf.get_menu_plans_for_month(self.connect, "2026-10")
+        self.assertIn(("2026-10-05", "Kuşluk Kahvaltısı"), plans_oct)
+
+        # 2. Each meal keeps its own calories, carbs & allergens strictly under its own column
+        workdays_oct = [d for d in caf.get_month_workdays_info(self.connect, "2026-10") if d.get("is_workday")]
+        col_rows = caf.build_planned_menu_columnar_rows(
+            workdays_oct, plans_oct, active_3, meal_times=sched_c["meal_times"]
+        )
+        self.assertEqual(len(col_rows), 1)
+        kusluk_col = col_rows[0]["Kuşluk Kahvaltısı (09:30 - 10:00)"]
+        ogle_col = col_rows[0]["Öğle Yemeği (12:00 - 13:00)"]
+        self.assertIn("Peynirli Börek", kusluk_col)
+        self.assertIn("370 kcal", kusluk_col)
+        self.assertIn("Gluten", kusluk_col)
+        self.assertNotIn("Mercimek Çorbası", kusluk_col)
+        self.assertIn("Mercimek Çorbası · Pirinç Pilavı", ogle_col)
+        self.assertIn("430 kcal", ogle_col)
+        self.assertIn("İkame: Çölyaklı öğrenciye haşlama patates", ogle_col)
+
+        # 3. A4 Multi-Meal Page Modes: combined (1 sheet) vs per_meal_page (3 sheets) vs auto_2_per_page (2 sheets)
+        h_comb = caf.build_menu_a4_html(
+            self.connect,
+            year_month="2026-10",
+            active_slots=active_3,
+            school_meta=cfg_custom,
+            meal_page_mode="combined",
+            show_per_dish_nutrition=True,
+        )
+        self.assertEqual(h_comb.count("<div class='a4-sheet'>"), 1)
+        self.assertIn("180 kcal, 28g K", h_comb)  # per-dish nutrition detail
+        self.assertNotIn("Günlük Toplam", h_comb)  # each meal's kcal/allergen stays under its own column
+
+        h_per_meal = caf.build_menu_a4_html(
+            self.connect,
+            year_month="2026-10",
+            active_slots=active_3,
+            school_meta=cfg_custom,
+            meal_page_mode="per_meal_page",
+        )
+        self.assertEqual(h_per_meal.count("<div class='a4-sheet'>"), 3)
+        self.assertIn("3 A4 Sayfa", h_per_meal)
+        sheets_split = h_per_meal.split("<div class='a4-sheet'>")[1:]
+        self.assertIn("Kuşluk Kahvaltısı", sheets_split[0])
+        self.assertNotIn("Gece Etüt Ara Öğünü", sheets_split[0])
+        self.assertIn("Öğle Yemeği", sheets_split[1])
+        self.assertIn("Gece Etüt Ara Öğünü", sheets_split[2])
+
+        h_auto2 = caf.build_menu_a4_html(
+            self.connect,
+            year_month="2026-10",
+            active_slots=active_3,
+            school_meta=cfg_custom,
+            meal_page_mode="auto_2_per_page",
+        )
+        self.assertEqual(h_auto2.count("<div class='a4-sheet'>"), 2)
+
+        d_per_meal_bytes = caf.build_menu_a4_docx(
+            self.connect,
+            year_month="2026-10",
+            active_slots=active_3,
+            school_meta=cfg_custom,
+            meal_page_mode="per_meal_page",
+        )
+        d_pm_doc = docx.Document(io.BytesIO(d_per_meal_bytes))
+        # 3 meal tables + 3 signer tables = 6 tables across 3 separated pages
+        self.assertGreaterEqual(len(d_pm_doc.tables), 6)
+        d_pm_txt = _extract_docx_all_text(d_per_meal_bytes)
+        self.assertIn("İkame: Çölyaklı öğrenciye haşlama patates", d_pm_txt)
+
+        # Multi-slot institutional Excel puts each meal's dishes, kcal/carbs & allergens under its own column headers
+        persantil.save_app_settings({"cafeteria_active_meal_slots": ",".join(active_3), "cafeteria_meals_per_day": "3"})
+        wb_ms_bytes = caf.build_school_menu_workbook_excel(self.connect, "2026-10", school_meta=persantil.get_app_settings())
+        wb_ms = openpyxl.load_workbook(io.BytesIO(wb_ms_bytes))
+        try:
+            ws_ms = wb_ms["Yemek_Listesi"]
+            hdrs_ms = [ws_ms.cell(4, c).value for c in range(1, ws_ms.max_column + 1)]
+            self.assertIn("Kuşluk Kahvaltısı — Yemekler", hdrs_ms)
+            self.assertIn("Kuşluk Kahvaltısı — Kalori & Karb.", hdrs_ms)
+            self.assertIn("Kuşluk Kahvaltısı — Alerjen", hdrs_ms)
+            self.assertIn("Öğle Yemeği — Alerjen", hdrs_ms)
+        finally:
+            wb_ms.close()
+
+        # 4. Ramazan Mode: Sahur & İftar times rendered directly UNDER the date in A4 HTML, Word & Columnar rows
+        ram_cfg = {
+            **persantil.get_app_settings(),
+            "cafeteria_ramazan_mode": "1",
+            "cafeteria_ramazan_province": "Ankara",
+        }
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("offline")):
+            ank_rt = caf.get_ramazan_times_for_dates(self.connect, "Ankara", ["2026-10-05"])["2026-10-05"]
+            for lm_r in ("standard", "compact_one_page", "weekly_grid"):
+                h_ram = caf.build_menu_a4_html(self.connect, year_month="2026-10", active_slots=active_3[:2], layout_mode=lm_r, school_meta=ram_cfg)
+                self.assertIn("ram-date-sub", h_ram)
+                self.assertIn(f"Sahur:", h_ram)
+                self.assertIn(ank_rt["sahur"], h_ram)
+                self.assertIn(ank_rt["iftar"], h_ram)
+                d_ram_t = _extract_docx_all_text(
+                    caf.build_menu_a4_docx(self.connect, year_month="2026-10", active_slots=active_3[:2], layout_mode=lm_r, school_meta=ram_cfg)
+                )
+                self.assertIn(f"Sahur: {ank_rt['sahur']}", d_ram_t)
+                self.assertIn(f"İftar: {ank_rt['iftar']}", d_ram_t)
+
+        # 5. Aligned cross-month copy, day swap, rotation templates, offline rule engine, stock match & allergy prep docx
+        # Swap 2026-10-05 with empty 2026-10-06 -> moves plans to Oct 6 and clears Oct 5
+        swapped_n = caf.swap_menu_plan_days(self.connect, "2026-10-05", "2026-10-06", meal_slots=active_3)
+        self.assertEqual(swapped_n, 3)
+        plans_after_sw = caf.get_menu_plans_for_month(self.connect, "2026-10")
+        self.assertNotIn(("2026-10-05", "Öğle Yemeği"), plans_after_sw)
+        self.assertIn(("2026-10-06", "Öğle Yemeği"), plans_after_sw)
+
+        # Aligned copy from 2026-10 (Tuesday Oct 6) -> 2026-11 (fills all Tuesdays in November!)
+        cp_res = caf.copy_month_menu_aligned(self.connect, "2026-10", "2026-11", meal_slots=["Öğle Yemeği"])
+        self.assertGreaterEqual(cp_res["copied"], 4)
+
+        # Save & apply rotation template
+        st_res = caf.save_menu_rotation_template(
+            self.connect, persantil.save_app_settings, persantil.get_app_settings(),
+            template_name="Sonbahar Standart", source_ym="2026-11", meal_slots=["Öğle Yemeği"],
+        )
+        self.assertTrue(st_res["ok"])
+        ap_res = caf.apply_menu_rotation_template(
+            self.connect, persantil.get_app_settings(), template_name="Sonbahar Standart", target_ym="2026-12",
+        )
+        self.assertTrue(ap_res["ok"])
+        self.assertGreater(ap_res["applied"], 0)
+
+        # Offline nutrition rules detect weekly repetition & calorie band deviation
+        eval_nov = caf.evaluate_menu_nutrition_rules(
+            caf.get_menu_plans_for_month(self.connect, "2026-11"),
+            [d for d in caf.get_month_workdays_info(self.connect, "2026-11") if d.get("is_workday")],
+            active_slots=["Öğle Yemeği"],
+            kcal_band=(650.0, 800.0),
+        )
+        self.assertTrue(any(w["Kural"] == "MEB Kalori Bandı" for w in eval_nov["warnings"]))
+
+        # Expiring stock matcher + live portion cost map + allergy kitchen prep sheet (.docx)
+        from datetime import date, timedelta
+        exp_dt = (date.today() + timedelta(days=4)).isoformat()
+        caf.upsert_purchase_invoice(
+            self.connect,
+            invoice_date="2026-10-01",
+            supplier_name="Stok Market",
+            items=[{"item_name": "Kırmızı Mercimek", "quantity": 5.0, "unit_type": "kg", "unit_price": 80.0, "expiry_date": exp_dt}],
+        )
+        cost_m = caf.estimate_all_dishes_cost_map(self.connect)
+        self.assertAlmostEqual(cost_m[d_soup], 4.8, places=2)
+        exp_sug = caf.match_expiring_stock_to_dishes(self.connect, within_days=14)
+        self.assertTrue(any("Mercimek Çorbası" in s["suggested_dishes"] for s in exp_sug))
+
+        prep_docx = _extract_docx_all_text(
+            caf.build_allergy_kitchen_prep_docx(self.connect, "2026-10", school_meta=persantil.get_app_settings())
+        )
+        self.assertIn("ÖZEL DİYET", prep_docx)
+        self.assertIn("Ali Kaya", prep_docx)
+
+        # 6. Headless UI render of enhanced Menu Planner with 3 active custom/renamed meals + crowding hint + SKT banner
+        revir_ui.reset_session()
+        revir_ui.session_state["caf_global_sel_ym"] = "2026-10"
+        ctx_ui = {
+            "connect_db": self.connect,
+            "get_app_settings": persantil.get_app_settings,
+            "save_app_settings": persantil.save_app_settings,
+            "_get_active_gemini_config": lambda: (False, "", ""),
+            "mask_kvkk_value": persantil.mask_kvkk_value,
+            "clear_all_data_caches": persantil.clear_all_data_caches,
+            "is_section_visible": persantil.is_section_visible,
+        }
+        out_mp = revir_ui.run_action_headless(
+            lambda: caf._render_tab_menu_planner(ctx_ui, "2026-10", persantil.get_app_settings()),
+            {"action": "render"},
+        )
+        mp_html = str(out_mp.get("main_html") or "")
+        self.assertNotIn("Çalışma Zamanı Hatası", mp_html)
+        self.assertIn("Öğün Yönetimi: Öğün Adlarını Değiştir", mp_html)
+        self.assertIn("Sayfa Sığdırma Önerisi", mp_html)
+        self.assertIn("SKT / Sıfır Atık Stok Önerisi", mp_html)
+        self.assertIn("Gece Etüt Ara Öğünü", mp_html)
+
+        # Clean reset of custom slot & default renames
+        caf.delete_custom_meal_slot(self.connect, persantil.save_app_settings, persantil.get_app_settings(), "Gece Etüt Ara Öğünü", delete_plans=True)
+        caf.reset_default_meal_slot_names(self.connect, persantil.save_app_settings, persantil.get_app_settings())
+        sched_restored = caf.parse_service_schedule_from_cfg(persantil.get_app_settings())
+        self.assertIn("Sabah Kahvaltısı", sched_restored["available_slots"])
+        self.assertNotIn("Gece Etüt Ara Öğünü", sched_restored["available_slots"])
+
 
 if __name__ == "__main__":
     unittest.main()
