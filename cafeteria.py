@@ -3303,38 +3303,58 @@ def build_menu_a4_html(
 		)
 
 	pg_badge = f" · {len(sheets_html)} A4 Sayfa" if multi_page else ""
+	orient_lbl = "Yatay A4" if page_orient == "landscape" else "Dikey A4"
+	margin_css = "6mm 8mm" if is_compact else "10mm 12mm"
+	sheet_pad = "6mm 8mm" if is_compact else "11mm 13mm"
+	wk_font = "8px" if is_compact else "8.5px"
+	ram_font = "8.0px" if is_compact else "8.8px"
+	tbl_layout = "fixed" if (is_grid or dense_cols) else "auto"
+	col_dt_w = "118px" if ramazan_mode else "108px"
+	dish_lh = "1.22" if is_compact else "1.35"
+	pill_font = "8.0px" if (is_compact or dense_cols) else "8.8px"
+	sheets_joined = "".join(sheets_html)
 	return f"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset='utf-8'>
 <title>{html.escape(scope_label)}</title>
 <style>
-@page {{ size: A4 {page_orient}; margin: {'6mm 8mm' if is_compact else '10mm 12mm'}; }}
+@page {{ size: A4 {page_orient}; margin: {margin_css}; }}
 * {{ box-sizing: border-box; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }}
-body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; color: #0f172a; background: #cbd5e1; margin: 0; padding: 14px; }}
-.topbar {{ max-width: {page_w}; margin: 0 auto 10px auto; display: flex; justify-content: space-between; align-items: center; }}
-.btn-print {{ padding: 8px 16px; background: #0f766e; color: #fff; border: none; border-radius: 7px; font-weight: 700; cursor: pointer; }}
-.a4-sheet {{ width: min(100%, {page_w}); margin: 0 auto 18px auto; padding: {'6mm 8mm' if is_compact else '11mm 13mm'}; background: #fff; border: 1px solid #94a3b8; box-shadow: 0 8px 24px rgba(15,23,42,.18); }}
+body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; color: #0f172a; background: #f1f5f9; margin: 0; padding: 12px; }}
+.topbar {{ position: sticky; top: 0; z-index: 20; max-width: {page_w}; margin: 0 auto 12px auto; padding: 8px 12px; background: rgba(255,255,255,0.94); backdrop-filter: blur(8px); border: 1px solid #cbd5e1; border-radius: 10px; box-shadow: 0 4px 14px rgba(15,23,42,0.06); display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }}
+.topbar-meta {{ display: flex; flex-direction: column; gap: 1px; }}
+.topbar-title {{ font-weight: 800; font-size: 12.5px; color: #0f172a; }}
+.topbar-sub {{ font-size: 11px; color: #475569; font-weight: 500; }}
+.topbar-actions {{ display: flex; align-items: center; gap: 8px; }}
+.zoom-grp {{ display: inline-flex; background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 7px; padding: 2px; gap: 2px; }}
+.zoom-btn {{ border: none; background: transparent; color: #475569; font-size: 11px; font-weight: 700; padding: 4px 8px; border-radius: 5px; cursor: pointer; }}
+.zoom-btn:hover {{ color: #0f172a; background: rgba(255,255,255,0.7); }}
+.zoom-btn.active {{ background: #fff; color: #0f766e; box-shadow: 0 1px 3px rgba(15,23,42,0.1); }}
+.btn-print {{ padding: 7px 14px; background: #0f766e; color: #fff; border: none; border-radius: 7px; font-size: 12px; font-weight: 700; cursor: pointer; transition: background .15s; }}
+.btn-print:hover {{ background: #0d9488; }}
+#a4-stage {{ transform-origin: top center; }}
+.a4-sheet {{ width: min(100%, {page_w}); margin: 0 auto 16px auto; padding: {sheet_pad}; background: #fff; border: 1px solid #cbd5e1; border-radius: 4px; box-shadow: 0 10px 28px rgba(15,23,42,.10); }}
 .antet {{ text-align: center; border-bottom: 2px solid #0f766e; padding-bottom: 6px; margin-bottom: 8px; }}
 .antet-top {{ font-size: 10.5px; color: #64748b; letter-spacing: .5px; }}
 .antet-school {{ font-size: 15px; font-weight: 800; color: #0f766e; margin-top: 2px; }}
 .antet-title {{ font-size: 12.5px; font-weight: 700; color: #1e293b; margin-top: 2px; }}
 .antet-sched {{ font-size: 10px; color: #475569; margin-top: 3px; }}
-.wk-tag {{ display: inline-block; font-size: {'8px' if is_compact else '8.5px'}; font-weight: 700; background: rgba(255,255,255,0.82); border: 1px solid #94a3b8; border-radius: 4px; padding: 0 3px; margin-left: 3px; vertical-align: middle; }}
-.ram-date-sub {{ margin-top: 3px; padding-top: 2px; border-top: 1px dashed rgba(15,118,110,0.32); font-size: {'8.0px' if is_compact else '8.8px'}; color: #0f766e; font-weight: 600; line-height: 1.3; white-space: normal; }}
-table {{ width: 100%; border-collapse: collapse; font-size: {tbl_font}; table-layout: {'fixed' if (is_grid or dense_cols) else 'auto'}; }}
+.wk-tag {{ display: inline-block; font-size: {wk_font}; font-weight: 700; background: rgba(255,255,255,0.82); border: 1px solid #94a3b8; border-radius: 4px; padding: 0 3px; margin-left: 3px; vertical-align: middle; }}
+.ram-date-sub {{ margin-top: 3px; padding-top: 2px; border-top: 1px dashed rgba(15,118,110,0.32); font-size: {ram_font}; color: #0f766e; font-weight: 600; line-height: 1.3; white-space: normal; }}
+table {{ width: 100%; border-collapse: collapse; font-size: {tbl_font}; table-layout: {tbl_layout}; }}
 th, td {{ border: 1px solid #94a3b8; padding: {cell_pad}; vertical-align: top; text-align: left; color: #0f172a; word-wrap: break-word; }}
 th {{ background: #0f766e; color: #fff; font-weight: 700; text-align: center; }}
-.col-date {{ width: {'118px' if ramazan_mode else '108px'}; font-weight: 700; white-space: nowrap; }}
+.col-date {{ width: {col_dt_w}; font-weight: 700; white-space: nowrap; }}
 .col-tot {{ width: 88px; text-align: center; vertical-align: middle; }}
 .grid-dt {{ font-weight: 800; border-bottom: 1px solid #94a3b8; margin-bottom: 4px; padding-bottom: 2px; font-size: 10px; }}
 .grid-slot-block {{ padding: 2px 0; border-bottom: 1px dotted rgba(148,163,184,0.5); }}
 .grid-slot-block:last-child {{ border-bottom: none; }}
 .grid-sl {{ font-weight: 700; color: #0f766e; font-size: 9.5px; margin-top: 2px; }}
 .meal-col-box {{ display: flex; flex-direction: column; gap: 3px; }}
-.dishes {{ font-weight: 600; color: #0f172a; line-height: {'1.22' if is_compact else '1.35'}; }}
+.dishes {{ font-weight: 600; color: #0f172a; line-height: {dish_lh}; }}
 .cell-meta {{ margin-top: 2px; padding-top: 2px; border-top: 1px dashed rgba(148,163,184,0.45); display: flex; flex-wrap: wrap; gap: 3px; align-items: center; }}
-.meta-pill {{ display: inline-block; background: rgba(255,255,255,0.92); border: 1px solid rgba(15,23,42,0.18); border-radius: 4px; padding: 1px 5px; font-size: {'8.0px' if (is_compact or dense_cols) else '8.8px'}; font-weight: 700; line-height: 1.25; }}
+.meta-pill {{ display: inline-block; background: rgba(255,255,255,0.92); border: 1px solid rgba(15,23,42,0.18); border-radius: 4px; padding: 1px 5px; font-size: {pill_font}; font-weight: 700; line-height: 1.25; }}
 .kcal-pill {{ color: #92400e; border-color: #f59e0b; }}
 .carb-pill {{ color: #1e40af; border-color: #60a5fa; }}
 .al-pill {{ color: #991b1b; border-color: #f87171; background: rgba(255,245,245,0.95); }}
@@ -3349,18 +3369,40 @@ th {{ background: #0f766e; color: #fff; font-weight: 700; text-align: center; }}
 .sig-line {{ font-size: 9.5px; color: #64748b; margin-top: 14px; }}
 @media print {{
   .topbar {{ display: none !important; }}
+  #a4-stage {{ zoom: 1 !important; }}
   body {{ background: #fff; padding: 0; }}
-  .a4-sheet {{ width: 100%; border: none; box-shadow: none; padding: 0; margin: 0; }}
+  .a4-sheet {{ width: 100%; border: none; border-radius: 0; box-shadow: none; padding: 0; margin: 0; }}
   .a4-sheet + .a4-sheet {{ page-break-before: always; break-before: page; }}
 }}
 </style>
 </head>
 <body>
 <div class='topbar'>
-  <span style='font-weight:700;font-size:12px;color:#334155;'>🍽️ A4 Menü Önizleme ({html.escape(scope_label)}{html.escape(pg_badge)})</span>
-  <button class='btn-print' onclick='window.print()'>🖨️ A4 Yazdır / PDF Kaydet</button>
+  <div class='topbar-meta'>
+    <span class='topbar-title'>🍽️ A4 Menü Önizleme ({html.escape(scope_label)}{html.escape(pg_badge)})</span>
+    <span class='topbar-sub'>📐 {orient_lbl} · {len(sheets_html)} Sayfa · Renkli Kurumsal Antet</span>
+  </div>
+  <div class='topbar-actions'>
+    <div class='zoom-grp' title='Önizleme Ölçeği'>
+      <button type='button' class='zoom-btn' onclick="setA4Zoom('0.8', this)">%80</button>
+      <button type='button' class='zoom-btn' onclick="setA4Zoom('0.9', this)">%90</button>
+      <button type='button' class='zoom-btn active' onclick="setA4Zoom('1', this)">%100</button>
+    </div>
+    <button type='button' class='btn-print' onclick='window.print()'>🖨️ A4 Yazdır / PDF Kaydet</button>
+  </div>
 </div>
-{''.join(sheets_html)}
+<div id='a4-stage'>
+{sheets_joined}
+</div>
+<script>
+function setA4Zoom(z, btn) {{
+  var st = document.getElementById('a4-stage');
+  if (st) st.style.zoom = z;
+  var bs = document.querySelectorAll('.zoom-btn');
+  for (var i = 0; i < bs.length; i++) bs[i].classList.remove('active');
+  if (btn) btn.classList.add('active');
+}}
+</script>
 </body>
 </html>"""
 
@@ -7981,7 +8023,6 @@ def _render_tab_menu_planner(
 	is_on, api_key, model = ctx_api["_get_active_gemini_config"]()
 	mask_fn = ctx_api.get("mask_kvkk_value") or (lambda v, *_a, **_kw: str(v or ""))
 
-	ui.markdown("### 🗓️ İş Günü Bazlı Öğün Menü Planlayıcı & A4 Çıktı")
 	dishes = get_all_dishes(connect_db_fn)
 	dish_lbl_to_id = {f"{d['name']} ({d['total_kcal']:g} kcal)": int(d["id"]) for d in dishes}
 	id_to_dish_lbl = {v: k for k, v in dish_lbl_to_id.items()}
@@ -8002,25 +8043,44 @@ def _render_tab_menu_planner(
 	if saved_band not in MEB_CALORIE_BAND_PRESETS:
 		saved_band = band_keys[0]
 
-	cfg_c1, cfg_c2, cfg_c3, cfg_c4 = ui.columns([1.75, 1.25, 0.95, 0.95], vertical_alignment="center")
-	with cfg_c1:
+	# --- 1. MİNİMALİST TEK SATIR BAĞLAM & DÖNEM ÇUBUĞU ---
+	top_c1, top_c2, top_c3, top_c4, top_c5 = ui.columns([1.05, 1.75, 1.25, 0.72, 0.78], vertical_alignment="center")
+	with top_c1:
+		ui.selectbox(
+			"📅 Aktif Ay",
+			month_options,
+			index=month_options.index(sel_ym) if sel_ym in month_options else 0,
+			format_func=_fmt_ym,
+			key="caf_global_sel_ym",
+		)
+	with top_c2:
 		active_slots = ui.multiselect(
-			"Planlanacak Öğünler",
+			"🍽️ Planlanacak Öğünler",
 			avail_slots,
 			default=[s for s in sched["active_meal_slots"] if s in avail_slots] or avail_slots[:1] or ["Öğle Yemeği"],
 			key="caf_menu_active_slots",
 		) or sched["active_meal_slots"]
-	with cfg_c2:
+	with top_c3:
 		sel_kcal_band_lbl = ui.selectbox(
-			"🎯 MEB Kademe Kalori Bandı",
+			"🎯 MEB Kalori Hedefi",
 			band_keys,
 			index=band_keys.index(saved_band),
 			key="caf_menu_kcal_band",
 		)
-	with cfg_c3:
-		inc_wknd = ui.checkbox("Hafta Sonlarını da Göster", value=any(wd >= 5 for wd in sched["weekdays_set"]), key="caf_menu_inc_wknd")
-	with cfg_c4:
-		auto_sync_diab = ui.checkbox("💉 Diyabete Oto-Eşitle", value=True, key="caf_menu_auto_sync_diab")
+	with top_c4:
+		inc_wknd = ui.checkbox(
+			"Hafta Sonu",
+			value=any(wd >= 5 for wd in sched["weekdays_set"]),
+			key="caf_menu_inc_wknd",
+			help="Hafta sonu günlerini de menü planlamasına dahil et",
+		)
+	with top_c5:
+		auto_sync_diab = ui.checkbox(
+			"💉 Diyabet Eşitle",
+			value=True,
+			key="caf_menu_auto_sync_diab",
+			help="Kaydedilen menü karbonhidratlarını İnsülin & Diyabet modülüyle otomatik eşitle",
+		)
 
 	kcal_band_tuple = MEB_CALORIE_BAND_PRESETS.get(sel_kcal_band_lbl, (0.0, 0.0))
 
@@ -8034,43 +8094,87 @@ def _render_tab_menu_planner(
 		if sched["ramazan_mode"]
 		else {}
 	)
+	local_eval = evaluate_menu_nutrition_rules(plans, workdays, active_slots=active_slots, kcal_band=kcal_band_tuple) if plans else None
 
-	tot_planned_days = len({p[0] for p in plans.keys()})
-	unplanned_workdays = max(0, len([w for w in workdays if not any(p[0] == w["date_iso"] for p in plans.keys())]))
-	slot_times_disp = " · ".join(f"{sl} ({sched['meal_times'][sl]})" for sl in active_slots if sched["meal_times"].get(sl))
-	ram_info_bit = f" · 🌙 **Ramazan Modu ({sched['ramazan_province']})**" if sched["ramazan_mode"] else ""
-	unplanned_bit = f" · ⚠️ **Boş İş Günü: {unplanned_workdays}**" if unplanned_workdays > 0 else " · ✅ **Tüm İş Günleri Planlandı**"
+	planned_workday_cnt = len([w for w in workdays if any(p[0] == w["date_iso"] and plans[p].get("dish_names") for p in plans.keys())])
+	unplanned_workdays = max(0, len(workdays) - planned_workday_cnt)
+	pct_done = int(round(100.0 * planned_workday_cnt / max(1, len(workdays)))) if workdays else 0
+	prog_color = "#10b981" if unplanned_workdays == 0 and workdays else "#0d9488"
 
-	# Canlı porsiyon maliyet ortalaması (fatura verisi varsa)
 	slot_costs_month: list[float] = []
 	if cost_map and plans:
 		for _pr in plans.values():
 			_sc = sum(cost_map.get(int(did), 0.0) for did in (_pr.get("dish_ids") or []))
 			if _sc > 0:
 				slot_costs_month.append(_sc)
-	cost_info_bit = ""
+
+	# --- 2. MİNİMALİST DURUM & İLERLEME ŞERİDİ (MİKRO ROZETLER) ---
+	pill_style_base = (
+		"display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;"
+		"font-size:12px;font-weight:600;border:1px solid rgba(148,163,184,0.32);background:rgba(255,255,255,0.65);"
+	)
+	strip_pills: list[str] = []
+	if unplanned_workdays > 0:
+		strip_pills.append(
+			f"<span style='{pill_style_base}color:#b45309;border-color:rgba(245,158,11,0.45);background:rgba(254,243,199,0.55);'>"
+			f"⚠️ {unplanned_workdays} Boş İş Günü</span>"
+		)
+	elif workdays:
+		strip_pills.append(
+			f"<span style='{pill_style_base}color:#047857;border-color:rgba(16,185,129,0.45);background:rgba(209,250,229,0.55);'>"
+			f"✅ Tüm İş Günleri Planlandı</span>"
+		)
+	if local_eval:
+		sc_num = int(local_eval.get("score") or 0)
+		strip_pills.append(f"<span style='{pill_style_base}'>🛡️ Denge: <b>{sc_num}/100</b></span>")
 	if slot_costs_month:
 		avg_plate_tl = sum(slot_costs_month) / len(slot_costs_month)
-		stu_fee_ref = _safe_float(app_cfg.get("cafeteria_default_meal_price"), 0.0)
-		fee_cmp = f" / Öğün Ücreti: {stu_fee_ref:g} ₺" if stu_fee_ref > 0 else ""
-		cost_info_bit = f" · 💰 **Ort. Tabak Maliyeti: ~{avg_plate_tl:.2f} ₺{fee_cmp}**"
+		strip_pills.append(f"<span style='{pill_style_base}'>💰 Ort. Tabak: <b>~{avg_plate_tl:.2f} ₺</b></span>")
+	if sched["ramazan_mode"]:
+		ram_prov_esc = html.escape(str(sched["ramazan_province"]))
+		strip_pills.append(
+			f"<span style='{pill_style_base}color:#0f766e;border-color:rgba(13,148,136,0.4);background:rgba(204,251,241,0.5);'>"
+			f"🌙 Ramazan Modu ({ram_prov_esc})</span>"
+		)
+	if holidays_in_month:
+		hol_tip = html.escape(", ".join(f"{h['day_num']} {h['holiday_title']}" for h in holidays_in_month[:4]), quote=True)
+		strip_pills.append(f"<span style='{pill_style_base}' title='{hol_tip}'>🎌 {len(holidays_in_month)} Resmi Tatil</span>")
 
-	ui.info(
-		f"📅 **{_fmt_ym(sel_ym)} Özeti:** Haftada **{sched['days_per_week']} gün**, **{len(active_slots)} öğün** "
-		f"({slot_times_disp}) · **{len(workdays)} iş günü** · Planlanan: **{tot_planned_days}**{unplanned_bit}{ram_info_bit}{cost_info_bit}"
-		+ (f" · Tatil ({len(holidays_in_month)}): " + ", ".join(f"{h['day_num']} ({h['holiday_title']})" for h in holidays_in_month[:3]) if holidays_in_month else "")
+	slot_times_short = " · ".join(
+		f"{html.escape(sl)}" + (f" ({html.escape(sched['meal_times'][sl])})" if sched["meal_times"].get(sl) else "")
+		for sl in active_slots
+	)
+	pills_joined = "".join(strip_pills)
+	ym_label_esc = html.escape(_fmt_ym(sel_ym))
+	ui.markdown(
+		f"<div style='display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;"
+		f"padding:8px 14px;margin:2px 0 6px 0;border-radius:10px;border:1px solid rgba(148,163,184,0.28);"
+		f"background:rgba(15,118,110,0.04);'>"
+		f"<div style='display:flex;flex-wrap:wrap;align-items:center;gap:10px;'>"
+		f"<span style='font-weight:800;font-size:13.5px;'>🗓️ {ym_label_esc}</span>"
+		f"<div style='display:inline-flex;align-items:center;gap:7px;' title='Aylık İş Günü Planlama İlerlemesi'>"
+		f"<div style='width:76px;height:7px;border-radius:99px;background:rgba(148,163,184,0.25);overflow:hidden;'>"
+		f"<div style='width:{pct_done}%;height:100%;background:{prog_color};border-radius:99px;'></div></div>"
+		f"<span style='font-size:12px;font-weight:700;'>{planned_workday_cnt}/{len(workdays)} gün (%{pct_done})</span>"
+		f"</div>"
+		f"<span style='font-size:11.5px;opacity:0.78;'>🍽️ {slot_times_short}</span>"
+		f"</div>"
+		f"<div style='display:flex;flex-wrap:wrap;align-items:center;gap:6px;'>{pills_joined}</div>"
+		f"</div>",
+		unsafe_allow_html=True,
 	)
 
-	# SKT'si yaklaşan mutfak malzemelerini Yemekler Bankası ile eşleştirip öner
+	# Kompakt SKT & Besin Güvenliği Uyarı Satırı (yalnızca ilgili kayıt varsa tek satırda görünür)
+	alert_notes: list[str] = []
 	expiring_matches = match_expiring_stock_to_dishes(connect_db_fn, within_days=14)
 	if expiring_matches:
 		exp_bits = []
-		for em in expiring_matches[:4]:
-			d_sug = f" → _{', '.join(em['suggested_dishes'][:3])}_" if em["suggested_dishes"] else ""
-			exp_bits.append(f"**{em['item_name']}** ({em['days_left']} gün kaldı){d_sug}")
-		ui.caption("📦 **SKT / Sıfır Atık Stok Önerisi:** " + " · ".join(exp_bits))
+		for em in expiring_matches[:3]:
+			sug_txt = ", ".join(em["suggested_dishes"][:2])
+			d_sug = f" → _{sug_txt}_" if sug_txt else ""
+			exp_bits.append(f"**{em['item_name']}** ({em['days_left']}g){d_sug}")
+		alert_notes.append("📦 **SKT / Sıfır Atık Stok Önerisi:** " + " · ".join(exp_bits))
 
-	# Okuldaki Besin Alerjili Öğrenci & Aylık Menü Alerjen Çapraz İkazı
 	try:
 		with connect_db_fn() as _aconn:
 			_allergy_stu_cnt = int(
@@ -8084,100 +8188,626 @@ def _render_tab_menu_planner(
 				if str(_alg).strip():
 					_planned_allergens.add(str(_alg).strip())
 		if _allergy_stu_cnt > 0 and _planned_allergens:
-			ui.caption(
-				f"🥜 **Besin Güvenliği Özeti:** Okulda alerji kaydı bulunan **{_allergy_stu_cnt}** kişi var · "
-				f"Bu ayki menüde yer alan alerjen grupları ({len(_planned_allergens)}): {', '.join(sorted(_planned_allergens)[:6])}"
-			)
+			al_short = ", ".join(sorted(_planned_allergens)[:5])
+			alert_notes.append(f"🥜 **Besin Güvenliği:** {_allergy_stu_cnt} alerjik kayıt · Menüdeki alerjenler: {al_short}")
 	except Exception:
 		pass
 
-	# 1. Öğün Adı Değiştirme & Özel Öğün Oluşturma Paneli
-	_render_meal_slot_manager_expander(ctx_api, app_cfg, sched, key_prefix="caf_mp")
+	if alert_notes:
+		ui.caption(" &nbsp;|&nbsp; ".join(alert_notes))
 
-	# 2. AI Akıllı Menü Oluşturucu & Dosyadan Aktarıcı
-	with ui.expander("🤖 Gemini AI ile Aylık/Haftalık Dengeli Menü Tasarla veya Dosyadan Aktar"):
-		if not is_on:
-			ui.caption("AI kapalıyken aşağıdaki iş günü kutularından, şablonlardan veya kopyalama araçlarından planlama yapabilirsiniz.")
-		else:
-			ac1, ac2 = ui.columns(2)
-			with ac1:
-				ai_menu_inst = ui.text_input("AI Menü Tercihi", placeholder="Örn: Haftada 2 gün kurubaklagil, 1 gün tavuk/balık, dengeli öğrenci kalorisi", key="caf_ai_menu_inst")
-				ai_opt1, ai_opt2 = ui.columns([1.35, 1.0], vertical_alignment="center")
-				with ai_opt1:
-					ai_only_empty = ui.checkbox(
-						"📅 Yalnızca Boş İş Günlerini Doldur",
-						value=False,
-						key="caf_ai_only_empty_days",
-						help="İşaretlenirse zaten planlanmış günler korunur, yalnızca boş kalan iş günlerine AI menü üretilir.",
+	weeks = _group_month_days_by_week(days_info)
+	if not weeks:
+		ui.warning("Seçilen ay için aktif iş günü bulunamadı.")
+		return
+
+	wk_labels = [f"{i + 1}. Hafta ({w[0]['day_num']} – {w[-1]['day_num']} {TR_MONTH_NAMES[int(sel_ym[5:7])]})" for i, w in enumerate(weeks)]
+	if ui.session_state.get("caf_menu_week_month") != sel_ym or ui.session_state.get("caf_menu_wk_pick") not in wk_labels:
+		ui.session_state["caf_menu_week_month"] = sel_ym
+		ui.session_state["caf_menu_wk_pick"] = wk_labels[0]
+
+	cur_wk_lbl = str(ui.session_state.get("caf_menu_wk_pick") or wk_labels[0])
+	wk_idx = wk_labels.index(cur_wk_lbl) if cur_wk_lbl in wk_labels else 0
+
+	tot_planned_meals_cnt = sum(
+		1 for d in workdays for sl in active_slots
+		if plans.get((d["date_iso"], sl)) and plans[(d["date_iso"], sl)].get("dish_names")
+	)
+
+	# --- 3. ODAKLI MİNİMALİST ÇALIŞMA MODLARI (SIFIR GECİKMELİ İSTEMCİ SEKMELERİ) ---
+	a4_studio_tab_lbl = "🖨️ A4 Çıktı & Canlı Önizleme"
+	mp_tabs = ui.tabs(
+		[
+			"✏️ Haftalık Menü Planla",
+			a4_studio_tab_lbl,
+			"✨ AI, Şablon & Araçlar",
+		],
+		lazy=False,
+	)
+
+	# =========================================================================
+	# ALT SEKME 1: HAFTALIK MENÜ PLANLA (YALIN & MİKRO ROZETLİ ÇALIŞMA MASASI)
+	# =========================================================================
+	with mp_tabs[0]:
+		bar_c1, bar_c2, bar_c3, bar_c4, bar_c5, bar_c6 = ui.columns([0.92, 1.75, 0.92, 1.18, 1.12, 1.12], vertical_alignment="center")
+		with bar_c1:
+			if ui.button(
+				"◀ Önceki Hafta",
+				key="caf_btn_prev_wk_top",
+				disabled=(wk_idx <= 0),
+				use_container_width=True,
+				help="Bir önceki haftaya geç",
+			):
+				ui.session_state["caf_menu_wk_pick"] = wk_labels[wk_idx - 1]
+				ui.rerun()
+		with bar_c2:
+			picked_wk_lbl = ui.selectbox(
+				"Düzenlenecek Haftayı Seçin",
+				wk_labels,
+				key="caf_menu_wk_pick",
+				placeholder="Düzenlenecek Haftayı Seçin",
+				label_visibility="collapsed",
+			)
+			wk_idx = wk_labels.index(picked_wk_lbl) if picked_wk_lbl in wk_labels else 0
+		with bar_c3:
+			if ui.button(
+				"Sonraki Hafta ▶",
+				key="caf_btn_next_wk_top",
+				disabled=(wk_idx >= len(weeks) - 1),
+				use_container_width=True,
+				help="Bir sonraki haftaya geç",
+			):
+				ui.session_state["caf_menu_wk_pick"] = wk_labels[wk_idx + 1]
+				ui.rerun()
+		with bar_c4:
+			if ui.button("💾 Haftayı Kaydet", type="primary", use_container_width=True, key="caf_btn_save_wk_all"):
+				cnt_w = 0
+				for d in weeks[wk_idx]:
+					d_iso = d["date_iso"]
+					for sl in active_slots:
+						sel_lbls_w = ui.session_state.get(f"caf_ms_{d_iso}_{sl}") or []
+						ex_raw_w = ui.session_state.get(f"caf_ex_{d_iso}_{sl}") or ""
+						alt_raw_w = ui.session_state.get(f"caf_alt_{d_iso}_{sl}")
+						c_ids_w = [dish_lbl_to_id[lbl] for lbl in sel_lbls_w if lbl in dish_lbl_to_id]
+						c_cust_w = parse_custom_dish_entries(ex_raw_w)
+						if c_ids_w or c_cust_w or ((d_iso, sl) in plans):
+							upsert_menu_plan_slot(
+								connect_db_fn,
+								plan_date=d_iso,
+								meal_slot=sl,
+								dish_ids=c_ids_w,
+								custom_items=c_cust_w,
+								alt_menu_note=str(alt_raw_w).strip() if alt_raw_w is not None else None,
+								sync_to_diabetes=auto_sync_diab,
+							)
+							cnt_w += 1
+				ui.success(f"✅ Seçili haftada {cnt_w} öğün güncellendi.")
+				ui.rerun()
+		with bar_c5:
+			if wk_idx > 0 and ui.button("📋 Önceki Haftayı Kopyala", type="secondary", use_container_width=True, key="caf_btn_copy_prev_wk"):
+				pairs = [(s["date_iso"], t["date_iso"]) for s, t in zip(weeks[wk_idx - 1], weeks[wk_idx])]
+				c_cnt = copy_menu_plans(connect_db_fn, date_pairs=pairs, meal_slots=active_slots, overwrite=True, sync_to_diabetes=auto_sync_diab)
+				ui.success(f"✅ {c_cnt} öğün önceki haftadan kopyalandı.")
+				ui.rerun()
+			elif wk_idx == 0 and ui.button("📆 Geçen Aydan Kopyala", type="secondary", use_container_width=True, key="caf_btn_copy_prev_mo"):
+				yy_i, mm_i = int(sel_ym[:4]), int(sel_ym[5:7])
+				pm_y, pm_m = (yy_i - 1, 12) if mm_i == 1 else (yy_i, mm_i - 1)
+				res_pm_cp = copy_month_menu_aligned(
+					connect_db_fn,
+					f"{pm_y:04d}-{pm_m:02d}",
+					sel_ym,
+					meal_slots=active_slots,
+					overwrite=False,
+					include_weekends=inc_wknd,
+					sync_to_diabetes=auto_sync_diab,
+				)
+				ui.success(f"✅ Geçen aydan hafta günü hizalı {res_pm_cp['copied']} öğün bu aya dağıtıldı.")
+				ui.rerun()
+		with bar_c6:
+			if ui.button("🖨️ A4 Önizle & Çıktı", type="secondary", use_container_width=True, key="caf_btn_jump_a4_studio"):
+				ui.session_state["_force_tab_label"] = a4_studio_tab_lbl
+				ui.rerun()
+
+		diab_stus = get_diabetic_students_for_menu(connect_db_fn)
+		icr_vals = [float(s["icr_lunch"]) for s in diab_stus if _safe_float(s.get("icr_lunch"), 0.0) > 0]
+
+		for d in weeks[wk_idx]:
+			d_iso = d["date_iso"]
+			half_badge = f" · ⏳ {d['holiday_title']}" if d.get("is_half_day") else ""
+			rt_day = ram_times_planner.get(d_iso)
+			filled_slots_cnt = sum(1 for sl in active_slots if plans.get((d_iso, sl)) and plans[(d_iso, sl)].get("dish_names"))
+			day_has_any = filled_slots_cnt > 0
+			status_dot = "🟢" if filled_slots_cnt >= len(active_slots) else ("🟡" if day_has_any else "⚪")
+
+			day_pre_kcal = sum(_safe_float((plans.get((d_iso, sl)) or {}).get("total_kcal"), 0.0) for sl in active_slots)
+			day_pre_cost = sum(
+				sum(cost_map.get(int(did), 0.0) for did in ((plans.get((d_iso, sl)) or {}).get("dish_ids") or []))
+				for sl in active_slots
+			)
+			hdr_tot_badge = ""
+			if day_pre_kcal > 0:
+				cost_hdr_bit = f" · ~{day_pre_cost:.2f} ₺" if day_pre_cost > 0 else ""
+				hdr_tot_badge = (
+					f"<span style='margin-left:8px;padding:2px 8px;border-radius:99px;font-size:11.5px;font-weight:700;"
+					f"background:rgba(15,118,110,0.10);color:#0f766e;'>{day_pre_kcal:g} kcal{cost_hdr_bit}</span>"
+				)
+
+			with ui.container(border=True):
+				dh_l, dh_r = ui.columns([4.5, 0.75], vertical_alignment="center")
+				with dh_l:
+					ram_sub_card = ""
+					if rt_day:
+						sh_esc = html.escape(rt_day["sahur"])
+						if_esc = html.escape(rt_day["iftar"])
+						ram_sub_card = (
+							f"<span style='margin-left:10px;font-size:12px;color:#0f766e;font-weight:700;'>"
+							f"🌙 Sahur: {sh_esc} · 🌅 İftar: {if_esc}</span>"
+						)
+					wd_esc = html.escape(d["weekday_name"])
+					hb_esc = html.escape(half_badge)
+					ui.markdown(
+						f"<div style='display:flex;flex-wrap:wrap;align-items:center;gap:4px;'>"
+						f"<span style='font-size:14px;font-weight:800;'>{status_dot} {d['day_num']:02d}.{sel_ym[5:7]}.{sel_ym[:4]} — {wd_esc}</span>"
+						f"<span style='font-size:12px;opacity:0.8;'>{hb_esc}</span>{hdr_tot_badge}{ram_sub_card}</div>",
+						unsafe_allow_html=True,
 					)
-				with ai_opt2:
-					ai_max_budget = ui.number_input(
-						"Maks. Tabak Bütçesi (₺, 0=Serbest)",
-						min_value=0.0,
-						step=5.0,
-						value=0.0,
-						key="caf_ai_max_plate_tl",
-					)
-				if ui.button("✨ Seçili Ayın İş Günlerine AI Menü Tasarla (Önizlemeli)", type="primary", use_container_width=True, key="caf_btn_ai_gen_menu"):
-					planned_dates_set = {dt for (dt, sl) in plans.keys() if sl in active_slots}
-					target_wds = (
-						[w for w in workdays if w["date_iso"] not in planned_dates_set]
-						if ai_only_empty
-						else list(workdays)
-					)
-					if not target_wds:
-						ui.info("Seçili ayda doldurulacak boş iş günü kalmadı (tüm iş günleri dolu).")
+				with dh_r:
+					if day_has_any and ui.button("🗑️ Temizle", key=f"caf_clr_day_{d_iso}", use_container_width=True, help="Bu günün planlı öğünlerini temizle"):
+						delete_menu_plan_slot(connect_db_fn, d_iso, None)
+						for sl_c in active_slots:
+							ui.session_state.pop(f"caf_ms_{d_iso}_{sl_c}", None)
+							ui.session_state.pop(f"caf_ex_{d_iso}_{sl_c}", None)
+							ui.session_state.pop(f"caf_alt_{d_iso}_{sl_c}", None)
+						ui.rerun()
+
+				for sl in active_slots:
+					rec = plans.get((d_iso, sl))
+					cur_ids = rec.get("dish_ids") or [] if rec else []
+					cur_lbls = [id_to_dish_lbl[int(x)] for x in cur_ids if int(x) in id_to_dish_lbl]
+					if rec:
+						cust_parts = []
+						for c in (rec.get("custom_items") or []):
+							if c.get("name"):
+								meta_b = []
+								if _safe_float(c.get("kcal"), 0.0) > 0:
+									meta_b.append(f"{_safe_float(c['kcal']):g} kcal")
+								if _safe_float(c.get("carbs_g"), 0.0) > 0:
+									meta_b.append(f"{_safe_float(c['carbs_g']):g}g karb")
+								if c.get("allergen"):
+									meta_b.append(str(c["allergen"]))
+								cust_parts.append(f"{c['name']} [{', '.join(meta_b)}]" if meta_b else str(c["name"]))
+						cur_cust_str = ", ".join(cust_parts)
 					else:
-						bank_compact = [
-							{"id": d["id"], "name": d["name"], "category": d["category"], "kcal": d["total_kcal"], "allergens": d.get("allergens") or []}
-							for d in dishes
+						cur_cust_str = ""
+
+					sl_tm_hint = f" ({sched['meal_times'][sl]})" if sched["meal_times"].get(sl) else ""
+					sc1, sc2, sc3 = ui.columns([2.45, 1.35, 0.65], vertical_alignment="bottom")
+					with sc1:
+						sel_dish_lbls = ui.multiselect(
+							f"🍽️ {sl}{sl_tm_hint}",
+							list(dish_lbl_to_id.keys()),
+							default=cur_lbls,
+							placeholder="Yemek seçin veya arayın...",
+							key=f"caf_ms_{d_iso}_{sl}",
+						)
+					with sc2:
+						extra_free = ui.text_input(
+							f"+ Ek Kalem ({sl})",
+							value=cur_cust_str,
+							placeholder="Örn: Ayran [75 kcal], Tam Buğday Ekmek",
+							key=f"caf_ex_{d_iso}_{sl}",
+						)
+					with sc3:
+						if ui.button("💾 Kaydet", key=f"caf_save_slot_{d_iso}_{sl}", use_container_width=True):
+							chosen_ids = [dish_lbl_to_id[lbl] for lbl in sel_dish_lbls if lbl in dish_lbl_to_id]
+							cust_list = parse_custom_dish_entries(extra_free)
+							alt_val_s = ui.session_state.get(f"caf_alt_{d_iso}_{sl}")
+							upsert_menu_plan_slot(
+								connect_db_fn,
+								plan_date=d_iso,
+								meal_slot=sl,
+								dish_ids=chosen_ids,
+								custom_items=cust_list,
+								alt_menu_note=str(alt_val_s).strip() if alt_val_s is not None else None,
+								sync_to_diabetes=auto_sync_diab,
+							)
+							ui.success(f"{d_iso} ({sl}) kaydedildi.")
+							ui.rerun()
+
+					if rec and rec.get("dish_names"):
+						kv = _safe_float(rec.get("total_kcal"), 0.0)
+						cgv = _safe_float(rec.get("total_carbs_g"), 0.0)
+						als = rec.get("allergens") or []
+						hits = match_allergens_against_school(connect_db_fn, als) if als else []
+
+						mp_tag = "display:inline-block;padding:2px 8px;border-radius:6px;font-size:11.5px;font-weight:600;border:1px solid rgba(148,163,184,0.3);"
+						row_badges = [
+							f"<span style='{mp_tag}color:#92400e;background:rgba(254,243,199,0.55);border-color:rgba(245,158,11,0.4);'>🔥 {kv:g} kcal</span>",
+							f"<span style='{mp_tag}color:#1e40af;background:rgba(219,234,254,0.55);border-color:rgba(96,165,250,0.4);'>🥖 {cgv:g} g Karb</span>",
 						]
-						existing_ctx = [
-							{"date": r["plan_date"], "slot": r["meal_slot"], "dishes": r.get("dish_names") or []}
-							for r in plans.values()
-						] if ai_only_empty else None
-						with ui.spinner("Gemini AI mevsimsel ve besin dengeli menü oluşturuyor..."):
-							ok_gm, res_gm, used_gm = gai.generate_monthly_cafeteria_menu_with_gemini(
-								api_key=api_key,
-								model=model,
-								year_month=sel_ym,
-								workdays_list=[{"date": w["date_iso"], "weekday": w["weekday_name"]} for w in target_wds],
-								meal_slots=active_slots,
-								available_dishes=bank_compact,
-								custom_instruction=ai_menu_inst,
-								existing_plans_context=existing_ctx,
-								max_plate_budget_tl=float(ai_max_budget or 0.0),
+
+						if kcal_band_tuple[0] > 0 and kcal_band_tuple[1] > 0 and kv > 0 and (len(active_slots) == 1 or any(k in _tr_fold(sl) for k in ("ogle", "iftar", "aksam"))):
+							if kv < kcal_band_tuple[0]:
+								row_badges.append(f"<span style='{mp_tag}color:#b45309;'>🟡 Hedef Altı ({kcal_band_tuple[0]:g}–{kcal_band_tuple[1]:g})</span>")
+							elif kv > kcal_band_tuple[1]:
+								row_badges.append(f"<span style='{mp_tag}color:#c2410c;'>🟠 Hedef Üstü ({kcal_band_tuple[0]:g}–{kcal_band_tuple[1]:g})</span>")
+							else:
+								row_badges.append(f"<span style='{mp_tag}color:#047857;background:rgba(209,250,229,0.5);border-color:rgba(16,185,129,0.4);'>🟢 MEB Bandında</span>")
+
+						sl_cost = sum(cost_map.get(int(did), 0.0) for did in (rec.get("dish_ids") or []))
+						if sl_cost > 0:
+							row_badges.append(f"<span style='{mp_tag}'>💰 ~{sl_cost:.2f} ₺</span>")
+
+						if als:
+							al_esc = html.escape(", ".join(als))
+							row_badges.append(f"<span style='{mp_tag}color:#991b1b;background:rgba(254,226,226,0.55);border-color:rgba(248,113,113,0.45);'>⚠️ {al_esc}</span>")
+
+						if hits:
+							hit_names = html.escape(", ".join(mask_fn(h["full_name"], "name") for h in hits[:3]))
+							row_badges.append(
+								f"<span style='{mp_tag}color:#991b1b;background:rgba(254,202,202,0.7);border-color:#ef4444;font-weight:700;'>"
+								f"🚨 {len(hits)} Alerji/Çölyak Çakışması: {hit_names}</span>"
 							)
-						if ok_gm and res_gm.get("plans"):
-							ui.session_state["caf_ai_menu_preview"] = {"plans": res_gm["plans"], "note": f"{len(res_gm['plans'])} öğün planı ({used_gm}) hazırlandı."}
+
+						if diab_stus and cgv > 0:
+							if icr_vals:
+								u_min = round(cgv / max(icr_vals), 1)
+								u_max = round(cgv / min(icr_vals), 1)
+								u_txt = f"~{u_min:g}U" if abs(u_max - u_min) < 0.2 else f"~{u_min:g}–{u_max:g}U"
+								row_badges.append(f"<span style='{mp_tag}color:#0369a1;'>💉 Diyabet ({len(diab_stus)} öğr.): {u_txt}</span>")
+							elif cgv >= 85.0:
+								row_badges.append(f"<span style='{mp_tag}color:#0369a1;'>💙 Yüksek Karb ({len(diab_stus)} diyabetli öğrenci)</span>")
+
+						badges_html = "".join(row_badges)
+						ui.markdown(
+							f"<div style='display:flex;flex-wrap:wrap;gap:5px;margin:2px 0 6px 0;'>{badges_html}</div>",
+							unsafe_allow_html=True,
+						)
+
+						if hits or rec.get("alt_menu_note"):
+							alt_c1, alt_c2 = ui.columns([3.5, 0.8], vertical_alignment="bottom")
+							with alt_c1:
+								alt_inp = ui.text_input(
+									f"🥗 Alerji / Çölyak İkame Tepsi Notu ({sl})",
+									value=str(rec.get("alt_menu_note") or ""),
+									placeholder="Örn: Çölyaklı öğrenciler için Karabuğday Pilavı + Izgara Tavuk",
+									key=f"caf_alt_{d_iso}_{sl}",
+								)
+							with alt_c2:
+								if ui.button("🥗 İkame Kaydet", key=f"caf_save_alt_{d_iso}_{sl}", use_container_width=True):
+									upsert_menu_plan_slot(
+										connect_db_fn,
+										plan_date=d_iso,
+										meal_slot=sl,
+										dish_ids=rec.get("dish_ids") or [],
+										custom_items=rec.get("custom_items") or [],
+										notes=str(rec.get("notes") or ""),
+										alt_menu_note=alt_inp,
+										sync_to_diabetes=auto_sync_diab,
+									)
+									ui.success("İkame tepsi notu kaydedildi.")
+									ui.rerun()
+
+		# Alt Hafta Gezgini
+		bnav_l, bnav_c, bnav_r = ui.columns([1.05, 2.3, 1.05], vertical_alignment="center")
+		with bnav_l:
+			if ui.button(
+				"◀ Önceki Hafta",
+				key="caf_btn_prev_wk_bot",
+				disabled=(wk_idx <= 0),
+				use_container_width=True,
+				help="Bir önceki haftaya geç",
+			):
+				ui.session_state["caf_menu_wk_pick"] = wk_labels[wk_idx - 1]
+				ui.rerun()
+		with bnav_c:
+			wk_cur_esc = html.escape(wk_labels[wk_idx])
+			ui.markdown(
+				f"<div style='text-align:center;font-weight:700;font-size:12.5px;padding:6px 10px;border-radius:8px;"
+				f"background:rgba(15,118,110,0.06);border:1px solid rgba(15,118,110,0.2);'>"
+				f"🗓️ {wk_cur_esc} &nbsp;·&nbsp; ({wk_idx + 1} / {len(weeks)})</div>",
+				unsafe_allow_html=True,
+			)
+		with bnav_r:
+			if ui.button(
+				"Sonraki Hafta ▶",
+				key="caf_btn_next_wk_bot",
+				disabled=(wk_idx >= len(weeks) - 1),
+				use_container_width=True,
+				help="Bir sonraki haftaya geç",
+			):
+				ui.session_state["caf_menu_wk_pick"] = wk_labels[wk_idx + 1]
+				ui.rerun()
+
+	# =========================================================================
+	# ALT SEKME 2: A4 ÇIKTI & CANLI ÖNİZLEME STÜDYOSU (SOL AYAR + SAĞ KAĞIT)
+	# =========================================================================
+	with mp_tabs[1]:
+		st_left, st_right = ui.columns([1.06, 2.14], vertical_alignment="top")
+		with st_left:
+			with ui.container(border=True):
+				ui.markdown("##### 🎛️ A4 Görünüm & Sayfa Düzeni")
+				pr_scope = ui.radio(
+					"Çıktı Kapsamı",
+					["📅 Tüm Ay", "🗓️ Seçili Hafta"],
+					horizontal=True,
+					key="caf_print_scope",
+				)
+				pr_layout_lbl = ui.selectbox(
+					"A4 Tablo Şablonu",
+					["Standart Liste", "Tek A4 Sayfaya Sığdır (Kompakt)", "Haftalık Tablo Izgarası (Pzt-Cum)"],
+					key="caf_print_layout",
+				)
+
+				pg_c1, pg_c2 = ui.columns(2)
+				with pg_c1:
+					orient_keys = list(A4_ORIENTATION_MODES.keys())
+					pr_orient = ui.selectbox(
+						"📐 Kağıt Yönü",
+						orient_keys,
+						index=0,
+						format_func=lambda k: A4_ORIENTATION_MODES[k],
+						key="caf_print_orient",
+					)
+				with pg_c2:
+					page_mode_keys = list(A4_MEAL_PAGE_MODES.keys())
+					def_pm = str(app_cfg.get("cafeteria_a4_meal_page_mode") or "combined")
+					if def_pm not in A4_MEAL_PAGE_MODES:
+						def_pm = "combined"
+					pr_page_mode = ui.selectbox(
+						"📑 Çoklu Öğün Planı",
+						page_mode_keys,
+						index=page_mode_keys.index(def_pm),
+						format_func=lambda k: A4_MEAL_PAGE_MODES[k],
+						key="caf_print_meal_page_mode",
+					)
+
+				if len(active_slots) >= 3 and pr_page_mode == "combined":
+					ui.info(
+						f"💡 **Sayfa Sığdırma Önerisi:** **{len(active_slots)} öğün** tek sayfada yan yana seçili. "
+						"Daha ferah sütunlar için **Çoklu Öğün Planı** kutusundan *Her Öğüne Ayrı A4* veya *Sayfa Başına 2 Öğün* seçebilirsiniz."
+					)
+
+				ui.markdown("**🏷️ Kağıtta Gösterilecek Bilgiler**")
+				chk_r1a, chk_r1b = ui.columns(2)
+				with chk_r1a:
+					pr_kcal = ui.checkbox("Kalori (kcal) Göster", value=True, key="caf_print_kcal")
+					pr_al = ui.checkbox("Alerjen Uyarısı Göster", value=True, key="caf_print_al")
+				with chk_r1b:
+					pr_carb = ui.checkbox("Karbonhidrat (g) Göster", value=True, key="caf_print_carbs")
+					pr_per_dish = ui.checkbox("Yemek Bazlı Kalori Detayı", value=False, key="caf_print_per_dish")
+
+			scope_code = "weekly" if "Hafta" in pr_scope else "monthly"
+			layout_code = "compact_one_page" if "Kompakt" in pr_layout_lbl else ("weekly_grid" if "Izgarası" in pr_layout_lbl else "standard")
+			signers = resolve_menu_signers_for_print(app_cfg)
+
+			a4_html = build_menu_a4_html(
+				connect_db_fn,
+				year_month=sel_ym,
+				scope=scope_code,
+				week_index=wk_idx,
+				active_slots=active_slots,
+				show_kcal=pr_kcal,
+				show_carbs=pr_carb,
+				show_allergens=pr_al,
+				include_weekends=inc_wknd,
+				layout_mode=layout_code,
+				signers=signers,
+				school_meta=app_cfg,
+				meal_page_mode=pr_page_mode,
+				page_orientation=pr_orient,
+				show_per_dish_nutrition=pr_per_dish,
+			)
+
+			with ui.container(border=True):
+				ui.markdown("##### 📥 Resmi Çıktılar & İndirme")
+				ui.download_button(
+					"📝 A4 Resmi Menü İndir (.docx)",
+					data=lambda: build_menu_a4_docx(
+						connect_db_fn,
+						year_month=sel_ym,
+						scope=scope_code,
+						week_index=wk_idx,
+						active_slots=active_slots,
+						show_kcal=pr_kcal,
+						show_carbs=pr_carb,
+						show_allergens=pr_al,
+						include_weekends=inc_wknd,
+						layout_mode=layout_code,
+						signers=signers,
+						school_meta=app_cfg,
+						meal_page_mode=pr_page_mode,
+						page_orientation=pr_orient,
+						show_per_dish_nutrition=pr_per_dish,
+					),
+					file_name=f"Yemekhane_Menu_{sel_ym}_{scope_code}.docx",
+					mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+					type="primary",
+					use_container_width=True,
+					key="caf_dl_menu_docx",
+				)
+				dl_sub1, dl_sub2 = ui.columns(2)
+				with dl_sub1:
+					ui.download_button(
+						"🖨️ A4 HTML (.html)",
+						data=a4_html.encode("utf-8"),
+						file_name=f"Yemekhane_Menu_{sel_ym}_{scope_code}.html",
+						mime="text/html",
+						use_container_width=True,
+						key="caf_dl_menu_html",
+					)
+				with dl_sub2:
+					ui.download_button(
+						"📊 3 Sekmeli Menü Excel",
+						data=lambda: build_school_menu_workbook_excel(connect_db_fn, sel_ym, school_meta=app_cfg),
+						file_name=f"Yemekhane_Menu_{sel_ym}_3Sekme.xlsx",
+						mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+						use_container_width=True,
+						key="caf_dl_menu_xlsx",
+					)
+
+				ui.markdown("**🍳 Mutfak & Özel Diyet Fişleri**")
+				ex_m1, ex_m2 = ui.columns(2)
+				with ex_m1:
+					ui.download_button(
+						"🛒 Malzeme İhtiyaç (.xlsx)",
+						data=lambda: build_shopping_list_excel(build_menu_shopping_list(connect_db_fn, sel_ym), sel_ym),
+						file_name=f"Mutfak_Malzeme_Ihtiyac_{sel_ym}.xlsx",
+						mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+						use_container_width=True,
+						key="caf_mp_dl_shop_xlsx",
+					)
+				with ex_m2:
+					ui.download_button(
+						"🥗 Özel Diyet & Alerji (.docx)",
+						data=lambda: build_allergy_kitchen_prep_docx(connect_db_fn, sel_ym, school_meta=app_cfg, mask_fn=mask_fn),
+						file_name=f"Ozel_Diyet_Alerji_Mutfak_Fisi_{sel_ym}.docx",
+						mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+						use_container_width=True,
+						key="caf_mp_dl_allergy_docx",
+					)
+
+				sig_preview_names = [f"{r}: {p}" for r, p in signers if str(p or "").strip()]
+				if sig_preview_names:
+					ui.caption("✍️ **İmza Bloğu:** " + " · ".join(sig_preview_names))
+
+		with st_right:
+			ui.components.v1.html(a4_html, height=730, scrolling=True)
+
+	# =========================================================================
+	# ALT SEKME 3: AKILLI ARAÇLAR, ŞABLONLAR, DENETÇİ & ÖĞÜN YÖNETİMİ
+	# =========================================================================
+	with mp_tabs[2]:
+		# Kart 1: AI Tasarımcı & Dosya / Excel İçe Aktarma
+		with ui.container(border=True):
+			ui.markdown("##### 🤖 Otomatik Menü Oluşturma & Dosyadan / Excel'den İçe Aktarma")
+			if not is_on:
+				ui.caption("ℹ️ Gemini AI kapalı; sağ taraftan kurumsal Excel/CSV menü şablonu yükleyebilir veya alttaki kopyalama/şablon araçlarını kullanabilirsiniz.")
+			ai_col_l, ai_col_r = ui.columns(2)
+			with ai_col_l:
+				if is_on:
+					ai_menu_inst = ui.text_input(
+						"✨ Gemini AI Menü Tercihi",
+						placeholder="Örn: Haftada 2 gün kurubaklagil, 1 gün tavuk/balık, dengeli kalori",
+						key="caf_ai_menu_inst",
+					)
+					ai_opt1, ai_opt2 = ui.columns([1.35, 1.0], vertical_alignment="center")
+					with ai_opt1:
+						ai_only_empty = ui.checkbox(
+							"📅 Yalnızca Boş İş Günlerini Doldur",
+							value=False,
+							key="caf_ai_only_empty_days",
+							help="İşaretlenirse dolu günler korunur, yalnızca boş iş günlerine AI menü üretilir.",
+						)
+					with ai_opt2:
+						ai_max_budget = ui.number_input(
+							"Maks. Tabak Bütçesi (₺)",
+							min_value=0.0,
+							step=5.0,
+							value=0.0,
+							key="caf_ai_max_plate_tl",
+						)
+					if ui.button("✨ İş Günlerine AI Menü Tasarla (Önizlemeli)", type="primary", use_container_width=True, key="caf_btn_ai_gen_menu"):
+						planned_dates_set = {dt for (dt, sl) in plans.keys() if sl in active_slots}
+						target_wds = (
+							[w for w in workdays if w["date_iso"] not in planned_dates_set]
+							if ai_only_empty
+							else list(workdays)
+						)
+						if not target_wds:
+							ui.info("Seçili ayda doldurulacak boş iş günü kalmadı.")
 						else:
-							ui.error(f"AI menü hatası: {(res_gm or {}).get('error', 'Yanıt alınamadı')}")
-			with ac2:
-				up_mfile = ui.file_uploader("📎 Mevcut Yemek Listesi Yükle (.pdf, .docx, .xlsx, .png, .jpg)", type=["pdf", "docx", "xlsx", "xls", "png", "jpg", "jpeg", "txt"], key="caf_ai_menu_file")
-				paste_mtxt = ui.text_area("Veya Menü Metni Yapıştır", height=68, key="caf_ai_menu_paste", placeholder="02.11.2026 Öğle: Mercimek Çorbası, Etli Nohut...")
-				if ui.button("📥 Belgedeki Menüyü Oku (Önizlemeli)", use_container_width=True, key="caf_btn_ai_parse_menu"):
-					fb = up_mfile.getvalue() if up_mfile is not None else None
-					fn = up_mfile.name if up_mfile is not None else ""
-					strict_pdf = str(app_cfg.get("gemini_strict_kvkk_pdf", "0")).strip() == "1"
-					if fb is None and not (paste_mtxt or "").strip():
-						ui.warning("Lütfen önce bir yemek listesi dosyası yükleyin veya menü metnini yapıştırın.")
+							bank_compact = [
+								{"id": d["id"], "name": d["name"], "category": d["category"], "kcal": d["total_kcal"], "allergens": d.get("allergens") or []}
+								for d in dishes
+							]
+							existing_ctx = [
+								{"date": r["plan_date"], "slot": r["meal_slot"], "dishes": r.get("dish_names") or []}
+								for r in plans.values()
+							] if ai_only_empty else None
+							with ui.spinner("Gemini AI mevsimsel ve besin dengeli menü oluşturuyor..."):
+								ok_gm, res_gm, used_gm = gai.generate_monthly_cafeteria_menu_with_gemini(
+									api_key=api_key,
+									model=model,
+									year_month=sel_ym,
+									workdays_list=[{"date": w["date_iso"], "weekday": w["weekday_name"]} for w in target_wds],
+									meal_slots=active_slots,
+									available_dishes=bank_compact,
+									custom_instruction=ai_menu_inst,
+									existing_plans_context=existing_ctx,
+									max_plate_budget_tl=float(ai_max_budget or 0.0),
+								)
+							if ok_gm and res_gm.get("plans"):
+								ui.session_state["caf_ai_menu_preview"] = {"plans": res_gm["plans"], "note": f"{len(res_gm['plans'])} öğün planı ({used_gm}) hazırlandı."}
+							else:
+								ui.error(f"AI menü hatası: {(res_gm or {}).get('error', 'Yanıt alınamadı')}")
+
+					ui.markdown("---")
+					up_mfile = ui.file_uploader(
+						"📎 PDF / Word / Görsel Yemek Listesini AI ile Oku",
+						type=["pdf", "docx", "xlsx", "xls", "png", "jpg", "jpeg", "txt"],
+						key="caf_ai_menu_file",
+					)
+					paste_mtxt = ui.text_area(
+						"Veya Menü Metni Yapıştır",
+						height=62,
+						key="caf_ai_menu_paste",
+						placeholder="02.11.2026 Öğle: Mercimek Çorbası, Etli Nohut...",
+					)
+					if ui.button("📥 Belgedeki Menüyü AI ile Oku", use_container_width=True, key="caf_btn_ai_parse_menu"):
+						fb = up_mfile.getvalue() if up_mfile is not None else None
+						fn = up_mfile.name if up_mfile is not None else ""
+						strict_pdf = str(app_cfg.get("gemini_strict_kvkk_pdf", "0")).strip() == "1"
+						if fb is None and not (paste_mtxt or "").strip():
+							ui.warning("Lütfen önce bir dosya yükleyin veya menü metnini yapıştırın.")
+						else:
+							with ui.spinner("Gemini AI belgeyi iş günlerine ayrıştırıyor..."):
+								ok_pm, res_pm, used_pm = gai.parse_cafeteria_menu_or_payments_text_with_gemini(
+									api_key=api_key,
+									model=model,
+									task_mode="menu",
+									workdays_list=[w["date_iso"] for w in workdays],
+									meal_slots=active_slots,
+									raw_text=paste_mtxt,
+									file_bytes=fb,
+									file_name=fn,
+									strict_kvkk_pdf=strict_pdf,
+								)
+							if ok_pm and res_pm.get("plans"):
+								ui.session_state["caf_ai_menu_preview"] = {"plans": res_pm["plans"], "note": f"{len(res_pm['plans'])} öğün belgeden çıkarıldı ({used_pm})."}
+							else:
+								ui.error(f"Menü okuma hatası: {(res_pm or {}).get('error', 'Satır bulunamadı')}")
+				else:
+					ui.info("🤖 AI destekli otomatik menü tasarımı ve PDF/görsel okuma için Ayarlar → Yapay Zeka bölümünden Gemini API anahtarını etkinleştirebilirsiniz.")
+
+			with ai_col_r:
+				ui.markdown("**📥 Excel / CSV Şablonundan Menü & Kalori Tablosu İçe Aktar**")
+				ui.caption("Kurum antetli 3 sekmeli Yemek Listesi (.xlsx) veya aynı düzendeki (.csv) şablonunu doğrudan takvime ve Yemekler Bankasına aktarır.")
+				up_menu_xl = ui.file_uploader(
+					"Menü Excel (.xlsx) veya CSV (.csv) Dosyası Seçin",
+					type=["xlsx", "csv"],
+					key="caf_menu_import_file",
+				)
+				if ui.button("✅ Excel / CSV Menüyü İçe Aktar", type="primary", use_container_width=True, key="caf_btn_import_menu_xlsx"):
+					if up_menu_xl is None:
+						ui.warning("Lütfen önce .xlsx veya .csv formatında menü dosyası seçin.")
 					else:
-						with ui.spinner("Gemini AI belgeyi iş günlerine ayrıştırıyor..."):
-							ok_pm, res_pm, used_pm = gai.parse_cafeteria_menu_or_payments_text_with_gemini(
-								api_key=api_key,
-								model=model,
-								task_mode="menu",
-								workdays_list=[w["date_iso"] for w in workdays],
-								meal_slots=active_slots,
-								raw_text=paste_mtxt,
-								file_bytes=fb,
-								file_name=fn,
-								strict_kvkk_pdf=strict_pdf,
-							)
-						if ok_pm and res_pm.get("plans"):
-							ui.session_state["caf_ai_menu_preview"] = {"plans": res_pm["plans"], "note": f"{len(res_pm['plans'])} öğün belgeden çıkarıldı ({used_pm})."}
+						def_slot_imp = active_slots[0] if active_slots else "Öğle Yemeği"
+						res_imp = import_school_menu_from_excel_or_csv(
+							connect_db_fn,
+							up_menu_xl.getvalue(),
+							up_menu_xl.name,
+							default_slot=def_slot_imp,
+							sync_to_diabetes=bool(auto_sync_diab),
+						)
+						if res_imp.get("error"):
+							ui.error(str(res_imp["error"]))
 						else:
-							ui.error(f"Menü okuma hatası: {(res_pm or {}).get('error', 'Satır bulunamadı')}")
+							ui.success(
+								f"✅ İçe aktarma tamamlandı: {res_imp.get('plans_saved', 0)} gün/öğün planı "
+								f"ve {res_imp.get('dishes_upserted', 0)} yemek kalemi güncellendi."
+							)
+							ui.rerun()
 
 			prev_m = ui.session_state.get("caf_ai_menu_preview")
 			if isinstance(prev_m, dict) and prev_m.get("plans"):
@@ -8247,624 +8877,194 @@ def _render_tab_menu_planner(
 						ui.session_state.pop("caf_ai_menu_preview", None)
 						ui.rerun()
 
-	# 3. Yerel Beslenme Kalite Kuralları & AI Klinik Güvenlik Denetçisi
-	local_eval = evaluate_menu_nutrition_rules(plans, workdays, active_slots=active_slots, kcal_band=kcal_band_tuple) if plans else None
-	if plans:
-		with ui.expander("🛡️ Beslenme Kalite Karnesi, Tekrar Kuralları & AI Klinik Denetçi (Alerji · Çölyak · Diyabet)"):
-			if local_eval:
-				ev_c1, ev_c2 = ui.columns([0.9, 2.5], vertical_alignment="center")
-				with ev_c1:
-					ui.metric("Yerel Denge & Çeşitlilik", f"{local_eval['score']} / 100")
-				with ev_c2:
-					cat_str = " · ".join(f"**{k}:** {v}" for k, v in local_eval["category_counts"].items() if v > 0)
-					ui.caption(f"🥗 **Aylık Besin Grubu Dağılımı:** {cat_str or 'Henüz veri yok'}")
-				if local_eval["warnings"]:
-					ui.dataframe(pd.DataFrame(local_eval["warnings"][:20]), hide_index=True, use_container_width=True)
-				else:
-					ui.success("✅ Haftalık tekrar, çift yoğun karbonhidrat veya seçili MEB kalori bandı sapması tespit edilmedi.")
-
-			if is_on:
-				ui.markdown("---")
-				if ui.button("🔍 Seçili Ay Menüsünü Gemini AI ile Klinik Risklere Göre Denetle", key="caf_btn_ai_audit_menu"):
-					risk_ctx = get_clinical_nutrition_risk_summary(connect_db_fn, mask_fn=mask_fn)
-					plan_sum = [
-						{
-							"plan_date": r["plan_date"],
-							"meal_slot": r["meal_slot"],
-							"dishes": r.get("dish_names") or [],
-							"total_kcal": r.get("total_kcal"),
-							"total_carbs_g": r.get("total_carbs_g"),
-							"allergens": r.get("allergens") or [],
-						}
-						for r in plans.values()
-					]
-					dish_comp = [{"name": d["name"], "category": d["category"], "kcal": d["total_kcal"], "allergens": d.get("allergens") or []} for d in dishes]
-					with ui.spinner("Gemini AI planlı menüyü alerji, çölyak ve diyabet güvenliği açısından denetliyor..."):
-						ok_au, res_au, used_au = gai.audit_cafeteria_menu_with_gemini(
-							api_key=api_key,
-							model=model,
-							year_month=sel_ym,
-							planned_menu_summary=plan_sum,
-							clinical_risk_summary=risk_ctx,
-							available_dishes=dish_comp,
-						)
-					if ok_au:
-						ui.session_state["caf_ai_menu_audit"] = res_au
-						ui.success(f"✅ Güvenlik denetimi tamamlandı ({used_au}).")
-					else:
-						ui.error(f"Denetim hatası: {(res_au or {}).get('error', 'Yanıt alınamadı')}")
-
-				au_res = ui.session_state.get("caf_ai_menu_audit")
-				if isinstance(au_res, dict) and au_res.get("overall_summary"):
-					ui.metric("AI Beslenme & Klinik Uyum Skoru", f"{au_res.get('balance_score', '—')} / 100")
-					ui.info(str(au_res["overall_summary"]))
-					findings = au_res.get("risk_findings") or []
-					if findings:
-						ui.dataframe(pd.DataFrame(findings), hide_index=True, use_container_width=True)
-						actionable_f = [
-							f for f in findings
-							if isinstance(f, dict) and str(f.get("plan_date") or "").strip() and str(f.get("recommended_alternative") or "").strip()
-						]
-						if actionable_f:
-							af_c1, af_c2 = ui.columns([2.2, 1.0], vertical_alignment="center")
-							af_opts = {
-								f"{f.get('plan_date')} ({f.get('meal_slot') or active_slots[0]}) → İkame: {str(f.get('recommended_alternative'))[:55]}": f
-								for f in actionable_f
-							}
-							with af_c1:
-								picked_af_k = ui.selectbox("AI İkame / Düzeltme Önerisi Seç", list(af_opts.keys()), key="caf_ai_audit_fix_sel")
-							with af_c2:
-								if ui.button("🔄 İkame Notuna İşle", use_container_width=True, key="caf_btn_apply_audit_alt"):
-									chosen_f = af_opts[picked_af_k]
-									f_dt = str(chosen_f.get("plan_date"))[:10]
-									f_sl = str(chosen_f.get("meal_slot") or active_slots[0])
-									ex_r = plans.get((f_dt, f_sl))
-									if ex_r:
-										upsert_menu_plan_slot(
-											connect_db_fn,
-											plan_date=f_dt,
-											meal_slot=f_sl,
-											dish_ids=ex_r.get("dish_ids") or [],
-											custom_items=ex_r.get("custom_items") or [],
-											notes=str(ex_r.get("notes") or ""),
-											alt_menu_note=str(chosen_f.get("recommended_alternative") or ""),
-											sync_to_diabetes=auto_sync_diab,
-										)
-										ui.success(f"✅ {f_dt} ({f_sl}) için AI ikame önerisi kaydedildi.")
-										ui.rerun()
-					for wn in (au_res.get("weekly_nutrition_notes") or []):
-						ui.caption(f"• {wn}")
-
-	# 4. Hafta Günü Hizalı Kopyalama, Gün Takası, Döngüsel Şablon & Mutfak İhtiyaç/Alerji Listeleri
-	with ui.expander("🔄 Hizalı Kopyalama, Gün Takası (Swap), Menü Şablonları & Mutfak Sipariş / Alerji Fişi"):
-		tl1, tl2 = ui.columns(2)
-		with tl1:
-			ui.markdown("**📆 Başka Aydan Hafta-Günü Hizalı Kopyala (Pzt → Pzt)**")
-			src_ym_choices = [m for m in month_options if m != sel_ym]
-			cp_c1, cp_c2, cp_c3 = ui.columns([1.3, 1.0, 1.0], vertical_alignment="center")
-			with cp_c1:
-				src_ym_pick = ui.selectbox("Kaynak Ay", src_ym_choices or [sel_ym], format_func=_fmt_ym, key="caf_aligned_cp_src")
-			with cp_c2:
-				cp_ow = ui.checkbox("Dolu günleri ez", value=False, key="caf_aligned_cp_ow")
-			with cp_c3:
-				if ui.button("📋 Hizalı Kopyala", use_container_width=True, key="caf_btn_aligned_cp"):
-					res_acp = copy_month_menu_aligned(
-						connect_db_fn,
-						src_ym_pick,
-						sel_ym,
-						meal_slots=active_slots,
-						overwrite=cp_ow,
-						include_weekends=inc_wknd,
-						sync_to_diabetes=auto_sync_diab,
-					)
-					ui.success(f"✅ {_fmt_ym(src_ym_pick)} ayından hafta günü hizalı {res_acp['copied']} öğün kopyalandı.")
-					ui.rerun()
-
-			if len(workdays) >= 2:
-				ui.markdown("**⇄ İki İş Gününün Menüsünü Takas Et (Yer Değiştir)**")
-				wd_lbl_map = {f"{d['day_num']:02d}.{sel_ym[5:7]}.{sel_ym[:4]} ({d['weekday_name']})": d["date_iso"] for d in workdays}
-				wd_lbl_keys = list(wd_lbl_map.keys())
-				sw_c1, sw_c2, sw_c3 = ui.columns([1.2, 1.2, 0.9], vertical_alignment="center")
-				with sw_c1:
-					sw_a = ui.selectbox("1. Gün", wd_lbl_keys, index=0, key="caf_swap_day_a")
-				with sw_c2:
-					sw_b = ui.selectbox("2. Gün", wd_lbl_keys, index=min(1, len(wd_lbl_keys) - 1), key="caf_swap_day_b")
-				with sw_c3:
-					if ui.button("⇄ Takas Et", use_container_width=True, key="caf_btn_swap_days"):
-						sw_cnt = swap_menu_plan_days(
-							connect_db_fn, wd_lbl_map[sw_a], wd_lbl_map[sw_b], meal_slots=active_slots, sync_to_diabetes=auto_sync_diab
-						)
-						ui.success(f"✅ {sw_cnt} öğün karşılıklı takas edildi.")
-						ui.rerun()
-
-		with tl2:
-			ui.markdown("**🗂️ Döngüsel Menü Şablonu (Kaydet / Uygula)**")
-			tmpls = get_menu_rotation_templates(app_cfg)
-			tm_c1, tm_c2 = ui.columns([1.6, 1.0], vertical_alignment="center")
-			with tm_c1:
-				new_tmpl_nm = ui.text_input("Şablon Adı", placeholder="Örn: Kış 4 Haftalık Standart Menü", key="caf_tmpl_new_nm")
-			with tm_c2:
-				if ui.button("💾 Bu Ayı Şablon Kaydet", use_container_width=True, key="caf_btn_save_tmpl"):
-					r_st = save_menu_rotation_template(
-						connect_db_fn, save_cfg_fn, app_cfg, template_name=new_tmpl_nm, source_ym=sel_ym, meal_slots=active_slots, include_weekends=inc_wknd
-					)
-					if r_st.get("ok"):
-						if callable(ctx_api.get("clear_all_data_caches")):
-							ctx_api["clear_all_data_caches"]()
-						ui.success(f"✅ “{r_st['template_name']}” şablonu kaydedildi ({r_st['slots_count']} öğün).")
-						ui.rerun()
-					else:
-						ui.warning(str(r_st.get("error") or ""))
-			if tmpls:
-				ap_c1, ap_c2, ap_c3 = ui.columns([1.5, 0.95, 0.75], vertical_alignment="center")
-				with ap_c1:
-					pick_tmpl = ui.selectbox("Kayıtlı Şablonlar", list(tmpls.keys()), key="caf_tmpl_pick")
-				with ap_c2:
-					if ui.button("▶ Bu Aya Uygula", type="primary", use_container_width=True, key="caf_btn_apply_tmpl"):
-						r_ap = apply_menu_rotation_template(
-							connect_db_fn, app_cfg, template_name=pick_tmpl, target_ym=sel_ym, overwrite=False, include_weekends=inc_wknd, sync_to_diabetes=auto_sync_diab
-						)
-						ui.success(f"✅ Şablondan {r_ap.get('applied', 0)} boş öğün dolduruldu.")
-						ui.rerun()
-				with ap_c3:
-					if ui.button("🗑️ Sil", use_container_width=True, key="caf_btn_del_tmpl"):
-						delete_menu_rotation_template(connect_db_fn, save_cfg_fn, app_cfg, pick_tmpl)
-						if callable(ctx_api.get("clear_all_data_caches")):
-							ctx_api["clear_all_data_caches"]()
-						ui.rerun()
-
-			ui.markdown("**🛒 Mutfak Satın Alma & Özel Diyet / Alerji Çıktıları**")
-			ex_m1, ex_m2 = ui.columns(2)
-			with ex_m1:
-				ui.download_button(
-					"🛒 Aylık Malzeme İhtiyaç (.xlsx)",
-					data=lambda: build_shopping_list_excel(build_menu_shopping_list(connect_db_fn, sel_ym), sel_ym),
-					file_name=f"Mutfak_Malzeme_Ihtiyac_{sel_ym}.xlsx",
-					mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-					use_container_width=True,
-					key="caf_mp_dl_shop_xlsx",
-				)
-			with ex_m2:
-				ui.download_button(
-					"🥗 Özel Diyet & Alerji Fişi (.docx)",
-					data=lambda: build_allergy_kitchen_prep_docx(connect_db_fn, sel_ym, school_meta=app_cfg, mask_fn=mask_fn),
-					file_name=f"Ozel_Diyet_Alerji_Mutfak_Fisi_{sel_ym}.docx",
-					mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-					use_container_width=True,
-					key="caf_mp_dl_allergy_docx",
-				)
-
-	# Hafta Bazlı Menü Düzenleyici (Seçili ayın iş günleri hafta hafta düzenli kartlar)
-	weeks = _group_month_days_by_week(days_info)
-	if not weeks:
-		ui.warning("Seçilen ay için aktif iş günü bulunamadı.")
-		return
-
-	wk_labels = [f"{i + 1}. Hafta ({w[0]['day_num']} – {w[-1]['day_num']} {TR_MONTH_NAMES[int(sel_ym[5:7])]})" for i, w in enumerate(weeks)]
-	if ui.session_state.get("caf_menu_week_month") != sel_ym or ui.session_state.get("caf_menu_wk_pick") not in wk_labels:
-		ui.session_state["caf_menu_week_month"] = sel_ym
-		ui.session_state["caf_menu_wk_pick"] = wk_labels[0]
-	w_col1, w_col2, w_col3, w_col4, w_col5 = ui.columns([1.1, 1.8, 1.15, 1.15, 1.2], vertical_alignment="center")
-	with w_col1:
-		ui.selectbox(
-			"Aktif Ay",
-			month_options,
-			index=month_options.index(sel_ym) if sel_ym in month_options else 0,
-			format_func=_fmt_ym,
-			key="caf_global_sel_ym",
-		)
-	with w_col2:
-		picked_wk_lbl = ui.selectbox("Düzenlenecek Haftayı Seçin (İş Günleri)", wk_labels, key="caf_menu_wk_pick")
-	wk_idx = wk_labels.index(picked_wk_lbl) if picked_wk_lbl in wk_labels else 0
-	with w_col3:
-		if ui.button("💾 Bu Haftanın Tümünü Kaydet", type="primary", use_container_width=True, key="caf_btn_save_wk_all"):
-			cnt_w = 0
-			for d in weeks[wk_idx]:
-				d_iso = d["date_iso"]
-				for sl in active_slots:
-					sel_lbls_w = ui.session_state.get(f"caf_ms_{d_iso}_{sl}") or []
-					ex_raw_w = ui.session_state.get(f"caf_ex_{d_iso}_{sl}") or ""
-					alt_raw_w = ui.session_state.get(f"caf_alt_{d_iso}_{sl}")
-					c_ids_w = [dish_lbl_to_id[lbl] for lbl in sel_lbls_w if lbl in dish_lbl_to_id]
-					c_cust_w = parse_custom_dish_entries(ex_raw_w)
-					if c_ids_w or c_cust_w or ((d_iso, sl) in plans):
-						upsert_menu_plan_slot(
-							connect_db_fn,
-							plan_date=d_iso,
-							meal_slot=sl,
-							dish_ids=c_ids_w,
-							custom_items=c_cust_w,
-							alt_menu_note=str(alt_raw_w).strip() if alt_raw_w is not None else None,
-							sync_to_diabetes=auto_sync_diab,
-						)
-						cnt_w += 1
-			ui.success(f"✅ Seçili haftada {cnt_w} öğün güncellendi.")
-			ui.rerun()
-	with w_col4:
-		if wk_idx > 0 and ui.button("📋 Önceki Haftayı Kopyala", type="secondary", use_container_width=True, key="caf_btn_copy_prev_wk"):
-			pairs = [(s["date_iso"], t["date_iso"]) for s, t in zip(weeks[wk_idx - 1], weeks[wk_idx])]
-			c_cnt = copy_menu_plans(connect_db_fn, date_pairs=pairs, meal_slots=active_slots, overwrite=True, sync_to_diabetes=auto_sync_diab)
-			ui.success(f"✅ {c_cnt} öğün önceki haftadan kopyalandı.")
-			ui.rerun()
-		elif wk_idx == 0 and ui.button("📆 Geçen Aydan Kopyala", type="secondary", use_container_width=True, key="caf_btn_copy_prev_mo"):
-			yy_i, mm_i = int(sel_ym[:4]), int(sel_ym[5:7])
-			pm_y, pm_m = (yy_i - 1, 12) if mm_i == 1 else (yy_i, mm_i - 1)
-			res_pm_cp = copy_month_menu_aligned(
-				connect_db_fn,
-				f"{pm_y:04d}-{pm_m:02d}",
-				sel_ym,
-				meal_slots=active_slots,
-				overwrite=False,
-				include_weekends=inc_wknd,
-				sync_to_diabetes=auto_sync_diab,
-			)
-			ui.success(f"✅ Geçen aydan hafta günü hizalı {res_pm_cp['copied']} öğün bu aya dağıtıldı.")
-			ui.rerun()
-	with w_col5:
-		if ui.button("💉 Tüm Ayı Diyabete Eşitle", type="secondary", use_container_width=True, key="caf_btn_sync_diab_all"):
-			cnt_s = sync_cafeteria_month_to_diabetes(connect_db_fn, sel_ym)
-			ui.success(f"✅ {cnt_s} öğün İnsülin & Diyabet Yönetimi modülüyle eşitlendi.")
-
-	def _render_week_nav_bar(pos_tag: str) -> None:
-		nav_l, nav_c, nav_r = ui.columns([1.05, 2.3, 1.05], vertical_alignment="center")
-		with nav_l:
-			if ui.button(
-				"◀ Önceki Hafta",
-				key=f"caf_btn_prev_wk_{pos_tag}",
-				disabled=(wk_idx <= 0),
-				use_container_width=True,
-				help="Bir önceki haftaya geç",
-			):
-				ui.session_state["caf_menu_wk_pick"] = wk_labels[wk_idx - 1]
-				ui.rerun()
-		with nav_c:
-			ui.markdown(
-				f"<div style='text-align:center;font-weight:700;font-size:13px;padding:6px 10px;border-radius:8px;"
-				f"background:rgba(15,118,110,0.08);border:1px solid rgba(15,118,110,0.25);'>"
-				f"🗓️ {html.escape(wk_labels[wk_idx])} &nbsp;·&nbsp; ({wk_idx + 1} / {len(weeks)})</div>",
-				unsafe_allow_html=True,
-			)
-		with nav_r:
-			if ui.button(
-				"Sonraki Hafta ▶",
-				key=f"caf_btn_next_wk_{pos_tag}",
-				disabled=(wk_idx >= len(weeks) - 1),
-				use_container_width=True,
-				help="Bir sonraki haftaya geç",
-			):
-				ui.session_state["caf_menu_wk_pick"] = wk_labels[wk_idx + 1]
-				ui.rerun()
-
-	_render_week_nav_bar("top")
-
-	diab_stus = get_diabetic_students_for_menu(connect_db_fn)
-	icr_vals = [float(s["icr_lunch"]) for s in diab_stus if _safe_float(s.get("icr_lunch"), 0.0) > 0]
-
-	for d in weeks[wk_idx]:
-		d_iso = d["date_iso"]
-		half_badge = f" · ⏳ {d['holiday_title']}" if d.get("is_half_day") else ""
-		rt_day = ram_times_planner.get(d_iso)
-		day_has_any = any(plans.get((d_iso, sl)) and plans[(d_iso, sl)].get("dish_names") for sl in active_slots)
+		# Kart 2: Hizalı Kopyalama, Gün Takası & Döngüsel Şablonlar
 		with ui.container(border=True):
-			dh_l, dh_r = ui.columns([4.2, 0.85], vertical_alignment="center")
-			with dh_l:
-				ram_sub_card = (
-					f"<div style='margin-top:3px;font-size:12.5px;color:#0f766e;font-weight:700;'>"
-					f"🌙 Sahur (İmsak): {html.escape(rt_day['sahur'])} &nbsp;·&nbsp; 🌅 İftar (Akşam): {html.escape(rt_day['iftar'])}"
-					f"</div>"
-					if rt_day
-					else ""
-				)
-				ui.markdown(
-					f"<div><strong>📆 {d['day_num']:02d}.{sel_ym[5:7]}.{sel_ym[:4]} — {html.escape(d['weekday_name'])}</strong>"
-					f"{html.escape(half_badge)}{ram_sub_card}</div>",
-					unsafe_allow_html=True,
-				)
-			with dh_r:
-				if day_has_any and ui.button("🗑️ Temizle", key=f"caf_clr_day_{d_iso}", use_container_width=True, help="Bu günün planlı öğünlerini temizle"):
-					delete_menu_plan_slot(connect_db_fn, d_iso, None)
-					for sl_c in active_slots:
-						ui.session_state.pop(f"caf_ms_{d_iso}_{sl_c}", None)
-						ui.session_state.pop(f"caf_ex_{d_iso}_{sl_c}", None)
-						ui.session_state.pop(f"caf_alt_{d_iso}_{sl_c}", None)
-					ui.rerun()
-
-			day_tot_kcal = 0.0
-			day_tot_cost = 0.0
-			for sl in active_slots:
-				rec = plans.get((d_iso, sl))
-				cur_ids = rec.get("dish_ids") or [] if rec else []
-				cur_lbls = [id_to_dish_lbl[int(x)] for x in cur_ids if int(x) in id_to_dish_lbl]
-				if rec:
-					cust_parts = []
-					for c in (rec.get("custom_items") or []):
-						if c.get("name"):
-							meta_b = []
-							if _safe_float(c.get("kcal"), 0.0) > 0:
-								meta_b.append(f"{_safe_float(c['kcal']):g} kcal")
-							if _safe_float(c.get("carbs_g"), 0.0) > 0:
-								meta_b.append(f"{_safe_float(c['carbs_g']):g}g karb")
-							if c.get("allergen"):
-								meta_b.append(str(c["allergen"]))
-							cust_parts.append(f"{c['name']} [{', '.join(meta_b)}]" if meta_b else str(c["name"]))
-					cur_cust_str = ", ".join(cust_parts)
-				else:
-					cur_cust_str = ""
-
-				sl_tm_hint = f" ({sched['meal_times'][sl]})" if sched["meal_times"].get(sl) else ""
-				sc1, sc2, sc3 = ui.columns([2.2, 1.4, 0.8], vertical_alignment="center")
-				with sc1:
-					sel_dish_lbls = ui.multiselect(
-						f"🍽️ {sl}{sl_tm_hint}",
-						list(dish_lbl_to_id.keys()),
-						default=cur_lbls,
-						key=f"caf_ms_{d_iso}_{sl}",
-					)
-				with sc2:
-					extra_free = ui.text_input(
-						f"Ek Serbest Kalem ({sl})",
-						value=cur_cust_str,
-						placeholder="Örn: Tam Buğday Ekmek [130 kcal, 24g karb, gluten]",
-						key=f"caf_ex_{d_iso}_{sl}",
-					)
-				with sc3:
-					if ui.button("💾 Kaydet", key=f"caf_save_slot_{d_iso}_{sl}", use_container_width=True):
-						chosen_ids = [dish_lbl_to_id[lbl] for lbl in sel_dish_lbls if lbl in dish_lbl_to_id]
-						cust_list = parse_custom_dish_entries(extra_free)
-						alt_val_s = ui.session_state.get(f"caf_alt_{d_iso}_{sl}")
-						upsert_menu_plan_slot(
+			ui.markdown("##### 🔄 Hizalı Kopyalama, Gün Takası & Döngüsel Şablonlar")
+			tl1, tl2 = ui.columns(2)
+			with tl1:
+				ui.markdown("**📆 Başka Aydan Hafta-Günü Hizalı Kopyala (Pzt → Pzt)**")
+				src_ym_choices = [m for m in month_options if m != sel_ym]
+				cp_c1, cp_c2, cp_c3 = ui.columns([1.3, 1.0, 1.0], vertical_alignment="bottom")
+				with cp_c1:
+					src_ym_pick = ui.selectbox("Kaynak Ay", src_ym_choices or [sel_ym], format_func=_fmt_ym, key="caf_aligned_cp_src")
+				with cp_c2:
+					cp_ow = ui.checkbox("Dolu günleri ez", value=False, key="caf_aligned_cp_ow")
+				with cp_c3:
+					if ui.button("📋 Hizalı Kopyala", use_container_width=True, key="caf_btn_aligned_cp"):
+						res_acp = copy_month_menu_aligned(
 							connect_db_fn,
-							plan_date=d_iso,
-							meal_slot=sl,
-							dish_ids=chosen_ids,
-							custom_items=cust_list,
-							alt_menu_note=str(alt_val_s).strip() if alt_val_s is not None else None,
+							src_ym_pick,
+							sel_ym,
+							meal_slots=active_slots,
+							overwrite=cp_ow,
+							include_weekends=inc_wknd,
 							sync_to_diabetes=auto_sync_diab,
 						)
-						ui.success(f"{d_iso} ({sl}) kaydedildi.")
+						ui.success(f"✅ {_fmt_ym(src_ym_pick)} ayından hafta günü hizalı {res_acp['copied']} öğün kopyalandı.")
 						ui.rerun()
 
-				if rec and rec.get("dish_names"):
-					kv = _safe_float(rec.get("total_kcal"), 0.0)
-					cgv = _safe_float(rec.get("total_carbs_g"), 0.0)
-					day_tot_kcal += kv
-					als = rec.get("allergens") or []
-					al_disp = " · ".join(format_allergen_badge(a) for a in als) if als else "Alerjen uyarısı yok"
-					hits = match_allergens_against_school(connect_db_fn, als) if als else []
-					hit_s = f" | 🚨 **{len(hits)} alerjik/çölyaklı kişi çakışması:** " + ", ".join(mask_fn(h["full_name"], "name") for h in hits[:4]) if hits else ""
-
-					# MEB Kalori bandı rozeti
-					band_s = ""
-					if kcal_band_tuple[0] > 0 and kcal_band_tuple[1] > 0 and kv > 0 and (len(active_slots) == 1 or any(k in _tr_fold(sl) for k in ("ogle", "iftar", "aksam"))):
-						if kv < kcal_band_tuple[0]:
-							band_s = f" | 🟡 Hedef Altı ({kcal_band_tuple[0]:g}–{kcal_band_tuple[1]:g})"
-						elif kv > kcal_band_tuple[1]:
-							band_s = f" | 🟠 Hedef Üstü ({kcal_band_tuple[0]:g}–{kcal_band_tuple[1]:g})"
-						else:
-							band_s = " | 🟢 MEB Bandında"
-
-					# Canlı porsiyon maliyeti
-					sl_cost = sum(cost_map.get(int(did), 0.0) for did in (rec.get("dish_ids") or []))
-					day_tot_cost += sl_cost
-					cost_s = f" · 💰 **Maliyet:** `~{sl_cost:.2f} ₺`" if sl_cost > 0 else ""
-
-					# Diyabet ICR tahmini bolus & yüksek karb uyarısı
-					diab_s = ""
-					if diab_stus and cgv > 0:
-						if icr_vals:
-							u_min = round(cgv / max(icr_vals), 1)
-							u_max = round(cgv / min(icr_vals), 1)
-							u_txt = f"~{u_min:g}U" if abs(u_max - u_min) < 0.2 else f"~{u_min:g}–{u_max:g}U"
-							diab_s = f" | 💉 **Diyabet ({len(diab_stus)} öğr. ICR bazlı tahmini):** `{u_txt}`"
-						elif cgv >= 85.0:
-							diab_s = f" | 💙 **Yüksek Karbonhidrat ({len(diab_stus)} diyabetli öğrenci için dikkat)**"
-
-					ui.caption(f"🔥 **{sl} Kalorisi:** `{kv:g} kcal` · **Karb:** `{cgv:g} g`{cost_s} · ⚠️ **Alerjenler:** {al_disp}{band_s}{hit_s}{diab_s}")
-
-					if hits or rec.get("alt_menu_note"):
-						alt_c1, alt_c2 = ui.columns([3.4, 0.85], vertical_alignment="center")
-						with alt_c1:
-							alt_inp = ui.text_input(
-								f"🥗 Alerji / Çölyak İkame Tepsi Notu ({sl})",
-								value=str(rec.get("alt_menu_note") or ""),
-								placeholder="Örn: Çölyaklı öğrenciler için Karabuğday Pilavı + Izgara Tavuk hazırlanacak",
-								key=f"caf_alt_{d_iso}_{sl}",
+				if len(workdays) >= 2:
+					ui.markdown("**⇄ İki İş Gününün Menüsünü Takas Et**")
+					wd_lbl_map = {f"{d['day_num']:02d}.{sel_ym[5:7]}.{sel_ym[:4]} ({d['weekday_name']})": d["date_iso"] for d in workdays}
+					wd_lbl_keys = list(wd_lbl_map.keys())
+					sw_c1, sw_c2, sw_c3 = ui.columns([1.2, 1.2, 0.9], vertical_alignment="bottom")
+					with sw_c1:
+						sw_a = ui.selectbox("1. Gün", wd_lbl_keys, index=0, key="caf_swap_day_a")
+					with sw_c2:
+						sw_b = ui.selectbox("2. Gün", wd_lbl_keys, index=min(1, len(wd_lbl_keys) - 1), key="caf_swap_day_b")
+					with sw_c3:
+						if ui.button("⇄ Takas Et", use_container_width=True, key="caf_btn_swap_days"):
+							sw_cnt = swap_menu_plan_days(
+								connect_db_fn, wd_lbl_map[sw_a], wd_lbl_map[sw_b], meal_slots=active_slots, sync_to_diabetes=auto_sync_diab
 							)
-						with alt_c2:
-							if ui.button("🥗 İkame Kaydet", key=f"caf_save_alt_{d_iso}_{sl}", use_container_width=True):
-								upsert_menu_plan_slot(
-									connect_db_fn,
-									plan_date=d_iso,
-									meal_slot=sl,
-									dish_ids=rec.get("dish_ids") or [],
-									custom_items=rec.get("custom_items") or [],
-									notes=str(rec.get("notes") or ""),
-									alt_menu_note=alt_inp,
-									sync_to_diabetes=auto_sync_diab,
-								)
-								ui.success("İkame tepsi notu kaydedildi.")
-								ui.rerun()
+							ui.success(f"✅ {sw_cnt} öğün karşılıklı takas edildi.")
+							ui.rerun()
 
-			if len(active_slots) > 1 and day_tot_kcal > 0:
-				tot_c_bit = f" · 💰 Günlük Tabak Toplamı: `~{day_tot_cost:.2f} ₺`" if day_tot_cost > 0 else ""
-				ui.caption(f"📊 **Gün Toplamı:** `{day_tot_kcal:g} kcal`{tot_c_bit}")
+			with tl2:
+				ui.markdown("**🗂️ Döngüsel Menü Şablonu (Kaydet / Uygula)**")
+				tmpls = get_menu_rotation_templates(app_cfg)
+				tm_c1, tm_c2 = ui.columns([1.55, 1.05], vertical_alignment="bottom")
+				with tm_c1:
+					new_tmpl_nm = ui.text_input("Şablon Adı", placeholder="Örn: Kış 4 Haftalık Menü", key="caf_tmpl_new_nm")
+				with tm_c2:
+					if ui.button("💾 Şablon Kaydet", use_container_width=True, key="caf_btn_save_tmpl"):
+						r_st = save_menu_rotation_template(
+							connect_db_fn, save_cfg_fn, app_cfg, template_name=new_tmpl_nm, source_ym=sel_ym, meal_slots=active_slots, include_weekends=inc_wknd
+						)
+						if r_st.get("ok"):
+							if callable(ctx_api.get("clear_all_data_caches")):
+								ctx_api["clear_all_data_caches"]()
+							ui.success(f"✅ “{r_st['template_name']}” şablonu kaydedildi ({r_st['slots_count']} öğün).")
+							ui.rerun()
+						else:
+							ui.warning(str(r_st.get("error") or ""))
+				if tmpls:
+					ap_c1, ap_c2, ap_c3 = ui.columns([1.5, 0.95, 0.75], vertical_alignment="bottom")
+					with ap_c1:
+						pick_tmpl = ui.selectbox("Kayıtlı Şablonlar", list(tmpls.keys()), key="caf_tmpl_pick")
+					with ap_c2:
+						if ui.button("▶ Aya Uygula", type="primary", use_container_width=True, key="caf_btn_apply_tmpl"):
+							r_ap = apply_menu_rotation_template(
+								connect_db_fn, app_cfg, template_name=pick_tmpl, target_ym=sel_ym, overwrite=False, include_weekends=inc_wknd, sync_to_diabetes=auto_sync_diab
+							)
+							ui.success(f"✅ Şablondan {r_ap.get('applied', 0)} boş öğün dolduruldu.")
+							ui.rerun()
+					with ap_c3:
+						if ui.button("🗑️ Sil", use_container_width=True, key="caf_btn_del_tmpl"):
+							delete_menu_rotation_template(connect_db_fn, save_cfg_fn, app_cfg, pick_tmpl)
+							if callable(ctx_api.get("clear_all_data_caches")):
+								ctx_api["clear_all_data_caches"]()
+							ui.rerun()
 
-	_render_week_nav_bar("bot")
+				ui.markdown("**💉 Diyabet Senkronizasyonu**")
+				if ui.button("💉 Tüm Ayı Diyabet Modülüne Eşitle", type="secondary", use_container_width=True, key="caf_btn_sync_diab_all"):
+					cnt_s = sync_cafeteria_month_to_diabetes(connect_db_fn, sel_ym)
+					ui.success(f"✅ {cnt_s} öğün İnsülin & Diyabet Yönetimi modülüyle eşitlendi.")
 
-	# Yalnızca Öğün Girilmiş Günler Özeti (Her Öğün Kendi Sütunu Altında, Ramazan Vakitleri Tarihin Altında)
-	planned_col_rows = build_planned_menu_columnar_rows(
-		workdays,
-		plans,
-		active_slots,
-		meal_times=sched["meal_times"],
-		ramazan_mode=sched["ramazan_mode"],
-		ramazan_times=ram_times_planner,
-	)
-	tot_planned_meals_cnt = sum(
-		1 for d in workdays for sl in active_slots
-		if plans.get((d["date_iso"], sl)) and plans[(d["date_iso"], sl)].get("dish_names")
-	)
-	ui.markdown("---")
-	ui.markdown(f"#### 📋 Planlanmış Menü Listesi ({tot_planned_meals_cnt} Öğün — Her Öğünün Kalori & Alerjeni Kendi Sütunu Altında)")
-	if planned_col_rows:
-		ui.dataframe(pd.DataFrame(planned_col_rows), hide_index=True, use_container_width=True)
-	else:
-		ui.caption("Seçili ay için henüz öğün girilmiş gün bulunmuyor.")
+		# Beslenme Kalite Karnesi & AI Klinik Güvenlik Denetçisi
+		if plans:
+			with ui.expander("🛡️ Beslenme Kalite Karnesi, Tekrar Kuralları & AI Klinik Denetçi (Alerji · Çölyak · Diyabet)", expanded=False):
+				if local_eval:
+					ev_c1, ev_c2 = ui.columns([0.9, 2.5], vertical_alignment="center")
+					with ev_c1:
+						ui.metric("Yerel Denge & Çeşitlilik", f"{local_eval['score']} / 100")
+					with ev_c2:
+						cat_str = " · ".join(f"**{k}:** {v}" for k, v in local_eval["category_counts"].items() if v > 0)
+						ui.caption(f"🥗 **Aylık Besin Grubu Dağılımı:** {cat_str or 'Henüz veri yok'}")
+					if local_eval["warnings"]:
+						ui.dataframe(pd.DataFrame(local_eval["warnings"][:20]), hide_index=True, use_container_width=True)
+					else:
+						ui.success("✅ Haftalık tekrar, çift yoğun karbonhidrat veya seçili MEB kalori bandı sapması tespit edilmedi.")
 
-	# A4 Çıktı ve İmzalı Belge Oluşturucu
-	ui.markdown("---")
-	ui.markdown("#### 🖨️ Resmi A4 Menü Çıktısı (Haftalık Renk Tonlu, Öğün Sütunlu, Sayfa Planlamalı & İmzalı)")
-	ui.caption(
-		"ℹ️ A4 çıktıda her öğünün yemekleri, kalorisi, karbonhidratı ve alerjen uyarısı kendi sütunu altında yer alır; "
-		"Ramazan modunda Sahur ve İftar saatleri doğrudan o günün tarihinin altında gösterilir."
-	)
-	p_c1, p_c2, p_c3, p_c4 = ui.columns([1.05, 1.25, 1.45, 1.15])
-	with p_c1:
-		pr_scope = ui.radio("Çıktı Kapsamı", ["📅 Tüm Ay", "🗓️ Seçili Hafta"], horizontal=True, key="caf_print_scope")
-	with p_c2:
-		pr_layout_lbl = ui.selectbox(
-			"A4 Sayfa Düzeni",
-			["Standart Liste", "Tek A4 Sayfaya Sığdır (Kompakt)", "Haftalık Tablo Izgarası (Pzt-Cum)"],
-			key="caf_print_layout",
-		)
-	with p_c3:
-		page_mode_keys = list(A4_MEAL_PAGE_MODES.keys())
-		def_pm = str(app_cfg.get("cafeteria_a4_meal_page_mode") or "combined")
-		if def_pm not in A4_MEAL_PAGE_MODES:
-			def_pm = "combined"
-		pr_page_mode = ui.selectbox(
-			"📑 Çoklu Öğün A4 Sayfa Planı (Sıkışma Kontrolü)",
-			page_mode_keys,
-			index=page_mode_keys.index(def_pm),
-			format_func=lambda k: A4_MEAL_PAGE_MODES[k],
-			key="caf_print_meal_page_mode",
-		)
-	with p_c4:
-		orient_keys = list(A4_ORIENTATION_MODES.keys())
-		pr_orient = ui.selectbox(
-			"📐 Kağıt Yönü",
-			orient_keys,
-			index=0,
-			format_func=lambda k: A4_ORIENTATION_MODES[k],
-			key="caf_print_orient",
-		)
+				if is_on:
+					ui.markdown("---")
+					if ui.button("🔍 Seçili Ay Menüsünü Gemini AI ile Klinik Risklere Göre Denetle", key="caf_btn_ai_audit_menu"):
+						risk_ctx = get_clinical_nutrition_risk_summary(connect_db_fn, mask_fn=mask_fn)
+						plan_sum = [
+							{
+								"plan_date": r["plan_date"],
+								"meal_slot": r["meal_slot"],
+								"dishes": r.get("dish_names") or [],
+								"total_kcal": r.get("total_kcal"),
+								"total_carbs_g": r.get("total_carbs_g"),
+								"allergens": r.get("allergens") or [],
+							}
+							for r in plans.values()
+						]
+						dish_comp = [{"name": d["name"], "category": d["category"], "kcal": d["total_kcal"], "allergens": d.get("allergens") or []} for d in dishes]
+						with ui.spinner("Gemini AI planlı menüyü alerji, çölyak ve diyabet güvenliği açısından denetliyor..."):
+							ok_au, res_au, used_au = gai.audit_cafeteria_menu_with_gemini(
+								api_key=api_key,
+								model=model,
+								year_month=sel_ym,
+								planned_menu_summary=plan_sum,
+								clinical_risk_summary=risk_ctx,
+								available_dishes=dish_comp,
+							)
+						if ok_au:
+							ui.session_state["caf_ai_menu_audit"] = res_au
+							ui.success(f"✅ Güvenlik denetimi tamamlandı ({used_au}).")
+						else:
+							ui.error(f"Denetim hatası: {(res_au or {}).get('error', 'Yanıt alınamadı')}")
 
-	chk_c1, chk_c2, chk_c3, chk_c4 = ui.columns(4)
-	with chk_c1:
-		pr_kcal = ui.checkbox("Kalori (kcal) Göster", value=True, key="caf_print_kcal")
-	with chk_c2:
-		pr_carb = ui.checkbox("Karbonhidrat (g) Göster", value=True, key="caf_print_carbs")
-	with chk_c3:
-		pr_al = ui.checkbox("Alerjen Uyarısı Göster", value=True, key="caf_print_al")
-	with chk_c4:
-		pr_per_dish = ui.checkbox("Yemek Bazlı Kalori/Karb Detayı", value=False, key="caf_print_per_dish")
+					au_res = ui.session_state.get("caf_ai_menu_audit")
+					if isinstance(au_res, dict) and au_res.get("overall_summary"):
+						ui.metric("AI Beslenme & Klinik Uyum Skoru", f"{au_res.get('balance_score', '—')} / 100")
+						ui.info(str(au_res["overall_summary"]))
+						findings = au_res.get("risk_findings") or []
+						if findings:
+							ui.dataframe(pd.DataFrame(findings), hide_index=True, use_container_width=True)
+							actionable_f = [
+								f for f in findings
+								if isinstance(f, dict) and str(f.get("plan_date") or "").strip() and str(f.get("recommended_alternative") or "").strip()
+							]
+							if actionable_f:
+								af_c1, af_c2 = ui.columns([2.2, 1.0], vertical_alignment="bottom")
+								af_opts = {
+									f"{f.get('plan_date')} ({f.get('meal_slot') or active_slots[0]}) → İkame: {str(f.get('recommended_alternative'))[:55]}": f
+									for f in actionable_f
+								}
+								with af_c1:
+									picked_af_k = ui.selectbox("AI İkame / Düzeltme Önerisi Seç", list(af_opts.keys()), key="caf_ai_audit_fix_sel")
+								with af_c2:
+									if ui.button("🔄 İkame Notuna İşle", use_container_width=True, key="caf_btn_apply_audit_alt"):
+										chosen_f = af_opts[picked_af_k]
+										f_dt = str(chosen_f.get("plan_date"))[:10]
+										f_sl = str(chosen_f.get("meal_slot") or active_slots[0])
+										ex_r = plans.get((f_dt, f_sl))
+										if ex_r:
+											upsert_menu_plan_slot(
+												connect_db_fn,
+												plan_date=f_dt,
+												meal_slot=f_sl,
+												dish_ids=ex_r.get("dish_ids") or [],
+												custom_items=ex_r.get("custom_items") or [],
+												notes=str(ex_r.get("notes") or ""),
+												alt_menu_note=str(chosen_f.get("recommended_alternative") or ""),
+												sync_to_diabetes=auto_sync_diab,
+											)
+											ui.success(f"✅ {f_dt} ({f_sl}) için AI ikame önerisi kaydedildi.")
+											ui.rerun()
+						for wn in (au_res.get("weekly_nutrition_notes") or []):
+							ui.caption(f"• {wn}")
 
-	if len(active_slots) >= 3 and pr_page_mode == "combined":
-		ui.info(
-			f"💡 **Sayfa Sığdırma Önerisi:** Şu anda **{len(active_slots)} öğün** tek sayfada yan yana seçili. "
-			"Sütunların sıkışmaması için yukarıdan **“📑 Her Öğüne Ait Ayrı A4 Sayfası”** veya **“📐 Akıllı Sığdırma (Sayfa Başına En Fazla 2 Öğün)”** modunu seçebilirsiniz."
-		)
+		# Öğün Yönetimi (Öğün Adı Değiştirme & Özel Öğün Oluşturma)
+		_render_meal_slot_manager_expander(ctx_api, app_cfg, sched, key_prefix="caf_mp", expanded=False)
 
-	scope_code = "weekly" if "Hafta" in pr_scope else "monthly"
-	layout_code = "compact_one_page" if "Kompakt" in pr_layout_lbl else ("weekly_grid" if "Izgarası" in pr_layout_lbl else "standard")
-
-	signers = resolve_menu_signers_for_print(app_cfg)
-	a4_html = build_menu_a4_html(
-		connect_db_fn,
-		year_month=sel_ym,
-		scope=scope_code,
-		week_index=wk_idx,
-		active_slots=active_slots,
-		show_kcal=pr_kcal,
-		show_carbs=pr_carb,
-		show_allergens=pr_al,
-		include_weekends=inc_wknd,
-		layout_mode=layout_code,
-		signers=signers,
-		school_meta=app_cfg,
-		meal_page_mode=pr_page_mode,
-		page_orientation=pr_orient,
-		show_per_dish_nutrition=pr_per_dish,
-	)
-	a4_docx = build_menu_a4_docx(
-		connect_db_fn,
-		year_month=sel_ym,
-		scope=scope_code,
-		week_index=wk_idx,
-		active_slots=active_slots,
-		show_kcal=pr_kcal,
-		show_carbs=pr_carb,
-		show_allergens=pr_al,
-		include_weekends=inc_wknd,
-		layout_mode=layout_code,
-		signers=signers,
-		school_meta=app_cfg,
-		meal_page_mode=pr_page_mode,
-		page_orientation=pr_orient,
-		show_per_dish_nutrition=pr_per_dish,
-	)
-
-	dl1, dl2, dl3 = ui.columns(3)
-	with dl1:
-		ui.download_button(
-			"📝 A4 Resmi Menü İndir (.docx)",
-			data=a4_docx,
-			file_name=f"Yemekhane_Menu_{sel_ym}_{scope_code}.docx",
-			mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-			type="primary",
-			use_container_width=True,
-			key="caf_dl_menu_docx",
+		# Sütunlu Tablo Özeti (İsteğe Bağlı Başvuru Görünümü)
+		planned_col_rows = build_planned_menu_columnar_rows(
+			workdays,
+			plans,
+			active_slots,
+			meal_times=sched["meal_times"],
+			ramazan_mode=sched["ramazan_mode"],
+			ramazan_times=ram_times_planner,
 		)
-	with dl2:
-		ui.download_button(
-			"🖨️ Yazdırılabilir A4 HTML İndir (.html)",
-			data=a4_html.encode("utf-8"),
-			file_name=f"Yemekhane_Menu_{sel_ym}_{scope_code}.html",
-			mime="text/html",
-			use_container_width=True,
-			key="caf_dl_menu_html",
-		)
-	with dl3:
-		ui.download_button(
-			"📊 3 Sekmeli Menü Excel (.xlsx)",
-			data=lambda: build_school_menu_workbook_excel(connect_db_fn, sel_ym, school_meta=app_cfg),
-			file_name=f"Yemekhane_Menu_{sel_ym}_3Sekme.xlsx",
-			mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-			use_container_width=True,
-			key="caf_dl_menu_xlsx",
-		)
-	with ui.expander("📥 Excel / CSV Şablonundan Menü & Kalori Tablosu İçe Aktar", expanded=False):
-		ui.caption(
-			"Kurum antetli 3 sekmeli Yemek Listesi (.xlsx) veya aynı düzendeki (.csv) şablonunu yükleyerek "
-			"günlük 1./2./3.+ çeşit yemekleri ve Kalori/Alerjen Bilgi Tablosunu menüye aktarabilirsiniz."
-		)
-		up_menu_xl = ui.file_uploader(
-			"Menü Excel (.xlsx) veya CSV (.csv) Dosyası Seçin",
-			type=["xlsx", "csv"],
-			key="caf_menu_import_file",
-		)
-		if ui.button("✅ Excel / CSV Menüyü İçe Aktar", type="primary", key="caf_btn_import_menu_xlsx"):
-			if up_menu_xl is None:
-				ui.warning("Lütfen önce .xlsx veya .csv formatında menü dosyası seçin.")
+		with ui.expander(f"📋 Planlanmış Menü Tablo Özeti ({tot_planned_meals_cnt} Öğün)", expanded=False):
+			if planned_col_rows:
+				ui.dataframe(pd.DataFrame(planned_col_rows), hide_index=True, use_container_width=True)
 			else:
-				def_slot_imp = active_slots[0] if active_slots else "Öğle Yemeği"
-				res_imp = import_school_menu_from_excel_or_csv(
-					connect_db_fn,
-					up_menu_xl.getvalue(),
-					up_menu_xl.name,
-					default_slot=def_slot_imp,
-					sync_to_diabetes=bool(auto_sync_diab),
-				)
-				if res_imp.get("error"):
-					ui.error(str(res_imp["error"]))
-				else:
-					ui.success(
-						f"✅ İçe aktarma tamamlandı: {res_imp.get('plans_saved', 0)} gün/öğün planı "
-						f"ve {res_imp.get('dishes_upserted', 0)} yemek kalemi güncellendi."
-					)
-					ui.rerun()
-	with ui.expander("👁️ A4 Kağıdı Önizleme ve Doğrudan Yazdırma", expanded=False):
-		ui.components.v1.html(a4_html, height=620, scrolling=True)
+				ui.caption("Seçili ay için henüz öğün girilmiş gün bulunmuyor.")
 
 
 def _calc_live_invoice_details(

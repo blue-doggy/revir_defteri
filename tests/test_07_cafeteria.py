@@ -2614,10 +2614,22 @@ MİKTAR | BİRİM | MALIN CİNSİ | FİYAT | TUTAR
         )
         mp_html = str(out_mp.get("main_html") or "")
         self.assertNotIn("Çalışma Zamanı Hatası", mp_html)
+        self.assertIn("✏️ Haftalık Menü Planla", mp_html)
+        self.assertIn("🖨️ A4 Çıktı &amp; Canlı Önizleme", mp_html)
+        self.assertIn("✨ AI, Şablon &amp; Araçlar", mp_html)
+        self.assertIn("caf_btn_jump_a4_studio", mp_html)
         self.assertIn("Öğün Yönetimi: Öğün Adlarını Değiştir", mp_html)
         self.assertIn("Sayfa Sığdırma Önerisi", mp_html)
         self.assertIn("SKT / Sıfır Atık Stok Önerisi", mp_html)
         self.assertIn("Gece Etüt Ara Öğünü", mp_html)
+        self.assertIn("setA4Zoom", h_comb)
+
+        # Clicking "🖨️ A4 Önizle & Çıktı" shortcut activates the Split-Screen A4 Studio tab
+        out_jump = revir_ui.run_action_headless(
+            lambda: caf._render_tab_menu_planner(ctx_ui, "2026-10", persantil.get_app_settings()),
+            {"action": "click", "key": "caf_btn_jump_a4_studio"},
+        )
+        self.assertNotIn("Çalışma Zamanı Hatası", str(out_jump.get("main_html") or ""))
 
         # Clean reset of custom slot & default renames
         caf.delete_custom_meal_slot(self.connect, persantil.save_app_settings, persantil.get_app_settings(), "Gece Etüt Ara Öğünü", delete_plans=True)
