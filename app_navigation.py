@@ -18,6 +18,7 @@ PAGE_NAV_GROUPS: tuple[tuple[str, tuple[tuple[str, str, str, str | None], ...]],
 		("📏 Ölçüm ve Gelişim", "📏", "Ölçüm & Gelişim", None),
 		("📅 Takvim & Planlama", "📅", "Takvim & Planlama", None),
 		("🍽️ Yemekhane Yönetimi", "🍽️", "Yemekhane Yönetimi", None),
+		("🏨 Okul Yurdu", "🏨", "Okul Yurdu", "dorm_alerts"),
 	)),
 	("BELGE & SİSTEM", (
 		("🖨️ Raporlar", "🖨️", "Raporlar", None),

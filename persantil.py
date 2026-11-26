@@ -32,6 +32,7 @@ import app_navigation
 import report_settings_ui
 import report_workflow_ui
 import cafeteria as caf
+import school_dormitory as sdorm
 import school_calendar
 import medication_prospectus as mprosp
 import infirmary_supply as invsup
@@ -139,7 +140,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return (Path(meipass_raw) if meipass_raw else _BUNDLE_DIR) / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.42.0"
+_DEFAULT_APP_VERSION = "1.43.0"
 
 
 def _load_app_version() -> str:
@@ -35162,6 +35163,7 @@ def _handle_cmd_search(query: str) -> list[dict[str, Any]]:
 		{"group": "⚡ Hızlı İşlemler", "kind": "page", "value": "🩺 Revir Kaydı", "icon": "🩺", "title": "Yeni Revir Kaydı Aç", "subtitle": "Öğrenci veya yetişkin revir başvurusu kaydet (Alt+V)", "tag": "Sayfa"},
 		{"group": "⚡ Hızlı İşlemler", "kind": "page", "value": "💉 İnsülin & Diyabet Yönetimi", "icon": "💉", "title": "İnsülin Dozu Hesapla & Yemek Menüsü", "subtitle": "Bolus hesaplayıcı ve aylık okul yemek menüsü yönetimi", "tag": "Diyabet"},
 		{"group": "⚡ Hızlı İşlemler", "kind": "page", "value": "🍽️ Yemekhane Yönetimi", "icon": "🍽️", "title": "Yemekhane Yönetimi (Menü, Gider & Kasa)", "subtitle": "Yemekler bankası, iş günü menü planı, A4 çıktı, fatura/gider ve kasa takibi", "tag": "Yemekhane"},
+		{"group": "⚡ Hızlı İşlemler", "kind": "page", "value": "🏨 Okul Yurdu", "icon": "🏨", "title": "Okul Yurdu & Pansiyon Yönetimi", "subtitle": "Oda-yatak haritası, dış okul pansiyoner, müşahede, gece nöbeti, 7/24 ilaç, izolasyon ve MEB denetim", "tag": "Pansiyon"},
 		{"group": "⚡ Hızlı İşlemler", "kind": "new_student", "value": "Öğrenci", "icon": "➕", "title": "Yeni Öğrenci Profili Ekle", "subtitle": "Sağlık profili ve ilk ölçüm formu", "tag": "Çekmece"},
 		{"group": "⚡ Hızlı İşlemler", "kind": "new_student", "value": "Sivil / diğer kişi", "icon": "👫", "title": "Yeni Yetişkin / Personel Ekle", "subtitle": "Öğretmen, personel veya veli kaydı oluştur", "tag": "Çekmece"},
 		{"group": "⚡ Hızlı İşlemler", "kind": "class_mgr", "value": "", "icon": "🏫", "title": "Okul Sınıfları & Şube Yönetimi", "subtitle": "Sınıf ekle, çıkar veya öğrenci ata", "tag": "Pencere"},
@@ -35292,6 +35294,20 @@ def _handle_cmd_search(query: str) -> list[dict[str, Any]]:
 							"title": str(pr["supplier_name"]),
 							"subtitle": "Yemekhane tedarikçi / fatura kaydı",
 							"tag": "Tedarikçi",
+						})
+				sdorm.ensure_dormitory_tables(conn)
+				dr_rows = conn.execute("SELECT id, full_name, block_name, room_no, origin_school_name FROM dorm_residents WHERE is_active=1 LIMIT 40").fetchall()
+				for dr_r in dr_rows:
+					rm_str = f"{dr_r['block_name']} oda {dr_r['room_no']} {dr_r['origin_school_name'] or ''}"
+					if q in _tr_fold(dr_r["full_name"]) or q in _tr_fold(rm_str):
+						results.append({
+							"group": "🏨 Okul Yurdu",
+							"kind": "page",
+							"value": "🏨 Okul Yurdu",
+							"icon": "🛏️",
+							"title": f"{mask_kvkk_value(dr_r['full_name'], 'name')} ({dr_r['block_name']} · Oda {dr_r['room_no']})",
+							"subtitle": f"Pansiyon öğrencisi {('· ' + dr_r['origin_school_name']) if dr_r['origin_school_name'] else ''}".strip(),
+							"tag": "Yurt Odası",
 						})
 		except Exception:
 			pass
@@ -35443,6 +35459,21 @@ def render_cafeteria_page() -> None:
 	)
 
 
+def render_school_dormitory_page() -> None:
+	sdorm.render_school_dormitory_page(
+		{
+			"connect_db": connect_db,
+			"get_app_settings": get_app_settings,
+			"save_app_settings": save_app_settings,
+			"_get_active_gemini_config": _get_active_gemini_config,
+			"mask_kvkk_value": mask_kvkk_value,
+			"clear_all_data_caches": clear_all_data_caches,
+			"open_person_dossier_dialog": open_person_dossier_dialog,
+			"is_section_visible": is_section_visible,
+		}
+	)
+
+
 def render_calendar_page() -> None:
 	school_calendar.render_calendar_and_planning_page(
 		connect_db_fn=connect_db,
@@ -35469,6 +35500,7 @@ PAGE_RENDERERS: dict[str, Callable[[], None]] = {
 	"Takvim & Planlama": render_calendar_page,
 	"Takvim ve Planlama": render_calendar_page,
 	"Yemekhane Yönetimi": render_cafeteria_page,
+	"Okul Yurdu": render_school_dormitory_page,
 	"Raporlar": render_reports,
 	"Evraklar": render_documents_depot,
 	"Ayarlar": render_settings,
@@ -35529,16 +35561,20 @@ def main() -> None:
 	active_meds_badge = 0
 	open_fup_badge = 0
 	diab_badge = 0
+	dorm_badge = 0
 	nav_badge_error = False
 	try:
 		with connect_db() as _bconn:
 			idm.ensure_diabetes_tables(_bconn)
+			sdorm.ensure_dormitory_tables(_bconn)
 			today_iso = date.today().isoformat()
 			b_row = _bconn.execute(
 				"""SELECT (SELECT COUNT(*) FROM visits WHERE visit_date=?) tv,
 						  (SELECT COUNT(*) FROM student_medications WHERE status='Aktif') am,
 						  (SELECT COUNT(*) FROM visits WHERE follow_up_status='Açık' AND follow_up IS NOT NULL AND trim(follow_up)!='') fu,
-						  (SELECT COUNT(*) FROM diabetes_profiles WHERE is_diabetic=1) db""",
+						  (SELECT COUNT(*) FROM diabetes_profiles WHERE is_diabetic=1) db,
+						  (SELECT COUNT(*) FROM dorm_observation_stays WHERE outcome_status='Müşahedede (Aktif Yatış)')
+						  + (SELECT COUNT(*) FROM dorm_isolation_stays WHERE status='İzolasyonda') drm""",
 				(today_iso,),
 			).fetchone()
 			if b_row:
@@ -35546,6 +35582,7 @@ def main() -> None:
 				active_meds_badge = int(b_row["am"] or 0)
 				open_fup_badge = int(b_row["fu"] or 0)
 				diab_badge = int(b_row["db"] or 0)
+				dorm_badge = int(b_row["drm"] or 0)
 	except Exception:
 		LOGGER.exception("Yan menü bildirim sayıları alınamadı.")
 		nav_badge_error = True
@@ -35555,6 +35592,7 @@ def main() -> None:
 		"today_visits": today_vis_badge or None,
 		"active_meds": active_meds_badge or None,
 		"diabetes_profiles": diab_badge or None,
+		"dorm_alerts": dorm_badge or None,
 	}
 	nav_groups = [
 		(
