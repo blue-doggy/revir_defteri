@@ -4226,13 +4226,30 @@ body.revir-layout-edit .revir-box-host:hover {
 	transition: none !important; user-select: none !important;
 	outline: 2px dashed var(--teal) !important; box-shadow: 0 10px 26px rgba(13,148,136,0.18) !important;
 }
+.revir-box-host.revir-box-closed { display: none !important; }
+.revir-box-close-x {
+	display: none; position: absolute; top: 6px; right: 7px; z-index: 26;
+	width: 25px; height: 25px; border-radius: 50%;
+	border: 1.5px solid #fca5a5; background: rgba(255,255,255,0.96); color: #dc2626;
+	font: 900 12.5px/1 sans-serif; align-items: center; justify-content: center;
+	cursor: pointer; padding: 0; box-shadow: 0 3px 10px rgba(15,23,42,0.14);
+	opacity: 0; pointer-events: none; transform: scale(0.86);
+	transition: opacity 0.15s ease, transform 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+body.revir-layout-edit .revir-box-host > .revir-box-close-x { display: inline-flex; }
+body.revir-layout-edit .revir-box-host:hover > .revir-box-close-x {
+	opacity: 1; pointer-events: auto; transform: scale(1);
+}
+.revir-box-close-x:hover { background: #dc2626 !important; color: #ffffff !important; border-color: #b91c1c !important; }
 .revir-box-toolbar {
-	display: none; position: absolute; top: 6px; right: 8px; z-index: 24;
+	display: none; position: absolute; top: 6px; right: 37px; z-index: 24;
 	align-items: center; gap: 3px; padding: 3px 5px; border-radius: 8px;
 	background: var(--card-bg); border: 1px solid rgba(13,148,136,0.45);
 	box-shadow: 0 4px 12px rgba(15,23,42,0.14);
+	opacity: 0; pointer-events: none; transition: opacity 0.15s ease;
 }
 body.revir-layout-edit .revir-box-host > .revir-box-toolbar { display: inline-flex; }
+body.revir-layout-edit .revir-box-host:hover > .revir-box-toolbar { opacity: 1; pointer-events: auto; }
 .revir-box-tbtn {
 	border: none; background: transparent; color: var(--text-main);
 	width: 23px; height: 22px; border-radius: 5px; cursor: pointer;
@@ -4335,10 +4352,72 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 .revir-layout-bar-btn {
 	border: 1px solid var(--line); background: var(--sidebar-bg); color: var(--text-main);
 	border-radius: 7px; padding: 4px 10px; font-size: 12px; font-weight: 700; cursor: pointer; font-family: inherit;
+	display: inline-flex; align-items: center; gap: 5px;
 }
 .revir-layout-bar-btn:hover { border-color: var(--teal); color: var(--teal); background: var(--mint); }
+.revir-layout-bar-btn.active-tray { border-color: var(--teal); background: var(--mint); color: var(--teal); }
 .revir-layout-bar-btn.primary { background: var(--teal); color: #ffffff; border-color: var(--teal); }
 .revir-layout-bar-btn.primary:hover { background: var(--teal-hover); color: #ffffff; }
+.revir-layout-wcnt {
+	display: inline-flex; align-items: center; justify-content: center;
+	min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px;
+	font-size: 10.5px; font-weight: 900; background: var(--line); color: var(--text-muted);
+}
+.revir-layout-wcnt.has-items { background: #f59e0b; color: #ffffff; }
+
+#revir-widget-tray {
+	position: fixed; bottom: 66px; left: 24px; z-index: 3405;
+	width: 356px; max-width: calc(100vw - 40px); max-height: 55vh;
+	background: var(--card-bg); color: var(--text-main);
+	border: 1.5px solid var(--teal); border-radius: 14px;
+	box-shadow: 0 18px 45px rgba(15,23,42,0.26);
+	display: none; flex-direction: column; overflow: hidden;
+	transition: opacity 0.16s ease, transform 0.16s ease;
+}
+body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revirPopIn 0.14s ease; }
+#revir-widget-tray.dragging-out { opacity: 0.22 !important; pointer-events: none !important; }
+.revir-wtray-hdr {
+	display: flex; align-items: center; justify-content: space-between; gap: 8px;
+	padding: 10px 13px; background: var(--sidebar-bg); border-bottom: 1px solid var(--line);
+}
+.revir-wtray-title { font-size: 13px; font-weight: 800; color: var(--text-heading); }
+.revir-wtray-sub { font-size: 11px; color: var(--text-muted); padding: 7px 13px 4px 13px; line-height: 1.35; }
+.revir-wtray-list {
+	padding: 6px 11px 11px 11px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px;
+}
+.revir-wtray-empty {
+	padding: 14px 10px; text-align: center; font-size: 12px; color: var(--text-muted);
+	border: 1px dashed var(--line); border-radius: 9px; background: var(--sidebar-bg);
+}
+.revir-wtray-item {
+	display: flex; align-items: center; justify-content: space-between; gap: 8px;
+	padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line);
+	background: var(--sidebar-bg); cursor: grab; user-select: none; touch-action: none;
+	transition: border-color 0.15s ease, background 0.15s ease, transform 0.12s ease;
+}
+.revir-wtray-item:hover { border-color: var(--teal); background: var(--mint); }
+.revir-wtray-item-info { min-width: 0; flex: 1; }
+.revir-wtray-item-name {
+	font-size: 12.5px; font-weight: 800; color: var(--text-heading);
+	white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.revir-wtray-item-hint { font-size: 10.5px; color: var(--text-muted); margin-top: 1px; }
+.revir-wtray-add-btn {
+	width: 30px; height: 30px; border-radius: 8px; border: 1.5px solid var(--teal);
+	background: var(--teal); color: #ffffff; font-size: 18px; font-weight: 900; line-height: 1;
+	display: inline-flex; align-items: center; justify-content: center;
+	cursor: grab; flex-shrink: 0; touch-action: none;
+	box-shadow: 0 2px 8px rgba(13,148,136,0.25); transition: background 0.14s ease, transform 0.12s ease;
+}
+.revir-wtray-add-btn:hover { background: var(--teal-hover); transform: scale(1.06); }
+#revir-wtray-drag-chip {
+	position: fixed; top: 0; left: 0; z-index: 99995; pointer-events: none;
+	display: none; align-items: center; gap: 7px; padding: 7px 13px; border-radius: 999px;
+	background: #0f172a; color: #ffffff; border: 1.5px solid var(--teal);
+	font-size: 12px; font-weight: 800; box-shadow: 0 10px 26px rgba(15,23,42,0.34);
+	white-space: nowrap;
+}
+#revir-wtray-drag-chip.active { display: inline-flex; }
 #revir-chat-bubble::after {
 	content: ""; position: absolute; bottom: -8px; right: 30px;
 	width: 16px; height: 16px; background: var(--card-bg, #ffffff);
@@ -4688,10 +4767,22 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 <div id="revir-resize-badge"></div>
 <div id="revir-toast" onclick="this.style.display='none'" title="Kapatmak için tıklayın"></div>
 <div id="revir-layout-bar">
-	<span>🧩 Kutucuk Düzeni (Takvim Hariç) — Sürükle veya Kenardan Boyutlandır</span>
-	<button type="button" class="revir-layout-bar-btn" onclick="window.__revirResetPageBoxLayout()" title="Bu sayfadaki tüm kutucuk konum ve boyutlarını varsayılana döndür">↺ Sayfayı Sıfırla</button>
+	<span>🧩 Kutucuk Düzeni — Sürükle, Boyutlandır veya ✕ ile Kapat</span>
+	<button type="button" id="revir-layout-widgets-btn" class="revir-layout-bar-btn" onclick="window.__revirToggleWidgetTray()" title="Bu sayfada kapattığınız widget'ları görüntüleyin ve sürükleyip istediğiniz yere bırakın">
+		🧩 Widgetlar <span id="revir-layout-widgets-cnt" class="revir-layout-wcnt">0</span>
+	</button>
+	<button type="button" class="revir-layout-bar-btn" onclick="window.__revirResetPageBoxLayout()" title="Bu sayfadaki tüm kutucuk konum, boyut ve gizliliklerini varsayılana döndür">↺ Sayfayı Sıfırla</button>
 	<button type="button" class="revir-layout-bar-btn primary" onclick="window.__revirToggleLayoutEdit(false)">✓ Bitir</button>
 </div>
+<div id="revir-widget-tray" role="region" aria-label="Kapatılan Widgetlar">
+	<div class="revir-wtray-hdr">
+		<span class="revir-wtray-title">🧩 Kapatılan Widgetlar</span>
+		<button type="button" class="revir-box-tbtn" onclick="window.__revirToggleWidgetTray(false)" title="Kapat">✕</button>
+	</div>
+	<div class="revir-wtray-sub">Yanındaki <b>＋</b> butonuna tıklayıp veya sürükleyip sayfadaki istediğiniz konuma bırakabilirsiniz.</div>
+	<div id="revir-widget-tray-list" class="revir-wtray-list"></div>
+</div>
+<div id="revir-wtray-drag-chip"></div>
 
 <!-- Yüzen Gemini Sohbet Butonu ve Konuşma Balonu -->
 <button id="revir-fab-btn" type="button" title="Gemini Klinik Asistan ile Konuş (Ctrl/⌘J / Alt+A)" aria-label="Gemini Klinik Asistan" onclick="window.__revirToggleChatBubble()">
@@ -4792,6 +4883,7 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 		clearTimeout(el.__t);
 		el.__t = setTimeout(function() { el.style.display = "none"; }, 3600);
 	}
+	window.__revirShowToast = showToast;
 
 	function setBusy(on, labelTxt) {
 		var bar = document.getElementById("revir-busy-bar");
@@ -6910,6 +7002,7 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 		store.pages[pg] = store.pages[pg] || {};
 		store.pages[pg].orders = store.pages[pg].orders || {};
 		store.pages[pg].sizes = store.pages[pg].sizes || {};
+		store.pages[pg].hidden = store.pages[pg].hidden || {};
 		return store.pages[pg];
 	}
 	function boxTextFingerprint(el) {
@@ -6972,6 +7065,15 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 		}
 		var nxt = (forceVal !== undefined) ? !!forceVal : !document.body.classList.contains("revir-layout-edit");
 		document.body.classList.toggle("revir-layout-edit", nxt);
+		if (window.__revirSmartCanvasApi && typeof window.__revirSmartCanvasApi.syncEditVisuals === "function") {
+			window.__revirSmartCanvasApi.syncEditVisuals();
+		}
+		if (!nxt && typeof window.__revirToggleWidgetTray === "function") {
+			window.__revirToggleWidgetTray(false);
+		}
+		if (nxt && typeof window.__revirRefreshWidgetTray === "function") {
+			window.__revirRefreshWidgetTray();
+		}
 		if (String(lastRenderedPage || "").includes("Genel Bakış")) {
 			var overviewEditState = document.querySelector('input[data-key="layout_overview_edit"]');
 			if (overviewEditState) {
@@ -6984,7 +7086,7 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 		}
 		syncLayoutBtnState();
 		if (nxt) {
-			showToast("🧩 12 sütunlu akıllı düzen açıldı — merkeze sürükleyince takas, araya bırakınca itme yapar");
+			showToast("🧩 Düzen modu açıldı — kartları sürükleyin, sağ üstteki ✕ ile kapatın veya ‘🧩 Widgetlar’dan geri ekleyin");
 		}
 	};
 	document.addEventListener("change", function(e) {
@@ -7067,10 +7169,33 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 		}
 
 		if (hostEl.dataset.boxDecorated === "1") {
+			hostEl.classList.toggle("revir-box-closed", !!pData.hidden[boxId]);
 			applyBoxSpanAndSize(sv);
 			return;
 		}
 		hostEl.dataset.boxDecorated = "1";
+		hostEl.dataset.boxTitle = boxTextFingerprint(hostEl);
+		hostEl.classList.toggle("revir-box-closed", !!pData.hidden[boxId]);
+
+		var closeXBtn = document.createElement("button");
+		closeXBtn.type = "button";
+		closeXBtn.className = "revir-box-close-x";
+		closeXBtn.title = "Bu pencereyi kapat (‘🧩 Widgetlar’ menüsünden geri ekleyebilirsiniz)";
+		closeXBtn.textContent = "✕";
+		closeXBtn.addEventListener("pointerdown", function(e) { e.stopPropagation(); });
+		closeXBtn.addEventListener("click", function(e) {
+			e.preventDefault();
+			e.stopPropagation();
+			var stClose = loadBoxStore();
+			var pdClose = getPageBoxData(stClose, pg);
+			var wTitle = hostEl.dataset.boxTitle || boxTextFingerprint(hostEl);
+			pdClose.hidden[boxId] = { title: wTitle, zoneId: zoneId };
+			saveBoxStore(stClose);
+			hostEl.classList.add("revir-box-closed");
+			if (typeof window.__revirRefreshWidgetTray === "function") window.__revirRefreshWidgetTray();
+			showToast("🧩 “" + wTitle + "” kapatıldı — alt çubuktaki ‘🧩 Widgetlar’ menüsünden geri ekleyebilirsiniz");
+		});
+		hostEl.appendChild(closeXBtn);
 
 		var swapPill = document.createElement("div");
 		swapPill.className = "revir-box-swap-pill";
@@ -7370,8 +7495,310 @@ body.revir-layout-edit #revir-layout-bar { display: inline-flex; animation: revi
 			var cols = Array.prototype.slice.call(colsEl.children).filter(isEligibleGridCol);
 			if (cols.length >= 2) setupZone(colsEl, "hz:" + hIdx, cols, true);
 		});
+		if (typeof window.__revirRefreshWidgetTray === "function") window.__revirRefreshWidgetTray();
 	}
 	window.__revirInitBoxLayout = initBoxLayout;
+
+	/* =========================================================================
+	   KAPATILAN WIDGET'LAR ÇEKMECESİ & + İLE SEÇİLEN KONUMA SÜRÜKLE-BIRAK MOTORU
+	   ========================================================================= */
+	(function initClosedWidgetTray() {
+		var activeFollowPlacement = null;
+
+		function isSmartCanvasActive() {
+			return !!(window.__revirSmartCanvasApi && typeof window.__revirSmartCanvasApi.isActive === "function" && window.__revirSmartCanvasApi.isActive());
+		}
+
+		function getClosedWidgetsForCurrentPage() {
+			if (isSmartCanvasActive()) {
+				return (window.__revirSmartCanvasApi.getHiddenWidgets() || []).map(function(w) {
+					return { kind: "smart", id: w.id, title: w.title || w.id };
+				});
+			}
+			var pg = String(lastRenderedPage || "main");
+			var store = loadBoxStore();
+			var pData = getPageBoxData(store, pg);
+			var hiddenMap = pData.hidden || {};
+			var out = [];
+			var mainInner = document.getElementById("revir-main-inner");
+			if (!mainInner) return out;
+			Object.keys(hiddenMap).forEach(function(bid) {
+				var el = mainInner.querySelector('[data-box-id="' + CSS.escape(bid) + '"]');
+				if (el) {
+					var info = hiddenMap[bid] || {};
+					out.push({
+						kind: "box",
+						id: bid,
+						title: info.title || el.dataset.boxTitle || boxTextFingerprint(el),
+						zoneId: info.zoneId || el.dataset.boxZone || ""
+					});
+				}
+			});
+			return out;
+		}
+
+		function setDragChip(visible, text, x, y) {
+			var chip = document.getElementById("revir-wtray-drag-chip");
+			if (!chip) return;
+			if (!visible) {
+				chip.classList.remove("active");
+				return;
+			}
+			if (text) chip.textContent = text;
+			chip.classList.add("active");
+			if (typeof x === "number" && typeof y === "number") {
+				chip.style.transform = "translate(" + Math.round(x + 14) + "px, " + Math.round(y + 14) + "px)";
+			}
+		}
+
+		function cancelFollowPlacement() {
+			if (!activeFollowPlacement) return;
+			if (activeFollowPlacement.cleanup) activeFollowPlacement.cleanup();
+			activeFollowPlacement = null;
+			setDragChip(false);
+			clearBoxDrops();
+			if (isSmartCanvasActive()) window.__revirSmartCanvasApi.clearExternalPreview();
+		}
+
+		function findBoxDropTarget(item, clientX, clientY) {
+			clearBoxDrops();
+			var mainInner = document.getElementById("revir-main-inner");
+			if (!mainInner) return null;
+			var hostEl = mainInner.querySelector('[data-box-id="' + CSS.escape(item.id) + '"]');
+			if (!hostEl || !hostEl.parentNode) return null;
+			var zoneEl = hostEl.parentNode;
+			var sibs = Array.prototype.slice.call(zoneEl.children).filter(function(ch) {
+				return ch !== hostEl && ch.dataset && ch.dataset.boxId && !ch.classList.contains("revir-box-closed");
+			});
+			var best = null;
+			var bestDist = Infinity;
+			for (var i = 0; i < sibs.length; i++) {
+				var r = sibs[i].getBoundingClientRect();
+				var cx = (r.left + r.right) / 2;
+				var cy = (r.top + r.bottom) / 2;
+				var d = Math.hypot(clientX - cx, clientY - cy);
+				if (d < bestDist) {
+					bestDist = d;
+					best = { el: sibs[i], rect: r };
+				}
+			}
+			if (!best) return { zoneEl: zoneEl, targetEl: null, before: false };
+			var before = clientY < (best.rect.top + best.rect.height / 2);
+			best.el.classList.add(before ? "revir-box-drop-before" : "revir-box-drop-after");
+			return { zoneEl: zoneEl, targetEl: best.el, before: before };
+		}
+
+		function restoreBoxWidgetAt(item, dropTarget) {
+			var pg = String(lastRenderedPage || "main");
+			var mainInner = document.getElementById("revir-main-inner");
+			if (!mainInner) return false;
+			var hostEl = mainInner.querySelector('[data-box-id="' + CSS.escape(item.id) + '"]');
+			if (!hostEl) return false;
+			hostEl.classList.remove("revir-box-closed");
+			var zoneEl = hostEl.parentNode;
+			var zoneId = hostEl.dataset.boxZone || item.zoneId || "";
+			if (dropTarget && dropTarget.targetEl && dropTarget.targetEl.parentNode === zoneEl) {
+				if (dropTarget.before) zoneEl.insertBefore(hostEl, dropTarget.targetEl);
+				else zoneEl.insertBefore(hostEl, dropTarget.targetEl.nextSibling);
+			}
+			var stNow = loadBoxStore();
+			var pd = getPageBoxData(stNow, pg);
+			delete pd.hidden[item.id];
+			if (zoneEl && zoneId) {
+				var ordered = Array.prototype.slice.call(zoneEl.children).filter(function(ch) {
+					return ch.dataset && ch.dataset.boxZone === zoneId;
+				});
+				pd.orders[zoneId] = ordered.map(function(h) { return h.dataset.boxId; }).filter(Boolean);
+			}
+			saveBoxStore(stNow);
+			clearBoxDrops();
+			renderWidgetTray();
+			return true;
+		}
+
+		function autoScrollMainOnDrag(clientY) {
+			var mainEl = document.getElementById("revir-main");
+			if (!mainEl) return;
+			var mr = mainEl.getBoundingClientRect();
+			if (clientY < mr.top + 56) mainEl.scrollTop -= 14;
+			else if (clientY > mr.bottom - 56) mainEl.scrollTop += 14;
+		}
+
+		function startFollowPlacementMode(item, startX, startY) {
+			cancelFollowPlacement();
+			// Tıklanır tıklanmaz widget'ı görünür hale getir ve imleçle hedef konumu seçmeye izin ver
+			if (item.kind === "smart" && isSmartCanvasActive()) {
+				window.__revirSmartCanvasApi.restoreWidget(item.id, null);
+			} else if (item.kind === "box") {
+				restoreBoxWidgetAt(item, null);
+			}
+			renderWidgetTray();
+			setDragChip(true, "📍 “" + item.title + "” — Bırakmak istediğiniz yere tıklayın (ESC: Olduğu yerde kalsın)", startX, startY);
+
+			var lastSmartPos = null;
+			var lastBoxTarget = null;
+
+			function onMove(mv) {
+				setDragChip(true, null, mv.clientX, mv.clientY);
+				autoScrollMainOnDrag(mv.clientY);
+				if (item.kind === "smart" && isSmartCanvasActive()) {
+					lastSmartPos = window.__revirSmartCanvasApi.previewExternalDrop(item.id, mv.clientX, mv.clientY);
+				} else if (item.kind === "box") {
+					lastBoxTarget = findBoxDropTarget(item, mv.clientX, mv.clientY);
+				}
+			}
+
+			function onDown(ev) {
+				if (ev.target && ev.target.closest("#revir-widget-tray, #revir-layout-bar")) return;
+				ev.preventDefault();
+				ev.stopPropagation();
+				if (item.kind === "smart" && isSmartCanvasActive() && lastSmartPos) {
+					window.__revirSmartCanvasApi.restoreWidget(item.id, lastSmartPos);
+				} else if (item.kind === "box" && lastBoxTarget) {
+					restoreBoxWidgetAt(item, lastBoxTarget);
+				}
+				showToast("✅ “" + item.title + "” seçtiğiniz konuma yerleştirildi");
+				cancelFollowPlacement();
+			}
+
+			function onKey(ke) {
+				if (ke.key === "Escape") {
+					cancelFollowPlacement();
+				}
+			}
+
+			window.addEventListener("pointermove", onMove);
+			window.addEventListener("pointerdown", onDown, true);
+			window.addEventListener("keydown", onKey);
+			activeFollowPlacement = {
+				cleanup: function() {
+					window.removeEventListener("pointermove", onMove);
+					window.removeEventListener("pointerdown", onDown, true);
+					window.removeEventListener("keydown", onKey);
+				}
+			};
+		}
+
+		function bindTrayItemGesture(rowEl, item) {
+			rowEl.addEventListener("pointerdown", function(e) {
+				if (e.button !== 0) return;
+				e.preventDefault();
+				e.stopPropagation();
+				cancelFollowPlacement();
+
+				var trayEl = document.getElementById("revir-widget-tray");
+				var sx = e.clientX, sy = e.clientY;
+				var dragging = false;
+				var lastSmartPos = null;
+				var lastBoxTarget = null;
+
+				function onMove(mv) {
+					if (!dragging && Math.hypot(mv.clientX - sx, mv.clientY - sy) > 5) {
+						dragging = true;
+						if (trayEl) trayEl.classList.add("dragging-out");
+					}
+					if (!dragging) return;
+					setDragChip(true, "➕ " + item.title + " — İstediğiniz yere bırakın", mv.clientX, mv.clientY);
+					autoScrollMainOnDrag(mv.clientY);
+					if (item.kind === "smart" && isSmartCanvasActive()) {
+						lastSmartPos = window.__revirSmartCanvasApi.previewExternalDrop(item.id, mv.clientX, mv.clientY);
+					} else if (item.kind === "box") {
+						lastBoxTarget = findBoxDropTarget(item, mv.clientX, mv.clientY);
+					}
+				}
+
+				function onUp(upEv) {
+					window.removeEventListener("pointermove", onMove);
+					window.removeEventListener("pointerup", onUp);
+					window.removeEventListener("pointercancel", onUp);
+					if (trayEl) trayEl.classList.remove("dragging-out");
+					setDragChip(false);
+
+					if (dragging) {
+						var trayRect = trayEl ? trayEl.getBoundingClientRect() : null;
+						var droppedBackOnTray = trayRect && upEv.clientX >= trayRect.left && upEv.clientX <= trayRect.right && upEv.clientY >= trayRect.top && upEv.clientY <= trayRect.bottom;
+						if (droppedBackOnTray) {
+							clearBoxDrops();
+							if (isSmartCanvasActive()) window.__revirSmartCanvasApi.clearExternalPreview();
+							return;
+						}
+						if (item.kind === "smart" && isSmartCanvasActive()) {
+							window.__revirSmartCanvasApi.restoreWidget(item.id, lastSmartPos);
+						} else if (item.kind === "box") {
+							restoreBoxWidgetAt(item, lastBoxTarget);
+						}
+						renderWidgetTray();
+						showToast("✅ “" + item.title + "” seçtiğiniz konuma eklendi");
+					} else {
+						// + butonuna veya satıra tek tıklandığında ekle ve hedef konum seçimine bağla
+						startFollowPlacementMode(item, upEv.clientX, upEv.clientY);
+					}
+				}
+
+				window.addEventListener("pointermove", onMove);
+				window.addEventListener("pointerup", onUp);
+				window.addEventListener("pointercancel", onUp);
+			});
+		}
+
+		function renderWidgetTray() {
+			var cntEl = document.getElementById("revir-layout-widgets-cnt");
+			var listEl = document.getElementById("revir-widget-tray-list");
+			var closedList = getClosedWidgetsForCurrentPage();
+			if (cntEl) {
+				cntEl.textContent = String(closedList.length);
+				cntEl.classList.toggle("has-items", closedList.length > 0);
+			}
+			if (!listEl) return;
+			listEl.innerHTML = "";
+			if (!closedList.length) {
+				var emp = document.createElement("div");
+				emp.className = "revir-wtray-empty";
+				emp.innerHTML = "✨ Bu sayfada kapatılmış widget yok.<br/><span style='font-size:11px;opacity:0.85;'>Kartların sağ üst köşesindeki <b>✕</b> işaretiyle kapattığınız pencereler burada listelenir.</span>";
+				listEl.appendChild(emp);
+				return;
+			}
+			closedList.forEach(function(item) {
+				var row = document.createElement("div");
+				row.className = "revir-wtray-item";
+				row.dataset.closedWidgetId = item.id;
+
+				var info = document.createElement("div");
+				info.className = "revir-wtray-item-info";
+				var nm = document.createElement("div");
+				nm.className = "revir-wtray-item-name";
+				nm.textContent = item.title;
+				var hint = document.createElement("div");
+				hint.className = "revir-wtray-item-hint";
+				hint.textContent = "Sürükleyip bırakın veya ＋ ile konum seçin";
+				info.appendChild(nm);
+				info.appendChild(hint);
+
+				var addBtn = document.createElement("button");
+				addBtn.type = "button";
+				addBtn.className = "revir-wtray-add-btn";
+				addBtn.title = "Tıklayıp veya sürükleyip istediğiniz yere bırakın";
+				addBtn.textContent = "+";
+
+				row.appendChild(info);
+				row.appendChild(addBtn);
+				bindTrayItemGesture(row, item);
+				listEl.appendChild(row);
+			});
+		}
+
+		window.__revirRefreshWidgetTray = renderWidgetTray;
+		window.__revirToggleWidgetTray = function(forceOpen) {
+			var tray = document.getElementById("revir-widget-tray");
+			var btn = document.getElementById("revir-layout-widgets-btn");
+			if (!tray) return;
+			var nextOpen = (forceOpen !== undefined) ? !!forceOpen : !tray.classList.contains("open");
+			if (!nextOpen) cancelFollowPlacement();
+			tray.classList.toggle("open", nextOpen);
+			if (btn) btn.classList.toggle("active-tray", nextOpen);
+			if (nextOpen) renderWidgetTray();
+		};
+	})();
 
 	/* =========================================================================
 	   KALICI YAN MENÜ RADYO & YEREL MP3 ÇALAR + MEDYA TUŞLARI MOTORU

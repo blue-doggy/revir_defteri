@@ -141,7 +141,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return (Path(meipass_raw) if meipass_raw else _BUNDLE_DIR) / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.44.0"
+_DEFAULT_APP_VERSION = "1.45.0"
 
 
 def _load_app_version() -> str:
@@ -1028,6 +1028,7 @@ GRID_LAYOUT_GAP_PX = 12
 
 # İçerik okunabilirliğini korumak için bileşen bazlı en küçük izin verilen sütun / satır eşikleri
 _WIDGET_MIN_GRID_BOUNDS: dict[str, tuple[int, int]] = {
+	"overview_daily_leaf": (4, 4),
 	"overview_stats": (6, 3),
 	"overview_quick_links": (4, 2),
 	"overview_meds": (4, 3),
@@ -1046,6 +1047,20 @@ _WIDGET_MIN_GRID_BOUNDS: dict[str, tuple[int, int]] = {
 	"clinical": (4, 3),
 	"vaccination": (4, 3),
 	"vaccination_info": (4, 3),
+}
+
+WIDGET_DISPLAY_TITLES: dict[str, str] = {
+	"overview_daily_leaf": "🗓️ Günlük Takvim Yaprağı",
+	"overview_stats": "📈 İstatistik Kartları & Öncelikler",
+	"overview_quick_links": "⚡ Hızlı Erişim ve İşlemler",
+	"overview_meds": "💊 Bugünün İlaç Çizelgesi Özeti",
+	"overview_diabetes": "💙 Diyabet Takipli Öğrenciler",
+	"overview_chart": "📊 Son 14 Takvim Günü Grafiği",
+	"overview_calendar": "📅 Takvim & Yaklaşan Etkinlikler",
+	"overview_gemini": "🤖 Gemini AI Klinik Komuta Merkezi",
+	"overview_pending": "⏳ Bekleyen İzlem ve Sevkler",
+	"overview_outbreak": "🦠 Salgın Erken Uyarı Radarı",
+	"overview_recent": "🕒 Son Yapılan İşlemler",
 }
 
 
@@ -1185,9 +1200,21 @@ def get_saved_widget_layout(page_key: str, default_layout: dict[str, Any]) -> di
 	saved = bundle.get("presets", {}).get(preset)
 	if isinstance(saved, dict):
 		layout = _normalize_widget_layout(default_layout)
+		had_daily_leaf = "overview_daily_leaf" in saved
 		for widget_id, item in _normalize_widget_layout(saved).items():
 			if widget_id in layout:
 				layout[widget_id] = item
+		if page_key == "layout_overview" and "overview_daily_leaf" in layout and not had_daily_leaf:
+			st_it = layout.get("overview_stats")
+			if st_it and int(st_it.get("row", 0)) == 0 and int(st_it.get("col_span", 12)) >= 8:
+				st_it["col"] = 0
+				st_it["col_span"] = 7
+				st_it["w_pct"] = 58.33
+			ql_it = layout.get("overview_quick_links")
+			if ql_it and int(ql_it.get("row", 4)) <= 5 and int(ql_it.get("col_span", 12)) >= 8:
+				ql_it["col"] = 0
+				ql_it["col_span"] = 7
+				ql_it["w_pct"] = 58.33
 		return layout
 	return _preset_default_layout(page_key, preset, default_layout)
 
@@ -1300,13 +1327,15 @@ def render_layout_toolbar(
 	with restore_col:
 		hidden_widgets = [widget_id for widget_id, item in layout_data.items() if not item["visible"]]
 		if hidden_widgets:
-			restore_id = ui.selectbox(
+			lbl_to_wid = {f"{WIDGET_DISPLAY_TITLES.get(wid, wid)} ({wid})": wid for wid in hidden_widgets}
+			restore_lbl = ui.selectbox(
 				"👁️ Gizli Kutular",
-				["—"] + hidden_widgets,
+				["—"] + list(lbl_to_wid.keys()),
 				key=f"widget_layout_restore_{page_key}",
 				disabled=not edit_mode,
 			)
-			if restore_id != "—":
+			if restore_lbl != "—" and restore_lbl in lbl_to_wid:
+				restore_id = lbl_to_wid[restore_lbl]
 				layout_data[restore_id]["visible"] = True
 				save_widget_layout(page_key, layout_data, stored_preset)
 
@@ -1339,6 +1368,7 @@ def render_draggable_resizable_canvas(
 		"magnetic": bool(magnetic),
 		"action": action,
 		"accentColors": list(WIDGET_LAYOUT_ACCENTS.values()),
+		"titles": WIDGET_DISPLAY_TITLES,
 	}
 	config_json = json.dumps(config, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
 	script = r"""
@@ -1456,14 +1486,17 @@ def render_draggable_resizable_canvas(
 		.revir-layout-canvas>.revir-card[data-layout-widget]{position:absolute!important;box-sizing:border-box!important;margin:0!important;overflow-y:auto!important;overflow-x:auto!important;container-type:inline-size;transition:left .16s cubic-bezier(.2,.8,.2,1),top .16s cubic-bezier(.2,.8,.2,1),width .16s cubic-bezier(.2,.8,.2,1),height .16s cubic-bezier(.2,.8,.2,1),box-shadow .14s ease,transform .12s ease}
 		.revir-layout-canvas>.revir-card[data-layout-widget].layout-dragging,
 		.revir-layout-canvas>.revir-card[data-layout-widget].layout-resizing{transition:box-shadow .12s ease!important;z-index:900!important;box-shadow:0 18px 40px rgba(15,23,42,0.24)!important;opacity:0.94}
-		.revir-layout-canvas>.revir-card[data-layout-widget].layout-hidden{visibility:hidden!important;pointer-events:none!important}
-		.revir-layout-canvas>.revir-card[data-layout-widget].layout-edit{outline:2px dashed rgba(13,148,136,0.75)!important;outline-offset:2px}
+		.revir-layout-canvas>.revir-card[data-layout-widget].layout-hidden{display:none!important;pointer-events:none!important}
+		.revir-layout-canvas>.revir-card[data-layout-widget].layout-edit,
+		body.revir-layout-edit .revir-layout-canvas>.revir-card[data-layout-widget]{outline:2px dashed rgba(13,148,136,0.75)!important;outline-offset:2px}
+		.revir-layout-canvas>.revir-card[data-layout-widget].revir-restored-pulse{animation:revirWidgetRestorePulse 1.1s ease}
+		@keyframes revirWidgetRestorePulse{0%{box-shadow:0 0 0 0 rgba(13,148,136,0.65)}60%{box-shadow:0 0 0 10px rgba(13,148,136,0)}100%{box-shadow:none}}
 		.revir-layout-canvas>.revir-card[data-layout-widget].layout-swap-target{outline:3px solid #f59e0b!important;box-shadow:0 0 0 5px rgba(245,158,11,0.24),0 14px 32px rgba(245,158,11,0.2)!important;transform:scale(1.01)}
 		.revir-swap-pill{display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:950;background:#b45309;color:#fff;font:800 13px sans-serif;padding:8px 14px;border-radius:999px;pointer-events:none;box-shadow:0 8px 24px rgba(0,0,0,0.28)}
 		.revir-layout-canvas>.revir-card[data-layout-widget].layout-swap-target>.revir-swap-pill{display:block}
 		.revir-layout-title{cursor:move;touch-action:none;user-select:none;min-height:20px}
 		.layout-handle{position:absolute;z-index:60;background:transparent;display:none;touch-action:none}
-		.layout-edit .layout-handle{display:block}
+		.layout-edit .layout-handle,body.revir-layout-edit .revir-layout-canvas>.revir-card[data-layout-widget]>.layout-handle{display:block}
 		.layout-handle-n,.layout-handle-s{height:8px;left:12px;right:12px;cursor:ns-resize}
 		.layout-handle-n{top:0}.layout-handle-s{bottom:0}
 		.layout-handle-e,.layout-handle-w{width:8px;top:12px;bottom:12px;cursor:ew-resize}
@@ -1471,8 +1504,15 @@ def render_draggable_resizable_canvas(
 		.layout-handle-ne,.layout-handle-sw,.layout-handle-nw,.layout-handle-se{width:16px;height:16px;border-radius:50%;background:rgba(13,148,136,0.35)}
 		.layout-handle-ne{right:1px;top:1px;cursor:nesw-resize}.layout-handle-nw{left:1px;top:1px;cursor:nwse-resize}
 		.layout-handle-se{right:1px;bottom:1px;cursor:nwse-resize;background:linear-gradient(135deg,transparent 40%,#0d9488 45%)}.layout-handle-sw{left:1px;bottom:1px;cursor:nesw-resize}
-		.layout-tools{display:none;position:absolute;right:8px;top:8px;z-index:65;gap:4px;background:rgba(255,255,255,0.92);padding:2px 4px;border-radius:8px;border:1px solid rgba(13,148,136,0.35)}
-		.layout-edit .layout-tools{display:inline-flex}
+		.revir-card-close-x{display:none;position:absolute;right:7px;top:7px;z-index:76;width:26px;height:26px;border-radius:50%;border:1.5px solid #fca5a5;background:rgba(255,255,255,0.96);color:#dc2626;font:900 13px/1 sans-serif;align-items:center;justify-content:center;cursor:pointer;padding:0;box-shadow:0 3px 10px rgba(15,23,42,0.14);opacity:0;pointer-events:none;transform:scale(0.86);transition:opacity .15s ease,transform .15s ease,background .15s ease,color .15s ease}
+		.layout-edit .revir-card-close-x,body.revir-layout-edit .revir-layout-canvas>.revir-card[data-layout-widget]>.revir-card-close-x{display:inline-flex}
+		.revir-layout-canvas>.revir-card[data-layout-widget].layout-edit:hover>.revir-card-close-x,
+		body.revir-layout-edit .revir-layout-canvas>.revir-card[data-layout-widget]:hover>.revir-card-close-x{opacity:1;pointer-events:auto;transform:scale(1)}
+		.revir-card-close-x:hover{background:#dc2626!important;color:#fff!important;border-color:#b91c1c!important}
+		.layout-tools{display:none;position:absolute;right:38px;top:8px;z-index:65;gap:4px;background:rgba(255,255,255,0.94);padding:2px 4px;border-radius:8px;border:1px solid rgba(13,148,136,0.35);opacity:0;pointer-events:none;transition:opacity .15s ease}
+		.layout-edit .layout-tools,body.revir-layout-edit .revir-layout-canvas>.revir-card[data-layout-widget]>.layout-tools{display:inline-flex}
+		.revir-layout-canvas>.revir-card[data-layout-widget].layout-edit:hover>.layout-tools,
+		body.revir-layout-edit .revir-layout-canvas>.revir-card[data-layout-widget]:hover>.layout-tools{opacity:1;pointer-events:auto}
 		.layout-tools button{border:1px solid #cbd5e1;border-radius:6px;background:#fff;padding:2px 6px;cursor:pointer;font-size:12px}
 		.layout-tools button:hover{background:#f0fdfa;border-color:#0d9488}
 		.revir-layout-guides{position:absolute;inset:0;pointer-events:none;z-index:999}
@@ -1505,6 +1545,29 @@ def render_draggable_resizable_canvas(
 	const gridState = new Map();
 	let cachedLocal = {};
 	try { cachedLocal = JSON.parse(localStorage.getItem(CACHE_KEY) || "{}") || {}; } catch (_e) { cachedLocal = {}; }
+	if (cfg.page === "layout_overview" && cachedLocal && Object.keys(cachedLocal).length > 0 && cachedLocal.overview_daily_leaf === undefined) {
+		if (cachedLocal.overview_stats && Number(cachedLocal.overview_stats.row || 0) === 0 && Number(cachedLocal.overview_stats.col_span || 12) >= 8) {
+			cachedLocal.overview_stats.col = 0;
+			cachedLocal.overview_stats.col_span = 7;
+		}
+		if (cachedLocal.overview_quick_links && Number(cachedLocal.overview_quick_links.row ?? 4) <= 5 && Number(cachedLocal.overview_quick_links.col_span || 12) >= 8) {
+			cachedLocal.overview_quick_links.col = 0;
+			cachedLocal.overview_quick_links.col_span = 7;
+		}
+		cachedLocal.overview_daily_leaf = { col: 7, row: 0, col_span: 5, row_span: 7, visible: true, accent: "#0d9488" };
+		try { localStorage.setItem(CACHE_KEY, JSON.stringify(cachedLocal)); } catch (_e) {}
+	}
+	const isEditModeNow = () => Boolean(cfg.edit || document.body.classList.contains("revir-layout-edit"));
+	const titleMap = cfg.titles || {};
+	const getWidgetTitle = (id) => {
+		if (titleMap[id]) return titleMap[id];
+		const c = cards.get(id);
+		if (c) {
+			const h = c.querySelector("h1,h2,h3,h4,h5,[data-layout-drag]");
+			if (h && h.textContent) return h.textContent.replace(/\s+/g, " ").trim().slice(0, 56);
+		}
+		return id;
+	};
 
 	cards.forEach((_, id) => {
 		const d = defs[id] || {col:0,row:0,col_span:6,row_span:4,min_col_span:3,min_row_span:2,visible:true,z:1,accent:"#0d9488"};
@@ -1766,6 +1829,21 @@ def render_draggable_resizable_canvas(
 		it.rowSpan = Math.max(it.minRow, Math.min(48, Math.ceil((naturalH + GAP_PX) / STEP_Y)));
 	};
 
+	const closeWidgetById = (id) => {
+		const it = gridState.get(id);
+		if (!it || !it.visible) return false;
+		historyPush();
+		it.visible = false;
+		compactGridUpward();
+		applyGridDOM();
+		sync();
+		if (typeof window.__revirRefreshWidgetTray === "function") window.__revirRefreshWidgetTray();
+		if (typeof window.__revirShowToast === "function") {
+			window.__revirShowToast("🧩 “" + getWidgetTitle(id) + "” kapatıldı — alt çubuktaki ‘🧩 Widgetlar’ menüsünden geri ekleyebilirsiniz");
+		}
+		return true;
+	};
+
 	cards.forEach((card, id) => {
 		if (!card.querySelector(".revir-swap-pill")) {
 			const pill = document.createElement("div");
@@ -1775,8 +1853,21 @@ def render_draggable_resizable_canvas(
 		}
 		if (card.dataset.layoutControls !== "1") {
 			card.dataset.layoutControls = "1";
-			const title = card.querySelector("h1,h2,h3,h4,h5,.revir-md");
+			const title = card.querySelector("[data-layout-drag],h1,h2,h3,h4,h5,.revir-md");
 			if (title) { title.classList.add("revir-layout-title"); title.dataset.layoutDrag = "1"; }
+			const closeX = document.createElement("button");
+			closeX.type = "button";
+			closeX.className = "revir-card-close-x";
+			closeX.textContent = "✕";
+			closeX.title = "Bu widget'ı kapat (‘🧩 Widgetlar’ menüsünden geri ekleyebilirsiniz)";
+			closeX.addEventListener("pointerdown", e => { e.stopPropagation(); });
+			closeX.addEventListener("click", e => {
+				e.preventDefault();
+				e.stopPropagation();
+				closeWidgetById(id);
+			});
+			card.appendChild(closeX);
+
 			const tools = document.createElement("div"); tools.className = "layout-tools";
 			const fitBtn = document.createElement("button"); fitBtn.type = "button"; fitBtn.textContent = "⇕"; fitBtn.title = "İçeriğe göre otomatik boyutlandır";
 			fitBtn.addEventListener("click", e => {
@@ -1784,16 +1875,6 @@ def render_draggable_resizable_canvas(
 				historyPush();
 				fitCardToContent(card, id);
 				resolveGridCollisions(id);
-				compactGridUpward();
-				applyGridDOM();
-				sync();
-			});
-			const hide = document.createElement("button"); hide.type = "button"; hide.textContent = "👁️"; hide.title = "Kutuyu gizle";
-			hide.addEventListener("click", e => {
-				e.stopPropagation();
-				historyPush();
-				const it = gridState.get(id);
-				if (it) it.visible = !it.visible;
 				compactGridUpward();
 				applyGridDOM();
 				sync();
@@ -1809,7 +1890,7 @@ def render_draggable_resizable_canvas(
 				applyGridDOM();
 				sync();
 			});
-			tools.append(fitBtn, hide, accent);
+			tools.append(fitBtn, accent);
 			card.appendChild(tools);
 			["n","s","e","w","ne","nw","se","sw"].forEach(side => {
 				const h = document.createElement("div");
@@ -1817,7 +1898,7 @@ def render_draggable_resizable_canvas(
 				h.dataset.handle = side;
 				h.title = "Kenardan veya köşeden boyutlandır · İçeriğe sığdırmak için çift tıklayın";
 				h.addEventListener("dblclick", ev => {
-					if (!cfg.edit) return;
+					if (!isEditModeNow()) return;
 					ev.preventDefault(); ev.stopPropagation();
 					historyPush();
 					fitCardToContent(card, id);
@@ -1830,7 +1911,7 @@ def render_draggable_resizable_canvas(
 			});
 
 			card.addEventListener("pointerdown", e => {
-				if (!cfg.edit || e.button !== 0 || window.innerWidth <= 760) return;
+				if (!isEditModeNow() || e.button !== 0 || window.innerWidth <= 760) return;
 				const handle = e.target.closest(".layout-handle");
 				const titleEl = e.target.closest("[data-layout-drag]");
 				if (!handle && !titleEl) return;
@@ -1950,8 +2031,13 @@ def render_draggable_resizable_canvas(
 		}
 	});
 
-	canvas.classList.toggle("layout-edit-active", !!cfg.edit);
-	canvas.classList.toggle("layout-locked", !cfg.edit);
+	const syncEditVisuals = () => {
+		const active = isEditModeNow();
+		canvas.classList.toggle("layout-edit-active", active);
+		canvas.classList.toggle("layout-locked", !active);
+		cards.forEach(c => c.classList.toggle("layout-edit", active));
+	};
+	syncEditVisuals();
 
 	if (cfg.action === "undo" && engine.undo.length) {
 		try {
@@ -1969,6 +2055,65 @@ def render_draggable_resizable_canvas(
 	} else {
 		applyGridDOM();
 	}
+
+	window.__revirSmartCanvasApi = {
+		isActive: () => Boolean(canvas && canvas.isConnected),
+		getPage: () => cfg.page,
+		syncEditVisuals,
+		getHiddenWidgets: () => {
+			const list = [];
+			gridState.forEach((it, id) => {
+				if (!it.visible) {
+					list.push({ id, title: getWidgetTitle(id), colSpan: it.colSpan, rowSpan: it.rowSpan });
+				}
+			});
+			return list;
+		},
+		closeWidget: (id) => closeWidgetById(id),
+		previewExternalDrop: (id, clientX, clientY) => {
+			const it = gridState.get(id);
+			if (!it || !canvas || !canvas.isConnected) return null;
+			const rect = canvas.getBoundingClientRect();
+			const { colW } = metrics();
+			const stepX = colW + GAP_PX;
+			const relX = clientX - rect.left - (it.colSpan * colW) * 0.35;
+			const relY = clientY - rect.top - 24;
+			const tgtCol = Math.max(0, Math.min(COLS - it.colSpan, Math.round(relX / stepX)));
+			const tgtRow = Math.max(0, Math.round(Math.max(0, relY) / STEP_Y));
+			showGhost(
+				{ col: tgtCol, row: tgtRow, colSpan: it.colSpan, rowSpan: it.rowSpan },
+				"➕ " + getWidgetTitle(id) + " (" + (tgtCol + 1) + ". sütun, " + (tgtRow + 1) + ". satır)"
+			);
+			return { valid: true, col: tgtCol, row: tgtRow };
+		},
+		clearExternalPreview: () => {
+			hideGhost();
+		},
+		restoreWidget: (id, targetPos) => {
+			const it = gridState.get(id);
+			const card = cards.get(id);
+			if (!it || !card) return false;
+			historyPush();
+			it.visible = true;
+			if (targetPos && typeof targetPos.col === "number" && typeof targetPos.row === "number") {
+				it.col = Math.max(0, Math.min(COLS - it.colSpan, Math.round(targetPos.col)));
+				it.row = Math.max(0, Math.round(targetPos.row));
+			}
+			card.classList.remove("layout-hidden");
+			fitCardToContent(card, id);
+			resolveGridCollisions([id]);
+			compactGridUpward(targetPos ? id : undefined);
+			applyGridDOM();
+			sync();
+			hideGhost();
+			card.classList.remove("revir-restored-pulse");
+			void card.offsetWidth;
+			card.classList.add("revir-restored-pulse");
+			if (typeof window.__revirRefreshWidgetTray === "function") window.__revirRefreshWidgetTray();
+			return { id, title: getWidgetTitle(id), col: it.col, row: it.row };
+		},
+	};
+	if (typeof window.__revirRefreshWidgetTray === "function") window.__revirRefreshWidgetTray();
 
 	window.__revirResetSmartCanvas = function() {
 		try { localStorage.removeItem(CACHE_KEY); } catch (_e) {}
@@ -4464,6 +4609,13 @@ PAGE_SECTIONS_REGISTRY: dict[str, dict[str, Any]] = {
 			"icon": "⚡",
 			"default": True,
 			"essential": True,
+		},
+		"overview_daily_leaf": {
+			"name": "🗓️ Günlük Takvim Yaprağı",
+			"desc": "Sağ üst köşede Hicri/Miladi tarih, resmi tatil durumu, günün meslek grubu, ezan vakitleri ve günün sözü yaprağı",
+			"icon": "🗓️",
+			"default": True,
+			"essential": False,
 		},
 		"overview_charts": {
 			"name": "Vizit & Başvuru Yoğunluk Grafiği",
@@ -18788,63 +18940,69 @@ def render_overview() -> None:
 	is_archive = e_date < today
 	overview_layout_defaults = {
 		"overview_stats": {
-			"id": "overview_stats", "col": 0, "row": 0, "col_span": 12, "row_span": 4,
+			"id": "overview_stats", "col": 0, "row": 0, "col_span": 7, "row_span": 4,
 			"min_col_span": 6, "min_row_span": 3,
-			"x_pct": 0, "y_px": 0, "w_pct": 100, "h_px": 260,
+			"x_pct": 0, "y_px": 0, "w_pct": 58.33, "h_px": 260,
 			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Turkuaz"],
 		},
 		"overview_quick_links": {
-			"id": "overview_quick_links", "col": 0, "row": 4, "col_span": 12, "row_span": 2,
+			"id": "overview_quick_links", "col": 0, "row": 4, "col_span": 7, "row_span": 3,
 			"min_col_span": 4, "min_row_span": 2,
-			"x_pct": 0, "y_px": 272, "w_pct": 100, "h_px": 124,
+			"x_pct": 0, "y_px": 272, "w_pct": 58.33, "h_px": 192,
 			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Bilgi Mavi"],
 		},
+		"overview_daily_leaf": {
+			"id": "overview_daily_leaf", "col": 7, "row": 0, "col_span": 5, "row_span": 7,
+			"min_col_span": 4, "min_row_span": 4,
+			"x_pct": 58.33, "y_px": 0, "w_pct": 41.67, "h_px": 464,
+			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Turkuaz"],
+		},
 		"overview_meds": {
-			"id": "overview_meds", "col": 0, "row": 6, "col_span": 6, "row_span": 4,
+			"id": "overview_meds", "col": 0, "row": 7, "col_span": 6, "row_span": 4,
 			"min_col_span": 4, "min_row_span": 3,
-			"x_pct": 0, "y_px": 408, "w_pct": 50, "h_px": 260,
+			"x_pct": 0, "y_px": 476, "w_pct": 50, "h_px": 260,
 			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Turkuaz"],
 		},
 		"overview_chart": {
-			"id": "overview_chart", "col": 6, "row": 6, "col_span": 6, "row_span": 5,
+			"id": "overview_chart", "col": 6, "row": 7, "col_span": 6, "row_span": 5,
 			"min_col_span": 4, "min_row_span": 4,
-			"x_pct": 50, "y_px": 408, "w_pct": 50, "h_px": 328,
+			"x_pct": 50, "y_px": 476, "w_pct": 50, "h_px": 328,
 			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Bilgi Mavi"],
 		},
 		"overview_diabetes": {
-			"id": "overview_diabetes", "col": 0, "row": 10, "col_span": 6, "row_span": 4,
+			"id": "overview_diabetes", "col": 0, "row": 11, "col_span": 6, "row_span": 4,
 			"min_col_span": 4, "min_row_span": 3,
-			"x_pct": 0, "y_px": 680, "w_pct": 50, "h_px": 260,
+			"x_pct": 0, "y_px": 748, "w_pct": 50, "h_px": 260,
 			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Bilgi Mavi"],
 		},
 		"overview_calendar": {
-			"id": "overview_calendar", "col": 6, "row": 11, "col_span": 6, "row_span": 5,
+			"id": "overview_calendar", "col": 6, "row": 12, "col_span": 6, "row_span": 5,
 			"min_col_span": 4, "min_row_span": 3,
-			"x_pct": 50, "y_px": 748, "w_pct": 50, "h_px": 328,
+			"x_pct": 50, "y_px": 816, "w_pct": 50, "h_px": 328,
 			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Turkuaz"],
 		},
 		"overview_gemini": {
-			"id": "overview_gemini", "col": 0, "row": 16, "col_span": 12, "row_span": 4,
+			"id": "overview_gemini", "col": 0, "row": 17, "col_span": 12, "row_span": 4,
 			"min_col_span": 6, "min_row_span": 4,
-			"x_pct": 0, "y_px": 1088, "w_pct": 100, "h_px": 260,
+			"x_pct": 0, "y_px": 1156, "w_pct": 100, "h_px": 260,
 			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Bilgi Mavi"],
 		},
 		"overview_pending": {
-			"id": "overview_pending", "col": 0, "row": 20, "col_span": 6, "row_span": 6,
+			"id": "overview_pending", "col": 0, "row": 21, "col_span": 6, "row_span": 6,
 			"min_col_span": 5, "min_row_span": 4,
-			"x_pct": 0, "y_px": 1360, "w_pct": 50, "h_px": 396,
+			"x_pct": 0, "y_px": 1428, "w_pct": 50, "h_px": 396,
 			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Turkuaz"],
 		},
 		"overview_outbreak": {
-			"id": "overview_outbreak", "col": 6, "row": 20, "col_span": 6, "row_span": 6,
+			"id": "overview_outbreak", "col": 6, "row": 21, "col_span": 6, "row_span": 6,
 			"min_col_span": 5, "min_row_span": 4,
-			"x_pct": 50, "y_px": 1360, "w_pct": 50, "h_px": 396,
+			"x_pct": 50, "y_px": 1428, "w_pct": 50, "h_px": 396,
 			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Uyarı Kırmızı"],
 		},
 		"overview_recent": {
-			"id": "overview_recent", "col": 0, "row": 26, "col_span": 12, "row_span": 7,
+			"id": "overview_recent", "col": 0, "row": 27, "col_span": 12, "row_span": 7,
 			"min_col_span": 6, "min_row_span": 4,
-			"x_pct": 0, "y_px": 1768, "w_pct": 100, "h_px": 464,
+			"x_pct": 0, "y_px": 1836, "w_pct": 100, "h_px": 464,
 			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Yeşil"],
 		},
 	}
@@ -18967,6 +19125,21 @@ def render_overview() -> None:
 				if ui.button("💉 İnsülin & Diyabet", use_container_width=True, key="ov_quick_ins"):
 					ui.session_state["target_page"] = "💉 İnsülin & Diyabet Yönetimi"
 					ui.rerun()
+
+	if is_section_visible("overview_daily_leaf"):
+		try:
+			from school_calendar import render_overview_daily_leaf_widget
+			_render_layout_widget_marker("overview_daily_leaf")
+			render_overview_daily_leaf_widget(
+				connect_db_fn=connect_db,
+				get_app_settings_fn=get_app_settings,
+				save_app_settings_fn=save_app_settings,
+				get_active_gemini_config_fn=_get_active_gemini_config,
+				get_tr_provinces_fn=get_tr_provinces,
+			)
+		except Exception:
+			LOGGER.exception("Genel Bakış: günlük takvim yaprağı yüklenemedi")
+			ui.warning("Günlük takvim yaprağı şu anda yüklenemedi.")
 
 	# Bugünün Hemşire Masası (2 Sütunlu Bento Panosu: Bekleyen İlaçlar + Diyabetli Öğrenciler + 14 Günlük Grafik + Takvim)
 	bento_l, bento_r = ui.columns([1.05, 1.0], gap="medium")

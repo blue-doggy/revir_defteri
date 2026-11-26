@@ -2424,6 +2424,7 @@ def _render_interactive_calendar_leaf(
 	ai_key: str,
 	ai_model: str,
 	get_tr_provinces_fn: Callable,
+	embed_in_overview: bool = False,
 ) -> None:
 	today = date.today()
 	sel_iso = sel_date.isoformat()
@@ -2830,6 +2831,10 @@ def _render_interactive_calendar_leaf(
 			else f"{sel_ptimes.get('source', 'Diyanet Takvimi')}"
 		)
 
+		countdown_id = "revir_ov_prayer_countdown" if embed_in_overview else "revir_prayer_countdown"
+		next_lbl_id = "revir_ov_next_prayer_label" if embed_in_overview else "revir_next_prayer_label"
+		timer_var = "_revirOvPrayerTimer" if embed_in_overview else "_revirPrayerTimer"
+
 		prayer_leaf_html = f"""<div style="margin-top:11px;padding-top:10px;border-top:1.5px dashed #cbd5e1;">
 			<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
 				<span style="font-size:10.8px;font-weight:800;color:#0f766e;text-transform:uppercase;letter-spacing:0.5px;">
@@ -2842,8 +2847,8 @@ def _render_interactive_calendar_leaf(
 			</div>
 			<div style="padding:7px 11px;border-radius:8px;background:linear-gradient(90deg,#0f766e 0%,#0284c7 100%);
 			color:#ffffff;display:flex;align-items:center;justify-content:space-between;font-size:12px;font-weight:800;">
-				<span>⏳ <span id="revir_next_prayer_label">{html.escape(next_vakit_name)} ({html.escape(next_vakit_hm)})</span> vaktine kalan:</span>
-				<span id="revir_prayer_countdown" style="background:rgba(255,255,255,0.2);padding:2px 8px;border-radius:5px;font-family:monospace;font-size:13px;letter-spacing:0.3px;">
+				<span>⏳ <span id="{next_lbl_id}">{html.escape(next_vakit_name)} ({html.escape(next_vakit_hm)})</span> vaktine kalan:</span>
+				<span id="{countdown_id}" style="background:rgba(255,255,255,0.2);padding:2px 8px;border-radius:5px;font-family:monospace;font-size:13px;letter-spacing:0.3px;">
 					{init_countdown_txt}
 				</span>
 			</div>
@@ -2854,8 +2859,8 @@ def _render_interactive_calendar_leaf(
 			var schedule = {today_schedule_json};
 			var tomorrowImsak = {tmr_imsak_json};
 			function tickPrayerCountdown() {{
-				var el = document.getElementById('revir_prayer_countdown');
-				var lbl = document.getElementById('revir_next_prayer_label');
+				var el = document.getElementById('{countdown_id}');
+				var lbl = document.getElementById('{next_lbl_id}');
 				if (!el || !schedule || !schedule.length) return;
 				var now = new Date();
 				var target = null;
@@ -2885,9 +2890,9 @@ def _render_interactive_calendar_leaf(
 				el.textContent = hh + ' saat ' + mm + ' dk ' + ss + ' sn';
 				if (lbl) lbl.textContent = targetName + ' (' + targetHM + ')';
 			}}
-			if (window._revirPrayerTimer) clearInterval(window._revirPrayerTimer);
+			if (window.{timer_var}) clearInterval(window.{timer_var});
 			tickPrayerCountdown();
-			window._revirPrayerTimer = setInterval(tickPrayerCountdown, 1000);
+			window.{timer_var} = setInterval(tickPrayerCountdown, 1000);
 		}})();
 		</script>"""
 
@@ -3077,11 +3082,14 @@ def _render_interactive_calendar_leaf(
 		unsafe_allow_html=True,
 	)
 
+	plus_btn_id = "btn_ov_open_cal_event_popup" if embed_in_overview else "btn_open_cal_event_popup"
+	drag_hdr_attr = ' data-layout-drag="1" class="revir-layout-title"' if embed_in_overview else ""
+
 	# BİRLEŞİK TEK PARÇA TAKVİM YAPRAĞI KARTI (Tarih + Meslek + MEB Haftası + Tatil + Ezan Vakti + Yaprak Arkası Yazısı)
 	ui.markdown(
 		f"""<div style="border-radius:13px;overflow:hidden;border:2px solid {header_accent};background:#fffdf9;
 		box-shadow:0 8px 22px rgba(15,23,42,0.08);margin-bottom:8px;color:#1e293b;">
-			<div style="background:{header_accent};color:#ffffff;padding:7px 13px;display:flex;align-items:center;justify-content:space-between;">
+			<div{drag_hdr_attr} style="background:{header_accent};color:#ffffff;padding:7px 13px;display:flex;align-items:center;justify-content:space-between;">
 				<span style="font-size:11.5px;font-weight:800;letter-spacing:0.6px;">🗓️ GÜNLÜK TAKVİM YAPRAĞI</span>
 				<span style="font-size:11px;font-weight:700;opacity:0.95;">🌙 {html.escape(hijri_str)}</span>
 			</div>
@@ -3096,7 +3104,7 @@ def _render_interactive_calendar_leaf(
 								{sel_date.day:02d}
 							</span>
 							<button type="button"
-							onclick="event.stopPropagation();window.__revirClick('btn_open_cal_event_popup');"
+							onclick="event.stopPropagation();window.__revirClick('{plus_btn_id}');"
 							title="{sel_date.strftime('%d.%m.%Y')} — Etkinlik & Plan Yönetimi (Ekle / Düzenle)"
 							style="width:30px;height:30px;border-radius:50%;border:1.5px solid {header_accent};
 							background:{header_accent};color:#ffffff;font-size:19px;font-weight:900;
@@ -3137,6 +3145,30 @@ def _render_interactive_calendar_leaf(
 		{prayer_script_html}""",
 		unsafe_allow_html=True,
 	)
+
+	if embed_in_overview:
+		ov_nav1, ov_nav2, ov_nav3, ov_nav4 = ui.columns([0.85, 1.0, 0.85, 1.45])
+		with ov_nav1:
+			if ui.button("◀ Gün", key="btn_ov_leaf_prev_day", use_container_width=True):
+				ui.session_state["ov_leaf_selected_date"] = (sel_date - timedelta(days=1)).isoformat()
+				ui.rerun()
+		with ov_nav2:
+			if ui.button("📍 Bugün", key="btn_ov_leaf_today", use_container_width=True):
+				ui.session_state["ov_leaf_selected_date"] = today.isoformat()
+				ui.rerun()
+		with ov_nav3:
+			if ui.button("Gün ▶", key="btn_ov_leaf_next_day", use_container_width=True):
+				ui.session_state["ov_leaf_selected_date"] = (sel_date + timedelta(days=1)).isoformat()
+				ui.rerun()
+		with ov_nav4:
+			if ui.button("📅 Takvime Git ↗", key="btn_ov_leaf_goto_cal", type="secondary", use_container_width=True):
+				ui.session_state["cal_selected_date"] = sel_iso
+				ui.session_state["cal_view_year"] = sel_date.year
+				ui.session_state["cal_view_month"] = sel_date.month
+				ui.session_state["target_page"] = "📅 Takvim & Planlama"
+				ui.session_state["main_menu_page"] = "📅 Takvim & Planlama"
+				ui.rerun()
+		return
 
 	# Yaprak Altı Hızlı Aksiyonlar (Gemini ile Yaprak Yazısı / Benzerleri Teke Düşür / Takvim Ayarları)
 	dedup_btn_lbl = "✨ AI ile Benzerleri Teke Düşür" if (ai_enabled and ai_key) else "🧹 Mükerrerleri Teke Düşür"
@@ -3917,5 +3949,57 @@ def render_overview_calendar_widget(
 
 		if len(rows) > 6:
 			ui.caption(f"… ve önümüzdeki 14 gün içinde {len(rows) - 6} takvim kaydı daha.")
+
+
+def render_overview_daily_leaf_widget(
+	*,
+	connect_db_fn: Callable,
+	get_app_settings_fn: Callable,
+	save_app_settings_fn: Callable,
+	get_active_gemini_config_fn: Callable,
+	get_tr_provinces_fn: Callable,
+) -> None:
+	"""Genel Bakış sağ üst köşesi için taşınabilir ve kapatılabilir 🗓️ GÜNLÜK TAKVİM YAPRAĞI kutusu."""
+	today_d = date.today()
+	raw_sel = str(ui.session_state.get("ov_leaf_selected_date") or today_d.isoformat())[:10]
+	try:
+		sel_d = date.fromisoformat(raw_sel)
+	except Exception:
+		sel_d = today_d
+
+	ov_seed_key = f"_cal_seeded_{sel_d.year}"
+	if not ui.session_state.get(ov_seed_key):
+		try:
+			ensure_year_builtin_holidays_seeded(sel_d.year, connect_db_fn, include_special_days=False)
+			ui.session_state[ov_seed_key] = True
+		except Exception:
+			pass
+
+	_handle_calendar_event_inline_click(connect_db_fn, set_flash=False)
+
+	ctx = ui._get_ctx()
+	if ctx and getattr(ctx, "clicked_button", None) == "btn_ov_open_cal_event_popup":
+		open_calendar_event_manager_dialog(
+			sel_iso=sel_d.isoformat(),
+			connect_db_fn=connect_db_fn,
+			get_active_gemini_config_fn=get_active_gemini_config_fn,
+		)
+
+	cfg = get_app_settings_fn()
+	ai_enabled, ai_key, ai_model = get_active_gemini_config_fn()
+
+	with ui.container(border=True):
+		_render_interactive_calendar_leaf(
+			sel_date=sel_d,
+			connect_db_fn=connect_db_fn,
+			cfg=cfg,
+			save_app_settings_fn=save_app_settings_fn,
+			ai_enabled=ai_enabled,
+			ai_key=ai_key,
+			ai_model=ai_model,
+			get_tr_provinces_fn=get_tr_provinces_fn,
+			embed_in_overview=True,
+		)
+
 
 
