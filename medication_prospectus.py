@@ -1644,8 +1644,10 @@ def list_prospectus_records(
 				filtered.append((40, it))
 			elif q_tokens and any(t in hay for t in q_tokens):
 				filtered.append((20, it))
-		filtered.sort(key=lambda pair: (-pair[0], str(pair[1].get("medication_name") or "")))
+		filtered.sort(key=lambda pair: (-pair[0], ui.tr_alpha_sort_key(pair[1].get("medication_name"))))
 		items = [pair[1] for pair in filtered]
+	else:
+		items.sort(key=lambda x: ui.tr_alpha_sort_key(x.get("medication_name")))
 	return items
 
 

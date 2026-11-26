@@ -276,6 +276,41 @@ class TestRevirUI(unittest.TestCase):
         ctrl.cancel_recording()
         ctrl.stop_speaking()
 
+    def test_dataframe_default_turkish_alphabetical_order_and_locked_headers(self):
+        names = ["Zeynep", "İbrahim", "Işıl", "Çetin", "Cem", "Ömer", "Şule", "Ümit", "Ahmet"]
+        sorted_names = sorted(names, key=revir_ui.tr_alpha_sort_key)
+        self.assertEqual(
+            sorted_names,
+            ["Ahmet", "Cem", "Çetin", "Işıl", "İbrahim", "Ömer", "Şule", "Ümit", "Zeynep"],
+        )
+
+        df_in = pd.DataFrame([
+            {"id": 10, "Ad Soyad": "Zeynep Kaya", "Sınıf": "4-A"},
+            {"id": 20, "Ad Soyad": "Çetin Demir", "Sınıf": "1-B"},
+            {"id": 30, "Ad Soyad": "Ahmet Yılmaz", "Sınıf": "3-C"},
+        ])
+
+        def _tbl_app():
+            revir_ui.dataframe(
+                df_in,
+                hide_index=True,
+                on_select="rerun",
+                selection_mode=["single-row", "single-cell"],
+                key="tbl_alpha_lock",
+                column_config={"id": None},
+            )
+
+        out = revir_ui.run_action_headless(_tbl_app, {"action": "render"})
+        html = str(out.get("main_html") or "")
+        # Column header click sorting must be disabled (no onclick sort or sort arrows)
+        self.assertNotIn('onclick="window.__revirSortTable', html)
+        self.assertNotIn("revir-sort-ind", html)
+        # Rows must render in default Turkish A-Z order by Ad Soyad
+        self.assertLess(html.index("Ahmet Yılmaz"), html.index("Çetin Demir"))
+        self.assertLess(html.index("Çetin Demir"), html.index("Zeynep Kaya"))
+        # Original DataFrame row index (2 for Ahmet Yılmaz) preserved in cell click handler
+        self.assertIn('__revirDfSelect("tbl_alpha_lock", 2,', html)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

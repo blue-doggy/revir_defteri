@@ -1558,6 +1558,7 @@ def get_all_dishes(connect_db_fn: Callable[[], sqlite3.Connection]) -> list[dict
 			d["allergens"] = []
 		d["ingredients"] = ings_by_dish.get(int(d["id"]), [])
 		out.append(d)
+	out.sort(key=lambda item: ui.tr_alpha_sort_key(item.get("name")))
 	return out
 
 
@@ -6575,6 +6576,7 @@ def get_diners(connect_db_fn: Callable[[], sqlite3.Connection], active_only: boo
 			if not str(item.get("role_title") or "").strip():
 				item["role_title"] = eff_title
 			out.append(item)
+		out.sort(key=lambda x: ui.tr_alpha_sort_key(x.get("full_name")))
 		return out
 
 
@@ -7053,6 +7055,8 @@ def get_cash_summary_and_diner_balances(
 		balances.append(d)
 		month_expected += exp
 		month_paid_matched += paid
+
+	balances.sort(key=lambda x: ui.tr_alpha_sort_key(x.get("full_name")))
 
 	m_in = sum(float(t["amount"] or 0.0) for t in month_tx if t["tx_type"] == "IN_PAYMENT")
 	m_hand = sum(float(t["amount"] or 0.0) for t in month_tx if t["tx_type"] == "OUT_SCHOOL_HANDOVER")

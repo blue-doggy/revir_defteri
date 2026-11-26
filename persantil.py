@@ -141,7 +141,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return (Path(meipass_raw) if meipass_raw else _BUNDLE_DIR) / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.47.0"
+_DEFAULT_APP_VERSION = "1.47.1"
 
 
 def _load_app_version() -> str:
@@ -9863,6 +9863,7 @@ def get_students_enriched(class_name: str | None = None, person_type: str | None
 			"Veli": clean_text(r["veli"]) or "—",
 			"Telefon": clean_text(r["veli_telefon"]) or "—",
 		})
+	out_rows.sort(key=lambda row: ui.tr_alpha_sort_key(row.get("Ad Soyad")))
 	return pd.DataFrame(out_rows)
 
 

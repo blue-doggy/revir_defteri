@@ -396,9 +396,11 @@ def get_enriched_inventory(connect_db_fn: Callable[[], Any]) -> list[dict[str, A
                       COALESCE(quarantine_status, 'Aktif') AS quarantine_status,
                       last_counted_at
                FROM infirmary_inventory
-               ORDER BY COALESCE(category, ''), item_name, id"""
+               ORDER BY item_name, id"""
         ).fetchall()
-    return [dict(r) for r in rows]
+    out_items = [dict(r) for r in rows]
+    out_items.sort(key=lambda x: ui.tr_alpha_sort_key(x.get("item_name")))
+    return out_items
 
 
 def seed_extended_meb_catalog(connect_db_fn: Callable[[], Any], base_items: list[dict[str, Any]]) -> int:
@@ -983,7 +985,8 @@ def list_medical_devices(connect_db_fn: Callable[[], Any], ref_date: date | None
     soon_iso = (base_d + timedelta(days=30)).isoformat()
     with connect_db_fn() as conn:
         ensure_supply_schema(conn)
-        rows = [dict(r) for r in conn.execute("SELECT * FROM medical_devices ORDER BY device_type, device_name, id").fetchall()]
+        rows = [dict(r) for r in conn.execute("SELECT * FROM medical_devices ORDER BY device_name, id").fetchall()]
+    rows.sort(key=lambda x: ui.tr_alpha_sort_key(x.get("device_name")))
     for d in rows:
         warns: list[str] = []
         st_val = _clean_text(d.get("status")) or "Çalışıyor"

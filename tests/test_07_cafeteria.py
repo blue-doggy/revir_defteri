@@ -892,7 +892,13 @@ class TestCafeteriaModule(unittest.TestCase):
             category="Çorba",
             ingredients=[{"ingredient_name": "Yoğurt", "amount": 60, "unit": "g", "kcal_portion": 45, "carbs_portion_g": 4, "allergen_tag": "Süt"}],
         )
-        # 1. Dishes tab must NOT include Tahmini Maliyet column in Kayıtlı Yemekler Listesi
+        caf.upsert_dish_with_ingredients(self.connect, name="Zeytinyağlı Fasulye", category="Sebze Yemeği", ingredients=[])
+        caf.upsert_dish_with_ingredients(self.connect, name="Çoban Salata", category="Salata / Meze", ingredients=[])
+        caf.upsert_dish_with_ingredients(self.connect, name="İzmir Köfte", category="Ana Yemek", ingredients=[])
+        caf.upsert_dish_with_ingredients(self.connect, name="Ispanak Yemeği", category="Sebze Yemeği", ingredients=[])
+        caf.upsert_dish_with_ingredients(self.connect, name="Ayran", category="İçecek / Ek", ingredients=[])
+
+        # 1. Dishes tab must NOT include Tahmini Maliyet column, must sort A-Z by dish name regardless of category, and lock headers
         ctx_api = {
             "connect_db": persantil.connect_db,
             "get_app_settings": persantil.get_app_settings,
@@ -903,7 +909,13 @@ class TestCafeteriaModule(unittest.TestCase):
             "is_section_visible": persantil.is_section_visible,
         }
         out_dishes = revir_ui.run_action_headless(lambda: caf._render_tab_dishes(ctx_api), {"action": "render"})
-        self.assertNotIn("Tahmini Maliyet (₺)", str(out_dishes.get("main_html") or ""))
+        dishes_html = str(out_dishes.get("main_html") or "")
+        self.assertNotIn("Tahmini Maliyet (₺)", dishes_html)
+        self.assertNotIn('onclick="window.__revirSortTable', dishes_html)
+        tbl_part = dishes_html.split('data-tbl-key="caf_dishes_list_tbl"', 1)[1]
+        expected_tr_order = ["Ayran", "Çoban Salata", "Ispanak Yemeği", "İzmir Köfte", "Yayla Çorbası", "Zeytinyağlı Fasulye"]
+        positions = [tbl_part.index(nm) for nm in expected_tr_order]
+        self.assertEqual(positions, sorted(positions))
 
         # 2. Pop-up editor dialog renders all 5 planned sections cleanly
         out_dlg = revir_ui.run_action_headless(lambda: caf.open_dish_editor_dialog(ctx_api, d_id), {"action": "render"})

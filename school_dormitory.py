@@ -821,6 +821,7 @@ def get_dorm_residents(
 		eff_dev = str(d.get("uses_devices") or "").strip() or str(d.get("hp_devices") or "").strip()
 		d["effective_devices"] = eff_dev
 		out.append(d)
+	out.sort(key=lambda x: ui.tr_alpha_sort_key(x.get("full_name")))
 	return out
 
 

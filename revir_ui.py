@@ -1191,6 +1191,106 @@ def _format_df_cell(val: Any, col_cfg: _ColumnConfig | None) -> str:
 	return str(val)
 
 
+_TR_ALPHA_ORDER = " 0123456789abcçdefgğhıijklmnoöpqrsştuüvwxyz"
+_TR_CHAR_RANK: dict[str, int] = {ch: idx for idx, ch in enumerate(_TR_ALPHA_ORDER)}
+
+_PRIMARY_NAME_SORT_HEADERS: tuple[str, ...] = (
+	"ad soyad",
+	"adı soyadı",
+	"ad-soyad",
+	"kişi adı",
+	"öğrenci adı",
+	"öğrenci",
+	"kişi",
+	"yetişkin",
+	"personel",
+	"abone adı",
+	"abone",
+	"yemek adı",
+	"yemek",
+	"malzeme adı",
+	"malzeme",
+	"ürün adı",
+	"ürün",
+	"kalem adı",
+	"kalem",
+	"ilaç adı",
+	"ilaç",
+	"cihaz adı",
+	"cihaz",
+	"çanta adı",
+	"çanta / nokta adı",
+	"ad",
+	"isim",
+)
+
+_FIRST_COL_NAME_HEADERS: frozenset[str] = frozenset({
+	"tedarikçi",
+	"tedarikçi / firma",
+	"kategori",
+	"şube adı",
+	"sınıf / şube",
+	"sınıf",
+	"köy / mahalle",
+	"test adı",
+	"test",
+	"aşı adı",
+	"aşı",
+})
+
+
+def _tr_lower_clean(val: Any) -> str:
+	if val is None or (isinstance(val, float) and math.isnan(val)):
+		return ""
+	s = str(val).strip()
+	if not s or s in ("—", "-", "–"):
+		return ""
+	s = re.sub(r"^[^\wÇĞİÖŞÜçğıöşü]+", "", s).strip()
+	s = s.replace("İ", "i").replace("I", "ı").lower()
+	return re.sub(r"\s+", " ", s)
+
+
+def tr_alpha_sort_key(val: Any) -> tuple[int, tuple[int, ...], str]:
+	"""Türkçe alfabeye (A-Z, Ç-Ğ-I-İ-Ö-Ş-Ü) göre büyük/küçük harf duyarsız sıralama anahtarı üretir."""
+	norm = _tr_lower_clean(val)
+	if not norm:
+		return (1, (), "")
+	ranks = tuple(_TR_CHAR_RANK.get(ch, 200 + ord(ch)) for ch in norm)
+	return (0, ranks, norm)
+
+
+def _norm_col_header_for_sort(raw_hdr: Any) -> str:
+	s = str(raw_hdr or "").strip()
+	s = re.sub(r"\([^)]*\)", "", s)
+	return _tr_lower_clean(s)
+
+
+def _detect_name_sort_columns(visible_cols: Sequence[Any], cfg_map: dict[str, Any]) -> list[str]:
+	"""Tablodaki görünür sütunlar arasında ad/isim sütunlarını öncelik sırasına göre tespit eder."""
+	if not visible_cols:
+		return []
+	norm_by_col: dict[Any, set[str]] = {}
+	for c in visible_cols:
+		cc = cfg_map.get(c)
+		norms = {_norm_col_header_for_sort(c)}
+		if isinstance(cc, _ColumnConfig) and cc.label:
+			norms.add(_norm_col_header_for_sort(cc.label))
+		norm_by_col[c] = {n for n in norms if n}
+
+	matched: list[Any] = []
+	for target in _PRIMARY_NAME_SORT_HEADERS:
+		for c in visible_cols:
+			if c not in matched and target in norm_by_col.get(c, set()):
+				matched.append(c)
+	if matched:
+		return matched[:2]
+
+	first_c = visible_cols[0]
+	if norm_by_col.get(first_c, set()) & _FIRST_COL_NAME_HEADERS:
+		return [first_c]
+	return []
+
+
 def _df_fingerprint(df: pd.DataFrame) -> str:
 	try:
 		cols = [str(c) for c in df.columns]
@@ -2294,10 +2394,19 @@ class _UIContainer:
 			lbl = cc.label if isinstance(cc, _ColumnConfig) and cc.label else str(c)
 			hlp = f' title="{html_lib.escape(cc.help, quote=True)}"' if isinstance(cc, _ColumnConfig) and cc.help else ""
 			st_cls = f' class="revir-sticky-th revir-sticky-c{c_idx}"' if c_idx < eff_sticky else ""
-			th_parts.append(f'<th{st_cls}{hlp} onclick="window.__revirSortTable(this)">{html_lib.escape(lbl)} <span class="revir-sort-ind">⇅</span></th>')
+			th_parts.append(f"<th{st_cls}{hlp}>{html_lib.escape(lbl)}</th>")
+
+		sort_cols = _detect_name_sort_columns(visible_cols, cfg_map)
+		if sort_cols and len(df) > 1:
+			row_indices = sorted(
+				range(len(df)),
+				key=lambda r_i: tuple(tr_alpha_sort_key(df.iloc[r_i][sc]) for sc in sort_cols),
+			)
+		else:
+			row_indices = list(range(len(df)))
 
 		row_parts: list[str] = []
-		for r_pos in range(len(df)):
+		for r_pos in row_indices:
 			row_sel_cls = " revir-row-selected" if r_pos in sel_rows_set else ""
 			tds: list[str] = []
 			if show_idx:
@@ -3734,7 +3843,7 @@ html, body {
 	position: sticky; top: 0; z-index: 3;
 	background: var(--sidebar-bg); color: var(--text-heading);
 	font-weight: 700; text-align: left; padding: 9px 11px;
-	border-bottom: 1.5px solid var(--line); white-space: nowrap; cursor: pointer; user-select: none;
+	border-bottom: 1.5px solid var(--line); white-space: nowrap; cursor: default; user-select: none;
 }
 .revir-md-table thead th { cursor: default; }
 .revir-md-table tbody td { padding: 7px 11px; border-bottom: 1px solid var(--line); vertical-align: middle; }
@@ -5830,41 +5939,9 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 		sendAction({ action: "df_select", key: key, value: { rows: [rowIdx], cells: [[rowIdx, colName]] } });
 	};
 
-	// İstemci tarafı tablo sıralama (görsel yön oku destekli)
-	window.__revirSortTable = function(th) {
-		var tbl = th.closest("table");
-		if (!tbl || tbl.classList.contains("revir-editor-table")) return;
-		if (tbl.dataset.colResizeAt && (Date.now() - parseInt(tbl.dataset.colResizeAt, 10)) < 320) return;
-		var tbody = tbl.querySelector("tbody");
-		if (!tbody) return;
-		var idx = Array.prototype.indexOf.call(th.parentNode.children, th);
-		var asc = th.dataset.sortDir !== "asc";
-		Array.prototype.forEach.call(th.parentNode.children, function(sib) {
-			if (sib !== th) sib.dataset.sortDir = "";
-			var ind = sib.querySelector(".revir-sort-ind");
-			if (ind) {
-				ind.textContent = "⇅";
-				ind.classList.remove("active");
-			}
-		});
-		th.dataset.sortDir = asc ? "asc" : "desc";
-		var curInd = th.querySelector(".revir-sort-ind");
-		if (curInd) {
-			curInd.textContent = asc ? "▲" : "▼";
-			curInd.classList.add("active");
-		}
-		var rows = Array.prototype.slice.call(tbody.querySelectorAll("tr"));
-		rows.sort(function(a, b) {
-			var av = (a.children[idx] ? a.children[idx].textContent : "").trim();
-			var bv = (b.children[idx] ? b.children[idx].textContent : "").trim();
-			var an = parseFloat(av.replace(",", "."));
-			var bn = parseFloat(bv.replace(",", "."));
-			if (!isNaN(an) && !isNaN(bn) && String(an).length === av.replace(",", ".").length && String(bn).length === bv.replace(",", ".").length) {
-				return asc ? (an - bn) : (bn - an);
-			}
-			return asc ? av.localeCompare(bv, "tr") : bv.localeCompare(av, "tr");
-		});
-		rows.forEach(function(r) { tbody.appendChild(r); });
+	// Sütun başlıklarına tıklamayla tablo sıralamasını değiştirme devre dışı (sabit A-Z sıra)
+	window.__revirSortTable = function(_th) {
+		return;
 	};
 
 	// Data Editor (Excel tarzı Enter ile alt satıra geçiş)
