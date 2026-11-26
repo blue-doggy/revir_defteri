@@ -923,6 +923,26 @@ class TestCafeteriaModule(unittest.TestCase):
         for sec_marker in ("Temel Yemek Bilgileri", "Yapay Zekâ", "Malzeme Listesi", "Besin Özeti", "Tarif / Servis Notu"):
             self.assertIn(sec_marker, dlg_html)
 
+        # 2b. REGRESSION: AI button inside the dish pop-up must NOT close the window and must fill ingredients
+        ctx_ai = dict(ctx_api)
+        ctx_ai["_get_active_gemini_config"] = lambda: (True, "test-key", "test-model")
+        fake_ai = {
+            "ingredients": [{"ingredient_name": "Süzme Yoğurt", "amount": 90, "unit": "g", "kcal_portion": 70, "carbs_portion_g": 5, "allergen_tag": "Süt"}],
+            "portion_g": 250.0, "protein_g": 4.0, "fat_g": 3.0, "recipe_notes": "AI notu",
+        }
+        def _page_with_opener():
+            if revir_ui.button("Yemeği Aç", key="t_open_dish_dlg"):
+                caf.open_dish_editor_dialog(ctx_ai, d_id)
+
+        revir_ui.reset_session()
+        out_open = revir_ui.run_action_headless(_page_with_opener, {"action": "click", "key": "t_open_dish_dlg"})
+        self.assertIsNotNone(out_open.get("dialog_html"))
+        with mock.patch.object(caf.gai, "generate_dish_ingredients_and_nutrition_with_gemini", return_value=(True, fake_ai, "test-model")):
+            out_ai = revir_ui.run_action_headless(_page_with_opener, {"action": "click", "key": "caf_dlg_d_btn_ai"})
+        self.assertIsNotNone(out_ai.get("dialog_html"), "AI düğmesi pop-up pencereyi kapattı!")
+        self.assertIn("Süzme Yoğurt", str(out_ai.get("dialog_html")))
+        self.assertGreaterEqual(int(out_ai.get("dialog_depth") or 0), 1)
+
         # 3. Settings: 6 days/week (Mon-Sat), 2 meals/day, custom meal hours -> reflected in workdays & A4 outputs
         persantil.save_app_settings({
             "cafeteria_service_days_per_week": "6",

@@ -7586,7 +7586,7 @@ def _render_dish_editor_body(
 					if res_d.get("recipe_notes"):
 						ui.session_state[f"{key_prefix}_rec"] = str(res_d["recipe_notes"])
 					ui.success(f"✅ {len(ui.session_state[draft_k])} malzeme Gemini ({used_m}) ile hazırlandı! Tablodan dilediğiniz gibi düzenleyebilirsiniz.")
-					ui.rerun()
+					ui.rerun(scope="fragment")
 				else:
 					ui.error(f"AI hatası: {(res_d or {}).get('error', 'Yanıt alınamadı')}")
 

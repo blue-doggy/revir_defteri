@@ -141,7 +141,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return (Path(meipass_raw) if meipass_raw else _BUNDLE_DIR) / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.47.1"
+_DEFAULT_APP_VERSION = "1.47.2"
 
 
 def _load_app_version() -> str:
@@ -1306,7 +1306,7 @@ def render_layout_toolbar(
 		reset_now = ui.button("🔄 Varsayılana Sıfırla", key=f"widget_layout_reset_{page_key}", use_container_width=True)
 	if reset_now:
 		reset_widget_layout(page_key)
-		ui.rerun()
+		ui.rerun(scope="fragment")
 
 	layout_data = get_saved_widget_layout(page_key, default_layout)
 	sync_key = f"_widget_layout_sync_{page_key}"
@@ -1325,7 +1325,7 @@ def render_layout_toolbar(
 		new_profile_name = ui.text_input("Yeni profil adı", placeholder="Örn: Haftalık tarama", key=f"widget_layout_new_name_{page_key}", disabled=not edit_mode)
 		if ui.button("➕ Yeni Profili Kaydet", key=f"widget_layout_new_{page_key}", disabled=not edit_mode or not clean_text(new_profile_name)):
 			save_widget_layout(page_key, layout_data, clean_text(new_profile_name))
-			ui.rerun()
+			ui.rerun(scope="fragment")
 	with restore_col:
 		hidden_widgets = [widget_id for widget_id, item in layout_data.items() if not item["visible"]]
 		if hidden_widgets:
@@ -11162,7 +11162,7 @@ def render_person_data_file_editor(person_id: int, section_key: str = "overview"
 		if ui.button("🔄 Dosyayı Veritabanıyla Yeniden Senkronize Et", key=f"sync_pfile_{section_key}_{person_id}", use_container_width=True):
 			sync_after_person_mutation(person_id)
 			ui.success(f"{person_data.get('full_name')} veri dosyası güncellendi.")
-			ui.rerun()
+			ui.rerun(scope="fragment")
 	with d_c3:
 		if ui.button("🧹 Kişinin Ölçüm/Revir Kayıtlarını Sıfırla", key=f"clear_pfile_recs_{section_key}_{person_id}", use_container_width=True):
 			with connect_db() as connection:
@@ -11171,7 +11171,7 @@ def render_person_data_file_editor(person_id: int, section_key: str = "overview"
 				connection.execute("DELETE FROM vital_readings WHERE student_id=?", (int(person_id),))
 			sync_after_person_mutation(int(person_id))
 			ui.success(f"{person_data.get('full_name')} adlı kişinin revir, ölçüm ve vital kayıtları temizlendi.")
-			ui.rerun()
+			ui.rerun(scope="fragment")
 
 	ed_tab_v, ed_tab_m, ed_tab_vr, ed_tab_json = ui.tabs([
 		f"🩺 Revir Kayıtları ({len(person_data.get('visits', []))})",
@@ -11207,7 +11207,7 @@ def render_person_data_file_editor(person_id: int, section_key: str = "overview"
 				person_data["visits"] = edited_v.dropna(how="all").to_dict(orient="records")
 				apply_person_data_file_to_db(person_id, person_data)
 				ui.success("Kişinin revir kayıtları kendi veri dosyasına kaydedildi.")
-				ui.rerun()
+				ui.rerun(scope="fragment")
 			except Exception as err:
 				ui.error(f"Revir kayıtları uygulanamadı (mevcut veriler korundu): {err}")
 
@@ -11236,7 +11236,7 @@ def render_person_data_file_editor(person_id: int, section_key: str = "overview"
 				person_data["measurements"] = edited_m.dropna(how="all").to_dict(orient="records")
 				apply_person_data_file_to_db(person_id, person_data)
 				ui.success("Kişinin boy-kilo ölçümleri kendi veri dosyasına kaydedildi.")
-				ui.rerun()
+				ui.rerun(scope="fragment")
 			except Exception as err:
 				ui.error(f"Ölçüm kayıtları uygulanamadı (mevcut veriler korundu): {err}")
 
@@ -11269,7 +11269,7 @@ def render_person_data_file_editor(person_id: int, section_key: str = "overview"
 				person_data["vital_readings"] = edited_vr.dropna(how="all").to_dict(orient="records")
 				apply_person_data_file_to_db(person_id, person_data)
 				ui.success("Kişinin vital kayıtları kendi veri dosyasına kaydedildi.")
-				ui.rerun()
+				ui.rerun(scope="fragment")
 			except Exception as err:
 				ui.error(f"Vital kayıtlar uygulanamadı (mevcut veriler korundu): {err}")
 
@@ -11285,7 +11285,7 @@ def render_person_data_file_editor(person_id: int, section_key: str = "overview"
 				parsed_json = json.loads(raw_json_str)
 				apply_person_data_file_to_db(person_id, parsed_json)
 				ui.success("Kişi veri dosyası güncellendi ve uygulandı.")
-				ui.rerun()
+				ui.rerun(scope="fragment")
 			except Exception as e:
 				ui.error(f"JSON biçimi geçersiz: {e}")
 

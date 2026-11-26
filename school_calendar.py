@@ -3391,7 +3391,7 @@ def open_calendar_event_manager_dialog(
 								conn.execute("DELETE FROM calendar_events WHERE id = ?", (ev_id,))
 							else:
 								conn.execute("UPDATE calendar_events SET is_completed = ? WHERE id = ?", (0 if ev_done else 1, ev_id))
-						ui.rerun()
+						ui.rerun(scope="fragment")
 				with row_c3:
 					if ui.button("✕", key=f"dlg_btn_cal_del_{ev_id}", help="Bu etkinliği takvimden kaldır", use_container_width=True):
 						with connect_db_fn() as conn:
@@ -3402,7 +3402,7 @@ def open_calendar_event_manager_dialog(
 							)
 							conn.execute("DELETE FROM calendar_events WHERE id = ?", (ev_id,))
 						ui.session_state["_cal_dlg_flash"] = f"✕ '{ev['title']}' takvimden kaldırıldı."
-						ui.rerun()
+						ui.rerun(scope="fragment")
 	else:
 		ui.info("Bu güne henüz kayıtlı bir etkinlik, tatil veya sınav bulunmuyor. Aşağıdan hemen ekleyebilirsiniz.")
 
@@ -3438,7 +3438,7 @@ def open_calendar_event_manager_dialog(
 							except Exception:
 								pass
 						ui.session_state["_cal_dlg_flash"] = f"✨ Gemini AI ({used_m}): {res.get('summary') or ''} ({added} kayıt takvime eklendi)."
-						ui.rerun()
+						ui.rerun(scope="fragment")
 					else:
 						ui.error(f"Gemini hatası: {res.get('error')}")
 			ui.divider()
