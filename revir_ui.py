@@ -4576,22 +4576,22 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 }
 #revir-chat-send-btn:hover { background: var(--teal-hover, #0f766e); }
 
-/* Yan Menü Kalıcı Radyo & MP3 Çalar (Sayfa Geçişlerinde Kesintisiz) */
+/* Yan Menü Kalıcı Radyo, Çevrimdışı Ortam & Kapaklı MP3 Çalar (Sayfa Geçişlerinde Kesintisiz) */
 .revir-media-dock {
 	margin: 10px 0 10px 0;
 	padding: 9px 10px;
 	border-radius: 12px;
 	border: 1px solid var(--line);
 	background: var(--card-bg);
-	box-shadow: 0 2px 8px rgba(15, 23, 42, 0.05);
+	box-shadow: 0 2px 10px rgba(15, 23, 42, 0.06);
 	display: flex;
 	flex-direction: column;
 	gap: 7px;
 	transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 .revir-media-dock.is-playing {
-	border-color: rgba(13, 148, 136, 0.45);
-	box-shadow: 0 3px 12px rgba(13, 148, 136, 0.12);
+	border-color: rgba(13, 148, 136, 0.48);
+	box-shadow: 0 4px 14px rgba(13, 148, 136, 0.14);
 }
 .revir-media-dock.hidden { display: none !important; }
 .revir-mp-mini-rail {
@@ -4600,14 +4600,17 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 	justify-content: center;
 }
 .revir-mp-mini-btn {
-	width: 42px; height: 42px; border-radius: 11px;
+	width: 42px; height: 42px; border-radius: 11px; padding: 0; overflow: hidden; position: relative;
 	border: 1px solid var(--line); background: var(--sidebar-bg); color: var(--text-main);
 	cursor: pointer; font-size: 17px; display: inline-flex; align-items: center; justify-content: center;
 	transition: all 0.15s ease;
 }
+.revir-mp-mini-btn img {
+	width: 100%; height: 100%; object-fit: cover; display: block;
+}
 .revir-media-dock.is-playing .revir-mp-mini-btn {
 	border-color: var(--teal); background: var(--mint); color: var(--teal);
-	box-shadow: 0 0 0 2px rgba(13, 148, 136, 0.18);
+	box-shadow: 0 0 0 2px rgba(13, 148, 136, 0.22);
 }
 .revir-sidebar.collapsed .revir-media-dock {
 	padding: 4px; border: none; background: transparent; box-shadow: none; margin: 6px 0;
@@ -4616,16 +4619,17 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 .revir-sidebar.collapsed .revir-mp-mini-rail { display: flex !important; }
 
 .revir-mp-top {
-	display: flex; align-items: center; justify-content: space-between; gap: 5px;
+	display: flex; align-items: center; justify-content: space-between; gap: 4px;
 }
 .revir-mp-modes {
-	display: inline-flex; flex: 1; background: var(--sidebar-bg);
+	display: inline-flex; flex: 1; min-width: 0; background: var(--sidebar-bg);
 	border: 1px solid var(--line); border-radius: 8px; padding: 2px; gap: 2px;
 }
 .revir-mp-mode-btn {
-	flex: 1; border: none; background: transparent; color: var(--text-muted);
-	font-family: inherit; font-size: 11.2px; font-weight: 700; padding: 4px 5px;
-	border-radius: 6px; cursor: pointer; white-space: nowrap; transition: all 0.15s ease;
+	flex: 1; min-width: 0; border: none; background: transparent; color: var(--text-muted);
+	font-family: inherit; font-size: 10.6px; font-weight: 700; padding: 4px 3px;
+	border-radius: 6px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+	transition: all 0.15s ease;
 }
 .revir-mp-mode-btn.active {
 	background: var(--card-bg); color: var(--teal);
@@ -4639,23 +4643,42 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 }
 .revir-mp-icon-act:hover { border-color: var(--teal); color: var(--teal); background: var(--mint); }
 .revir-mp-sel {
-	width: 100%; height: 28px; border-radius: 7px;
+	width: 100%; height: 27px; border-radius: 7px;
 	border: 1px solid var(--line); background: var(--input-bg); color: var(--input-text);
-	font-family: inherit; font-size: 11.5px; font-weight: 600; padding: 0 6px;
+	font-family: inherit; font-size: 11.3px; font-weight: 600; padding: 0 6px;
 	outline: none; cursor: pointer;
 }
 .revir-mp-sel:focus { border-color: var(--teal); }
+.revir-mp-sel.mp-hidden { display: none !important; }
+
+/* Kapak Fotoğrafı + Şarkı Adı + Mini Liste Butonu Satırı */
 .revir-mp-now {
-	display: flex; align-items: center; justify-content: space-between; gap: 6px;
-	background: var(--sidebar-bg); border-radius: 7px; padding: 4px 7px;
-	border: 1px solid rgba(148, 163, 184, 0.22); min-height: 26px;
+	display: flex; align-items: center; gap: 8px;
+	background: var(--sidebar-bg); border-radius: 10px; padding: 6px 7px;
+	border: 1px solid rgba(148, 163, 184, 0.24); min-height: 52px;
+}
+.revir-mp-cover {
+	width: 42px; height: 42px; border-radius: 9px; overflow: hidden; flex-shrink: 0;
+	background: linear-gradient(135deg, #0d9488, #115e59);
+	box-shadow: 0 2px 7px rgba(15, 23, 42, 0.16);
+	display: flex; align-items: center; justify-content: center;
+	color: #ffffff; font-size: 18px; position: relative;
+}
+.revir-mp-cover img {
+	width: 100%; height: 100%; object-fit: cover; display: block;
+}
+.revir-media-dock.is-playing .revir-mp-cover {
+	box-shadow: 0 0 0 2px var(--teal), 0 3px 9px rgba(13, 148, 136, 0.25);
+}
+.revir-mp-meta {
+	flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 3px;
 }
 .revir-mp-marquee-vp {
-	flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; position: relative;
+	width: 100%; min-width: 0; overflow: hidden; white-space: nowrap; position: relative;
 }
 .revir-mp-marquee-txt {
-	display: inline-block; font-size: 11.5px; font-weight: 700; color: var(--text-heading);
-	white-space: nowrap;
+	display: inline-block; font-size: 11.8px; font-weight: 800; color: var(--text-heading);
+	white-space: nowrap; line-height: 1.25;
 }
 .revir-mp-marquee-txt.scrolling {
 	padding-left: 100%;
@@ -4668,14 +4691,100 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 	0% { transform: translateX(0); }
 	100% { transform: translateX(-100%); }
 }
+.revir-mp-subrow {
+	display: flex; align-items: center; justify-content: space-between; gap: 4px; min-width: 0;
+}
+.revir-mp-sub {
+	font-size: 10.3px; font-weight: 600; color: var(--text-muted);
+	overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0;
+}
 .revir-mp-badge {
-	font-size: 10px; font-weight: 800; padding: 2px 6px; border-radius: 999px;
+	font-size: 9.5px; font-weight: 800; padding: 1px 5px; border-radius: 999px;
 	background: var(--card-bg); color: var(--text-muted); border: 1px solid var(--line);
 	white-space: nowrap; flex-shrink: 0; font-variant-numeric: tabular-nums;
 }
 .revir-mp-badge.live {
 	color: #dc2626; border-color: rgba(220, 38, 38, 0.32); background: rgba(220, 38, 38, 0.08);
 }
+.revir-mp-list-btn {
+	min-width: 32px; height: 34px; padding: 0 6px; border-radius: 8px;
+	border: 1px solid var(--line); background: var(--card-bg); color: var(--text-heading);
+	cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 3px;
+	font-family: inherit; font-size: 11.5px; font-weight: 800; flex-shrink: 0;
+	transition: all 0.15s ease;
+}
+.revir-mp-list-btn:hover, .revir-mp-list-btn.open {
+	border-color: var(--teal); color: var(--teal); background: var(--mint);
+}
+.revir-mp-list-cnt {
+	font-size: 9.8px; font-weight: 800; opacity: 0.88;
+}
+
+/* Açılır Mini Şarkı / İstasyon Listesi Çekmecesi */
+.revir-mp-playlist-panel {
+	display: none; flex-direction: column; gap: 5px;
+	background: var(--sidebar-bg); border: 1px solid var(--line);
+	border-radius: 9px; padding: 6px; max-height: 228px;
+}
+.revir-mp-playlist-panel.open {
+	display: flex;
+}
+.revir-mp-pl-hdr {
+	display: flex; align-items: center; gap: 4px;
+}
+.revir-mp-pl-search {
+	flex: 1; min-width: 0; height: 25px; border-radius: 6px;
+	border: 1px solid var(--line); background: var(--input-bg); color: var(--input-text);
+	font-family: inherit; font-size: 11px; padding: 0 7px; outline: none;
+}
+.revir-mp-pl-search:focus { border-color: var(--teal); }
+.revir-mp-pl-close {
+	width: 24px; height: 25px; border-radius: 6px; border: 1px solid var(--line);
+	background: var(--card-bg); color: var(--text-muted); cursor: pointer; font-size: 11px;
+	display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.revir-mp-pl-close:hover { color: #dc2626; border-color: rgba(220,38,38,0.4); }
+.revir-mp-pl-items {
+	overflow-y: auto; max-height: 182px; display: flex; flex-direction: column; gap: 3px;
+	padding-right: 2px;
+}
+.revir-mp-pl-item {
+	display: flex; align-items: center; gap: 7px; padding: 4px 6px;
+	border-radius: 7px; border: 1px solid transparent; background: var(--card-bg);
+	cursor: pointer; text-align: left; font-family: inherit; color: var(--text-main);
+	transition: all 0.12s ease; width: 100%; box-sizing: border-box;
+}
+.revir-mp-pl-item:hover {
+	border-color: rgba(13, 148, 136, 0.35); background: var(--mint);
+}
+.revir-mp-pl-item.active {
+	border-color: var(--teal); background: var(--mint);
+}
+.revir-mp-pl-thumb {
+	width: 28px; height: 28px; border-radius: 6px; object-fit: cover; flex-shrink: 0;
+	background: linear-gradient(135deg, #0d9488, #115e59);
+	display: inline-flex; align-items: center; justify-content: center; color: #fff; font-size: 13px;
+}
+.revir-mp-pl-txt {
+	flex: 1; min-width: 0; display: flex; flex-direction: column;
+}
+.revir-mp-pl-name {
+	font-size: 11px; font-weight: 700; color: var(--text-heading);
+	overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.revir-mp-pl-item.active .revir-mp-pl-name { color: var(--teal); font-weight: 800; }
+.revir-mp-pl-sub {
+	font-size: 9.6px; color: var(--text-muted);
+	overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.revir-mp-pl-idx {
+	font-size: 10px; font-weight: 800; color: var(--text-muted); flex-shrink: 0;
+}
+.revir-mp-pl-item.active .revir-mp-pl-idx { color: var(--teal); }
+.revir-mp-pl-empty {
+	font-size: 11px; color: var(--text-muted); text-align: center; padding: 12px 6px;
+}
+
 .revir-mp-seek-wrap { display: none; align-items: center; }
 .revir-mp-seek-wrap.visible { display: flex; }
 .revir-mp-seek {
@@ -7807,30 +7916,34 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 		var MP_STORAGE_KEY = "revir_mp_state_v1";
 		var audioEl = document.getElementById("revir-persistent-audio");
 		var dockEl = null;
-		var mpServerCfg = { visible: false, stations: [], tracks: [], music_folder: "", music_folder_name: "muzikler" };
+		var mpServerCfg = { visible: false, stations: [], tracks: [], ambient_presets: [], music_folder: "", music_folder_name: "muzikler" };
 		var mpState = {
 			mode: "radio",
 			volume: 0.75,
 			muted: false,
 			shuffle: false,
+			listOpen: false,
 			stationId: "",
+			ambientId: "",
 			trackId: ""
 		};
+		var playlistQuery = "";
 		var shuffleHistory = [];
 		var currentCandidateUrls = [];
 		var currentCandidateIdx = 0;
 		var isSeeking = false;
 		var lastMediaCmdAt = 0;
-		var canNativeHls = false;
 
 		try {
 			var savedMp = JSON.parse(localStorage.getItem(MP_STORAGE_KEY) || "{}");
 			if (savedMp && typeof savedMp === "object") {
-				if (savedMp.mode === "radio" || savedMp.mode === "folder") mpState.mode = savedMp.mode;
+				if (savedMp.mode === "radio" || savedMp.mode === "folder" || savedMp.mode === "ambient") mpState.mode = savedMp.mode;
 				if (typeof savedMp.volume === "number" && savedMp.volume >= 0 && savedMp.volume <= 1) mpState.volume = savedMp.volume;
 				if (typeof savedMp.muted === "boolean") mpState.muted = savedMp.muted;
 				if (typeof savedMp.shuffle === "boolean") mpState.shuffle = savedMp.shuffle;
+				if (typeof savedMp.listOpen === "boolean") mpState.listOpen = savedMp.listOpen;
 				if (typeof savedMp.stationId === "string") mpState.stationId = savedMp.stationId;
+				if (typeof savedMp.ambientId === "string") mpState.ambientId = savedMp.ambientId;
 				if (typeof savedMp.trackId === "string") mpState.trackId = savedMp.trackId;
 			}
 		} catch (_e) {}
@@ -7838,11 +7951,14 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 		if (audioEl) {
 			audioEl.volume = mpState.volume;
 			audioEl.muted = mpState.muted;
-			try {
-				var c1 = audioEl.canPlayType("application/vnd.apple.mpegurl");
-				var c2 = audioEl.canPlayType("audio/mpegurl");
-				canNativeHls = !!(c1 || c2);
-			} catch (_he) { canNativeHls = false; }
+		}
+
+		function escHtml(str) {
+			return String(str == null ? "" : str)
+				.replace(/&/g, "&amp;")
+				.replace(/</g, "&lt;")
+				.replace(/>/g, "&gt;")
+				.replace(/"/g, "&quot;");
 		}
 
 		function saveMpState() {
@@ -7859,6 +7975,7 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 
 		function getStations() { return Array.isArray(mpServerCfg.stations) ? mpServerCfg.stations : []; }
 		function getTracks() { return Array.isArray(mpServerCfg.tracks) ? mpServerCfg.tracks : []; }
+		function getAmbients() { return Array.isArray(mpServerCfg.ambient_presets) ? mpServerCfg.ambient_presets : []; }
 
 		function getActiveStation() {
 			var list = getStations();
@@ -7867,6 +7984,16 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 				if (list[i].id === mpState.stationId) return list[i];
 			}
 			mpState.stationId = list[0].id;
+			return list[0];
+		}
+
+		function getActiveAmbient() {
+			var list = getAmbients();
+			if (!list.length) return null;
+			for (var i = 0; i < list.length; i++) {
+				if (list[i].id === mpState.ambientId) return list[i];
+			}
+			mpState.ambientId = list[0].id;
 			return list[0];
 		}
 
@@ -7880,21 +8007,35 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 			return list[0];
 		}
 
+		function trackDisplayTitle(tr) {
+			if (!tr) return "";
+			return String(tr.tag_title || tr.title || "Parça");
+		}
+
+		function trackDisplaySubtitle(tr) {
+			if (!tr) return "";
+			if (tr.artist) return String(tr.artist);
+			if (tr.folder) return "📁 " + tr.folder;
+			return "📁 " + (mpServerCfg.music_folder_name || "Klasörüm");
+		}
+
 		function buildStationUrlChain(st) {
 			if (!st) return [];
 			var urls = [];
-			var isHls = !!(st.is_hls || String(st.url || "").toLowerCase().indexOf(".m3u8") !== -1);
-			if (isHls && !canNativeHls && st.hls_proxy_url) {
-				urls.push(st.hls_proxy_url);
-			}
-			if (st.url) urls.push(st.url);
-			if (Array.isArray(st.backup_urls)) {
-				st.backup_urls.forEach(function(bu) {
-					if (bu && urls.indexOf(bu) === -1) urls.push(bu);
+			// MEB sertifikası, HTML engel algılama ve ID3 temizliği için önce yerel Python köprü zinciri
+			if (Array.isArray(st.proxy_chain)) {
+				st.proxy_chain.forEach(function(pu) {
+					if (pu && urls.indexOf(pu) === -1) urls.push(pu);
 				});
 			}
 			if (st.hls_proxy_url && urls.indexOf(st.hls_proxy_url) === -1) {
 				urls.push(st.hls_proxy_url);
+			}
+			if (st.url && urls.indexOf(st.url) === -1) urls.push(st.url);
+			if (Array.isArray(st.backup_urls)) {
+				st.backup_urls.forEach(function(bu) {
+					if (bu && urls.indexOf(bu) === -1) urls.push(bu);
+				});
 			}
 			return urls;
 		}
@@ -7904,26 +8045,129 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 			try {
 				var title = "Revir Ses Modülü";
 				var artist = "Revir Defteri";
+				var artwork = [];
 				if (mpState.mode === "radio") {
 					var st = getActiveStation();
 					if (st) {
 						title = st.name;
 						artist = st.category || "Canlı Radyo (HTTPS)";
 					}
+				} else if (mpState.mode === "ambient") {
+					var am = getActiveAmbient();
+					if (am) {
+						title = am.name;
+						artist = "Çevrimdışı Revir Ambiyansı";
+					}
 				} else {
 					var tr = getActiveTrack();
 					if (tr) {
-						title = tr.title;
-						artist = tr.folder ? ("📁 " + tr.folder) : ("📁 " + (mpServerCfg.music_folder_name || "Klasörüm"));
+						title = trackDisplayTitle(tr);
+						artist = trackDisplaySubtitle(tr);
+						if (tr.cover_url) {
+							artwork = [{ src: tr.cover_url, sizes: "256x256" }];
+						}
 					}
 				}
-				navigator.mediaSession.metadata = new MediaMetadata({
-					title: title,
-					artist: artist,
-					album: "Revir Defteri"
-				});
+				var metaInit = { title: title, artist: artist, album: "Revir Defteri" };
+				if (artwork.length) metaInit.artwork = artwork;
+				navigator.mediaSession.metadata = new MediaMetadata(metaInit);
 				navigator.mediaSession.playbackState = (audioEl && !audioEl.paused) ? "playing" : "paused";
 			} catch (_mse) {}
+		}
+
+		function renderMiniPlaylist() {
+			if (!dockEl) return;
+			var panel = dockEl.querySelector("#revir-mp-playlist-panel");
+			var listBtn = dockEl.querySelector("#revir-mp-list-btn");
+			var cntEl = dockEl.querySelector("#revir-mp-list-cnt");
+			var itemsEl = dockEl.querySelector("#revir-mp-pl-items");
+			var searchInp = dockEl.querySelector("#revir-mp-pl-search");
+
+			var totalLen = 0;
+			if (mpState.mode === "folder") totalLen = getTracks().length;
+			else if (mpState.mode === "radio") totalLen = getStations().length;
+			else totalLen = getAmbients().length;
+
+			if (cntEl) cntEl.textContent = totalLen > 0 ? String(totalLen) : "";
+			if (listBtn) {
+				listBtn.classList.toggle("open", !!mpState.listOpen);
+				listBtn.title = mpState.mode === "folder"
+					? "Klasördeki Şarkıları Mini Liste Olarak Göster (" + totalLen + " parça)"
+					: "İstasyon / Ses Listesini Aç";
+			}
+			if (!panel || !itemsEl) return;
+			panel.classList.toggle("open", !!mpState.listOpen);
+			if (!mpState.listOpen) return;
+
+			if (searchInp) {
+				searchInp.placeholder = mpState.mode === "folder" ? "🔍 Klasörde şarkı ara..." : "🔍 İstasyon ara...";
+			}
+
+			var q = (playlistQuery || "").trim().toLowerCase();
+			var htmlParts = [];
+			var isPlaying = !!(audioEl && !audioEl.paused && audioEl.currentSrc);
+
+			if (mpState.mode === "folder") {
+				var tracks = getTracks();
+				var activeTr = getActiveTrack();
+				tracks.forEach(function(tr, idx) {
+					var tTitle = trackDisplayTitle(tr);
+					var tSub = trackDisplaySubtitle(tr);
+					if (q && (tTitle + " " + tSub + " " + (tr.rel_path || "")).toLowerCase().indexOf(q) === -1) return;
+					var isAct = !!(activeTr && activeTr.id === tr.id);
+					var thumbHtml = tr.cover_url
+						? '<img class="revir-mp-pl-thumb" src="' + escHtml(tr.cover_url) + '" alt="" loading="lazy"/>'
+						: '<span class="revir-mp-pl-thumb">♪</span>';
+					htmlParts.push(
+						'<button type="button" class="revir-mp-pl-item' + (isAct ? ' active' : '') + '" data-pl-kind="folder" data-pl-id="' + escHtml(tr.id) + '">' +
+							thumbHtml +
+							'<span class="revir-mp-pl-txt">' +
+								'<span class="revir-mp-pl-name">' + escHtml(tTitle) + '</span>' +
+								'<span class="revir-mp-pl-sub">' + escHtml(tSub) + '</span>' +
+							'</span>' +
+							'<span class="revir-mp-pl-idx">' + (isAct && isPlaying ? '♫' : (idx + 1)) + '</span>' +
+						'</button>'
+					);
+				});
+				if (!htmlParts.length) {
+					htmlParts.push('<div class="revir-mp-pl-empty">' + (tracks.length ? 'Aramaya uygun şarkı yok.' : 'Klasörde ses dosyası yok. Üstteki 📁 simgesiyle klasör seçin.') + '</div>');
+				}
+			} else if (mpState.mode === "radio") {
+				var stations = getStations();
+				var activeSt = getActiveStation();
+				stations.forEach(function(st, idx) {
+					if (q && (st.name + " " + (st.category || "")).toLowerCase().indexOf(q) === -1) return;
+					var isActR = !!(activeSt && activeSt.id === st.id);
+					htmlParts.push(
+						'<button type="button" class="revir-mp-pl-item' + (isActR ? ' active' : '') + '" data-pl-kind="radio" data-pl-id="' + escHtml(st.id) + '">' +
+							'<span class="revir-mp-pl-thumb">📻</span>' +
+							'<span class="revir-mp-pl-txt">' +
+								'<span class="revir-mp-pl-name">' + escHtml(st.name) + '</span>' +
+								'<span class="revir-mp-pl-sub">' + escHtml(st.category || "HTTPS 443") + '</span>' +
+							'</span>' +
+							'<span class="revir-mp-pl-idx">' + (isActR && isPlaying ? '●' : (idx + 1)) + '</span>' +
+						'</button>'
+					);
+				});
+			} else {
+				var ambs = getAmbients();
+				var activeAm = getActiveAmbient();
+				ambs.forEach(function(am) {
+					var isActA = !!(activeAm && activeAm.id === am.id);
+					htmlParts.push(
+						'<button type="button" class="revir-mp-pl-item' + (isActA ? ' active' : '') + '" data-pl-kind="ambient" data-pl-id="' + escHtml(am.id) + '">' +
+							'<span class="revir-mp-pl-thumb">' + escHtml(am.icon || "🌊") + '</span>' +
+							'<span class="revir-mp-pl-txt">' +
+								'<span class="revir-mp-pl-name">' + escHtml(am.name) + '</span>' +
+								'<span class="revir-mp-pl-sub">Sıfır İnternet · Çevrimdışı Ses</span>' +
+							'</span>' +
+							'<span class="revir-mp-pl-idx">' + (isActA && isPlaying ? '♫' : '') + '</span>' +
+						'</button>'
+					);
+				});
+			}
+
+			itemsEl.innerHTML = htmlParts.join("");
 		}
 
 		function ensureDockElement() {
@@ -7940,14 +8184,31 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 					'<div class="revir-mp-top">' +
 						'<div class="revir-mp-modes">' +
 							'<button type="button" class="revir-mp-mode-btn active" data-mp-mode="radio">📻 Radyo</button>' +
+							'<button type="button" class="revir-mp-mode-btn" data-mp-mode="ambient" title="İnternetsiz Dinlendirici Revir Sesleri">🌊 Ortam</button>' +
 							'<button type="button" class="revir-mp-mode-btn" data-mp-mode="folder">🎵 Klasörüm</button>' +
 						'</div>' +
 						'<button type="button" class="revir-mp-icon-act" id="revir-mp-aux-btn" title="Çevrimiçi HTTPS Radyoları Yenile">🌐</button>' +
 					'</div>' +
 					'<select class="revir-mp-sel" id="revir-mp-select" aria-label="İstasyon veya Parça Seçin"></select>' +
 					'<div class="revir-mp-now">' +
-						'<div class="revir-mp-marquee-vp"><span class="revir-mp-marquee-txt" id="revir-mp-title">Hazır</span></div>' +
-						'<span class="revir-mp-badge" id="revir-mp-badge">HAZIR</span>' +
+						'<div class="revir-mp-cover" id="revir-mp-cover"><span id="revir-mp-cover-ico">📻</span></div>' +
+						'<div class="revir-mp-meta">' +
+							'<div class="revir-mp-marquee-vp"><span class="revir-mp-marquee-txt" id="revir-mp-title">Hazır</span></div>' +
+							'<div class="revir-mp-subrow">' +
+								'<span class="revir-mp-sub" id="revir-mp-sub">Canlı Yayın</span>' +
+								'<span class="revir-mp-badge" id="revir-mp-badge">HAZIR</span>' +
+							'</div>' +
+						'</div>' +
+						'<button type="button" class="revir-mp-list-btn" id="revir-mp-list-btn" title="Şarkı / İstasyon Listesini Aç">' +
+							'<span>☰</span><span class="revir-mp-list-cnt" id="revir-mp-list-cnt"></span>' +
+						'</button>' +
+					'</div>' +
+					'<div class="revir-mp-playlist-panel" id="revir-mp-playlist-panel">' +
+						'<div class="revir-mp-pl-hdr">' +
+							'<input type="text" class="revir-mp-pl-search" id="revir-mp-pl-search" placeholder="🔍 Şarkı ara..." autocomplete="off"/>' +
+							'<button type="button" class="revir-mp-pl-close" id="revir-mp-pl-close" title="Listeyi Kapat">✕</button>' +
+						'</div>' +
+						'<div class="revir-mp-pl-items" id="revir-mp-pl-items"></div>' +
 					'</div>' +
 					'<div class="revir-mp-seek-wrap" id="revir-mp-seek-wrap">' +
 						'<input type="range" class="revir-mp-seek" id="revir-mp-seek" min="0" max="1000" value="0" title="İleri / Geri Sar"/>' +
@@ -7972,9 +8233,13 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 					if (nextMode && nextMode !== mpState.mode) {
 						var wasPlaying = !!(audioEl && !audioEl.paused);
 						mpState.mode = nextMode;
+						playlistQuery = "";
+						var sInp = dockEl.querySelector("#revir-mp-pl-search");
+						if (sInp) sInp.value = "";
 						saveMpState();
 						if (audioEl) {
 							audioEl.pause();
+							audioEl.loop = false;
 							audioEl.removeAttribute("src");
 							audioEl.load();
 						}
@@ -7984,18 +8249,60 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 				});
 			});
 
+			dockEl.querySelector("#revir-mp-list-btn").addEventListener("click", function(e) {
+				e.stopPropagation();
+				mpState.listOpen = !mpState.listOpen;
+				saveMpState();
+				renderMiniPlaylist();
+				if (mpState.listOpen) {
+					var actEl = dockEl.querySelector(".revir-mp-pl-item.active");
+					if (actEl && actEl.scrollIntoView) {
+						try { actEl.scrollIntoView({ block: "nearest" }); } catch (_se) {}
+					}
+				}
+			});
+
+			dockEl.querySelector("#revir-mp-pl-close").addEventListener("click", function(e) {
+				e.stopPropagation();
+				mpState.listOpen = false;
+				saveMpState();
+				renderMiniPlaylist();
+			});
+
+			dockEl.querySelector("#revir-mp-pl-search").addEventListener("input", function(e) {
+				playlistQuery = e.target.value || "";
+				renderMiniPlaylist();
+			});
+
+			dockEl.querySelector("#revir-mp-pl-items").addEventListener("click", function(e) {
+				var rowBtn = e.target && e.target.closest ? e.target.closest("[data-pl-id]") : null;
+				if (!rowBtn) return;
+				e.stopPropagation();
+				var pid = rowBtn.getAttribute("data-pl-id");
+				var pkind = rowBtn.getAttribute("data-pl-kind");
+				if (!pid) return;
+				if (pkind === "folder") mpState.trackId = pid;
+				else if (pkind === "ambient") mpState.ambientId = pid;
+				else mpState.stationId = pid;
+				saveMpState();
+				playCurrentSelection();
+			});
+
 			dockEl.querySelector("#revir-mp-aux-btn").addEventListener("click", function(e) {
 				e.stopPropagation();
 				if (mpState.mode === "radio") {
 					refreshOnlineStations();
-				} else {
+				} else if (mpState.mode === "folder") {
 					pickMusicFolderInteractive();
+				} else {
+					showToast("🌊 Çevrimdışı ortam sesleri internet bağlantısı gerektirmez.");
 				}
 			});
 
 			dockEl.querySelector("#revir-mp-select").addEventListener("change", function(e) {
 				var val = e.target.value;
 				if (mpState.mode === "radio") mpState.stationId = val;
+				else if (mpState.mode === "ambient") mpState.ambientId = val;
 				else mpState.trackId = val;
 				saveMpState();
 				playCurrentSelection();
@@ -8077,6 +8384,20 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 			else muteBtn.textContent = "🔊";
 		}
 
+		function renderCoverSlot(coverUrl, fallbackEmoji) {
+			if (!dockEl) return;
+			var covEl = dockEl.querySelector("#revir-mp-cover");
+			if (!covEl) return;
+			var wantedKey = coverUrl ? ("img:" + coverUrl) : ("ico:" + fallbackEmoji);
+			if (covEl.dataset.covKey === wantedKey) return;
+			covEl.dataset.covKey = wantedKey;
+			if (coverUrl) {
+				covEl.innerHTML = '<img id="revir-mp-cover-img" src="' + escHtml(coverUrl) + '" alt="Kapak"/>';
+			} else {
+				covEl.innerHTML = '<span id="revir-mp-cover-ico">' + escHtml(fallbackEmoji || "🎵") + '</span>';
+			}
+		}
+
 		function renderDockState(rebuildOptions) {
 			if (!dockEl) return;
 			if (!mpServerCfg || !mpServerCfg.visible) {
@@ -8090,7 +8411,17 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 
 			var miniBtn = dockEl.querySelector("#revir-mp-mini-btn");
 			if (miniBtn) {
-				miniBtn.textContent = isPlaying ? "⏸" : (mpState.mode === "radio" ? "📻" : "🎵");
+				if (mpState.mode === "folder") {
+					var mTr = getActiveTrack();
+					if (mTr && mTr.cover_url) {
+						miniBtn.innerHTML = '<img src="' + escHtml(mTr.cover_url) + '" alt=""/>';
+						miniBtn.title = (isPlaying ? "⏸ Çalıyor: " : "▶ Oynat: ") + trackDisplayTitle(mTr);
+					} else {
+						miniBtn.textContent = isPlaying ? "⏸" : "🎵";
+					}
+				} else {
+					miniBtn.textContent = isPlaying ? "⏸" : (mpState.mode === "radio" ? "📻" : "🌊");
+				}
 			}
 
 			dockEl.querySelectorAll("[data-mp-mode]").forEach(function(b) {
@@ -8100,25 +8431,26 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 			var auxBtn = dockEl.querySelector("#revir-mp-aux-btn");
 			if (auxBtn) {
 				if (mpState.mode === "radio") {
+					auxBtn.style.display = "inline-flex";
 					auxBtn.textContent = "🌐";
 					auxBtn.title = "MEB Uyumlu HTTPS Radyo Listesini Güncelle (443 Portu)";
-				} else {
+				} else if (mpState.mode === "folder") {
+					auxBtn.style.display = "inline-flex";
 					auxBtn.textContent = "📁";
 					auxBtn.title = "Müzik Klasörü Seç (Aktif: " + (mpServerCfg.music_folder || "muzikler") + ")";
+				} else {
+					auxBtn.style.display = "none";
 				}
 			}
 
 			var selEl = dockEl.querySelector("#revir-mp-select");
-			if (selEl && rebuildOptions) {
-				selEl.innerHTML = "";
-				if (mpState.mode === "radio") {
-					var stations = getStations();
-					if (!stations.length) {
-						var optEmptyR = document.createElement("option");
-						optEmptyR.value = "";
-						optEmptyR.textContent = "İstasyon bulunamadı";
-						selEl.appendChild(optEmptyR);
-					} else {
+			if (selEl) {
+				// Klasör modunda kapak + şarkı adı + ☰ mini liste kullanıldığından açılır kutuyu gizle (DOM'da senkron tut)
+				selEl.classList.toggle("mp-hidden", mpState.mode === "folder");
+				if (rebuildOptions) {
+					selEl.innerHTML = "";
+					if (mpState.mode === "radio") {
+						var stations = getStations();
 						var activeSt = getActiveStation();
 						stations.forEach(function(st) {
 							var o = document.createElement("option");
@@ -8127,31 +8459,37 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 							if (activeSt && st.id === activeSt.id) o.selected = true;
 							selEl.appendChild(o);
 						});
-					}
-				} else {
-					var tracks = getTracks();
-					if (!tracks.length) {
-						var optEmptyF = document.createElement("option");
-						optEmptyF.value = "";
-						optEmptyF.textContent = "📁 Klasörde ses dosyası yok (📁 ile seçin)";
-						selEl.appendChild(optEmptyF);
+					} else if (mpState.mode === "ambient") {
+						var ambs = getAmbients();
+						var activeAm = getActiveAmbient();
+						ambs.forEach(function(am) {
+							var oa = document.createElement("option");
+							oa.value = am.id;
+							oa.textContent = (am.icon || "🌊") + " " + am.name;
+							if (activeAm && am.id === activeAm.id) oa.selected = true;
+							selEl.appendChild(oa);
+						});
 					} else {
+						var tracks = getTracks();
 						var activeTr = getActiveTrack();
 						tracks.forEach(function(tr, idx) {
 							var o2 = document.createElement("option");
 							o2.value = tr.id;
-							o2.textContent = (idx + 1) + ". " + tr.title;
+							o2.textContent = (idx + 1) + ". " + trackDisplayTitle(tr);
 							if (activeTr && tr.id === activeTr.id) o2.selected = true;
 							selEl.appendChild(o2);
 						});
 					}
+				} else {
+					var targetVal = mpState.mode === "radio"
+						? (getActiveStation() || {}).id
+						: (mpState.mode === "ambient" ? (getActiveAmbient() || {}).id : (getActiveTrack() || {}).id);
+					if (targetVal && selEl.value !== targetVal) selEl.value = targetVal;
 				}
-			} else if (selEl) {
-				var targetVal = mpState.mode === "radio" ? (getActiveStation() || {}).id : (getActiveTrack() || {}).id;
-				if (targetVal && selEl.value !== targetVal) selEl.value = targetVal;
 			}
 
 			var titleEl = dockEl.querySelector("#revir-mp-title");
+			var subEl = dockEl.querySelector("#revir-mp-sub");
 			var badgeEl = dockEl.querySelector("#revir-mp-badge");
 			var seekWrap = dockEl.querySelector("#revir-mp-seek-wrap");
 			var playBtn = dockEl.querySelector("#revir-mp-play");
@@ -8167,36 +8505,61 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 			}
 
 			var nowText = "Hazır";
+			var subText = "";
 			if (mpState.mode === "radio") {
 				var stNow = getActiveStation();
-				nowText = stNow ? (stNow.name + (stNow.category ? " · " + stNow.category : "")) : "İstasyon seçin";
+				nowText = stNow ? stNow.name : "İstasyon seçin";
+				subText = stNow ? (stNow.category || "MEB Uyumlu HTTPS") : "Radyo";
+				renderCoverSlot("", "📻");
 				if (badgeEl) {
 					badgeEl.textContent = isPlaying ? "● CANLI" : "RADYO";
 					badgeEl.classList.toggle("live", isPlaying);
 				}
+			} else if (mpState.mode === "ambient") {
+				var amNow = getActiveAmbient();
+				nowText = amNow ? amNow.name : "Ortam Sesi";
+				subText = "İnternetsiz Revir Ambiyansı";
+				renderCoverSlot("", amNow ? (amNow.icon || "🌊") : "🌊");
+				if (badgeEl) {
+					badgeEl.classList.remove("live");
+					badgeEl.textContent = isPlaying ? "● AKTİF" : "ÇEVRİMDIŞI";
+				}
 			} else {
 				var trNow = getActiveTrack();
-				nowText = trNow ? (trNow.title + (trNow.folder ? " (" + trNow.folder + ")" : "")) : ("📁 " + (mpServerCfg.music_folder_name || "muzikler") + " klasörü boş");
+				if (trNow) {
+					nowText = trackDisplayTitle(trNow);
+					subText = trackDisplaySubtitle(trNow);
+					renderCoverSlot(trNow.cover_url || "", "🎵");
+				} else {
+					nowText = (mpServerCfg.music_folder_name || "muzikler") + " klasörü boş";
+					subText = "Üstteki 📁 ile MP3 klasörü seçin";
+					renderCoverSlot("", "📁");
+				}
 				if (badgeEl) {
 					badgeEl.classList.remove("live");
 					if (isPlaying && audioEl && isFinite(audioEl.duration) && audioEl.duration > 0) {
 						badgeEl.textContent = fmtTime(audioEl.currentTime) + " / " + fmtTime(audioEl.duration);
 					} else {
-						badgeEl.textContent = getTracks().length ? (getTracks().length + " MP3") : "BOŞ";
+						badgeEl.textContent = getTracks().length ? (getTracks().length + " PARÇA") : "BOŞ";
 					}
 				}
 			}
 
 			if (titleEl && titleEl.textContent !== nowText) {
 				titleEl.textContent = nowText;
-				titleEl.classList.toggle("scrolling", nowText.length > 24);
+				titleEl.classList.toggle("scrolling", nowText.length > 22);
+			}
+			if (subEl && subEl.textContent !== subText) {
+				subEl.textContent = subText;
 			}
 			updateVolumeIcons();
 			updateMediaSessionMeta();
+			renderMiniPlaylist();
 		}
 
-		function startAudioWithCandidates(urls) {
+		function startAudioWithCandidates(urls, enableLoop) {
 			if (!audioEl || !urls || !urls.length) return;
+			audioEl.loop = !!enableLoop;
 			currentCandidateUrls = urls.slice();
 			currentCandidateIdx = 0;
 			audioEl.src = currentCandidateUrls[0];
@@ -8221,7 +8584,7 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 			}
 			renderDockState(false);
 			if (mpState.mode === "radio") {
-				showToast("⚠️ Radyo akışına bağlanılamadı (ağ/sertifika kısıtlaması olabilir).", "warn");
+				showToast("⚠️ MEB ağı bu istasyonu engelledi veya sertifika onayı gerekiyor. TRT kanallarını, Ayarlar > MEB Tanılama'yı veya '🌊 Ortam' modunu deneyin.", "warn");
 			} else {
 				showToast("⚠️ Ses dosyası oynatılamadı.", "warn");
 			}
@@ -8236,7 +8599,14 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 					return;
 				}
 				var chain = buildStationUrlChain(st);
-				startAudioWithCandidates(chain);
+				startAudioWithCandidates(chain, false);
+			} else if (mpState.mode === "ambient") {
+				var am = getActiveAmbient();
+				if (!am || !am.url) {
+					showToast("⚠️ Ortam sesi bulunamadı.", "warn");
+					return;
+				}
+				startAudioWithCandidates([am.url], true);
 			} else {
 				var tr = getActiveTrack();
 				if (!tr) {
@@ -8245,7 +8615,7 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 				}
 				shuffleHistory.push(tr.id);
 				if (shuffleHistory.length > 60) shuffleHistory.shift();
-				startAudioWithCandidates([tr.url]);
+				startAudioWithCandidates([tr.url], false);
 			}
 			renderDockState(false);
 		}
@@ -8270,6 +8640,7 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 			currentCandidateUrls = [];
 			currentCandidateIdx = 0;
 			audioEl.pause();
+			audioEl.loop = false;
 			try { audioEl.currentTime = 0; } catch (_e) {}
 			if (mpState.mode === "radio") {
 				audioEl.removeAttribute("src");
@@ -8289,6 +8660,21 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 				}
 				var nextSIdx = (sIdx + delta + stations.length) % stations.length;
 				mpState.stationId = stations[nextSIdx].id;
+				saveMpState();
+				renderDockState(false);
+				playCurrentSelection();
+				return;
+			}
+
+			if (mpState.mode === "ambient") {
+				var ambs = getAmbients();
+				if (!ambs.length) return;
+				var curAm = getActiveAmbient();
+				var aIdx = 0;
+				for (var k = 0; k < ambs.length; k++) {
+					if (curAm && ambs[k].id === curAm.id) { aIdx = k; break; }
+				}
+				mpState.ambientId = ambs[(aIdx + delta + ambs.length) % ambs.length].id;
 				saveMpState();
 				renderDockState(false);
 				playCurrentSelection();
@@ -8352,6 +8738,7 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 							if (apiRes && apiRes.media_player) {
 								mpServerCfg = apiRes.media_player;
 								mpState.trackId = "";
+								mpState.listOpen = true;
 								saveMpState();
 								renderDockState(true);
 								showToast("📁 Müzik klasörü seçildi (" + (mpServerCfg.track_count || 0) + " parça)");
@@ -8364,6 +8751,7 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 						if (apiRes && apiRes.media_player) {
 							mpServerCfg = apiRes.media_player;
 							mpState.trackId = "";
+							mpState.listOpen = true;
 							saveMpState();
 							renderDockState(true);
 							showToast("📁 Müzik klasörü güncellendi (" + (mpServerCfg.track_count || 0) + " parça)");
@@ -8376,6 +8764,7 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 				if (apiRes && apiRes.selected && apiRes.media_player) {
 					mpServerCfg = apiRes.media_player;
 					mpState.trackId = "";
+					mpState.listOpen = true;
 					saveMpState();
 					renderDockState(true);
 					showToast("📁 Müzik klasörü seçildi (" + (mpServerCfg.track_count || 0) + " parça)");
@@ -8389,6 +8778,8 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 			audioEl.addEventListener("ended", function() {
 				if (mpState.mode === "folder" && getTracks().length > 0) {
 					stepTrack(1);
+				} else if (mpState.mode === "ambient") {
+					playCurrentSelection();
 				} else {
 					renderDockState(false);
 				}

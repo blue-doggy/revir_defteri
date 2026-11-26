@@ -1,15 +1,19 @@
 """
-Yan Menü Radyo & Yerel MP3 Çalar Modülü Otomatik Test Paketi (test_12_media_player.py)
+Yan Menü MEB Radyo, Çevrimdışı Ortam Sesleri & Kapaklı Yerel MP3 Çalar Test Paketi (test_12_media_player.py)
 """
 from __future__ import annotations
 
+import http.client
 import json
 from pathlib import Path
+import ssl
+import struct
 import sys
 import tempfile
 import unittest
 from unittest import mock
 import urllib.error
+import urllib.parse
 import urllib.request
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -22,15 +26,34 @@ import revir_ui
 from tests.db_test_helper import isolated_real_db
 
 
+def _build_id3v23_mp3_with_cover(title: str, artist: str, png_bytes: bytes) -> bytes:
+	def _frame(fid: str, payload: bytes) -> bytes:
+		return fid.encode("ascii") + struct.pack(">I", len(payload)) + b"\x00\x00" + payload
+
+	tit2 = _frame("TIT2", b"\x03" + title.encode("utf-8") + b"\x00")
+	tpe1 = _frame("TPE1", b"\x03" + artist.encode("utf-8") + b"\x00")
+	apic_payload = b"\x00image/png\x00\x03Cover\x00" + png_bytes
+	apic = _frame("APIC", apic_payload)
+	frames = tit2 + tpe1 + apic
+	sz = len(frames)
+	syncsafe = bytes([
+		(sz >> 21) & 0x7F,
+		(sz >> 14) & 0x7F,
+		(sz >> 7) & 0x7F,
+		sz & 0x7F,
+	])
+	return b"ID3\x03\x00\x00" + syncsafe + frames + (b"\xff\xfb\x90\x64" * 32)
+
+
 class TestMediaPlayerModule(unittest.TestCase):
 	def test_meb_safe_stream_url_filtering(self) -> None:
 		# Standart HTTPS (443) akışları kabul edilmeli
-		self.assertTrue(media_player.is_meb_safe_stream_url("https://radio-trtfm.live.trt.com.tr/master.m3u8"))
+		self.assertTrue(media_player.is_meb_safe_stream_url("https://rd-trtfm.medya.trt.com.tr/master.m3u8"))
 		self.assertTrue(media_player.is_meb_safe_stream_url("https://playerservices.streamtheworld.com:443/api/livestream-redirect/JOY_TURK_SC"))
-		self.assertTrue(media_player.is_meb_safe_stream_url("https://ntvradyo.radyotvonline.net/ntvradyo"))
+		self.assertTrue(media_player.is_meb_safe_stream_url("https://dygedge2.radyotvonline.net/ntvradyo/playlist.m3u8"))
 
 		# Şifresiz HTTP ve standart dışı portlar (:8000, :8080, :9999) reddedilmeli
-		self.assertFalse(media_player.is_meb_safe_stream_url("http://radio-trtfm.live.trt.com.tr/master.m3u8"))
+		self.assertFalse(media_player.is_meb_safe_stream_url("http://rd-trtfm.medya.trt.com.tr/master.m3u8"))
 		self.assertFalse(media_player.is_meb_safe_stream_url("https://ornek-radyo.com:8000/stream.mp3"))
 		self.assertFalse(media_player.is_meb_safe_stream_url("https://ornek-radyo.com:8080/live.aac"))
 		self.assertFalse(media_player.is_meb_safe_stream_url("https://ornek-radyo.com:9999/;"))
@@ -39,7 +62,7 @@ class TestMediaPlayerModule(unittest.TestCase):
 		self.assertFalse(media_player.is_meb_safe_stream_url(""))
 
 		# Tüm yerleşik istasyonlar ve yedek URL'ler MEB güvenli olmalı
-		self.assertGreaterEqual(len(media_player.BUILTIN_MEB_SAFE_STATIONS), 10)
+		self.assertGreaterEqual(len(media_player.BUILTIN_MEB_SAFE_STATIONS), 15)
 		for st in media_player.BUILTIN_MEB_SAFE_STATIONS:
 			self.assertTrue(media_player.is_meb_safe_stream_url(st["url"]), f"Güvensiz yerleşik istasyon: {st}")
 			for b_url in st.get("backup_urls", []):
@@ -63,6 +86,8 @@ class TestMediaPlayerModule(unittest.TestCase):
 		fake_bytes = json.dumps(fake_api_rows).encode("utf-8")
 
 		class _FakeResp:
+			headers = {"Content-Type": "application/json"}
+
 			def __enter__(self):
 				return self
 
@@ -137,6 +162,189 @@ class TestMediaPlayerModule(unittest.TestCase):
 			finally:
 				srv.stop()
 
+	def test_mp3_id3v2_cover_and_metadata_extraction_and_cover_endpoint(self) -> None:
+		with tempfile.TemporaryDirectory() as td:
+			root = Path(td) / "kapakli_arsiv"
+			album_dir = root / "album_kapakli"
+			plain_dir = root / "kapaksiz"
+			album_dir.mkdir(parents=True)
+			plain_dir.mkdir(parents=True)
+
+			fake_png = b"\x89PNG\r\n\x1a\n" + b"\x42" * 80
+			mp3_bytes = _build_id3v23_mp3_with_cover("Bahar Senfonisi", "Revir Oda Orkestrası", fake_png)
+			(root / "01_bahar.mp3").write_bytes(mp3_bytes)
+
+			fake_jpg = b"\xff\xd8\xff\xe0" + b"\x77" * 80
+			(album_dir / "cover.jpg").write_bytes(fake_jpg)
+			(album_dir / "02_yan_flut.wav").write_bytes(b"RIFF" + b"\x00" * 256)
+
+			(plain_dir / "03_yalniz_piyano.wav").write_bytes(b"RIFF" + b"\x00" * 256)
+
+			srv = media_player.LocalMediaStreamServer(host="127.0.0.1", port=0)
+			srv.start()
+			try:
+				tracks = srv.scan_folder(root, force=True)
+				self.assertEqual(len(tracks), 3)
+
+				tr_mp3 = next(t for t in tracks if t["rel_path"] == "01_bahar.mp3")
+				self.assertTrue(tr_mp3["has_cover"])
+				self.assertEqual(tr_mp3["tag_title"], "Bahar Senfonisi")
+				self.assertEqual(tr_mp3["artist"], "Revir Oda Orkestrası")
+				with urllib.request.urlopen(tr_mp3["cover_url"], timeout=3.0) as r1:
+					self.assertEqual(r1.status, 200)
+					self.assertEqual(r1.headers.get("Content-Type"), "image/png")
+					self.assertEqual(r1.read(), fake_png)
+
+				tr_sidecar = next(t for t in tracks if "02_yan_flut.wav" in t["rel_path"])
+				self.assertTrue(tr_sidecar["has_cover"])
+				with urllib.request.urlopen(tr_sidecar["cover_url"], timeout=3.0) as r2:
+					self.assertEqual(r2.status, 200)
+					self.assertEqual(r2.headers.get("Content-Type"), "image/jpeg")
+					self.assertEqual(r2.read(), fake_jpg)
+
+				tr_svg = next(t for t in tracks if "03_yalniz_piyano.wav" in t["rel_path"])
+				self.assertFalse(tr_svg["has_cover"])
+				with urllib.request.urlopen(tr_svg["cover_url"], timeout=3.0) as r3:
+					self.assertEqual(r3.status, 200)
+					self.assertEqual(r3.headers.get("Content-Type"), "image/svg+xml")
+					svg_body = r3.read()
+					self.assertIn(b"<svg", svg_body)
+			finally:
+				srv.stop()
+
+	def test_offline_ambient_wav_generator_and_endpoint(self) -> None:
+		wav_bytes = media_player.generate_ambient_wav_bytes("amb_calm432", duration_sec=1.0, sample_rate=8000)
+		self.assertTrue(wav_bytes.startswith(b"RIFF"))
+		self.assertIn(b"WAVEfmt ", wav_bytes[:24])
+		self.assertGreater(len(wav_bytes), 16000)
+
+		srv = media_player.LocalMediaStreamServer(host="127.0.0.1", port=0)
+		srv.start()
+		try:
+			presets = srv.get_ambient_presets()
+			self.assertGreaterEqual(len(presets), 4)
+			rain_url = next(p["url"] for p in presets if p["id"] == "amb_rain")
+
+			with urllib.request.urlopen(rain_url, timeout=4.0) as resp:
+				self.assertEqual(resp.status, 200)
+				self.assertEqual(resp.headers.get("Content-Type"), "audio/wav")
+				data = resp.read(64)
+				self.assertTrue(data.startswith(b"RIFF"))
+
+			req_part = urllib.request.Request(rain_url, headers={"Range": "bytes=0-43"})
+			with urllib.request.urlopen(req_part, timeout=4.0) as resp_part:
+				self.assertEqual(resp_part.status, 206)
+				self.assertEqual(len(resp_part.read()), 44)
+
+			with self.assertRaises(urllib.error.HTTPError) as exc_404:
+				urllib.request.urlopen(f"{srv.base_url}/ambient/olmayan_ses", timeout=3.0)
+			self.assertEqual(exc_404.exception.code, 404)
+		finally:
+			srv.stop()
+
+	def test_meb_firewall_block_detection_id3_strip_and_proxy_chain(self) -> None:
+		# 1. MEB / FortiGuard HTML engel sayfası algılama
+		self.assertTrue(media_player.is_meb_block_or_html_payload("text/html; charset=utf-8", b"<html><body>FortiGuard</body></html>"))
+		self.assertTrue(media_player.is_meb_block_or_html_payload("audio/aac", b"<!DOCTYPE html><html>meb.gov.tr erisim engellenmistir</html>"))
+		self.assertFalse(media_player.is_meb_block_or_html_payload("audio/mpeg", b"\xff\xfb\x90\x64\x00\x11\x22\x33"))
+
+		# 2. TRT AAC segment başındaki ID3v2 etiketini sıyırma
+		id3_hdr = b"ID3\x04\x00\x00\x00\x00\x00\x0a" + (b"X" * 10)
+		adts_tail = b"\xff\xf1\x50\x80\x02\x1f\xfcAAC_DATA"
+		self.assertEqual(media_player._strip_leading_id3(id3_hdr + adts_tail), adts_tail)
+
+		# 3. Hem .m3u8 hem doğrudan HTTPS akışlar için proxy_chain üretimi
+		stations = media_player.get_meb_safe_radio_stations(hls_proxy_base_url="http://127.0.0.1:19876")
+		for st in stations:
+			chain = st.get("proxy_chain") or []
+			self.assertGreaterEqual(len(chain), 1)
+			if st.get("is_hls"):
+				self.assertTrue(chain[0].startswith("http://127.0.0.1:19876/hls_live?url="))
+			else:
+				self.assertTrue(chain[0].startswith("http://127.0.0.1:19876/radio_proxy?url="))
+
+		# 4. /radio_proxy ve /hls_live HTML engel veya 404 alt listede HTTP 200 yerine anında 502 dönmeli
+		class _BlockedHtmlResp:
+			status = 200
+			headers = {"Content-Type": "text/html; charset=utf-8"}
+
+			def __enter__(self):
+				return self
+
+			def __exit__(self, *args):
+				return False
+
+			def geturl(self):
+				return "https://blocked.example.com/live.mp3"
+
+			def close(self):
+				pass
+
+			def read(self, *_args):
+				return b"<!DOCTYPE html><html><body>FortiGuard Web Filtering - Access Blocked</body></html>"
+
+		srv = media_player.LocalMediaStreamServer(host="127.0.0.1", port=0)
+		srv.start()
+		try:
+			with mock.patch("urllib.request.urlopen", return_value=_BlockedHtmlResp()):
+				conn = http.client.HTTPConnection("127.0.0.1", srv.port, timeout=3.0)
+				q_u = urllib.parse.quote("https://blocked.example.com/live.mp3", safe="")
+				conn.request("GET", f"/radio_proxy?url={q_u}")
+				r_proxy = conn.getresponse()
+				r_proxy.read()
+				conn.close()
+				self.assertEqual(r_proxy.status, 502)
+
+				conn2 = http.client.HTTPConnection("127.0.0.1", srv.port, timeout=3.0)
+				q_m3u8 = urllib.parse.quote("https://blocked.example.com/master.m3u8", safe="")
+				conn2.request("GET", f"/hls_live?url={q_m3u8}")
+				r_hls = conn2.getresponse()
+				r_hls.read()
+				conn2.close()
+				self.assertEqual(r_hls.status, 502)
+		finally:
+			srv.stop()
+
+	def test_ssl_configuration_and_meb_connectivity_diagnostics(self) -> None:
+		try:
+			media_player.configure_ssl_options(custom_cert_path="", allow_relaxed_ssl=True)
+			ctx_relaxed = media_player.build_system_ssl_context()
+			self.assertEqual(ctx_relaxed.verify_mode, ssl.CERT_NONE)
+		finally:
+			media_player.configure_ssl_options(custom_cert_path="", allow_relaxed_ssl=False)
+
+		st_sample = {"id": "test_st", "name": "Test Radyo", "category": "Ulusal", "url": "https://clean.example.com/live.mp3"}
+
+		class _AudioOkResp:
+			status = 200
+			headers = {"Content-Type": "audio/mpeg"}
+
+			def __enter__(self):
+				return self
+
+			def __exit__(self, *args):
+				return False
+
+			def geturl(self):
+				return "https://clean.example.com/live.mp3"
+
+			def read(self, *_args):
+				return b"\xff\xfb\x90\x64" * 64
+
+		with mock.patch("urllib.request.urlopen", return_value=_AudioOkResp()):
+			d_ok = media_player.diagnose_single_station(st_sample, timeout=1.5)
+			self.assertTrue(d_ok["ok"])
+			self.assertEqual(d_ok["status_code"], "ok")
+
+		with mock.patch("urllib.request.urlopen", side_effect=ssl.SSLError("CERTIFICATE_VERIFY_FAILED")):
+			d_ssl = media_player.diagnose_single_station(st_sample, timeout=1.5)
+			self.assertFalse(d_ssl["ok"])
+			self.assertEqual(d_ssl["status_code"], "ssl_error")
+			report = media_player.diagnose_radio_connectivity(timeout=1.0, max_stations=3)
+			self.assertEqual(report["ok_count"], 0)
+			self.assertEqual(report["ssl_error_count"], 3)
+			self.assertIn("MEB", report["recommendation"])
+
 	def test_mpegts_audio_pes_extraction(self) -> None:
 		def _pad_pkt(header_and_payload: bytes) -> bytes:
 			self.assertLessEqual(len(header_and_payload), 188)
@@ -166,22 +374,38 @@ class TestMediaPlayerModule(unittest.TestCase):
 			self.assertIn('id="revir-persistent-audio"', revir_ui._SHELL_HTML)
 			self.assertIn("window.__revirMediaControl", revir_ui._SHELL_HTML)
 			self.assertIn("navigator.mediaSession", revir_ui._SHELL_HTML)
+			self.assertIn("revir-mp-cover", revir_ui._SHELL_HTML)
+			self.assertIn("revir-mp-list-btn", revir_ui._SHELL_HTML)
+			self.assertIn("revir-mp-playlist-panel", revir_ui._SHELL_HTML)
+			self.assertIn('data-mp-mode="ambient"', revir_ui._SHELL_HTML)
+			self.assertIn("meb_custom_cert_path", persantil.DEFAULT_APP_SETTINGS)
+			self.assertIn("meb_ssl_relaxed", persantil.DEFAULT_APP_SETTINGS)
 
 			res_init = revir_ui.run_action_headless(persantil.main, {"action": "init"})
 			mp_cfg = res_init.get("media_player")
 			self.assertIsInstance(mp_cfg, dict)
 			self.assertTrue(mp_cfg["visible"])
-			self.assertGreaterEqual(mp_cfg["station_count"], 10)
+			self.assertGreaterEqual(mp_cfg["station_count"], 15)
+			self.assertGreaterEqual(len(mp_cfg.get("ambient_presets") or []), 4)
 			self.assertTrue(any(s.get("hls_proxy_url") for s in mp_cfg["stations"] if s.get("is_hls")))
+			self.assertTrue(all(len(s.get("proxy_chain") or []) >= 1 for s in mp_cfg["stations"]))
 
 			custom_mp3_dir = tmp_p / "secili_mp3ler"
 			custom_mp3_dir.mkdir()
-			(custom_mp3_dir / "Tenefus_Zili.mp3").write_bytes(b"ID3" + b"\x00" * 256)
+			fake_png = b"\x89PNG\r\n\x1a\n" + b"\x55" * 64
+			(custom_mp3_dir / "Tenefus_Zili.mp3").write_bytes(
+				_build_id3v23_mp3_with_cover("Teneffüs Melodisi", "Okul Zili", fake_png)
+			)
 
 			act_res = persantil._handle_media_player_action({"action": "set_folder", "path": str(custom_mp3_dir)})
 			self.assertTrue(act_res["ok"])
 			self.assertEqual(act_res["media_player"]["track_count"], 1)
-			self.assertEqual(act_res["media_player"]["tracks"][0]["title"], "Tenefus Zili")
+			tr0 = act_res["media_player"]["tracks"][0]
+			self.assertEqual(tr0["title"], "Tenefus Zili")
+			self.assertEqual(tr0["tag_title"], "Teneffüs Melodisi")
+			self.assertEqual(tr0["artist"], "Okul Zili")
+			self.assertTrue(tr0["has_cover"])
+			self.assertIn("/cover/", tr0["cover_url"])
 			self.assertEqual(persantil.get_app_settings()["custom_music_folder"], str(custom_mp3_dir.resolve()))
 
 			persantil.save_app_settings({"show_sidebar_media_player": "0"})

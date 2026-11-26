@@ -141,7 +141,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return (Path(meipass_raw) if meipass_raw else _BUNDLE_DIR) / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.45.0"
+_DEFAULT_APP_VERSION = "1.46.0"
 
 
 def _load_app_version() -> str:
@@ -327,6 +327,8 @@ DEFAULT_APP_SETTINGS: dict[str, str] = {
 	"show_sidebar_media_player": "1",
 	"custom_music_folder": "",
 	"custom_radio_stations_json": "[]",
+	"meb_custom_cert_path": "",
+	"meb_ssl_relaxed": "0",
 }
 
 INCIDENT_LOCATIONS = [
@@ -34466,6 +34468,76 @@ def render_settings() -> None:
 							ui.rerun()
 
 				with ui.container(border=True):
+					ui.markdown("#### 🛡️ MEB / Fatih Ağı Radyo Uyumluluk, Sertifika & Bağlantı Tanılama")
+					ui.caption(
+						"Okul ağında radyo akışları SSL sertifikası nedeniyle kesiliyorsa `MEB_SERTIFIKASI.cer` dosyasını yükleyebilir veya "
+						"tanılama testiyle hangi kanalların açık / engelli olduğunu saniyeler içinde görebilirsiniz. Tüm dış yayınlar kapalıysa yan menüdeki **🌊 Ortam** sekmesi internetsiz çalışır."
+					)
+					cur_cert_p = str(current_cfg.get("meb_custom_cert_path", "")).strip()
+					cur_relaxed = str(current_cfg.get("meb_ssl_relaxed", "0")).strip() == "1"
+					mc1, mc2 = ui.columns([1.8, 1.2])
+					with mc1:
+						up_cert = ui.file_uploader(
+							"📜 MEB Kök Sertifikası Yükle (.cer / .crt / .pem — İsteğe Bağlı)",
+							type=["cer", "crt", "pem"],
+							key="cfg_meb_cert_uploader",
+						)
+						cert_path_inp = ui.text_input(
+							"Sertifika Dosyası Yolu",
+							value=cur_cert_p,
+							placeholder="Örn: C:\\RevirDefteri\\MEB_SERTIFIKASI.cer",
+							key="cfg_meb_cert_path_inp",
+						)
+					with mc2:
+						ssl_relax_val = ui.toggle(
+							"🔓 MEB Esnek SSL Doğrulama Modu (Sertifika hatası veren okul ağları için)",
+							value=cur_relaxed,
+							key="cfg_meb_ssl_relaxed_tog",
+						)
+						if ui.button("💾 MEB Sertifika & SSL Ayarını Kaydet", type="primary", key="btn_save_meb_ssl_cfg", use_container_width=True):
+							final_cert_p = cert_path_inp.strip()
+							if up_cert is not None:
+								saved_cert_file = APP_DIR / "meb_sertifikasi.cer"
+								saved_cert_file.write_bytes(up_cert.getvalue())
+								final_cert_p = str(saved_cert_file.resolve())
+							save_app_settings({
+								"meb_custom_cert_path": final_cert_p,
+								"meb_ssl_relaxed": "1" if ssl_relax_val else "0",
+							})
+							mplayer.configure_ssl_options(custom_cert_path=final_cert_p, allow_relaxed_ssl=bool(ssl_relax_val))
+							ui.success("✅ MEB sertifika ve SSL bağlantı ayarları kaydedildi.")
+							ui.rerun()
+
+						if ui.button("🩺 MEB Radyo Ağ & Sertifika Testini Çalıştır", type="secondary", key="btn_run_meb_radio_diag", use_container_width=True):
+							mplayer.configure_ssl_options(custom_cert_path=cert_path_inp.strip(), allow_relaxed_ssl=bool(ssl_relax_val))
+							with ui.spinner("Radyo istasyonları MEB filtresi ve SSL sertifikası açısından test ediliyor..."):
+								ui.session_state["_meb_radio_diag_report"] = mplayer.diagnose_radio_connectivity(
+									custom_stations_json=current_cfg.get("custom_radio_stations_json", "[]"),
+									timeout=3.0,
+									max_stations=12,
+								)
+
+					diag_rep = ui.session_state.get("_meb_radio_diag_report")
+					if isinstance(diag_rep, dict) and diag_rep.get("results"):
+						if diag_rep.get("ok_count", 0) > 0:
+							ui.info(diag_rep.get("recommendation", ""))
+						else:
+							ui.warning(diag_rep.get("recommendation", ""))
+						ui.dataframe(
+							pd.DataFrame([
+								{
+									"İstasyon": r["name"],
+									"Kategori": r["category"],
+									"Durum": r["status_label"],
+									"Detay": r["detail"],
+								}
+								for r in diag_rep["results"]
+							]),
+							width="stretch",
+							hide_index=True,
+						)
+
+				with ui.container(border=True):
 					ui.markdown("#### 🌐 Özel HTTPS (443 Portu) Radyo İstasyonu Ekle")
 					ui.caption("MEB ağında kesintisiz çalışması için yalnızca `https://` ile başlayan ve özel port (`:8000`, `:8080` vb.) içermeyen `.m3u8`, `.mp3` veya `.aac` akış adresleri kabul edilir.")
 					custom_stations = mplayer.parse_custom_stations_json(current_cfg.get("custom_radio_stations_json", "[]"))
@@ -35784,13 +35856,21 @@ def _build_media_player_ui_config(app_cfg: dict[str, str]) -> dict[str, Any]:
 	payload = mplayer.build_sidebar_media_player_payload(app_cfg, APP_DIR, include_online_stations=False)
 	cached_online = ui.session_state.get("_cached_online_radio_stations")
 	if payload.get("visible") and isinstance(cached_online, list) and cached_online:
+		srv_base = str(payload.get("stream_base_url") or "")
 		seen_u = {str(s.get("url") or "") for s in payload.get("stations", [])}
 		merged_st = list(payload.get("stations") or [])
 		for extra_st in cached_online:
 			u = str(extra_st.get("url") or "")
 			if u and u not in seen_u and mplayer.is_meb_safe_stream_url(u):
 				seen_u.add(u)
-				merged_st.append(extra_st)
+				st_copy = dict(extra_st)
+				if srv_base:
+					is_h = bool(st_copy.get("is_hls") or ".m3u8" in u.lower())
+					p_u = mplayer._wrap_stream_via_local_proxy(u, srv_base, force_hls=is_h)
+					st_copy["proxy_chain"] = [p_u]
+					if is_h:
+						st_copy["hls_proxy_url"] = p_u
+				merged_st.append(st_copy)
 		payload["stations"] = merged_st
 		payload["station_count"] = len(merged_st)
 	return payload
