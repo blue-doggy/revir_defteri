@@ -412,6 +412,75 @@ class TestMediaPlayerModule(unittest.TestCase):
 			res_hidden = revir_ui.run_action_headless(persantil.main, {"action": "init"})
 			self.assertFalse(res_hidden["media_player"]["visible"])
 
+	def test_windows_taskbar_thumbnail_media_toolbar_and_bridge(self) -> None:
+		import threading
+		import desktop_app
+
+		stop_ev = threading.Event()
+		dispatched: list[str] = []
+
+		class _FakeWin:
+			def evaluate_js(self, code: str) -> None:
+				dispatched.append(code)
+
+		holder = {"window": _FakeWin()}
+		tb = desktop_app._WindowsTaskbarMediaToolbar(holder, stop_ev)
+		bridge = desktop_app._RevirDesktopBridge(None, holder, taskbar_toolbar=tb)
+
+		res_sync = bridge.sync_taskbar_media_state(True, "TRT FM", True)
+		self.assertTrue(res_sync["ok"])
+		self.assertTrue(tb._is_playing)
+		self.assertEqual(tb._title, "TRT FM")
+
+		arr_playing = tb._build_thumb_buttons_array()
+		self.assertEqual(len(arr_playing), 3)
+		self.assertEqual(arr_playing[0].iId, tb.BTN_PREV)
+		self.assertEqual(arr_playing[1].iId, tb.BTN_PLAY_PAUSE)
+		self.assertEqual(arr_playing[1].szTip, "Duraklat")
+		self.assertEqual(arr_playing[2].iId, tb.BTN_NEXT)
+
+		bridge.sync_taskbar_media_state(False, "TRT FM", True)
+		arr_paused = tb._build_thumb_buttons_array()
+		self.assertEqual(arr_paused[1].szTip, "Oynat")
+
+		if sys.platform == "win32":
+			import ctypes
+			from ctypes import wintypes
+			import time
+			import clr  # type: ignore[import-not-found]
+			clr.AddReference("System.Windows.Forms")
+			from System.Windows.Forms import Form  # type: ignore[import-not-found]
+
+			user32 = ctypes.windll.user32
+			user32.DestroyIcon.argtypes = [wintypes.HICON]
+			user32.DestroyIcon.restype = wintypes.BOOL
+			for kind in ("prev", "play", "pause", "next"):
+				hi = tb._create_media_hicon(kind, 20)
+				self.assertNotEqual(hi, 0)
+				user32.DestroyIcon(wintypes.HICON(hi))
+
+			frm = Form()
+			try:
+				hwnd = int(frm.Handle.ToInt64())
+				self.assertTrue(tb.install_subclass_on_hwnd(hwnd))
+				user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, ctypes.c_size_t, ctypes.c_ssize_t]
+				user32.SendMessageW.restype = ctypes.c_ssize_t
+				user32.SendMessageW(hwnd, tb.WM_COMMAND, (tb.THBN_CLICKED << 16) | tb.BTN_PREV, 0)
+				user32.SendMessageW(hwnd, tb.WM_COMMAND, (tb.THBN_CLICKED << 16) | tb.BTN_PLAY_PAUSE, 0)
+				user32.SendMessageW(hwnd, tb.WM_COMMAND, (tb.THBN_CLICKED << 16) | tb.BTN_NEXT, 0)
+				for _ in range(20):
+					if len(dispatched) >= 3:
+						break
+					time.sleep(0.02)
+				joined = "\n".join(dispatched)
+				self.assertIn("'prev'", joined)
+				self.assertIn("'play_pause'", joined)
+				self.assertIn("'next'", joined)
+			finally:
+				tb.close()
+				frm.Dispose()
+		stop_ev.set()
+
 
 if __name__ == "__main__":
 	unittest.main()

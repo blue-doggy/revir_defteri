@@ -8632,6 +8632,20 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 			updateVolumeIcons();
 			updateMediaSessionMeta();
 			renderMiniPlaylist();
+			syncDesktopTaskbarMedia(isPlaying, nowText, !!(mpServerCfg && mpServerCfg.visible));
+		}
+
+		var lastTaskbarSyncSig = "";
+		function syncDesktopTaskbarMedia(isPlaying, titleTxt, isVis) {
+			if (!window.pywebview || !window.pywebview.api || typeof window.pywebview.api.sync_taskbar_media_state !== "function") {
+				return;
+			}
+			var sig = (isPlaying ? "1" : "0") + "|" + (isVis ? "1" : "0") + "|" + String(titleTxt || "");
+			if (sig === lastTaskbarSyncSig) return;
+			lastTaskbarSyncSig = sig;
+			try {
+				window.pywebview.api.sync_taskbar_media_state(!!isPlaying, String(titleTxt || ""), !!isVis);
+			} catch (_tbe) {}
 		}
 
 		function startAudioWithCandidates(urls, enableLoop) {
@@ -8916,11 +8930,11 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 			else if (ev.key === "MediaStop") { ev.preventDefault(); window.__revirMediaControl("stop"); }
 		});
 
-		/* Katman 2: Masaüstü Odak Dışı / Arka Plan Global Medya Tuşu Köprüsü (Debounce Korumalı) */
-		window.__revirMediaControl = function(cmd) {
+		/* Katman 2: Masaüstü Odak Dışı / Arka Plan Global Medya Tuşu & Görev Çubuğu Köprüsü */
+		window.__revirMediaControl = function(cmd, bypassDebounce) {
 			if (!mpServerCfg || !mpServerCfg.visible) return false;
 			var nowMs = Date.now();
-			if (nowMs - lastMediaCmdAt < 320) return false;
+			if (!bypassDebounce && (nowMs - lastMediaCmdAt < 320)) return false;
 			lastMediaCmdAt = nowMs;
 
 			if (cmd === "play_pause") togglePlayPause();

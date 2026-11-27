@@ -141,7 +141,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return (Path(meipass_raw) if meipass_raw else _BUNDLE_DIR) / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.47.3"
+_DEFAULT_APP_VERSION = "1.48.0"
 
 
 def _load_app_version() -> str:
@@ -1717,8 +1717,8 @@ def render_draggable_resizable_canvas(
 		setCanvasHeight();
 	};
 
-	// İlk yüklemede içerik yüksekliğine göre taşma varsa kartı otomatik sığdır (kayıtlı özel yüksekliği ezme)
-	if (window.innerWidth > 760) {
+	// İlk yüklemede içerik yüksekliğine göre taşma varsa kartı otomatik sığdır (Genel Bakış özenli varsayılan satır düzenini korur)
+	if (window.innerWidth > 760 && cfg.page !== "layout_overview") {
 		cards.forEach((card, id) => {
 			const it = gridState.get(id);
 			const loc = cachedLocal[id];
@@ -18943,70 +18943,70 @@ def render_overview() -> None:
 	is_archive = e_date < today
 	overview_layout_defaults = {
 		"overview_stats": {
-			"id": "overview_stats", "col": 0, "row": 0, "col_span": 7, "row_span": 4,
+			"id": "overview_stats", "col": 0, "row": 16, "col_span": 7, "row_span": 4,
 			"min_col_span": 6, "min_row_span": 3,
-			"x_pct": 0, "y_px": 0, "w_pct": 58.33, "h_px": 260,
+			"x_pct": 0.0, "y_px": 1088, "w_pct": 58.33, "h_px": 260,
 			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Turkuaz"],
 		},
 		"overview_quick_links": {
-			"id": "overview_quick_links", "col": 0, "row": 4, "col_span": 7, "row_span": 3,
+			"id": "overview_quick_links", "col": 0, "row": 0, "col_span": 7, "row_span": 3,
 			"min_col_span": 4, "min_row_span": 2,
-			"x_pct": 0, "y_px": 272, "w_pct": 58.33, "h_px": 192,
-			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Bilgi Mavi"],
+			"x_pct": 0.0, "y_px": 0, "w_pct": 58.33, "h_px": 192,
+			"visible": True, "z": 7, "accent": WIDGET_LAYOUT_ACCENTS["Bilgi Mavi"],
 		},
 		"overview_daily_leaf": {
-			"id": "overview_daily_leaf", "col": 7, "row": 0, "col_span": 5, "row_span": 7,
+			"id": "overview_daily_leaf", "col": 7, "row": 0, "col_span": 5, "row_span": 12,
 			"min_col_span": 4, "min_row_span": 4,
-			"x_pct": 58.33, "y_px": 0, "w_pct": 41.67, "h_px": 464,
+			"x_pct": 58.33, "y_px": 0, "w_pct": 41.67, "h_px": 804,
 			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Turkuaz"],
 		},
 		"overview_meds": {
-			"id": "overview_meds", "col": 0, "row": 7, "col_span": 6, "row_span": 4,
+			"id": "overview_meds", "col": 7, "row": 12, "col_span": 5, "row_span": 4,
 			"min_col_span": 4, "min_row_span": 3,
-			"x_pct": 0, "y_px": 476, "w_pct": 50, "h_px": 260,
+			"x_pct": 58.33, "y_px": 816, "w_pct": 41.67, "h_px": 260,
 			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Turkuaz"],
 		},
 		"overview_chart": {
-			"id": "overview_chart", "col": 6, "row": 7, "col_span": 6, "row_span": 5,
+			"id": "overview_chart", "col": 6, "row": 30, "col_span": 6, "row_span": 6,
 			"min_col_span": 4, "min_row_span": 4,
-			"x_pct": 50, "y_px": 476, "w_pct": 50, "h_px": 328,
-			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Bilgi Mavi"],
+			"x_pct": 50.0, "y_px": 2040, "w_pct": 50.0, "h_px": 396,
+			"visible": False, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Bilgi Mavi"],
 		},
 		"overview_diabetes": {
-			"id": "overview_diabetes", "col": 0, "row": 11, "col_span": 6, "row_span": 4,
+			"id": "overview_diabetes", "col": 7, "row": 16, "col_span": 5, "row_span": 4,
 			"min_col_span": 4, "min_row_span": 3,
-			"x_pct": 0, "y_px": 748, "w_pct": 50, "h_px": 260,
+			"x_pct": 58.33, "y_px": 1088, "w_pct": 41.67, "h_px": 260,
 			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Bilgi Mavi"],
 		},
 		"overview_calendar": {
-			"id": "overview_calendar", "col": 6, "row": 12, "col_span": 6, "row_span": 5,
+			"id": "overview_calendar", "col": 7, "row": 20, "col_span": 5, "row_span": 5,
 			"min_col_span": 4, "min_row_span": 3,
-			"x_pct": 50, "y_px": 816, "w_pct": 50, "h_px": 328,
+			"x_pct": 58.33, "y_px": 1360, "w_pct": 41.67, "h_px": 328,
 			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Turkuaz"],
 		},
 		"overview_gemini": {
-			"id": "overview_gemini", "col": 0, "row": 17, "col_span": 12, "row_span": 4,
+			"id": "overview_gemini", "col": 0, "row": 25, "col_span": 12, "row_span": 5,
 			"min_col_span": 6, "min_row_span": 4,
-			"x_pct": 0, "y_px": 1156, "w_pct": 100, "h_px": 260,
+			"x_pct": 0.0, "y_px": 1700, "w_pct": 100.0, "h_px": 328,
 			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Bilgi Mavi"],
 		},
 		"overview_pending": {
-			"id": "overview_pending", "col": 0, "row": 21, "col_span": 6, "row_span": 6,
+			"id": "overview_pending", "col": 0, "row": 12, "col_span": 7, "row_span": 4,
 			"min_col_span": 5, "min_row_span": 4,
-			"x_pct": 0, "y_px": 1428, "w_pct": 50, "h_px": 396,
-			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Turkuaz"],
+			"x_pct": 0.0, "y_px": 816, "w_pct": 58.33, "h_px": 260,
+			"visible": True, "z": 12, "accent": WIDGET_LAYOUT_ACCENTS["Turkuaz"],
 		},
 		"overview_outbreak": {
-			"id": "overview_outbreak", "col": 6, "row": 21, "col_span": 6, "row_span": 6,
+			"id": "overview_outbreak", "col": 0, "row": 20, "col_span": 7, "row_span": 5,
 			"min_col_span": 5, "min_row_span": 4,
-			"x_pct": 50, "y_px": 1428, "w_pct": 50, "h_px": 396,
-			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Uyarı Kırmızı"],
+			"x_pct": 0.0, "y_px": 1360, "w_pct": 58.33, "h_px": 328,
+			"visible": True, "z": 15, "accent": WIDGET_LAYOUT_ACCENTS["Uyarı Kırmızı"],
 		},
 		"overview_recent": {
-			"id": "overview_recent", "col": 0, "row": 27, "col_span": 12, "row_span": 7,
+			"id": "overview_recent", "col": 0, "row": 3, "col_span": 7, "row_span": 9,
 			"min_col_span": 6, "min_row_span": 4,
-			"x_pct": 0, "y_px": 1836, "w_pct": 100, "h_px": 464,
-			"visible": True, "z": 1, "accent": WIDGET_LAYOUT_ACCENTS["Yeşil"],
+			"x_pct": 0.0, "y_px": 204, "w_pct": 58.33, "h_px": 600,
+			"visible": True, "z": 14, "accent": WIDGET_LAYOUT_ACCENTS["Yeşil"],
 		},
 	}
 	overview_layout, overview_edit, overview_magnetic, overview_action = render_layout_toolbar(

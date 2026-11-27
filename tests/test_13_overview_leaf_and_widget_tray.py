@@ -42,21 +42,24 @@ class TestOverviewDailyLeafAndWidgetTray(unittest.TestCase):
 		self.assertIn("revir_ov_prayer_countdown", ov_html)
 		self.assertIn("btn_ov_open_cal_event_popup", ov_html)
 
-		# 2. Konumu sağ üst köşe (col=7, row=0, col_span=5) olarak tanımlanmış olmalı
+		# 2. Yeni kurulum varsayılan yerleşimi kullanıcının belirlediği 12 sütunlu düzende gelmeli
 		cfg_line = ov_scripts.split("const cfg = ", 1)[1].split(";\n", 1)[0]
 		parsed_cfg = json.loads(cfg_line)
-		leaf_pos = parsed_cfg["layout"]["overview_daily_leaf"]
-		stats_pos = parsed_cfg["layout"]["overview_stats"]
-		qlinks_pos = parsed_cfg["layout"]["overview_quick_links"]
+		lay = parsed_cfg["layout"]
 
-		self.assertEqual(leaf_pos["col"], 7)
-		self.assertEqual(leaf_pos["row"], 0)
-		self.assertEqual(leaf_pos["col_span"], 5)
-		self.assertEqual(stats_pos["col"], 0)
-		self.assertEqual(stats_pos["col_span"], 7)
-		self.assertEqual(qlinks_pos["col"], 0)
-		self.assertEqual(qlinks_pos["col_span"], 7)
-		self.assertTrue(leaf_pos["visible"])
+		self.assertEqual((lay["overview_quick_links"]["col"], lay["overview_quick_links"]["row"], lay["overview_quick_links"]["col_span"], lay["overview_quick_links"]["row_span"]), (0, 0, 7, 3))
+		self.assertEqual((lay["overview_recent"]["col"], lay["overview_recent"]["row"], lay["overview_recent"]["col_span"], lay["overview_recent"]["row_span"]), (0, 3, 7, 9))
+		self.assertEqual((lay["overview_pending"]["col"], lay["overview_pending"]["row"], lay["overview_pending"]["col_span"], lay["overview_pending"]["row_span"]), (0, 12, 7, 4))
+		self.assertEqual((lay["overview_stats"]["col"], lay["overview_stats"]["row"], lay["overview_stats"]["col_span"], lay["overview_stats"]["row_span"]), (0, 16, 7, 4))
+		self.assertEqual((lay["overview_outbreak"]["col"], lay["overview_outbreak"]["row"], lay["overview_outbreak"]["col_span"], lay["overview_outbreak"]["row_span"]), (0, 20, 7, 5))
+
+		self.assertEqual((lay["overview_daily_leaf"]["col"], lay["overview_daily_leaf"]["row"], lay["overview_daily_leaf"]["col_span"], lay["overview_daily_leaf"]["row_span"]), (7, 0, 5, 12))
+		self.assertEqual((lay["overview_meds"]["col"], lay["overview_meds"]["row"], lay["overview_meds"]["col_span"], lay["overview_meds"]["row_span"]), (7, 12, 5, 4))
+		self.assertEqual((lay["overview_diabetes"]["col"], lay["overview_diabetes"]["row"], lay["overview_diabetes"]["col_span"], lay["overview_diabetes"]["row_span"]), (7, 16, 5, 4))
+		self.assertEqual((lay["overview_calendar"]["col"], lay["overview_calendar"]["row"], lay["overview_calendar"]["col_span"], lay["overview_calendar"]["row_span"]), (7, 20, 5, 5))
+		self.assertEqual((lay["overview_gemini"]["col"], lay["overview_gemini"]["row"], lay["overview_gemini"]["col_span"], lay["overview_gemini"]["row_span"]), (0, 25, 12, 5))
+		self.assertTrue(lay["overview_daily_leaf"]["visible"])
+		self.assertFalse(lay["overview_chart"]["visible"])
 
 		# 3. Yaprak üzerindeki '+' butonuna tıklandığında etkinlik ekleme diyaloğu açılmalı
 		with mock.patch("school_calendar.get_prayer_times_for_province", return_value={
