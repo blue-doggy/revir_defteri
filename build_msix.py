@@ -220,8 +220,7 @@ def render_appx_manifest(cfg: dict[str, Any], quad_version: str, arch: str = "x6
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-  xmlns:desktop6="http://schemas.microsoft.com/appx/manifest/desktop/windows10/6"
-  IgnorableNamespaces="uap rescap desktop6">
+  IgnorableNamespaces="uap rescap">
 
   <Identity
     Name="{xml_escape(id_name)}"
@@ -233,8 +232,6 @@ def render_appx_manifest(cfg: dict[str, Any], quad_version: str, arch: str = "x6
     <DisplayName>{disp_name}</DisplayName>
     <PublisherDisplayName>{pub_disp}</PublisherDisplayName>
     <Logo>Assets\\StoreLogo.png</Logo>
-    <desktop6:FileSystemWriteVirtualization>enabled</desktop6:FileSystemWriteVirtualization>
-    <desktop6:RegistryWriteVirtualization>enabled</desktop6:RegistryWriteVirtualization>
   </Properties>
 
   <Dependencies>
@@ -336,12 +333,15 @@ def stage_msix_directory(
 
 
 def find_makeappx_exe() -> Path | None:
-	"""Sistemdeki Windows 10/11 SDK `makeappx.exe` aracını otomatik bulur."""
+	"""Sistemdeki veya önbellekteki Windows SDK `makeappx.exe` aracını otomatik bulur."""
 	from_path = shutil.which("makeappx.exe") or shutil.which("makeappx")
 	if from_path:
 		return Path(from_path)
 
+	local_cache_base = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")) / "RevirDefteri_BuildTools" / "bin"
 	roots = [
+		PROJECT_ROOT / "build" / "sdk_tools" / "bin",
+		local_cache_base,
 		Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Windows Kits" / "10" / "bin",
 		Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Windows Kits" / "10" / "bin",
 	]
@@ -358,6 +358,61 @@ def find_makeappx_exe() -> Path | None:
 		return None
 	candidates.sort(key=lambda p: str(p), reverse=True)
 	return candidates[0]
+
+
+def ensure_makeappx_exe(auto_download: bool = True) -> Path | None:
+	"""
+	`makeappx.exe` kurulu değilse (ör. MEB ağında tam Windows SDK kurulumu 15605 hatası verdiğinde),
+	resmi Microsoft NuGet `Microsoft.Windows.SDK.BuildTools` paketinden (~20 MB) taşınabilir
+	ve Microsoft imzalı `makeappx.exe` + `signtool.exe` araçlarını otomatik indirip hazırlar.
+	"""
+	existing = find_makeappx_exe()
+	if existing is not None:
+		return existing
+	if not auto_download:
+		return None
+
+	import io
+	import urllib.request
+	import zipfile
+
+	try:
+		import truststore
+		truststore.inject_into_ssl()
+	except Exception:
+		pass
+
+	index_url = "https://api.nuget.org/v3-flatcontainer/microsoft.windows.sdk.buildtools/index.json"
+	print("[*] Sistemde makeappx.exe bulunamadı; resmi Microsoft.Windows.SDK.BuildTools (~20 MB) indiriliyor...")
+	req_idx = urllib.request.Request(index_url, headers={"User-Agent": "RevirDefteri-MSIXBuilder/1.0"})
+	with urllib.request.urlopen(req_idx, timeout=25) as resp:
+		idx_data = json.loads(resp.read().decode("utf-8"))
+
+	versions = [str(v) for v in (idx_data.get("versions") or []) if "-" not in str(v)]
+	if not versions:
+		versions = [str(v) for v in (idx_data.get("versions") or [])]
+	if not versions:
+		raise RuntimeError("NuGet üzerinde Microsoft.Windows.SDK.BuildTools sürümü bulunamadı.")
+
+	ver = versions[-1]
+	nupkg_url = f"https://api.nuget.org/v3-flatcontainer/microsoft.windows.sdk.buildtools/{ver}/microsoft.windows.sdk.buildtools.{ver}.nupkg"
+	req_pkg = urllib.request.Request(nupkg_url, headers={"User-Agent": "RevirDefteri-MSIXBuilder/1.0"})
+	with urllib.request.urlopen(req_pkg, timeout=120) as resp_pkg:
+		raw_nupkg = resp_pkg.read()
+
+	dest_root = PROJECT_ROOT / "build" / "sdk_tools"
+	dest_root.mkdir(parents=True, exist_ok=True)
+	with zipfile.ZipFile(io.BytesIO(raw_nupkg)) as zf:
+		for member in zf.namelist():
+			if member.startswith("bin/") and not member.endswith("/"):
+				target_path = dest_root / Path(member)
+				target_path.parent.mkdir(parents=True, exist_ok=True)
+				target_path.write_bytes(zf.read(member))
+
+	found = find_makeappx_exe()
+	if found is not None:
+		print(f"[OK] Resmi Microsoft SDK araçları hazırlandı (v{ver}): {found}")
+	return found
 
 
 def pack_msix(makeappx_exe: Path, staging_dir: Path, output_msix: Path) -> None:
@@ -420,7 +475,11 @@ def main(argv: list[str] | None = None) -> int:
 			"        Partner Center'a yüklemeden önce Product Identity değerlerinizi msix_config.json dosyasına girin."
 		)
 
-	makeappx = find_makeappx_exe()
+	try:
+		makeappx = ensure_makeappx_exe(auto_download=True)
+	except Exception as exc:
+		print(f"[UYARI] Taşınabilir SDK araçları otomatik indirilemedi: {exc}", file=sys.stderr)
+		makeappx = None
 	out_msix = PROJECT_ROOT / "installer" / f"RevirDefteri_Store_v{ver_raw}.msix"
 	if makeappx is None:
 		print(

@@ -19,12 +19,10 @@ Bu projede Microsoft Store için gerekli tüm teknik paketleme, ikon üretimi, `
 
 ## 2. Tek Komutla `.msix` Paketini ve Vitrin Görsellerini Üretin
 
-1. Bilgisayarınızda `makeappx.exe` (Windows SDK) kurulu değilse bir kez PowerShell'de şu komutu çalıştırın:
-   ```powershell
-   winget install Microsoft.WindowsSDK.10.0.22621
-   ```
-2. Ardından proje klasöründeki **`msix_olustur.bat`** dosyasına çift tıklayın (veya terminalde `python build_msix.py` çalıştırın).
-3. İşlem bittiğinde iki çıktı hazır olur:
+> **Harika Haber (Windows SDK Kurmanıza Gerek Kalmadı!):** MEB / kurum internetinde dev Windows SDK yükleyicisi (`15605` indirme hatası) takılsa bile, `build_msix.py` artık resmi Microsoft NuGet sunucusundan yalnızca ~20 MB boyutundaki Microsoft imzalı `makeappx.exe` aracını yönetici izni gerekmeden otomatik indirip `build\sdk_tools` altına kurar!
+
+1. Doğrudan proje klasöründeki **`msix_olustur.bat`** dosyasına çift tıklayın (veya terminalde `python build_msix.py` çalıştırın).
+2. İşlem bittiğinde iki çıktı hazır olur:
    - **Mağazaya yüklenecek paket:** `installer\RevirDefteri_Store_v<SÜRÜM>.msix`
    - **Mağaza vitrin görselleri (300x300 logo, 720x1080 poster, 1920x1080 kapak):** `store_submission_assets\`
 

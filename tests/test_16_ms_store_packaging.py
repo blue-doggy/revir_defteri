@@ -92,6 +92,14 @@ class TestMicrosoftStorePackaging(unittest.TestCase):
 			self.assertTrue((sub_assets / "StoreListing_Logo_300x300.png").exists())
 			self.assertTrue((sub_assets / "StoreListing_Hero_1920x1080.png").exists())
 
+			# makeappx.exe ile gerçek .msix paketlemesini doğrula
+			makeappx = build_msix.ensure_makeappx_exe(auto_download=True)
+			self.assertIsNotNone(makeappx)
+			out_msix = tmp_p / "RevirDefteri_Test.msix"
+			build_msix.pack_msix(makeappx, staging, out_msix)
+			self.assertTrue(out_msix.exists())
+			self.assertGreater(out_msix.stat().st_size, 4096)
+
 	def test_store_runtime_detection_and_self_updater_guard(self) -> None:
 		with tempfile.TemporaryDirectory() as tmp:
 			tmp_p = Path(tmp)
