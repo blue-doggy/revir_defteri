@@ -141,7 +141,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return (Path(meipass_raw) if meipass_raw else _BUNDLE_DIR) / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.48.1"
+_DEFAULT_APP_VERSION = "1.49.0"
 
 
 def _load_app_version() -> str:
@@ -26063,6 +26063,558 @@ def render_bulk_class_screening_tab(default_class: str | None = None, key_ctx: s
 			)
 
 
+def classify_adult_screening_metrics(
+	bmi: float | None = None,
+	systolic_mmhg: float | None = None,
+	diastolic_mmhg: float | None = None,
+	glucose_mg_dl: float | None = None,
+	glucose_context: str | None = None,
+) -> dict[str, tuple[str, str]]:
+	"""Yetişkin tarama ölçümleri (VKİ, Tansiyon, Kan Şekeri) için sade klinik durum etiketleri döndürür."""
+	out: dict[str, tuple[str, str]] = {}
+	if bmi is not None and bmi > 0:
+		if bmi < 18.5:
+			out["bmi"] = ("Zayıf", "warn")
+		elif bmi < 25.0:
+			out["bmi"] = ("Normal", "ok")
+		elif bmi < 30.0:
+			out["bmi"] = ("Fazla Kilolu", "warn")
+		else:
+			out["bmi"] = ("Obez", "danger")
+
+	if systolic_mmhg is not None and diastolic_mmhg is not None:
+		s_v, d_v = float(systolic_mmhg), float(diastolic_mmhg)
+		if s_v >= 180 or d_v >= 120:
+			out["bp"] = ("Hipertansif Kriz", "danger")
+		elif s_v >= 140 or d_v >= 90:
+			out["bp"] = ("Yüksek TA", "warn")
+		elif s_v < 90 or d_v < 60:
+			out["bp"] = ("Düşük TA", "warn")
+		elif s_v >= 130 or d_v >= 85:
+			out["bp"] = ("Yüksek Normal", "muted")
+		else:
+			out["bp"] = ("Normal", "ok")
+
+	if glucose_mg_dl is not None and glucose_mg_dl > 0:
+		g_v = float(glucose_mg_dl)
+		is_fasting = "aç" in str(glucose_context or "").lower()
+		if g_v < 70:
+			out["glucose"] = ("Düşük KŞ", "danger")
+		elif (is_fasting and g_v >= 126) or ((not is_fasting) and g_v >= 200):
+			out["glucose"] = ("Yüksek KŞ", "danger")
+		elif (is_fasting and g_v >= 100) or ((not is_fasting) and g_v >= 140):
+			out["glucose"] = ("Sınırda", "warn")
+		else:
+			out["glucose"] = ("Normal", "ok")
+	return out
+
+
+def save_adult_screening(
+	person_id: int,
+	screening_date: str,
+	*,
+	height_cm: object = None,
+	weight_kg: object = None,
+	bp_sys: object = None,
+	bp_dia: object = None,
+	pulse_bpm: object = None,
+	temperature_c: object = None,
+	spo2_pct: object = None,
+	glucose_mg_dl: object = None,
+	glucose_context: str | None = None,
+	vision_status: str | None = None,
+	notes: str | None = None,
+	screened_by: str | None = None,
+) -> int:
+	"""Yetişkin / personel sağlık taramasını kaydeder ve boy-kilo (VKİ) ile vital kayıtlarına eşitler."""
+	sid = int(person_id)
+	now_iso = datetime.now().isoformat(timespec="seconds")
+	scr_date = parse_birth_date(screening_date) or str(screening_date or date.today().isoformat())[:10]
+	try:
+		scr_date_obj = date.fromisoformat(scr_date)
+	except (TypeError, ValueError):
+		scr_date_obj = date.today()
+		scr_date = scr_date_obj.isoformat()
+
+	app_cfg = get_app_settings()
+	scr_by = (str(screened_by or app_cfg.get("nurse_name", "")).strip()) or None
+
+	h_clean = normalize_height(height_cm)
+	w_clean = normalize_weight(weight_kg, is_adult=True)
+	sys_i, dia_i = normalize_bp(bp_sys, bp_dia)
+	p_clean_i = normalize_pulse(pulse_bpm)
+	p_clean = float(p_clean_i) if p_clean_i is not None else None
+	t_clean = normalize_temperature(temperature_c)
+	s_clean_i = normalize_spo2(spo2_pct)
+	s_clean = float(s_clean_i) if s_clean_i is not None else None
+	glu_clean = normalize_glucose(glucose_mg_dl)
+	glu_ctx = str(glucose_context or "").strip() or None
+
+	vis_clean = str(vision_status or "").strip() or None
+	wears_val = None
+	vr_val = None
+	vl_val = None
+	if vis_clean:
+		if "Gözlük" in vis_clean or "Lens" in vis_clean:
+			wears_val = "Evet (Sürekli)"
+			vr_val = vis_clean
+			vl_val = vis_clean
+		elif "Normal" in vis_clean:
+			wears_val = "Hayır (Kullanmıyor)"
+			vr_val = "Normal"
+			vl_val = "Normal"
+		else:
+			vr_val = vis_clean
+			vl_val = vis_clean
+
+	clean_notes = str(notes or "").strip() or None
+
+	upserted_meas_id: int | None = None
+	with connect_db() as connection:
+		stu_row = connection.execute(
+			"SELECT sex, birth_date, guardian_name, guardian_phone FROM students WHERE id = ?",
+			(sid,),
+		).fetchone()
+		if not stu_row:
+			raise ValueError(f"Kişi bulunamadı: #{sid}")
+
+		cur = connection.execute(
+			"""INSERT INTO school_screenings(
+				student_id, screening_date, height_cm, weight_kg, head_circ_cm,
+				temperature_c, pulse_bpm, spo2_pct, wears_glasses, vision_right,
+				vision_left, hair_screening, hearing_right, hearing_left,
+				health_behavior, harmful_habits, psychosocial_status, notes, screened_by, created_at
+			) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, ?)""",
+			(
+				sid, scr_date, h_clean, w_clean,
+				t_clean, p_clean, s_clean, wears_val, vr_val, vl_val,
+				clean_notes, scr_by, now_iso,
+			),
+		)
+		screening_id = int(cur.lastrowid)
+
+		g_name = stu_row["guardian_name"]
+		g_phone = stu_row["guardian_phone"]
+		connection.execute(
+			"""INSERT INTO health_profiles(
+				student_id, guardian_name, guardian_phone, updated_at,
+				wears_glasses, vision_right, vision_left, last_screened_at, reviewed_by
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(student_id) DO UPDATE SET
+				updated_at=excluded.updated_at,
+				wears_glasses=COALESCE(excluded.wears_glasses, health_profiles.wears_glasses),
+				vision_right=COALESCE(excluded.vision_right, health_profiles.vision_right),
+				vision_left=COALESCE(excluded.vision_left, health_profiles.vision_left),
+				last_screened_at=excluded.last_screened_at,
+				reviewed_by=COALESCE(excluded.reviewed_by, health_profiles.reviewed_by)""",
+			(sid, g_name, g_phone, now_iso, wears_val, vr_val, vl_val, scr_date, scr_by),
+		)
+
+		if h_clean is not None or w_clean is not None:
+			upserted_meas_id, _ = _upsert_measurement_conn(
+				connection,
+				sid,
+				scr_date_obj,
+				h_clean,
+				w_clean,
+				stu_row["birth_date"],
+				stu_row["sex"],
+				head_circ_cm=None,
+			)
+
+		if any(v is not None for v in (sys_i, dia_i, p_clean, t_clean, s_clean, glu_clean)):
+			_upsert_vital_conn(
+				connection,
+				sid,
+				f"{scr_date}T09:30",
+				sys_i,
+				dia_i,
+				p_clean,
+				t_clean,
+				glu_clean,
+				glucose_context=glu_ctx if glu_clean is not None else None,
+				notes="Okul Taraması (Yetişkin)",
+				spo2=s_clean,
+				upsert_same_slot=True,
+				upsert_screening_day=True,
+			)
+
+	sync_after_person_mutation(sid, active_measurement_id=upserted_meas_id)
+	return screening_id
+
+
+def _get_adult_screening_rows() -> list[dict[str, Any]]:
+	"""Kayıtlı yetişkin / personel listesini son tarama, VKİ ve vital bulgularıyla tek sorguda getirir."""
+	with connect_db() as connection:
+		rows = connection.execute(
+			"""SELECT s.id, s.full_name, s.sex, s.birth_date, s.person_type, s.notes AS role_title,
+			          c.name AS class_name, h.last_screened_at, h.wears_glasses, h.vision_right,
+			          h.chronic_conditions,
+			          (SELECT sc.screening_date FROM school_screenings sc WHERE sc.student_id = s.id ORDER BY sc.screening_date DESC, sc.id DESC LIMIT 1) AS scr_date,
+			          (SELECT sc.height_cm FROM school_screenings sc WHERE sc.student_id = s.id ORDER BY sc.screening_date DESC, sc.id DESC LIMIT 1) AS scr_h,
+			          (SELECT sc.weight_kg FROM school_screenings sc WHERE sc.student_id = s.id ORDER BY sc.screening_date DESC, sc.id DESC LIMIT 1) AS scr_w,
+			          (SELECT sc.pulse_bpm FROM school_screenings sc WHERE sc.student_id = s.id ORDER BY sc.screening_date DESC, sc.id DESC LIMIT 1) AS scr_pulse,
+			          (SELECT sc.vision_right FROM school_screenings sc WHERE sc.student_id = s.id ORDER BY sc.screening_date DESC, sc.id DESC LIMIT 1) AS scr_vis,
+			          (SELECT sc.notes FROM school_screenings sc WHERE sc.student_id = s.id ORDER BY sc.screening_date DESC, sc.id DESC LIMIT 1) AS scr_notes,
+			          (SELECT m.height_cm FROM measurements m WHERE m.student_id = s.id AND m.height_cm IS NOT NULL ORDER BY m.measured_on DESC, m.id DESC LIMIT 1) AS meas_h,
+			          (SELECT m.weight_kg FROM measurements m WHERE m.student_id = s.id AND m.weight_kg IS NOT NULL ORDER BY m.measured_on DESC, m.id DESC LIMIT 1) AS meas_w,
+			          (SELECT m.bmi FROM measurements m WHERE m.student_id = s.id AND m.bmi IS NOT NULL ORDER BY m.measured_on DESC, m.id DESC LIMIT 1) AS meas_bmi,
+			          (SELECT v.systolic_mmhg FROM vital_readings v WHERE v.student_id = s.id AND v.systolic_mmhg IS NOT NULL ORDER BY v.measured_at DESC, v.id DESC LIMIT 1) AS vit_sys,
+			          (SELECT v.diastolic_mmhg FROM vital_readings v WHERE v.student_id = s.id AND v.diastolic_mmhg IS NOT NULL ORDER BY v.measured_at DESC, v.id DESC LIMIT 1) AS vit_dia,
+			          (SELECT v.pulse_bpm FROM vital_readings v WHERE v.student_id = s.id AND v.pulse_bpm IS NOT NULL ORDER BY v.measured_at DESC, v.id DESC LIMIT 1) AS vit_pulse,
+			          (SELECT v.glucose_mg_dl FROM vital_readings v WHERE v.student_id = s.id AND v.glucose_mg_dl IS NOT NULL ORDER BY v.measured_at DESC, v.id DESC LIMIT 1) AS vit_glu,
+			          (SELECT v.glucose_context FROM vital_readings v WHERE v.student_id = s.id AND v.glucose_mg_dl IS NOT NULL ORDER BY v.measured_at DESC, v.id DESC LIMIT 1) AS vit_glu_ctx
+			   FROM students s
+			   LEFT JOIN classes c ON c.id = s.class_id
+			   LEFT JOIN health_profiles h ON h.student_id = s.id
+			   WHERE c.name = 'Sivil / Diğer'
+			      OR (s.person_type IS NOT NULL AND trim(s.person_type) != '' AND trim(s.person_type) != 'Öğrenci')
+			   ORDER BY s.full_name COLLATE NOCASE"""
+		).fetchall()
+
+	items: list[dict[str, Any]] = []
+	for r in rows:
+		d = dict(r)
+		h_v = d["scr_h"] if d["scr_h"] is not None else d["meas_h"]
+		w_v = d["scr_w"] if d["scr_w"] is not None else d["meas_w"]
+		bmi_v = d["meas_bmi"]
+		if bmi_v is None and h_v and w_v and float(h_v) > 0:
+			bmi_v = round(float(w_v) / ((float(h_v) / 100.0) ** 2), 1)
+		last_dt = d["scr_date"] or d["last_screened_at"] or ""
+		items.append({
+			"id": int(d["id"]),
+			"full_name": d["full_name"] or "",
+			"role": str(d["role_title"] or "").strip() or "Personel / Yetişkin",
+			"sex": d["sex"] or "",
+			"birth_date": d["birth_date"] or "",
+			"is_screened": bool(last_dt),
+			"last_date": str(last_dt)[:10] if last_dt else "",
+			"height_cm": float(h_v) if h_v is not None else None,
+			"weight_kg": float(w_v) if w_v is not None else None,
+			"bmi": round(float(bmi_v), 1) if bmi_v is not None else None,
+			"sys_mmhg": int(round(float(d["vit_sys"]))) if d["vit_sys"] is not None else None,
+			"dia_mmhg": int(round(float(d["vit_dia"]))) if d["vit_dia"] is not None else None,
+			"pulse_bpm": int(round(float(d["scr_pulse"] if d["scr_pulse"] is not None else d["vit_pulse"]))) if (d["scr_pulse"] is not None or d["vit_pulse"] is not None) else None,
+			"glucose_mg_dl": round(float(d["vit_glu"]), 1) if d["vit_glu"] is not None else None,
+			"glucose_context": d["vit_glu_ctx"] or "Açlık",
+			"vision": d["scr_vis"] or d["vision_right"] or "",
+			"notes": d["scr_notes"] or d["chronic_conditions"] or "",
+		})
+	return items
+
+
+def render_adult_screening_tab() -> None:
+	"""Okul Sağlık Taraması paneli içinde sade, minimalist yetişkin / personel tarama sekmesi."""
+	adult_flash = ui.session_state.pop("_adult_scr_flash", None)
+	if adult_flash:
+		ui.success(adult_flash)
+
+	adults = _get_adult_screening_rows()
+	total_cnt = len(adults)
+	done_cnt = sum(1 for a in adults if a["is_screened"])
+	pend_cnt = total_cnt - done_cnt
+	pct_done = round(done_cnt / total_cnt * 100) if total_cnt > 0 else 0
+
+	# Minimalist üst özet + araç çubuğu
+	top_l, top_m1, top_m2, top_r1, top_r2 = ui.columns([2.1, 1.7, 1.15, 0.95, 0.95], vertical_alignment="center")
+	with top_l:
+		ui.markdown(
+			f"<div style='padding:4px 0;'>"
+			f"<div style='font-size:13px;color:var(--text-muted, #64748b);letter-spacing:0.01em;'>"
+			f"Yetişkin &amp; Personel &nbsp;·&nbsp; <strong style='color:var(--text-heading, #0f172a);'>{done_cnt}/{total_cnt}</strong> tarandı "
+			f"<span style='opacity:0.75;'>(%{pct_done} · {pend_cnt} bekleyen)</span>"
+			f"</div>"
+			f"<div style='height:3px;background:rgba(148,163,184,0.22);border-radius:99px;margin-top:6px;overflow:hidden;'>"
+			f"<div style='width:{pct_done}%;height:100%;background:var(--teal, #0d9488);border-radius:99px;'></div>"
+			f"</div></div>",
+			unsafe_allow_html=True,
+		)
+	with top_m1:
+		q_search = ui.text_input(
+			"Ara",
+			placeholder="🔍 Ad soyad veya görev ara...",
+			key="adult_scr_search_q",
+			label_visibility="collapsed",
+		)
+	with top_m2:
+		status_filter = ui.selectbox(
+			"Durum",
+			["Tümü", "Bekleyenler", "Tarananlar"],
+			key="adult_scr_status_filter",
+			label_visibility="collapsed",
+		)
+	with top_r1:
+		show_add_bar = ui.toggle("＋ Yeni Kişi", value=(total_cnt == 0), key="adult_scr_show_quick_add")
+	with top_r2:
+		def _export_adult_scr_xlsx(_rows=list(adults)) -> bytes:
+			_out = []
+			for _a in _rows:
+				_cls_m = classify_adult_screening_metrics(_a["bmi"], _a["sys_mmhg"], _a["dia_mmhg"], _a["glucose_mg_dl"], _a["glucose_context"])
+				_out.append({
+					"Ad Soyad": _a["full_name"],
+					"Görev / Branş": _a["role"],
+					"Durum": "Taranmış" if _a["is_screened"] else "Bekliyor",
+					"Son Tarama": _a["last_date"],
+					"Boy (cm)": _a["height_cm"] or "",
+					"Kilo (kg)": _a["weight_kg"] or "",
+					"VKİ": _a["bmi"] or "",
+					"VKİ Sınıfı": _cls_m.get("bmi", ("", ""))[0],
+					"Tansiyon (mmHg)": f"{_a['sys_mmhg']}/{_a['dia_mmhg']}" if (_a["sys_mmhg"] and _a["dia_mmhg"]) else "",
+					"Nabız (/dk)": _a["pulse_bpm"] or "",
+					"Kan Şekeri (mg/dL)": _a["glucose_mg_dl"] or "",
+					"Görme": _a["vision"] or "",
+					"Not": _a["notes"] or "",
+				})
+			_buf = io.BytesIO()
+			with pd.ExcelWriter(_buf, engine="openpyxl") as _writer:
+				pd.DataFrame(_out).to_excel(_writer, index=False, sheet_name="Yetiskin_Taramasi")
+			return _buf.getvalue()
+
+		ui.download_button(
+			"📥 Excel",
+			data=_export_adult_scr_xlsx,
+			file_name=f"yetiskin_taramasi_{date.today().isoformat()}.xlsx",
+			mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+			key="btn_dl_adult_scr_xlsx",
+			use_container_width=True,
+		)
+
+	# Tek satırlık sade hızlı yetişkin ekleme çubuğu
+	if show_add_bar:
+		with ui.container(border=True):
+			qa1, qa2, qa3, qa4 = ui.columns([2.0, 1.5, 1.0, 0.9], vertical_alignment="bottom")
+			with qa1:
+				qa_name = ui.text_input("Ad Soyad", placeholder="Örn: Ahmet Demir", key="adult_scr_qa_name")
+			with qa2:
+				qa_role = _render_adult_role_selector("Görev / Branş", key_prefix="adult_scr_qa_role", default_role="Öğretmen")
+			with qa3:
+				qa_sex_lbl = ui.selectbox("Cinsiyet", ["Belirtilmedi", "Kadın", "Erkek"], key="adult_scr_qa_sex")
+			with qa4:
+				if ui.button("Ekle ve Seç", type="primary", key="btn_adult_scr_qa_submit", use_container_width=True):
+					clean_nm = str(qa_name or "").strip()
+					if not clean_nm:
+						ui.error("Ad soyad girin.")
+					else:
+						sex_code = {"Kadın": "K", "Erkek": "E"}.get(qa_sex_lbl)
+						app_cfg = get_app_settings()
+						with connect_db() as conn:
+							conn.execute("INSERT OR IGNORE INTO classes(name) VALUES ('Sivil / Diğer')")
+							civ_cid = int(conn.execute("SELECT id FROM classes WHERE name='Sivil / Diğer'").fetchone()["id"])
+							ex_row = conn.execute(
+								"SELECT id FROM students WHERE class_id=? AND lower(full_name)=lower(?)",
+								(civ_cid, clean_nm),
+							).fetchone()
+							if ex_row:
+								new_aid = int(ex_row["id"])
+							else:
+								cur_ins = conn.execute(
+									"""INSERT INTO students(class_id, person_type, full_name, sex, notes, country, province, district)
+									   VALUES (?, 'Sivil / diğer kişi', ?, ?, ?, ?, ?, ?)""",
+									(
+										civ_cid,
+										clean_nm,
+										sex_code,
+										qa_role or "Personel",
+										app_cfg.get("default_country") or "Türkiye",
+										app_cfg.get("default_province") or None,
+										app_cfg.get("default_district") or None,
+									),
+								)
+								new_aid = int(cur_ins.lastrowid)
+						sync_after_person_mutation(new_aid)
+						ui.session_state["adult_scr_selected_id"] = new_aid
+						ui.session_state.pop("adult_scr_qa_name", None)
+						ui.session_state["_adult_scr_flash"] = f"✓ {clean_nm} eklendi ve tarama formuna seçildi."
+						ui.rerun()
+
+	if not adults:
+		ui.caption("Kayıtlı yetişkin veya personel bulunmuyor. Yukarıdan isim ve görev girerek ekleyebilirsiniz.")
+		return
+
+	# Minimalist Hızlı Tarama Kartı (Seçili kişi için tek kart, 2 kompakt satır)
+	id_map = {a["id"]: a for a in adults}
+	sel_aid = ui.session_state.get("adult_scr_selected_id")
+	if sel_aid not in id_map:
+		first_pending = next((a["id"] for a in adults if not a["is_screened"]), adults[0]["id"])
+		sel_aid = first_pending
+		ui.session_state["adult_scr_selected_id"] = sel_aid
+
+	opt_labels = {
+		a["id"]: f"{'●' if a['is_screened'] else '○'} {mask_kvkk_value(a['full_name'], 'name')} · {a['role']}"
+		for a in adults
+	}
+	id_order = [a["id"] for a in adults]
+
+	with ui.container(border=True):
+		sel_col, badge_col = ui.columns([2.2, 2.8], vertical_alignment="center")
+		with sel_col:
+			picked_label = ui.selectbox(
+				"Taranacak Kişi",
+				[opt_labels[i] for i in id_order],
+				index=id_order.index(sel_aid),
+				key="adult_scr_picker_box",
+				label_visibility="collapsed",
+			)
+			picked_id = id_order[[opt_labels[i] for i in id_order].index(picked_label)]
+			if picked_id != sel_aid:
+				ui.session_state["adult_scr_selected_id"] = picked_id
+				ui.rerun()
+		cur_adult = id_map[sel_aid]
+		with badge_col:
+			cls_tags = classify_adult_screening_metrics(
+				cur_adult["bmi"], cur_adult["sys_mmhg"], cur_adult["dia_mmhg"], cur_adult["glucose_mg_dl"], cur_adult["glucose_context"]
+			)
+			tone_styles = {
+				"ok": "background:rgba(16,185,129,0.10);color:#047857;",
+				"warn": "background:rgba(245,158,11,0.13);color:#b45309;",
+				"danger": "background:rgba(244,63,94,0.12);color:#be123c;",
+				"muted": "background:rgba(148,163,184,0.14);color:#475569;",
+			}
+			pills: list[str] = []
+			if cur_adult["bmi"]:
+				b_lbl, b_tn = cls_tags.get("bmi", ("", "muted"))
+				pills.append(f"<span style='{tone_styles[b_tn]}padding:2px 8px;border-radius:99px;font-size:11.5px;font-weight:600;'>VKİ {cur_adult['bmi']:.1f} · {b_lbl}</span>")
+			if cur_adult["sys_mmhg"] and cur_adult["dia_mmhg"]:
+				bp_lbl, bp_tn = cls_tags.get("bp", ("", "muted"))
+				pills.append(f"<span style='{tone_styles[bp_tn]}padding:2px 8px;border-radius:99px;font-size:11.5px;font-weight:600;'>TA {cur_adult['sys_mmhg']}/{cur_adult['dia_mmhg']} · {bp_lbl}</span>")
+			if cur_adult["glucose_mg_dl"]:
+				g_lbl, g_tn = cls_tags.get("glucose", ("", "muted"))
+				pills.append(f"<span style='{tone_styles[g_tn]}padding:2px 8px;border-radius:99px;font-size:11.5px;font-weight:600;'>KŞ {cur_adult['glucose_mg_dl']:g} · {g_lbl}</span>")
+			if not pills:
+				pills.append(f"<span style='color:var(--text-muted,#64748b);font-size:12px;'>{html.escape(cur_adult['role'])} · Henüz ölçüm girilmedi</span>")
+			ui.markdown("<div style='display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;'>" + "".join(pills) + "</div>", unsafe_allow_html=True)
+
+		with ui.form(f"form_adult_scr_min_{sel_aid}"):
+			r1c1, r1c2, r1c3, r1c4, r1c5, r1c6 = ui.columns([1.05, 0.9, 0.9, 1.0, 0.85, 0.95])
+			with r1c1:
+				f_date = ui.date_input("Tarih", value=date.today(), key=f"ascr_dt_{sel_aid}")
+			with r1c2:
+				f_h = smart_text_input("Boy (cm)", "height", key=f"ascr_h_{sel_aid}", value=cur_adult["height_cm"], placeholder="172", in_form=True)
+			with r1c3:
+				f_w = smart_text_input("Kilo (kg)", "weight", key=f"ascr_w_{sel_aid}", value=cur_adult["weight_kg"], placeholder="74", in_form=True, is_adult=True)
+			with r1c4:
+				init_bp = f"{cur_adult['sys_mmhg']}/{cur_adult['dia_mmhg']}" if (cur_adult["sys_mmhg"] and cur_adult["dia_mmhg"]) else ""
+				f_bp = ui.text_input("Tansiyon (mmHg)", value=init_bp, placeholder="120/80", key=f"ascr_bp_{sel_aid}")
+			with r1c5:
+				f_pulse = smart_text_input("Nabız (/dk)", "pulse", key=f"ascr_p_{sel_aid}", value=cur_adult["pulse_bpm"], placeholder="72", in_form=True)
+			with r1c6:
+				f_glu = smart_text_input("Kan Şekeri", "glucose", key=f"ascr_g_{sel_aid}", value=cur_adult["glucose_mg_dl"], placeholder="95 mg/dL", in_form=True)
+
+			r2c1, r2c2, r2c3, r2c4 = ui.columns([0.95, 1.25, 2.3, 1.15], vertical_alignment="bottom")
+			with r2c1:
+				ctx_opts = ["Açlık", "Tokluk", "Rastgele"]
+				cur_ctx = cur_adult["glucose_context"] if cur_adult["glucose_context"] in ctx_opts else "Açlık"
+				f_gctx = ui.selectbox("KŞ Zamanı", ctx_opts, index=ctx_opts.index(cur_ctx), key=f"ascr_gctx_{sel_aid}")
+			with r2c2:
+				vis_opts = ["Normal", "Gözlük / Lens Kullanıyor", "Kontrol Önerildi"]
+				cur_vis_raw = cur_adult["vision"] or ""
+				cur_vis_idx = 1 if ("Gözlük" in cur_vis_raw or "Lens" in cur_vis_raw) else (2 if "Kontrol" in cur_vis_raw else 0)
+				f_vis = ui.selectbox("Görme", vis_opts, index=cur_vis_idx, key=f"ascr_vis_{sel_aid}")
+			with r2c3:
+				f_notes = ui.text_input("Not / Kronik Durum", value=cur_adult["notes"], placeholder="İsteğe bağlı: HT, DM, düzenli ilaç veya hekim kontrol önerisi...", key=f"ascr_nt_{sel_aid}")
+			with r2c4:
+				submitted_adult = ui.form_submit_button("💾 Kaydet", type="primary", use_container_width=True)
+
+			if submitted_adult:
+				bad_fields: list[str] = []
+				if str(f_h or "").strip() and normalize_height(f_h) is None:
+					bad_fields.append("Boy")
+				if str(f_w or "").strip() and normalize_weight(f_w, is_adult=True) is None:
+					bad_fields.append("Kilo")
+				if str(f_bp or "").strip() and normalize_bp(f_bp)[0] is None:
+					bad_fields.append("Tansiyon (örn. 120/80)")
+				if str(f_pulse or "").strip() and normalize_pulse(f_pulse) is None:
+					bad_fields.append("Nabız")
+				if str(f_glu or "").strip() and normalize_glucose(f_glu) is None:
+					bad_fields.append("Kan Şekeri")
+
+				if bad_fields:
+					ui.error("Lütfen geçerli değer girin: " + ", ".join(bad_fields))
+				else:
+					save_adult_screening(
+						person_id=sel_aid,
+						screening_date=f_date.isoformat(),
+						height_cm=f_h,
+						weight_kg=f_w,
+						bp_sys=f_bp,
+						pulse_bpm=f_pulse,
+						glucose_mg_dl=f_glu,
+						glucose_context=f_gctx,
+						vision_status=f_vis,
+						notes=f_notes,
+					)
+					for _k in (f"ascr_h_{sel_aid}", f"ascr_w_{sel_aid}", f"ascr_bp_{sel_aid}", f"ascr_p_{sel_aid}", f"ascr_g_{sel_aid}", f"ascr_nt_{sel_aid}"):
+						ui.session_state.pop(_k, None)
+					next_unscreened = next((a["id"] for a in adults if a["id"] != sel_aid and not a["is_screened"]), None)
+					if next_unscreened is not None:
+						ui.session_state["adult_scr_selected_id"] = next_unscreened
+					ui.session_state["_adult_scr_flash"] = f"✓ {cur_adult['full_name']} yetişkin taraması kaydedildi."
+					ui.rerun()
+
+	# Filtrelenmiş minimalist liste
+	kw = str(q_search or "").strip().lower()
+	filtered: list[dict[str, Any]] = []
+	for a in adults:
+		if status_filter == "Bekleyenler" and a["is_screened"]:
+			continue
+		if status_filter == "Tarananlar" and not a["is_screened"]:
+			continue
+		if kw and (kw not in a["full_name"].lower()) and (kw not in a["role"].lower()):
+			continue
+		filtered.append(a)
+
+	if not filtered:
+		ui.caption("Filtreye uygun kayıt bulunamadı.")
+		return
+
+	for a in filtered:
+		aid = a["id"]
+		is_sel = (aid == sel_aid)
+		dot_html = (
+			"<span style='color:#10b981;font-size:11px;'>●</span>"
+			if a["is_screened"]
+			else "<span style='color:#94a3b8;font-size:11px;'>○</span>"
+		)
+		metrics_parts: list[str] = []
+		if a["height_cm"] and a["weight_kg"]:
+			bmi_txt = f" · VKİ {a['bmi']:.1f}" if a["bmi"] else ""
+			metrics_parts.append(f"{a['height_cm']:.0f} cm / {a['weight_kg']:.1f} kg{bmi_txt}")
+		elif a["bmi"]:
+			metrics_parts.append(f"VKİ {a['bmi']:.1f}")
+		if a["sys_mmhg"] and a["dia_mmhg"]:
+			metrics_parts.append(f"TA {a['sys_mmhg']}/{a['dia_mmhg']}")
+		if a["pulse_bpm"]:
+			metrics_parts.append(f"{a['pulse_bpm']}/dk")
+		if a["glucose_mg_dl"]:
+			metrics_parts.append(f"KŞ {a['glucose_mg_dl']:g}")
+		if a["last_date"]:
+			metrics_parts.append(a["last_date"])
+		summary_txt = " &nbsp;·&nbsp; ".join(html.escape(p) for p in metrics_parts) if metrics_parts else "Bekliyor"
+
+		c_info, c_sum, c_act1, c_act2 = ui.columns([2.1, 2.8, 0.55, 0.55], vertical_alignment="center")
+		with c_info:
+			sel_mark = "font-weight:700;color:var(--teal,#0d9488);" if is_sel else "font-weight:600;color:var(--text-heading,#0f172a);"
+			ui.markdown(
+				f"<div style='padding:4px 0;font-size:13.5px;'>{dot_html} "
+				f"<span style='{sel_mark}'>{html.escape(mask_kvkk_value(a['full_name'], 'name'))}</span> "
+				f"<span style='color:var(--text-muted,#64748b);font-size:12px;margin-left:6px;'>{html.escape(a['role'])}</span></div>",
+				unsafe_allow_html=True,
+			)
+		with c_sum:
+			ui.markdown(
+				f"<div style='font-size:12.5px;color:var(--text-muted,#64748b);padding:4px 0;'>{summary_txt}</div>",
+				unsafe_allow_html=True,
+			)
+		with c_act1:
+			if ui.button("Seç", key=f"btn_ascr_pick_{aid}", type="secondary", use_container_width=True):
+				ui.session_state["adult_scr_selected_id"] = aid
+				ui.rerun()
+		with c_act2:
+			if ui.button("Dosya", key=f"btn_ascr_dos_{aid}", type="secondary", use_container_width=True):
+				_close_dyn_report_builder_dialog()
+				open_person_dossier_dialog(aid)
+
+
 def render_school_screening() -> None:
 	visible_fields = get_screening_visible_fields()
 	all_classes = [c for c in get_classes() if c != "Sivil / Diğer"]
@@ -26099,9 +26651,10 @@ def render_school_screening() -> None:
 
 	# VIEW 1: Sınıf Kutucukları Listesi (Grid of Class Boxes)
 	if not selected_class or selected_class not in all_classes:
-		tab_cls_cards, tab_bulk_top = ui.tabs([
+		tab_cls_cards, tab_bulk_top, tab_adult_scr = ui.tabs([
 			"🗂️ Sınıf Kartları & Tekil Tarama",
 			"⚡ Seri Sınıf Taraması (Toplu Tablo Girişi)",
+			"🧑 Yetişkin Taraması",
 		])
 		with tab_cls_cards:
 			vis_names = [SCREENING_FIELDS_INFO[f]["name"] for f in visible_fields if f in SCREENING_FIELDS_INFO]
@@ -26161,6 +26714,9 @@ def render_school_screening() -> None:
 
 		with tab_bulk_top:
 			render_bulk_class_screening_tab(default_class=None, key_ctx="top")
+
+		with tab_adult_scr:
+			render_adult_screening_tab()
 
 	# VIEW 2: Seçili Sınıfın Tarama Paneli ve Öğrenci Listesi
 	else:
