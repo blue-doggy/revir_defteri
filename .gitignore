@@ -45,3 +45,6 @@ scratch/
 
 .git_local_history_backup/
 
+# Microsoft Store MSIX build ciktilari
+build/
+installer/*.msix

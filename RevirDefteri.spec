@@ -48,6 +48,7 @@ datas = [
     (str(PROJECT_ROOT / "screening_import.py"), "."),
     (str(PROJECT_ROOT / "gemini_api_anahtari_kilavuzu.pdf"), "."),
     (str(PROJECT_ROOT / "VERSION"), "."),
+    (str(PROJECT_ROOT / "PRIVACY_POLICY.md"), "."),
     (str(PROJECT_ROOT / "app_icon.png"), "."),
     (str(PROJECT_ROOT / "app_icon.ico"), "."),
     (str(PROJECT_ROOT / "turkiye-il-ilce-mahalle-koy.json"), "."),

@@ -142,7 +142,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return (Path(meipass_raw) if meipass_raw else _BUNDLE_DIR) / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.51.1"
+_DEFAULT_APP_VERSION = "1.52.0"
 
 
 def _load_app_version() -> str:
@@ -34046,6 +34046,18 @@ def get_git_info() -> dict[str, Any]:
 
 OFFICIAL_REPO_URL = "https://github.com/blue-doggy/revir_defteri.git"
 GITHUB_RELEASES_API_URL = "https://api.github.com/repos/blue-doggy/revir_defteri/releases?per_page=15"
+PRIVACY_POLICY_PUBLIC_URL = "https://github.com/blue-doggy/revir_defteri/blob/main/PRIVACY_POLICY.md"
+
+
+def is_microsoft_store_build() -> bool:
+	"""Uygulamanın Microsoft Store (MSIX) sürümü olarak çalışıp çalışmadığını döndürür."""
+	if os.environ.get("REVIR_MS_STORE", "").strip() == "1":
+		return True
+	if _resolve_bundled_asset("MS_STORE_BUILD").exists():
+		return True
+	if "windowsapps" in str(Path(sys.executable)).lower():
+		return True
+	return False
 
 
 def _ensure_tls_trust() -> None:
@@ -34320,6 +34332,12 @@ def download_github_release_asset(
 	"""GitHub Release kurulum dosyasını (.exe / .dmg) akışlı olarak İndirilenler klasörüne indirir."""
 	import urllib.request
 
+	if is_microsoft_store_build():
+		return (
+			False,
+			None,
+			"Microsoft Store sürümünde harici kurulum paketi indirme devre dışıdır; güncellemeler Microsoft Store üzerinden otomatik yönetilir.",
+		)
 	url_clean = str(download_url or "").strip()
 	if not url_clean.startswith("https://"):
 		return False, None, "Geçersiz indirme bağlantısı (yalnızca HTTPS desteklenir)."
@@ -36033,6 +36051,7 @@ def render_settings() -> None:
 
 			with t_upd:
 				ui.markdown("### 🚀 Sistem Sürümü & Güncelleme Yönetimi")
+				_is_store_pkg = is_microsoft_store_build()
 				git_info = get_git_info()
 				_plat_key_u, _plat_lbl_u, _plat_ext_u = _detect_target_installer_platform()
 				col_v1, col_v2, col_v3 = ui.columns([1.4, 1.9, 1.4])
@@ -36040,7 +36059,7 @@ def render_settings() -> None:
 					with ui.container(border=True):
 						ui.caption("📌 **Mevcut Sürüm**")
 						ui.markdown(f"### v{APP_VERSION}")
-						ui.caption(f"Platform: **{_plat_lbl_u}**")
+						ui.caption("Dağıtım: **Microsoft Store (MSIX)**" if _is_store_pkg else f"Platform: **{_plat_lbl_u}**")
 				with col_v2:
 					with ui.container(border=True):
 						ui.caption("🔖 **Son İyileştirme / Kaynak**")
@@ -36049,149 +36068,175 @@ def render_settings() -> None:
 						ui.caption(cmt_clean or f"Dal: `{git_info['branch'] or 'release'}`")
 				with col_v3:
 					with ui.container(border=True):
-						ui.caption("🖥️ **Masaüstü Başlatıcı**")
-						if ui.button("🔄 Kısayolu Yenile", key="btn_refresh_desktop_sc", use_container_width=True):
-							sc_path = create_or_refresh_desktop_launcher()
-							ui.success(f"Kısayol yenilendi: `{sc_path.name}`")
-				with ui.container(border=True):
-					ui.caption(
-						f"🔍 GitHub Releases üzerinden **{_plat_lbl_u}** kurulum dosyalarının (`*{_plat_ext_u or '.exe/.dmg'}`) sürümünü ve boyutunu denetler."
-					)
-					if ui.button("🔍 Güncellemeleri Denetle (GitHub Releases)", type="primary", key="btn_chk_updates"):
-						with ui.spinner("GitHub Releases üzerinden en güncel kurulum paketleri kontrol ediliyor..."):
-							ui.session_state["last_update_check_result"] = check_for_github_release_updates()
-					chk_res = ui.session_state.get("last_update_check_result")
-					if chk_res:
-						if not chk_res.get("success"):
-							ui.warning(f"⚠️ {chk_res.get('message', 'Denetim başarısız.')}")
+						if _is_store_pkg:
+							ui.caption("🛍️ **Mağaza Güncellemesi**")
+							ui.markdown("**Otomatik Aktif**")
+							ui.caption("Microsoft Store güvencesiyle")
 						else:
-							if chk_res.get("has_updates"):
-								ui.success(f"🟢 **Yeni Güncelleme Mevcut!** — {chk_res.get('message', '')}")
+							ui.caption("🖥️ **Masaüstü Başlatıcı**")
+							if ui.button("🔄 Kısayolu Yenile", key="btn_refresh_desktop_sc", use_container_width=True):
+								sc_path = create_or_refresh_desktop_launcher()
+								ui.success(f"Kısayol yenilendi: `{sc_path.name}`")
+				if _is_store_pkg:
+					with ui.container(border=True):
+						ui.info(
+							"🛍️ **Microsoft Store Sürümü:** Uygulama güncellemeleri Microsoft Store üzerinden "
+							"otomatik olarak indirilir ve doğrulanır; harici kurulum dosyası indirmenize gerek yoktur."
+						)
+				else:
+					with ui.container(border=True):
+						ui.caption(
+							f"🔍 GitHub Releases üzerinden **{_plat_lbl_u}** kurulum dosyalarının (`*{_plat_ext_u or '.exe/.dmg'}`) sürümünü ve boyutunu denetler."
+						)
+						if ui.button("🔍 Güncellemeleri Denetle (GitHub Releases)", type="primary", key="btn_chk_updates"):
+							with ui.spinner("GitHub Releases üzerinden en güncel kurulum paketleri kontrol ediliyor..."):
+								ui.session_state["last_update_check_result"] = check_for_github_release_updates()
+						chk_res = ui.session_state.get("last_update_check_result")
+						if chk_res:
+							if not chk_res.get("success"):
+								ui.warning(f"⚠️ {chk_res.get('message', 'Denetim başarısız.')}")
 							else:
-								ui.info(f"✅ {chk_res.get('message', '')}")
+								if chk_res.get("has_updates"):
+									ui.success(f"🟢 **Yeni Güncelleme Mevcut!** — {chk_res.get('message', '')}")
+								else:
+									ui.info(f"✅ {chk_res.get('message', '')}")
 
-							if chk_res.get("pending_build_note"):
-								ui.caption(f"ℹ️ {chk_res['pending_build_note']}")
+								if chk_res.get("pending_build_note"):
+									ui.caption(f"ℹ️ {chk_res['pending_build_note']}")
 
-							asset = chk_res.get("asset")
-							if isinstance(asset, dict) and asset.get("download_url"):
-								with ui.container(border=True):
-									pkg_name = str(asset.get("name") or "")
-									pkg_ver = str(asset.get("version") or chk_res.get("latest_version") or "")
-									pkg_size = str(asset.get("size_str") or "—")
-									pkg_bytes = int(asset.get("size_bytes") or 0)
-									rel_dt = str(chk_res.get("published_at") or "—")
-									dl_url = str(asset.get("download_url") or "")
-									rel_url = str(chk_res.get("release_url") or dl_url)
+								asset = chk_res.get("asset")
+								if isinstance(asset, dict) and asset.get("download_url"):
+									with ui.container(border=True):
+										pkg_name = str(asset.get("name") or "")
+										pkg_ver = str(asset.get("version") or chk_res.get("latest_version") or "")
+										pkg_size = str(asset.get("size_str") or "—")
+										pkg_bytes = int(asset.get("size_bytes") or 0)
+										rel_dt = str(chk_res.get("published_at") or "—")
+										dl_url = str(asset.get("download_url") or "")
+										rel_url = str(chk_res.get("release_url") or dl_url)
 
-									m1, m2, m3, m4 = ui.columns(4)
-									m1.metric("📦 Paket Sürümü", f"v{pkg_ver}")
-									m2.metric("💾 Paket Boyutu", pkg_size)
-									m3.metric("💻 Hedef Sistem", str(chk_res.get("platform_label") or _plat_lbl_u))
-									m4.metric("📅 Yayın Tarihi", rel_dt)
+										m1, m2, m3, m4 = ui.columns(4)
+										m1.metric("📦 Paket Sürümü", f"v{pkg_ver}")
+										m2.metric("💾 Paket Boyutu", pkg_size)
+										m3.metric("💻 Hedef Sistem", str(chk_res.get("platform_label") or _plat_lbl_u))
+										m4.metric("📅 Yayın Tarihi", rel_dt)
 
-									ui.markdown(
-										f"- **Kurulum Dosyası:** `{pkg_name}` ({pkg_bytes:,} bayt)\n"
-										f"- **İndirme Bağlantısı:** `{dl_url}`"
-									)
-									if chk_res.get("release_notes"):
-										with ui.expander(f"📋 Sürüm Notları (v{pkg_ver})", expanded=bool(chk_res.get("has_updates"))):
-											ui.markdown(str(chk_res["release_notes"]))
-
-									dl_c1, dl_c2 = ui.columns(2)
-									with dl_c1:
-										dl_btn_lbl = (
-											f"⬇️ Güncelleme Paketini İndir (v{pkg_ver} · {pkg_size})"
-											if chk_res.get("has_updates")
-											else f"⬇️ Kurulum Paketini Tekrar İndir ({pkg_size})"
+										ui.markdown(
+											f"- **Kurulum Dosyası:** `{pkg_name}` ({pkg_bytes:,} bayt)\n"
+											f"- **İndirme Bağlantısı:** `{dl_url}`"
 										)
-										dl_btn_type = "primary" if chk_res.get("has_updates") else "secondary"
-										if ui.button(dl_btn_lbl, type=dl_btn_type, key="btn_download_release_installer", use_container_width=True):
-											with ui.spinner(f"GitHub'dan {pkg_name} ({pkg_size}) indiriliyor, lütfen bekleyin..."):
-												ok_dl, saved_p, msg_dl = download_github_release_asset(
-													dl_url,
-													pkg_name,
-													expected_size=pkg_bytes,
-												)
-											if ok_dl and saved_p is not None:
-												ui.session_state["downloaded_update_installer"] = {
-													"path": str(saved_p),
-													"name": pkg_name,
-													"version": pkg_ver,
-													"size_str": pkg_size,
-												}
-												ui.balloons()
-												ui.success(f"✅ {msg_dl}")
-											else:
-												ui.error(f"❌ {msg_dl}")
-									with dl_c2:
-										ui.link_button(
-											"🌐 Tarayıcıda İndir / GitHub Sayfası ↗",
-											url=dl_url,
-											use_container_width=True,
-											help=f"GitHub Release sayfası: {rel_url}",
-										)
+										if chk_res.get("release_notes"):
+											with ui.expander(f"📋 Sürüm Notları (v{pkg_ver})", expanded=bool(chk_res.get("has_updates"))):
+												ui.markdown(str(chk_res["release_notes"]))
 
-									dl_state = ui.session_state.get("downloaded_update_installer")
-									if (
-										isinstance(dl_state, dict)
-										and dl_state.get("name") == pkg_name
-										and dl_state.get("path")
-										and Path(str(dl_state["path"])).exists()
-									):
-										dl_path_obj = Path(str(dl_state["path"]))
-										ui.success(f"📁 **Kurulum dosyası hazır:** `{dl_path_obj}`")
-										inst_c1, inst_c2 = ui.columns(2)
-										with inst_c1:
-											run_lbl = (
-												"🚀 Kurulum Sihirbazını Başlat (.exe)"
-												if _plat_key_u == "windows"
-												else ("🚀 Kurulum Paketini Aç (.dmg)" if _plat_key_u == "macos" else "🚀 İndirilen Dosyayı Aç")
+										dl_c1, dl_c2 = ui.columns(2)
+										with dl_c1:
+											dl_btn_lbl = (
+												f"⬇️ Güncelleme Paketini İndir (v{pkg_ver} · {pkg_size})"
+												if chk_res.get("has_updates")
+												else f"⬇️ Kurulum Paketini Tekrar İndir ({pkg_size})"
 											)
-											if ui.button(run_lbl, type="primary", key="btn_launch_downloaded_installer", use_container_width=True):
-												ok_op, msg_op = open_downloaded_installer(dl_path_obj)
-												if ok_op:
-													ui.success(f"✅ {msg_op}")
+											dl_btn_type = "primary" if chk_res.get("has_updates") else "secondary"
+											if ui.button(dl_btn_lbl, type=dl_btn_type, key="btn_download_release_installer", use_container_width=True):
+												with ui.spinner(f"GitHub'dan {pkg_name} ({pkg_size}) indiriliyor, lütfen bekleyin..."):
+													ok_dl, saved_p, msg_dl = download_github_release_asset(
+														dl_url,
+														pkg_name,
+														expected_size=pkg_bytes,
+													)
+												if ok_dl and saved_p is not None:
+													ui.session_state["downloaded_update_installer"] = {
+														"path": str(saved_p),
+														"name": pkg_name,
+														"version": pkg_ver,
+														"size_str": pkg_size,
+													}
+													ui.balloons()
+													ui.success(f"✅ {msg_dl}")
 												else:
-													ui.error(f"❌ {msg_op}")
-										with inst_c2:
-											if ui.button("📂 İndirilen Klasörde Göster", type="secondary", key="btn_reveal_downloaded_installer", use_container_width=True):
-												ok_rv, msg_rv = open_downloaded_installer(dl_path_obj, reveal_only=True)
-												if ok_rv:
-													ui.info(msg_rv)
-												else:
-													ui.error(f"❌ {msg_rv}")
-										if _plat_key_u == "windows":
-											ui.caption("💡 Windows kurulum sihirbazı açık uygulamayı otomatik kapatıp mevcut veritabanı ve belgelerinizi koruyarak günceller.")
-										elif _plat_key_u == "macos":
-											ui.caption("💡 Açılan `.dmg` penceresinden **RevirDefteri.app** simgesini **Applications** klasörüne sürükleyerek güncelleyebilirsiniz (verileriniz korunur).")
+													ui.error(f"❌ {msg_dl}")
+										with dl_c2:
+											ui.link_button(
+												"🌐 Tarayıcıda İndir / GitHub Sayfası ↗",
+												url=dl_url,
+												use_container_width=True,
+												help=f"GitHub Release sayfası: {rel_url}",
+											)
 
-							if not getattr(sys, "frozen", False) and (APP_DIR / ".git").exists() and chk_res.get("has_updates"):
-								with ui.expander("🛠️ Geliştirici Modu: Kaynak Kodunu Git ile Güncelle", expanded=False):
-									if ui.button("⚡ Git Pull ile Kaynağı Güncelle", type="secondary", key="btn_apply_git_update"):
-										ok, msg = perform_system_update()
-										if ok:
-											ui.balloons()
-											ui.success("✅ Güncellendi!")
-											ui.session_state.pop("last_update_check_result", None)
-											ui.rerun()
-										else:
-											ui.error(f"Güncelleme hatası: {msg}")
-				with ui.expander("📥 Çevrimdışı / Manuel Güncelleme Paketi (.ZIP)", expanded=False):
-					pkg_file = ui.file_uploader("Güncelleme Paketi (.zip)", type=["zip"], key="cfg_upload_update_pkg")
-					if pkg_file is not None and ui.button("🚀 Manuel Paketi Uygula", type="secondary", key="btn_apply_zip_pkg", use_container_width=True):
-						try:
-							import zipfile
-							with zipfile.ZipFile(io.BytesIO(pkg_file.getvalue())) as zf:
-								for z_name in zf.namelist():
-									if z_name.endswith("/") or z_name.startswith("egitim_yillari/") or z_name.startswith("revir_evraklari/") or "revir_defteri.db" in z_name:
-										continue
-									zf.extract(z_name, APP_DIR)
-							clear_all_data_caches()
-							ui.success("Manuel güncelleme paketi uygulandı!")
-							ui.rerun()
-						except Exception as e:
-							ui.error(f"Paket hatası: {e}")
+										dl_state = ui.session_state.get("downloaded_update_installer")
+										if (
+											isinstance(dl_state, dict)
+											and dl_state.get("name") == pkg_name
+											and dl_state.get("path")
+											and Path(str(dl_state["path"])).exists()
+										):
+											dl_path_obj = Path(str(dl_state["path"]))
+											ui.success(f"📁 **Kurulum dosyası hazır:** `{dl_path_obj}`")
+											inst_c1, inst_c2 = ui.columns(2)
+											with inst_c1:
+												run_lbl = (
+													"🚀 Kurulum Sihirbazını Başlat (.exe)"
+													if _plat_key_u == "windows"
+													else ("🚀 Kurulum Paketini Aç (.dmg)" if _plat_key_u == "macos" else "🚀 İndirilen Dosyayı Aç")
+												)
+												if ui.button(run_lbl, type="primary", key="btn_launch_downloaded_installer", use_container_width=True):
+													ok_op, msg_op = open_downloaded_installer(dl_path_obj)
+													if ok_op:
+														ui.success(f"✅ {msg_op}")
+													else:
+														ui.error(f"❌ {msg_op}")
+											with inst_c2:
+												if ui.button("📂 İndirilen Klasörde Göster", type="secondary", key="btn_reveal_downloaded_installer", use_container_width=True):
+													ok_rv, msg_rv = open_downloaded_installer(dl_path_obj, reveal_only=True)
+													if ok_rv:
+														ui.info(msg_rv)
+													else:
+														ui.error(f"❌ {msg_rv}")
+											if _plat_key_u == "windows":
+												ui.caption("💡 Windows kurulum sihirbazı açık uygulamayı otomatik kapatıp mevcut veritabanı ve belgelerinizi koruyarak günceller.")
+											elif _plat_key_u == "macos":
+												ui.caption("💡 Açılan `.dmg` penceresinden **RevirDefteri.app** simgesini **Applications** klasörüne sürükleyerek güncelleyebilirsiniz (verileriniz korunur).")
+
+								if not getattr(sys, "frozen", False) and (APP_DIR / ".git").exists() and chk_res.get("has_updates"):
+									with ui.expander("🛠️ Geliştirici Modu: Kaynak Kodunu Git ile Güncelle", expanded=False):
+										if ui.button("⚡ Git Pull ile Kaynağı Güncelle", type="secondary", key="btn_apply_git_update"):
+											ok, msg = perform_system_update()
+											if ok:
+												ui.balloons()
+												ui.success("✅ Güncellendi!")
+												ui.session_state.pop("last_update_check_result", None)
+												ui.rerun()
+											else:
+												ui.error(f"Güncelleme hatası: {msg}")
+				if not _is_store_pkg:
+					with ui.expander("📥 Çevrimdışı / Manuel Güncelleme Paketi (.ZIP)", expanded=False):
+						pkg_file = ui.file_uploader("Güncelleme Paketi (.zip)", type=["zip"], key="cfg_upload_update_pkg")
+						if pkg_file is not None and ui.button("🚀 Manuel Paketi Uygula", type="secondary", key="btn_apply_zip_pkg", use_container_width=True):
+							try:
+								import zipfile
+								with zipfile.ZipFile(io.BytesIO(pkg_file.getvalue())) as zf:
+									for z_name in zf.namelist():
+										if z_name.endswith("/") or z_name.startswith("egitim_yillari/") or z_name.startswith("revir_evraklari/") or "revir_defteri.db" in z_name:
+											continue
+										zf.extract(z_name, APP_DIR)
+								clear_all_data_caches()
+								ui.success("Manuel güncelleme paketi uygulandı!")
+								ui.rerun()
+							except Exception as e:
+								ui.error(f"Paket hatası: {e}")
+
+				with ui.container(border=True):
+					ui.markdown("#### 🛡️ Gizlilik Politikası (KVKK) & Tıbbi Sorumluluk Beyanı")
+					ui.caption(
+						"**Yerel Veri Güvencesi:** Tüm kayıtlar yalnızca bu bilgisayardaki yerel SQLite veritabanında tutulur; "
+						"merkezi bir sunucuya veya üçüncü taraflara aktarılmaz. İsteğe bağlı Gemini AI özelliklerinde kişisel kimlik "
+						"verileri KVKK kapsamında maskelenir."
+					)
+					ui.caption(
+						"⚕️ **Tıbbi Sorumluluk Beyanı:** Bu yazılım tıbbi tanı veya tedavi cihazı değildir; hekim muayenesinin veya "
+						"reçetesinin yerine geçmez. Yalnızca okul sağlığı personeline yönelik kayıt tutma ve karar destek aracıdır."
+					)
+					ui.link_button("📄 Gizlilik Politikası ve KVKK Metnini Görüntüle ↗", url=PRIVACY_POLICY_PUBLIC_URL)
 
 			with t_rst:
 				with ui.container(border=True):

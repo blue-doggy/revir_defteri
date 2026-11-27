@@ -1,0 +1,13 @@
+{
+  "_aciklama": "Microsoft Partner Center -> Uygulamanız -> Product management -> Product identity ekranındaki 3 değeri aşağıya yapıştırın.",
+  "identity_name": "BlueDoggy.OkulRevirDefteri",
+  "publisher": "CN=00000000-0000-0000-0000-000000000000",
+  "publisher_display_name": "Okul Sağlığı ve Revir Bilgi Sistemi",
+  "display_name": "Okul Revir Defteri",
+  "description": "Okul revirleri için yerel veritabanlı sağlık izlem, WHO büyüme persantili, ilaç ve diyabet karar destek, okul taraması ve resmi raporlama sistemi.",
+  "background_color": "#0D9488",
+  "min_windows_version": "10.0.17763.0",
+  "max_windows_version_tested": "10.0.22621.0",
+  "language": "tr-tr",
+  "privacy_policy_url": "https://github.com/blue-doggy/revir_defteri/blob/main/PRIVACY_POLICY.md"
+}

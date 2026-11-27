@@ -35,7 +35,7 @@ def _ensure_standard_streams() -> None:
 
 _ensure_standard_streams()
 
-_DEFAULT_APP_VERSION = "1.51.1"
+_DEFAULT_APP_VERSION = "1.52.0"
 
 
 def _load_app_version() -> str:
@@ -77,8 +77,56 @@ def _is_dir_writable(path: Path) -> bool:
 		return False
 
 
+def is_ms_store_runtime(exe_dir: Path | None = None, resource_dir: Path | None = None) -> bool:
+	"""Uygulamanın Microsoft Store (MSIX / WindowsApps) ortamında çalışıp çalışmadığını algılar."""
+	if os.environ.get("REVIR_MS_STORE", "").strip() == "1":
+		return True
+	for folder in (exe_dir, resource_dir):
+		if folder is not None and (folder / "MS_STORE_BUILD").exists():
+			return True
+	exe_s = str(exe_dir or sys.executable or "").lower()
+	if "windowsapps" in exe_s:
+		return True
+	if sys.platform == "win32" and getattr(sys, "frozen", False):
+		try:
+			kernel32 = ctypes.windll.kernel32
+			length = ctypes.c_uint32(0)
+			rc = kernel32.GetCurrentPackageFullName(ctypes.byref(length), None)
+			# APPMODEL_ERROR_NO_PACKAGE = 15700; farklı bir dönüş kodu aktif MSIX paket kimliğini gösterir
+			if rc != 15700 and length.value > 0:
+				return True
+		except Exception:
+			pass
+	return False
+
+
+def _has_windows_webview2_runtime() -> bool:
+	"""Windows üzerinde Microsoft Edge WebView2 Runtime kurulu olup olmadığını denetler."""
+	if sys.platform != "win32":
+		return True
+	try:
+		import winreg
+		wv2_guid = r"Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+		checks = (
+			(winreg.HKEY_LOCAL_MACHINE, rf"SOFTWARE\WOW6432Node\{wv2_guid}"),
+			(winreg.HKEY_LOCAL_MACHINE, rf"SOFTWARE\{wv2_guid}"),
+			(winreg.HKEY_CURRENT_USER, rf"Software\{wv2_guid}"),
+		)
+		for hive, subkey in checks:
+			try:
+				with winreg.OpenKey(hive, subkey) as k:
+					pv, _ = winreg.QueryValueEx(k, "pv")
+					if pv and str(pv).strip() and str(pv).strip() != "0.0.0.0":
+						return True
+			except OSError:
+				continue
+	except Exception:
+		return True
+	return False
+
+
 def resolve_runtime_paths() -> dict[str, Path]:
-	"""Geliştirme (.py) ve PyInstaller (.exe) modları için çalışma ve paket dizinlerini çözümler."""
+	"""Geliştirme (.py), PyInstaller (.exe) ve Microsoft Store (MSIX) modları için çalışma dizinlerini çözümler."""
 	is_frozen = getattr(sys, "frozen", False)
 	if is_frozen:
 		exe_dir = Path(sys.executable).resolve().parent
@@ -86,6 +134,10 @@ def resolve_runtime_paths() -> dict[str, Path]:
 	else:
 		exe_dir = Path(__file__).resolve().parent
 		resource_dir = exe_dir
+
+	ms_store = is_ms_store_runtime(exe_dir=exe_dir, resource_dir=resource_dir)
+	if ms_store:
+		os.environ["REVIR_MS_STORE"] = "1"
 
 	env_data = os.environ.get("REVIR_DATA_DIR", "").strip()
 	if env_data:
@@ -95,6 +147,10 @@ def resolve_runtime_paths() -> dict[str, Path]:
 		# macOS .app paketi icinde veritabani tutmak guncellemede veri kaybina yol acar;
 		# her zaman ~/Library/Application Support/RevirDefteri kullanilir.
 		data_dir = Path.home() / "Library" / "Application Support" / "RevirDefteri"
+		data_dir.mkdir(parents=True, exist_ok=True)
+	elif ms_store:
+		local_base = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+		data_dir = local_base / "RevirDefteri"
 		data_dir.mkdir(parents=True, exist_ok=True)
 	elif _is_dir_writable(exe_dir):
 		data_dir = exe_dir
@@ -939,6 +995,20 @@ def launch_desktop_app() -> int:
 		try:
 			webview.start(**start_kwargs)
 		except Exception:
+			if sys.platform == "win32" and not _has_windows_webview2_runtime():
+				try:
+					import webbrowser
+					ans = ctypes.windll.user32.MessageBoxW(
+						0,
+						"Okul Revir Defteri arayüzü için 'Microsoft Edge WebView2 Çalışma Zamanı' gereklidir.\n\n"
+						"Microsoft'un resmi indirme sayfasını şimdi açmak ister misiniz?",
+						"WebView2 Çalışma Zamanı Gerekli",
+						0x00000004 | 0x00000030,
+					)
+					if ans == 6:
+						webbrowser.open("https://go.microsoft.com/fwlink/p/?LinkId=2124703")
+				except Exception:
+					pass
 			start_kwargs.pop("gui", None)
 			start_kwargs.pop("icon", None)
 			webview.start(**start_kwargs)
