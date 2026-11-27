@@ -46,8 +46,12 @@ TR_WEEKDAYS_SHORT: dict[int, str] = {
 
 MEAL_SLOTS: list[str] = [
 	"Sabah Kahvaltısı",
+	"Kuşluk Ara Öğünü",
+	"Brunch",
 	"Öğle Yemeği",
 	"İkindi Ara Öğünü",
+	"Akşam Yemeği",
+	"Gece Ara Öğünü",
 ]
 
 RAMAZAN_EXTRA_SLOTS: list[str] = ["İftar", "Sahur"]
@@ -623,8 +627,12 @@ def format_allergen_badge(allergen: str) -> str:
 
 _MEAL_TIME_SETTING_KEYS: dict[str, tuple[str, str]] = {
 	"Sabah Kahvaltısı": ("cafeteria_time_breakfast", "08:00 - 08:45"),
+	"Kuşluk Ara Öğünü": ("cafeteria_time_midmorning", "10:15 - 10:35"),
+	"Brunch": ("cafeteria_time_brunch", "10:30 - 11:30"),
 	"Öğle Yemeği": ("cafeteria_time_lunch", "12:00 - 13:00"),
 	"İkindi Ara Öğünü": ("cafeteria_time_snack", "15:00 - 15:30"),
+	"Akşam Yemeği": ("cafeteria_time_dinner", "18:30 - 19:30"),
+	"Gece Ara Öğünü": ("cafeteria_time_nightsnack", "21:00 - 21:30"),
 }
 
 
@@ -756,8 +764,12 @@ def parse_custom_meal_slots_config(app_cfg: dict[str, str] | None = None) -> dic
 	reverse_renames = {v: k for k, v in renames.items()}
 	diab_map: dict[str, str] = {
 		"Sabah Kahvaltısı": "Kahvaltı",
+		"Kuşluk Ara Öğünü": "İkindi / Ara Öğün",
+		"Brunch": "Kahvaltı",
 		"Öğle Yemeği": "Öğle Yemeği",
 		"İkindi Ara Öğünü": "İkindi / Ara Öğün",
+		"Akşam Yemeği": "Akşam Yemeği",
+		"Gece Ara Öğünü": "Sahur / Gece",
 		"İftar": "Akşam Yemeği",
 		"Sahur": "Sahur / Gece",
 	}
@@ -834,12 +846,20 @@ def parse_service_schedule_from_cfg(app_cfg: dict[str, str] | None = None) -> di
 
 	lunch_lbl = renames.get("Öğle Yemeği", "Öğle Yemeği")
 	bkf_lbl = renames.get("Sabah Kahvaltısı", "Sabah Kahvaltısı")
+	snk_lbl = renames.get("İkindi Ara Öğünü", "İkindi Ara Öğünü")
+	din_lbl = renames.get("Akşam Yemeği", "Akşam Yemeği")
 	if not raw_slots:
 		if meals_pd == 1:
 			raw_slots = [lunch_lbl] if lunch_lbl in valid_pool else valid_pool[:1]
 		elif meals_pd == 2:
 			cand2 = [x for x in (bkf_lbl, lunch_lbl) if x in valid_pool]
 			raw_slots = cand2 if len(cand2) == 2 else valid_pool[:2]
+		elif meals_pd == 3:
+			cand3 = [x for x in (bkf_lbl, lunch_lbl, snk_lbl) if x in valid_pool]
+			raw_slots = cand3 if len(cand3) == 3 else valid_pool[:3]
+		elif meals_pd == 4:
+			cand4 = [x for x in (bkf_lbl, lunch_lbl, snk_lbl, din_lbl) if x in valid_pool]
+			raw_slots = cand4 if len(cand4) == 4 else valid_pool[:4]
 		else:
 			raw_slots = valid_pool[:min(meals_pd, len(valid_pool))]
 
@@ -1767,8 +1787,12 @@ def get_month_workdays_info(
 
 _DIABETES_SLOT_MAP: dict[str, str] = {
 	"Sabah Kahvaltısı": "Kahvaltı",
+	"Kuşluk Ara Öğünü": "İkindi / Ara Öğün",
+	"Brunch": "Kahvaltı",
 	"Öğle Yemeği": "Öğle Yemeği",
 	"İkindi Ara Öğünü": "İkindi / Ara Öğün",
+	"Akşam Yemeği": "Akşam Yemeği",
+	"Gece Ara Öğünü": "Sahur / Gece",
 	"İftar": "Akşam Yemeği",
 	"Sahur": "Sahur / Gece",
 }
@@ -11099,7 +11123,7 @@ def _render_tab_diners_and_cash(ctx_api: dict[str, Any], sel_ym: str, app_cfg: d
 					"Ünvan / Meslek": ui.column_config.TextColumn("Ünvan / Meslek", disabled=True),
 					"Sınıf/Birim": ui.column_config.TextColumn("Sınıf/Birim", disabled=True),
 					"Planlı Gün": ui.column_config.NumberColumn("Katılım Günü", min_value=0, max_value=31, step=1),
-					"Günlük Öğün": ui.column_config.NumberColumn("Öğün", min_value=1, max_value=3, step=1),
+					"Günlük Öğün": ui.column_config.NumberColumn("Öğün", min_value=1, max_value=10, step=1),
 					"Öğün (₺)": ui.column_config.NumberColumn("Öğün (₺)", min_value=0.0, step=5.0),
 					"Devreden (₺)": ui.column_config.NumberColumn("Devreden (₺)", step=10.0),
 					"İndirim (₺)": ui.column_config.NumberColumn("İndirim (₺)", step=10.0),
@@ -11216,10 +11240,20 @@ def render_cafeteria_settings_panel(ctx_api: dict[str, Any], app_cfg: dict[str, 
 			bkf_disp = sched.get("slot_renames", {}).get("Sabah Kahvaltısı", "Sabah Kahvaltısı")
 			lun_disp = sched.get("slot_renames", {}).get("Öğle Yemeği", "Öğle Yemeği")
 			snk_disp = sched.get("slot_renames", {}).get("İkindi Ara Öğünü", "İkindi Ara Öğünü")
-			tm1, tm2, tm3 = ui.columns(3)
-			t_bkf_in = tm1.text_input(f"{bkf_disp} Saati", value=sched["meal_times"].get(bkf_disp, "08:00 - 08:45"), placeholder="08:00 - 08:45", key=f"{kp}_t_bkf")
-			t_lun_in = tm2.text_input(f"{lun_disp} Saati", value=sched["meal_times"].get(lun_disp, "12:00 - 13:00"), placeholder="12:00 - 13:00", key=f"{kp}_t_lun")
-			t_snk_in = tm3.text_input(f"{snk_disp} Saati", value=sched["meal_times"].get(snk_disp, "15:00 - 15:30"), placeholder="15:00 - 15:30", key=f"{kp}_t_snk")
+			din_disp = sched.get("slot_renames", {}).get("Akşam Yemeği", "Akşam Yemeği")
+			std_time_inputs: dict[str, tuple[str, str, str]] = {}
+			std_items = list(_MEAL_TIME_SETTING_KEYS.items())
+			tm_cols = ui.columns(3)
+			for idx_tm, (orig_sl_k, (cfg_tm_k, def_tm_v)) in enumerate(std_items):
+				disp_sl_k = sched.get("slot_renames", {}).get(orig_sl_k, orig_sl_k)
+				cur_tm_s = sched["meal_times"].get(disp_sl_k, def_tm_v)
+				inp_val = tm_cols[idx_tm % 3].text_input(
+					f"{disp_sl_k} Saati",
+					value=cur_tm_s,
+					placeholder=def_tm_v,
+					key=f"{kp}_tm_{cfg_tm_k}",
+				)
+				std_time_inputs[orig_sl_k] = (cfg_tm_k, def_tm_v, inp_val)
 
 			rm1, rm2 = ui.columns([1.5, 1.5], vertical_alignment="center")
 			ram_on_in = rm1.checkbox("🌙 Ramazan Modu Aktif (Menüye İl Bazlı İftar ve Sahur Saatlerini İşle)", value=sched["ramazan_mode"], key=f"{kp}_ram_on")
@@ -11297,27 +11331,35 @@ def render_cafeteria_settings_panel(ctx_api: dict[str, Any], app_cfg: dict[str, 
 					final_meals_pd = len(chosen_slots)
 				elif int(meals_pd_in) != sched["meals_per_day"] or not picked_slots:
 					final_meals_pd = max(1, min(10, int(meals_pd_in)))
-					chosen_slots = [lun_disp] if final_meals_pd == 1 else ([bkf_disp, lun_disp] if final_meals_pd == 2 else cfg_slot_pool[:final_meals_pd])
+					if final_meals_pd == 1:
+						chosen_slots = [lun_disp]
+					elif final_meals_pd == 2:
+						chosen_slots = [bkf_disp, lun_disp]
+					elif final_meals_pd == 3:
+						chosen_slots = [bkf_disp, lun_disp, snk_disp]
+					elif final_meals_pd == 4:
+						chosen_slots = [bkf_disp, lun_disp, snk_disp, din_disp]
+					else:
+						chosen_slots = cfg_slot_pool[:final_meals_pd]
 				else:
 					chosen_slots = picked_slots
 					final_meals_pd = len(chosen_slots)
 
 				prov_to_save = "" if ram_prov_in == auto_prov_lbl else ram_prov_in
 				extra_tm_upd = dict(parse_custom_meal_slots_config(app_cfg).get("extra_times") or {})
-				if bkf_disp != "Sabah Kahvaltısı":
-					extra_tm_upd[bkf_disp] = t_bkf_in.strip() or "08:00 - 08:45"
-				if lun_disp != "Öğle Yemeği":
-					extra_tm_upd[lun_disp] = t_lun_in.strip() or "12:00 - 13:00"
-				if snk_disp != "İkindi Ara Öğünü":
-					extra_tm_upd[snk_disp] = t_snk_in.strip() or "15:00 - 15:30"
+				tm_cfg_updates: dict[str, str] = {}
+				for orig_sl_k, (cfg_tm_k, def_tm_v, inp_val) in std_time_inputs.items():
+					clean_tm_v = str(inp_val or "").strip() or def_tm_v
+					tm_cfg_updates[cfg_tm_k] = clean_tm_v
+					disp_sl_k = sched.get("slot_renames", {}).get(orig_sl_k, orig_sl_k)
+					if disp_sl_k != orig_sl_k:
+						extra_tm_upd[disp_sl_k] = clean_tm_v
 				save_cfg_fn({
 					"cafeteria_service_days_per_week": str(final_days_pw),
 					"cafeteria_service_weekdays": ",".join(str(i) for i in chosen_wd_idxs),
 					"cafeteria_meals_per_day": str(final_meals_pd),
 					"cafeteria_active_meal_slots": ",".join(chosen_slots),
-					"cafeteria_time_breakfast": t_bkf_in.strip() or "08:00 - 08:45",
-					"cafeteria_time_lunch": t_lun_in.strip() or "12:00 - 13:00",
-					"cafeteria_time_snack": t_snk_in.strip() or "15:00 - 15:30",
+					**tm_cfg_updates,
 					"cafeteria_slot_times_json": json.dumps(extra_tm_upd, ensure_ascii=False),
 					"cafeteria_ramazan_mode": "1" if ram_on_in else "0",
 					"cafeteria_ramazan_province": prov_to_save,

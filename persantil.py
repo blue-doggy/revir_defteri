@@ -141,7 +141,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return (Path(meipass_raw) if meipass_raw else _BUNDLE_DIR) / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.49.1"
+_DEFAULT_APP_VERSION = "1.49.2"
 
 
 def _load_app_version() -> str:
@@ -320,8 +320,12 @@ DEFAULT_APP_SETTINGS: dict[str, str] = {
 	"cafeteria_meals_per_day": "1",
 	"cafeteria_active_meal_slots": "Öğle Yemeği",
 	"cafeteria_time_breakfast": "08:00 - 08:45",
+	"cafeteria_time_midmorning": "10:15 - 10:35",
+	"cafeteria_time_brunch": "10:30 - 11:30",
 	"cafeteria_time_lunch": "12:00 - 13:00",
 	"cafeteria_time_snack": "15:00 - 15:30",
+	"cafeteria_time_dinner": "18:30 - 19:30",
+	"cafeteria_time_nightsnack": "21:00 - 21:30",
 	"cafeteria_ramazan_mode": "0",
 	"cafeteria_ramazan_province": "",
 	"show_sidebar_media_player": "1",

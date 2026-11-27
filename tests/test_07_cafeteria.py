@@ -1024,11 +1024,16 @@ class TestCafeteriaModule(unittest.TestCase):
         self.assertEqual(sched["available_slots"], caf.ALL_MEAL_SLOTS)
         self.assertEqual(sched["active_meal_slots"], ["İftar", "Sahur"])
 
-        # Disabling Ramazan Modu hides İftar/Sahur cleanly
+        # Disabling Ramazan Modu hides İftar/Sahur cleanly and exposes standard meals including Brunch & Akşam Yemeği
         sched_off = caf.parse_service_schedule_from_cfg({**cfg_ram, "cafeteria_ramazan_mode": "0"})
         self.assertFalse(sched_off["ramazan_mode"])
         self.assertEqual(sched_off["available_slots"], caf.MEAL_SLOTS)
         self.assertNotIn("İftar", sched_off["active_meal_slots"])
+        for expected_slot in ("Sabah Kahvaltısı", "Kuşluk Ara Öğünü", "Brunch", "Öğle Yemeği", "İkindi Ara Öğünü", "Akşam Yemeği", "Gece Ara Öğünü"):
+            self.assertIn(expected_slot, sched_off["available_slots"])
+            self.assertTrue(bool(sched_off["meal_times"].get(expected_slot)))
+        self.assertEqual(sched_off["diabetes_slot_map"]["Akşam Yemeği"], "Akşam Yemeği")
+        self.assertEqual(sched_off["diabetes_slot_map"]["Brunch"], "Kahvaltı")
 
         # 4. Create dishes and plan İftar + Sahur on 2026-03-02
         d_iftar = caf.upsert_dish_with_ingredients(
