@@ -141,7 +141,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return (Path(meipass_raw) if meipass_raw else _BUNDLE_DIR) / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.47.2"
+_DEFAULT_APP_VERSION = "1.47.3"
 
 
 def _load_app_version() -> str:

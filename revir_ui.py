@@ -8659,9 +8659,21 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 				}
 				return;
 			}
+			if (mpState.mode === "radio" && Array.isArray(mpServerCfg.stations) && mpServerCfg.stations.length > 0) {
+				var failedSt = getActiveStation();
+				if (failedSt) {
+					mpServerCfg.stations = mpServerCfg.stations.filter(function(s) { return s.id !== failedSt.id; });
+					mpServerCfg.station_count = mpServerCfg.stations.length;
+					mpState.stationId = mpServerCfg.stations.length ? mpServerCfg.stations[0].id : "";
+					saveMpState();
+					renderDockState(true);
+					showToast("⚠️ Çalışmayan kanal listeden çıkarıldı: " + failedSt.name, "warn");
+					return;
+				}
+			}
 			renderDockState(false);
 			if (mpState.mode === "radio") {
-				showToast("⚠️ MEB ağı bu istasyonu engelledi veya sertifika onayı gerekiyor. TRT kanallarını, Ayarlar > MEB Tanılama'yı veya '🌊 Ortam' modunu deneyin.", "warn");
+				showToast("⚠️ Radyo akışına bağlanılamadı.", "warn");
 			} else {
 				showToast("⚠️ Ses dosyası oynatılamadı.", "warn");
 			}

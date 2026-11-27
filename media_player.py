@@ -88,7 +88,7 @@ _SSL_OPTIONS_LOCK = threading.RLock()
 _CUSTOM_MEB_CERT_PATH: str = ""
 _ALLOW_RELAXED_SSL: bool = False
 
-# Canlı doğrulanmış MEB-Güvenli Yerleşik İstasyon Havuzu (Tamamı standart HTTPS / 443 portu)
+# Canlı doğrulanmış MEB-Güvenli Yerleşik İstasyon Havuzu (Tamamı standart HTTPS / 443 portu ve aktif akış)
 BUILTIN_MEB_SAFE_STATIONS: list[dict[str, Any]] = [
 	{
 		"id": "trt_fm",
@@ -154,110 +154,12 @@ BUILTIN_MEB_SAFE_STATIONS: list[dict[str, Any]] = [
 		"is_hls": True,
 	},
 	{
-		"id": "ntv_radyo",
-		"name": "NTV Radyo",
-		"category": "Ulusal / Haber & Müzik",
-		"url": "https://dygedge2.radyotvonline.net/ntvradyo/playlist.m3u8",
-		"backup_urls": [],
-		"is_hls": True,
-	},
-	{
 		"id": "radyo_turkuvaz",
 		"name": "Radyo Turkuvaz",
 		"category": "Ulusal / Türkçe Müzik",
 		"url": "https://trkvz-radyolar.ercdn.net/radyoturkuvaz/playlist.m3u8",
 		"backup_urls": [],
 		"is_hls": True,
-	},
-	{
-		"id": "kral_fm",
-		"name": "Kral FM",
-		"category": "Ulusal / Müzik",
-		"url": "https://dygedge2.radyotvonline.net/kralfm/playlist.m3u8",
-		"backup_urls": [],
-		"is_hls": True,
-	},
-	{
-		"id": "kral_pop",
-		"name": "Kral Pop Radyo",
-		"category": "Ulusal / Türkçe Pop",
-		"url": "https://ssldyg.radyotvonline.com/smil/smil:kralpop.smil/playlist.m3u8",
-		"backup_urls": [],
-		"is_hls": True,
-	},
-	{
-		"id": "powerturk",
-		"name": "PowerTürk",
-		"category": "Ulusal / Türkçe Pop",
-		"url": "https://live.powerapp.com.tr/powerturk/abr/playlist.m3u8",
-		"backup_urls": [],
-		"is_hls": True,
-	},
-	{
-		"id": "alem_fm",
-		"name": "Alem FM",
-		"category": "Ulusal / Pop & Sohbet",
-		"url": "https://turkmedya.radyotvonline.net/alemfmaac",
-		"backup_urls": [],
-		"is_hls": False,
-	},
-	{
-		"id": "joy_fm",
-		"name": "Joy FM (Dinlendirici / Lounge)",
-		"category": "Ulusal / Lounge",
-		"url": "https://playerservices.streamtheworld.com/api/livestream-redirect/JOY_FM_SC",
-		"backup_urls": [
-			"https://playerservices.streamtheworld.com/api/livestream-redirect/JOY_FMAAC.aac",
-		],
-		"is_hls": False,
-	},
-	{
-		"id": "joyturk_akustik",
-		"name": "JoyTürk Akustik",
-		"category": "Ulusal / Akustik",
-		"url": "https://playerservices.streamtheworld.com/api/livestream-redirect/JOYTURK_AKUSTIK_SC",
-		"backup_urls": [
-			"https://playerservices.streamtheworld.com/api/livestream-redirect/JOYTURK_AKUSTIKAAC.aac",
-		],
-		"is_hls": False,
-	},
-	{
-		"id": "joyturk",
-		"name": "JoyTürk",
-		"category": "Ulusal / Türkçe Slow",
-		"url": "https://playerservices.streamtheworld.com/api/livestream-redirect/JOY_TURK_SC",
-		"backup_urls": [
-			"https://playerservices.streamtheworld.com/api/livestream-redirect/JOY_TURKAAC.aac",
-		],
-		"is_hls": False,
-	},
-	{
-		"id": "super_fm",
-		"name": "Süper FM",
-		"category": "Ulusal / Pop",
-		"url": "https://playerservices.streamtheworld.com/api/livestream-redirect/SUPER_FM_SC",
-		"backup_urls": [
-			"https://playerservices.streamtheworld.com/api/livestream-redirect/SUPER_FMAAC.aac",
-		],
-		"is_hls": False,
-	},
-	{
-		"id": "metro_fm",
-		"name": "Metro FM",
-		"category": "Ulusal / Yabancı Pop",
-		"url": "https://playerservices.streamtheworld.com/api/livestream-redirect/METRO_FM_SC",
-		"backup_urls": [
-			"https://playerservices.streamtheworld.com/api/livestream-redirect/METRO_FMAAC.aac",
-		],
-		"is_hls": False,
-	},
-	{
-		"id": "radyo_fenomen",
-		"name": "Radyo Fenomen",
-		"category": "Ulusal / Hit Müzik",
-		"url": "https://live.radyofenomen.com/fenomen/128/icecast.audio",
-		"backup_urls": [],
-		"is_hls": False,
 	},
 ]
 
@@ -498,9 +400,27 @@ def fetch_online_meb_safe_stations(timeout: float = 2.5) -> list[dict[str, Any]]
 			"backup_urls": [],
 			"is_hls": ".m3u8" in stream_url.lower(),
 		})
-		if len(results) >= 25:
+		if len(results) >= 20:
 			break
-	return results
+
+	if not results:
+		return []
+
+	# Yalnızca mevcut ağda gerçek ses/HLS akışı veren (503/404/MEB engeli olmayan) kanalları tut
+	verified: list[dict[str, Any]] = []
+	with ThreadPoolExecutor(max_workers=min(6, len(results))) as pool:
+		fut_to_idx = {pool.submit(diagnose_single_station, st, min(2.2, max(0.8, float(timeout)))): i for i, st in enumerate(results)}
+		ok_indices: list[int] = []
+		for fut in as_completed(fut_to_idx):
+			idx = fut_to_idx[fut]
+			try:
+				if fut.result().get("ok"):
+					ok_indices.append(idx)
+			except Exception:
+				pass
+	for idx in sorted(ok_indices):
+		verified.append(results[idx])
+	return verified
 
 
 def _wrap_stream_via_local_proxy(stream_url: str, proxy_base_url: str, force_hls: bool = False) -> str:
@@ -568,7 +488,7 @@ def diagnose_single_station(station: dict[str, Any], timeout: float = 3.5) -> di
 				headers={"User-Agent": "Mozilla/5.0 RevirDefteri/1.0", "Range": "bytes=0-2048", "Icy-MetaData": "0"},
 			)
 			with urllib.request.urlopen(req, timeout=max(1.0, float(timeout)), context=ctx) as resp:
-				final_u = str(resp.geturl() or cand)
+				final_u = str(getattr(resp, "geturl", lambda: cand)() or cand)
 				if not is_meb_safe_stream_url(final_u):
 					last_status = "meb_blocked"
 					last_detail = f"Güvensiz porta/HTTP'ye yönlendirildi ({final_u[:60]})"
@@ -606,7 +526,7 @@ def diagnose_single_station(station: dict[str, Any], timeout: float = 3.5) -> di
 						"status_code": "ok",
 						"status_label": "✅ Çalışıyor (Canlı Akış Hazır)",
 						"tested_url": cand,
-						"detail": f"HTTP {resp.status} · {ct or 'audio'}",
+						"detail": f"HTTP {getattr(resp, 'status', 200)} · {ct or 'audio'}",
 					}
 		except ssl.SSLError as ssl_exc:
 			last_status = "ssl_error"

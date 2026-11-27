@@ -62,7 +62,7 @@ class TestMediaPlayerModule(unittest.TestCase):
 		self.assertFalse(media_player.is_meb_safe_stream_url(""))
 
 		# Tüm yerleşik istasyonlar ve yedek URL'ler MEB güvenli olmalı
-		self.assertGreaterEqual(len(media_player.BUILTIN_MEB_SAFE_STATIONS), 15)
+		self.assertGreaterEqual(len(media_player.BUILTIN_MEB_SAFE_STATIONS), 7)
 		for st in media_player.BUILTIN_MEB_SAFE_STATIONS:
 			self.assertTrue(media_player.is_meb_safe_stream_url(st["url"]), f"Güvensiz yerleşik istasyon: {st}")
 			for b_url in st.get("backup_urls", []):
@@ -385,7 +385,7 @@ class TestMediaPlayerModule(unittest.TestCase):
 			mp_cfg = res_init.get("media_player")
 			self.assertIsInstance(mp_cfg, dict)
 			self.assertTrue(mp_cfg["visible"])
-			self.assertGreaterEqual(mp_cfg["station_count"], 15)
+			self.assertGreaterEqual(mp_cfg["station_count"], 7)
 			self.assertGreaterEqual(len(mp_cfg.get("ambient_presets") or []), 4)
 			self.assertTrue(any(s.get("hls_proxy_url") for s in mp_cfg["stations"] if s.get("is_hls")))
 			self.assertTrue(all(len(s.get("proxy_chain") or []) >= 1 for s in mp_cfg["stations"]))
