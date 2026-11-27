@@ -1495,7 +1495,10 @@ def chat_with_gemini_assistant(
 		"21) Yemekhane kayıtlarını SİLME (YALNIZCA kullanıcı açıkça 'sil / kaldır' dediğinde; tüm detaylar onay kartında gösterilir):\n"
 		"   {\"action\":\"cafeteria_delete_records\",\"dish_names\":[],\"plan_dates\":[{\"plan_date\":\"YYYY-MM-DD\",\"meal_slot\":\"\"}],\"purchase_ids\":[],\"diner_names\":[],\"cash_tx_ids\":[]}\n"
 		"22) Yemekhane aylık A4 menüsü (Word/HTML) veya tam Excel kitabı dışa aktarma:\n"
-		"   {\"action\":\"cafeteria_export\",\"year_month\":\"YYYY-MM\",\"format\":\"docx | xlsx\"}\n\n"
+		"   {\"action\":\"cafeteria_export\",\"year_month\":\"YYYY-MM\",\"format\":\"docx | xlsx\"}\n"
+		"23) Çoklu yetişkin/personel veya öğrenci için profil oluşturma + sağlık taraması (boy, kilo, tansiyon, kan şekeri, nabız, ateş, SpO2, görme, işitme, saç/hijyen, not) toplu kaydetme (tablo yapıştırıldığında veya .xlsx/.docx/.csv/.pdf/.jpg/.png tarama listesi eklendiğinde MUTLAKA bunu kullan; onay kartı zorunlu):\n"
+		"   {\"action\":\"record_bulk_screenings\",\"target_group\":\"adult | student | auto\",\"screening_date\":\"YYYY-MM-DD\",\"default_role\":\"Öğretmen / Personel\",\"default_class\":\"\",\"records\":[{\"full_name\":\"Müberra Görgü\",\"person_group\":\"adult\",\"role\":\"Personel\",\"class_name\":\"\",\"student_no\":\"\",\"sex\":\"\",\"birth_date\":\"\",\"height_cm\":168,\"weight_kg\":77.6,\"bp\":\"115-60\",\"glucose_mg_dl\":96,\"glucose_context\":\"Açlık\",\"pulse_bpm\":89,\"temperature_c\":null,\"spo2_pct\":null,\"vision_right\":\"\",\"hair_screening\":\"\",\"hearing_right\":\"\",\"notes\":\"\"}]}\n"
+		"   ÖNEMLİ: Hücrede `-` veya boşluk varsa `null` yaz; alt satıra kaymış tekil sayıları (ör. bir alt satıra düşen nabız değeri) üstteki kişinin satırına birleştir; listedeki tüm kişileri eksiksiz `records` dizisine ekle.\n\n"
 		"KRİTİK GÜVENLİK VE ONAY KURALI (VERİ YAZMA / SİLME):\n"
 		"- Veritabanına herhangi bir veri yazacak (sınıf/öğrenci/öğretmen/etkinlik/ölçüm ekleme veya güncelleme) ya da silecek bir komut aldığında:\n"
 		"  1) Yanıtının metin kısmında YAPACAĞIN İŞLEMİ adım adım açıkça TARİF ET (hangi sınıfların/kişilerin/kayıtların ekleneceğini, güncelleneceğini veya silineceğini madde madde yaz) ve 'Onaylıyor musunuz? Aşağıdaki onay kartından onaylayabilirsiniz.' diye kullanıcıdan onay iste.\n"
@@ -1594,7 +1597,8 @@ def chat_with_gemini_assistant(
 		model=model,
 		system_instruction=sys_inst,
 		inline_files=inline_files if inline_files else None,
-		timeout=26.0,
+		timeout=36.0,
+		max_output_tokens=8192,
 	)
 	if not ok:
 		return False, raw_reply, used_model, "", None, None
@@ -3025,8 +3029,11 @@ SADECE aşağıdaki JSON yapısını döndür (kullanılmayan sütunlar için bo
 			file_bytes, file_name, sensitive_names=None, strict_kvkk_pdf=strict_kvkk_pdf
 		)
 
-	prompt = f"""Aşağıdaki karmaşık okul sağlık taraması belgesinden veya liste görselinden öğrenci sınıf, ad soyad, cinsiyet, doğum tarihi, boy (cm) ve kilo (kg) satırlarını çıkar.
-ÖNEMLİ: Boy metre cinsindense cm'ye çevir (ör. 1.42 -> 142.0). Kilo gram cinsindense kg'ye çevir. Tarihleri YYYY-MM-DD yap. Cinsiyeti 'Erkek' veya 'Kız' olarak standartlaştır.
+	prompt = f"""Aşağıdaki sağlık taraması belgesinden, tablosundan veya liste görselinden (öğrenci VEYA yetişkin/personel listesi olabilir) tüm kişi ve tarama verilerini eksiksiz çıkar.
+KURALLAR:
+1. Tabloda Tansiyon (ör. 115-60, 120/80), Kan Şekeri / Şeker veya Görev/Branş sütunu varsa ve öğrenci sınıfı yoksa `target_group` değerini `"adult"` yap; öğrenci listesi ise `"student"` yap.
+2. Boy metre cinsindense cm'ye çevir (ör. 1.68 -> 168.0). Türkçe ondalık virgülleri noktaya çevir (ör. 77,6 -> 77.6).
+3. `-` veya boş bırakılmış hücreleri `null` olarak döndür, asla değer uydurma. Alt satıra kaymış tekil sayıları üstteki kişinin eksik sütununa birleştir.
 
 [DOSYA ADI]: {file_name or 'Belge'}
 {('[BELGE İÇERİĞİ]: ' + doc_txt) if doc_txt else ''}
@@ -3034,15 +3041,31 @@ SADECE aşağıdaki JSON yapısını döndür (kullanılmayan sütunlar için bo
 SADECE şu JSON şemasını döndür:
 {{
   "mode": "rows",
+  "target_group": "adult veya student",
   "explanation": "Okunan tarama listesinin kısa açıklaması",
   "rows": [
     {{
-      "class_name": "5-A",
-      "full_name": "Ali Demir",
-      "sex": "Erkek veya Kız veya null",
+      "person_group": "adult veya student",
+      "class_name": "5-A veya boş",
+      "student_no": "101 veya null",
+      "role": "Öğretmen / Personel veya boş",
+      "full_name": "Ad Soyad",
+      "sex": "E veya K veya null",
       "birth_date": "YYYY-MM-DD veya null",
-      "height_cm": 142.5,
-      "weight_kg": 36.4
+      "height_cm": 168.0,
+      "weight_kg": 77.6,
+      "bp": "115-60 veya null",
+      "glucose_mg_dl": 96.0,
+      "pulse_bpm": 89,
+      "temperature_c": null,
+      "spo2_pct": null,
+      "wears_glasses": null,
+      "vision_right": null,
+      "vision_left": null,
+      "hair_screening": null,
+      "hearing_right": null,
+      "hearing_left": null,
+      "notes": null
     }}
   ]
 }}"""
@@ -3052,8 +3075,9 @@ SADECE şu JSON şemasını döndür:
 		model=model,
 		inline_files=inline_files if inline_files else None,
 		expect_json=True,
-		temperature=0.1,
-		timeout=32.0,
+		temperature=0.05,
+		timeout=38.0,
+		max_output_tokens=8192,
 	)
 	if not ok:
 		return False, {"error": raw}, used_m

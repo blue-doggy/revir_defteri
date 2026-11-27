@@ -37,6 +37,7 @@ import school_calendar
 import medication_prospectus as mprosp
 import infirmary_supply as invsup
 import media_player as mplayer
+import screening_import as simport
 
 LOGGER = logging.getLogger(__name__)
 
@@ -141,7 +142,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return (Path(meipass_raw) if meipass_raw else _BUNDLE_DIR) / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.49.2"
+_DEFAULT_APP_VERSION = "1.50.0"
 
 
 def _load_app_version() -> str:
@@ -13874,13 +13875,29 @@ def _execute_gemini_chat_export(export_spec: dict[str, Any], active_pid: int | N
 						)
 						added_staff += 1
 
-			if added_students or added_staff:
+			# Eğer create_profiles içinde tarama/ölçüm/vital alanları da verilmişse onları da işle
+			embedded_scr_inputs: list[dict[str, Any]] = []
+			_scr_keys_chk = ("height_cm", "weight_kg", "boy", "kilo", "bp", "tansiyon", "bp_sys", "systolic_bp", "glucose_mg_dl", "seker", "pulse_bpm", "nabiz", "temperature_c", "spo2_pct", "vision_right")
+			for _s_chk in stu_list[:500]:
+				if isinstance(_s_chk, dict) and any(_s_chk.get(k) not in (None, "") for k in _scr_keys_chk):
+					embedded_scr_inputs.append({**_s_chk, "person_group": "student"})
+			for _stf_chk in staff_list[:200]:
+				if isinstance(_stf_chk, dict) and any(_stf_chk.get(k) not in (None, "") for k in _scr_keys_chk):
+					embedded_scr_inputs.append({**_stf_chk, "person_group": "adult"})
+			embedded_scr_cnt = 0
+			if embedded_scr_inputs:
+				norm_emb = simport.normalize_ai_extracted_records(embedded_scr_inputs)
+				res_emb = _commit_smart_screening_records(norm_emb, str(export_spec.get("screening_date") or date.today().isoformat()))
+				embedded_scr_cnt = int(res_emb.get("screened_count") or 0)
+			if added_students or added_staff or embedded_scr_cnt:
 				try:
 					sync_all_person_data_files()
 				except Exception:
 					pass
 			clear_all_data_caches()
 			parts: list[str] = []
+			if embedded_scr_cnt:
+				parts.append(f"**{embedded_scr_cnt} kişinin sağlık taraması & vital ölçümleri**")
 			if added_classes:
 				parts.append(f"**{len(added_classes)} sınıf** (`{', '.join(added_classes[:15])}`)")
 			if updated_teachers:
@@ -13892,6 +13909,34 @@ def _execute_gemini_chat_export(export_spec: dict[str, Any], active_pid: int | N
 			if parts:
 				return [], "\n\n✅ **Belgeden oluşturuldu / güncellendi:** " + ", ".join(parts)
 			return [], "\n\nℹ️ *Belirtilen sınıf ve profiller sistemde zaten mevcuttu.*"
+
+		if action == "record_bulk_screenings":
+			raw_recs = export_spec.get("records") if isinstance(export_spec.get("records"), list) else []
+			tgt_grp = str(export_spec.get("target_group") or "auto").strip().lower()
+			def_cls = str(export_spec.get("default_class") or "").strip()
+			def_rl = str(export_spec.get("default_role") or "Öğretmen / Personel").strip() or "Öğretmen / Personel"
+			scr_dt_s = str(export_spec.get("screening_date") or date.today().isoformat())[:10]
+			norm_recs = simport.normalize_ai_extracted_records(
+				raw_recs,
+				target_group=tgt_grp if tgt_grp in ("adult", "student") else "auto",
+				fallback_class=def_cls,
+				default_role=def_rl,
+			)
+			if not norm_recs:
+				return [], "\n\nℹ️ *Kaydedilecek geçerli tarama satırı bulunamadı.*"
+			res_bs = _commit_smart_screening_records(
+				norm_recs,
+				scr_dt_s,
+				default_class=def_cls or None,
+				default_role=def_rl,
+			)
+			clear_all_data_caches()
+			return [], (
+				f"\n\n✅ **Toplu Sağlık Taraması Kaydedildi ({scr_dt_s}):** "
+				f"**{res_bs['screened_count']}** kişinin tarama/ölçüm verisi işlendi "
+				f"(Yeni yetişkin profili: **{res_bs['added_adults']}**, Yeni öğrenci: **{res_bs['added_students']}**, "
+				f"Güncellenen mevcut profil: **{res_bs['updated_profiles']}**)."
+			)
 
 		if action == "add_calendar_events":
 			evs = export_spec.get("events") if isinstance(export_spec.get("events"), list) else []
@@ -14333,6 +14378,7 @@ def _summarize_write_spec_items(ws: dict[str, Any]) -> list[str]:
 _MUTATING_CHAT_EXPORT_ACTIONS = {
 	"create_classes",
 	"create_profiles",
+	"record_bulk_screenings",
 	"rename_classes",
 	"add_calendar_events",
 	"delete_records",
@@ -14465,6 +14511,35 @@ def _build_export_write_proposal(export_spec: dict[str, Any]) -> dict[str, Any]:
 		if stf_names:
 			items.append(f"👨‍🏫 Eklenecek öğretmen / personel profilleri ({len(stf_names)}): {', '.join(stf_names[:10])}{'...' if len(stf_names) > 10 else ''}")
 		items.append("🛡️ Mevcut şubeler ve kayıtlı öğrenciler silinmeden korunur.")
+	elif act == "record_bulk_screenings":
+		raw_recs = export_spec.get("records") if isinstance(export_spec.get("records"), list) else []
+		tgt_grp = str(export_spec.get("target_group") or "auto").strip().lower()
+		norm_recs = simport.normalize_ai_extracted_records(
+			raw_recs,
+			target_group=tgt_grp if tgt_grp in ("adult", "student") else "auto",
+			fallback_class=str(export_spec.get("default_class") or ""),
+			default_role=str(export_spec.get("default_role") or "Öğretmen / Personel"),
+		)
+		enriched_p = simport.preview_match_and_alerts(connect_db, norm_recs)
+		is_ad_p = sum(1 for r in enriched_p if r.get("person_group") == "adult") >= max(1, len(enriched_p) / 2.0)
+		title = f"{'Yetişkin / Personel' if is_ad_p else 'Öğrenci'} Profil & Sağlık Taraması Kaydı ({len(enriched_p)} Kişi — Onay Gerekli)"
+		confirm_label = f"✅ Onayla ve {len(enriched_p)} Kişinin Taramasını Kaydet"
+		new_cnt_p = sum(1 for r in enriched_p if not r.get("matched_id"))
+		mat_cnt_p = len(enriched_p) - new_cnt_p
+		items.append(f"📊 Toplam **{len(enriched_p)} kişi** · Yeni oluşturulacak profil: **{new_cnt_p}** · Mevcut eşleşen: **{mat_cnt_p}**")
+		for r_p in enriched_p[:15]:
+			bits_p = []
+			if r_p.get("height_cm"): bits_p.append(f"{r_p['height_cm']:g} cm")
+			if r_p.get("weight_kg"): bits_p.append(f"{r_p['weight_kg']:g} kg")
+			if r_p.get("bmi"): bits_p.append(f"VKİ {r_p['bmi']:.1f}")
+			if r_p.get("bp_sys") and r_p.get("bp_dia"): bits_p.append(f"TA {r_p['bp_sys']}/{r_p['bp_dia']}")
+			if r_p.get("glucose_mg_dl"): bits_p.append(f"KŞ {r_p['glucose_mg_dl']:g}")
+			if r_p.get("pulse_bpm"): bits_p.append(f"Nabız {r_p['pulse_bpm']}")
+			badge_p = "🆕" if not r_p.get("matched_id") else "🟢"
+			warn_p = f" · {r_p['clinical_alert']}" if r_p.get("clinical_alert") else ""
+			items.append(f"{badge_p} {r_p['full_name']}: {' · '.join(bits_p) or 'Profil kaydı'}{warn_p}")
+		if len(enriched_p) > 15:
+			items.append(f"...ve {len(enriched_p) - 15} kişi daha")
 	elif act == "add_calendar_events":
 		title = "Takvime Eklenecek Etkinlikler (Onay Gerekli)"
 		evs = [e for e in (export_spec.get("events") or []) if isinstance(e, dict) and str(e.get("title") or "").strip()]
@@ -14706,6 +14781,34 @@ def _handle_floating_gemini_chat(payload: dict[str, Any], chat_history: list[dic
 	except Exception:
 		pass
 
+	# Çoklu kişi listesi / tarama tablosu / dosya aktarımı komutlarında aktif öğrencinin adı
+	# listedeki yeni kişilerin isimlerini ('Esra' -> '[KVKK-İSİM]') bozmasın ve yerel deterministik ayrıştırıcıyla desteklensin.
+	msg_fold_chk = simport.tr_fold(raw_msg)
+	wants_bulk_save = any(w in msg_fold_chk for w in ("profil", "tarama", "kaydet", "isle", "ekle", "olustur", "aktar", "yukle"))
+	forced_tgt_grp = "adult" if any(w in msg_fold_chk for w in ("yetiskin", "personel", "ogretmen", "memur", "idareci")) else (
+		"student" if ("ogrenci" in msg_fold_chk and "ogretmen" not in msg_fold_chk) else "auto"
+	)
+	local_pre_recs: list[dict[str, Any]] = []
+	local_pre_grp = forced_tgt_grp
+	try:
+		if first_att_bytes and first_att_name.lower().endswith((".xlsx", ".xls", ".csv", ".tsv", ".docx", ".txt")):
+			local_pre_recs, local_pre_grp, _ = simport.parse_smart_screening_source(
+				file_bytes=first_att_bytes,
+				file_name=first_att_name,
+				target_group=forced_tgt_grp,
+				ocr_reader_fn=get_ocr_reader,
+				extract_docx_fn=_extract_docx_screening_tables_and_lines,
+			)
+		elif raw_msg.count("\n") >= 2:
+			# Mesajın başındaki/sonundaki serbest açıklama cümlelerini ayıklayıp tablo satırlarını yakala
+			local_pre_recs, local_pre_grp, _ = simport.parse_smart_screening_source(
+				raw_text=raw_msg,
+				target_group=forced_tgt_grp,
+			)
+	except Exception:
+		local_pre_recs = []
+
+	effective_sensitive = None if (len(local_pre_recs) >= 2 or wants_bulk_save) else sensitive_names
 	strict_pdf_mode = str(get_app_settings().get("gemini_strict_kvkk_pdf", "0")).strip() == "1"
 	ok, reply_txt, used_m, transcribed, export_spec, write_spec = gai.chat_with_gemini_assistant(
 		api_key=api_key,
@@ -14717,10 +14820,21 @@ def _handle_floating_gemini_chat(payload: dict[str, Any], chat_history: list[dic
 		voice_audio_mime=str(payload.get("voice_audio_mime") or "audio/wav"),
 		anon_person_context=anon_person_ctx,
 		school_context=school_ctx,
-		sensitive_names=sensitive_names,
+		sensitive_names=effective_sensitive,
 		available_classes=all_cls,
 		strict_kvkk_pdf=strict_pdf_mode,
 	)
+	# Yerel deterministik tablo ayrıştırıcı >=2 kişi yakaladıysa ve kullanıcı kayıt istediyse:
+	# Gemini komutu unuttuysa veya satırları eksik kesti ise %100 eksiksiz yerel ayrıştırma ile tamamla!
+	if ok and len(local_pre_recs) >= 2 and wants_bulk_save:
+		ai_rec_cnt = len((export_spec or {}).get("records") or []) if isinstance(export_spec, dict) else 0
+		if not isinstance(export_spec, dict) or export_spec.get("action") != "record_bulk_screenings" or ai_rec_cnt < len(local_pre_recs):
+			export_spec = {
+				"action": "record_bulk_screenings",
+				"target_group": local_pre_grp,
+				"screening_date": date.today().isoformat(),
+				"records": local_pre_recs,
+			}
 	if not ok:
 		return {"ok": False, "error": reply_txt}
 
@@ -25358,7 +25472,103 @@ def commit_screening_import(
 	return updated_cnt, screened_cnt, added_cnt
 
 
+def _commit_smart_screening_records(
+	records: list[dict[str, Any]],
+	screening_date_iso: str,
+	screened_by: str | None = None,
+	default_class: str | None = None,
+	default_role: str = "Öğretmen / Personel",
+) -> dict[str, int]:
+	app_cfg = get_app_settings()
+	def _after_commit() -> None:
+		try:
+			sync_all_person_data_files()
+		except Exception:
+			pass
+		sync_after_person_mutation(None)
+
+	return simport.commit_smart_screening_import(
+		connect_db,
+		_upsert_measurement_conn,
+		_upsert_vital_conn,
+		records,
+		screening_date=screening_date_iso,
+		screened_by=screened_by or app_cfg.get("nurse_name", "Okul Revir Sorumlusu"),
+		default_class=default_class,
+		default_role=default_role,
+		default_country=app_cfg.get("default_country") or "Türkiye",
+		default_province=app_cfg.get("default_province") or None,
+		default_district=app_cfg.get("default_district") or None,
+		on_after_commit_fn=_after_commit,
+	)
+
+
+def _run_ai_smart_screening_parse(
+	file_bytes: bytes | None,
+	file_name: str,
+	raw_text: str,
+	target_group: str = "auto",
+	fallback_class: str = "",
+	default_role: str = "Öğretmen / Personel",
+) -> tuple[bool, list[dict[str, Any]], str, str]:
+	is_on, api_key, model = _get_active_gemini_config()
+	if not is_on:
+		return False, [], "student", "Gemini Yapay Zekâ kapalı veya API anahtarı tanımlı değil."
+	strict_pdf = str(get_app_settings().get("gemini_strict_kvkk_pdf", "0")).strip() == "1"
+	prep_bytes = file_bytes
+	if file_bytes and file_name.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp")):
+		try:
+			prep_bytes, _ = simport.preprocess_image_for_ocr_and_vision(file_bytes)
+			file_name = Path(file_name).stem + ".png"
+		except Exception:
+			prep_bytes = file_bytes
+	# Word / Excel / CSV için metin çıkarımı hazırla
+	extracted_txt = raw_text or ""
+	if not extracted_txt and prep_bytes and file_name.lower().endswith((".xlsx", ".xls", ".csv", ".tsv", ".docx", ".txt")):
+		_, blk_txt = gai._extract_attachment_context(file_name, "", prep_bytes, sensitive_names=None, strict_kvkk_pdf=strict_pdf)
+		extracted_txt = blk_txt
+		prep_bytes = None
+	ok_r, spec_r, used_r = gai.map_screening_table_with_gemini(
+		api_key=api_key,
+		model=model,
+		raw_text=extracted_txt,
+		file_bytes=prep_bytes,
+		file_name=file_name,
+		strict_kvkk_pdf=strict_pdf,
+	)
+	if not ok_r:
+		return False, [], "student", str((spec_r or {}).get("error") or "AI çözümleme başarısız.")
+	ai_grp = str(spec_r.get("target_group") or "").strip().lower()
+	eff_grp = target_group if target_group in ("adult", "student") else (ai_grp if ai_grp in ("adult", "student") else "auto")
+	norm_rows = simport.normalize_ai_extracted_records(
+		spec_r.get("rows") or [],
+		target_group=eff_grp,
+		fallback_class=fallback_class,
+		default_role=default_role,
+	)
+	resolved_g = "adult" if (norm_rows and sum(1 for r in norm_rows if r["person_group"] == "adult") >= len(norm_rows) / 2.0) else "student"
+	return bool(norm_rows), norm_rows, resolved_g, str(spec_r.get("explanation") or f"{used_r} ile {len(norm_rows)} satır okundu.")
+
+
 def render_screening_import_section(target_class: str | None = None) -> None:
+	simport.render_smart_template_and_ai_import_tab(
+		connect_db_fn=connect_db,
+		get_app_settings_fn=get_app_settings,
+		get_gemini_cfg_fn=_get_active_gemini_config,
+		ocr_reader_fn=get_ocr_reader,
+		extract_docx_fn=_extract_docx_screening_tables_and_lines,
+		ai_parse_fn=_run_ai_smart_screening_parse,
+		commit_fn=lambda recs, dt_s, nrs_s, def_c, def_r: _commit_smart_screening_records(
+			recs, dt_s, screened_by=nrs_s, default_class=def_c, default_role=def_r
+		),
+		merge_editor_fn=_merge_data_editor_state_into_df,
+		target_class=target_class,
+		key_prefix="scr_imp",
+	)
+	return
+
+
+def _legacy_render_screening_import_section(target_class: str | None = None) -> None:
 	ui.markdown("### 📥 Toplu Tarama Verisi İçe Aktar (Excel / Word / CSV / Resim-OCR)")
 	ui.caption("Öğrencilerin sınıf, boy, kilo, cinsiyet ve doğum tarihi tarama verilerini Excel (.xlsx, .xls), Word (.docx), CSV (.csv) veya liste fotoğrafları (.png, .jpg) üzerinden topluca sisteme aktarın.")
 
@@ -26655,10 +26865,11 @@ def render_school_screening() -> None:
 
 	# VIEW 1: Sınıf Kutucukları Listesi (Grid of Class Boxes)
 	if not selected_class or selected_class not in all_classes:
-		tab_cls_cards, tab_bulk_top, tab_adult_scr = ui.tabs([
+		tab_cls_cards, tab_bulk_top, tab_adult_scr, tab_tpl_imp = ui.tabs([
 			"🗂️ Sınıf Kartları & Tekil Tarama",
 			"⚡ Seri Sınıf Taraması (Toplu Tablo Girişi)",
 			"🧑 Yetişkin Taraması",
+			"📥 Şablondan / Dosyadan Yükle",
 		])
 		with tab_cls_cards:
 			vis_names = [SCREENING_FIELDS_INFO[f]["name"] for f in visible_fields if f in SCREENING_FIELDS_INFO]
@@ -26713,14 +26924,14 @@ def render_school_screening() -> None:
 							ui.session_state["selected_screening_class"] = c_name
 							ui.rerun()
 
-			ui.markdown("---")
-			render_screening_import_section()
-
 		with tab_bulk_top:
 			render_bulk_class_screening_tab(default_class=None, key_ctx="top")
 
 		with tab_adult_scr:
 			render_adult_screening_tab()
+
+		with tab_tpl_imp:
+			render_screening_import_section()
 
 	# VIEW 2: Seçili Sınıfın Tarama Paneli ve Öğrenci Listesi
 	else:
