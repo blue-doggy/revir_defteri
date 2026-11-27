@@ -1808,16 +1808,17 @@ def estimate_extra_foods_carbs_with_gemini(
 		return False, {"error": "Yiyecek açıklaması yazın veya yemek fotoğrafı yükleyin."}, ""
 
 	age_hint = f"Öğrenci yaşı: yaklaşık {student_age_years:.1f} yaş." if student_age_years else ""
-	prompt = f"""Bir pediatrik diyabet diyetisyeni olarak aşağıdaki ekstra yiyecek / atıştırmalık açıklamasını ve/veya ekli yemek fotoğrafını analiz et, her yiyeceğin karbonhidrat miktarını (gram) hesapla.
+	prompt = f"""Bir pediatrik diyabet diyetisyeni olarak aşağıdaki ekstra yiyecek / atıştırmalık açıklamasını ve/veya ekli yemek fotoğrafını analiz et; her yiyeceğin tahmini porsiyonunu, karbonhidrat miktarını (gram), yaklaşık kalorisini (kcal) ve glisemik indeks (Gİ) etkisini hesapla.
 {age_hint}
 [YİYECEK AÇIKLAMASI]: {desc or 'Ekli fotoğraftaki yiyecekleri ve porsiyonlarını tahmin et.'}
 
 Yalnızca şu JSON şemasıyla Türkçe yanıt ver:
 {{
   "items": [
-    {{"name": "Yiyecek adı", "portion": "Tahmini porsiyon", "carbs_g": 15.0, "gi": "Düşük | Orta | Yüksek"}}
+    {{"name": "Yiyecek adı", "portion": "Tahmini porsiyon (örn: 1 paket 40g / 1 orta boy)", "carbs_g": 15.0, "kcal": 120.0, "gi": "Düşük | Orta | Yüksek"}}
   ],
   "total_carbs_g": 15.0,
+  "total_kcal": 120.0,
   "glycemic_note": "Glisemik hız, yağ/protein gecikmeli yükseliş riski veya porsiyon uyarısı (1-2 cümle)"
 }}"""
 
@@ -1845,16 +1846,23 @@ Yalnızca şu JSON şemasıyla Türkçe yanıt ver:
 			cg = max(0.0, round(float(str(it.get("carbs_g") or 0).replace(",", ".")), 1))
 		except Exception:
 			cg = 0.0
+		try:
+			kc = max(0.0, round(float(str(it.get("kcal") or 0).replace(",", ".")), 0))
+		except Exception:
+			kc = 0.0
 		clean_items.append({
 			"name": nm,
 			"portion": str(it.get("portion") or "1 porsiyon").strip(),
 			"carbs_g": cg,
+			"kcal": kc,
 			"gi": str(it.get("gi") or "Orta").strip(),
 		})
 	tot = round(sum(x["carbs_g"] for x in clean_items), 1)
+	tot_kcal = round(sum(x["kcal"] for x in clean_items), 0)
 	return True, {
 		"items": clean_items,
 		"total_carbs_g": tot,
+		"total_kcal": tot_kcal,
 		"glycemic_note": str(parsed.get("glycemic_note") or "").strip(),
 	}, used_m
 

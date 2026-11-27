@@ -1169,15 +1169,100 @@ def _render_tab_bolus_calculator(
 							ui.session_state[extras_key].append({"name": qf["name"], "carbs_g": qf["carbs_g"], "gi": qf["gi"]})
 							ui.rerun()
 
-				ex_c1, ex_c2, ex_c3 = ui.columns([2.0, 1.0, 0.9])
-				ex_name = ex_c1.text_input("Ekstra Yiyecek Adı", placeholder="Örn: 1 kase yoğurt / ev yapımı kek", key=f"ins_ex_nm_{student_id}")
-				ex_cg = ex_c2.number_input("Karb (g)", min_value=0.0, max_value=200.0, step=1.0, value=15.0, key=f"ins_ex_cg_{student_id}")
-				with ex_c3:
-					ui.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
-					if ui.button("➕ Ekle", key=f"ins_ex_add_{student_id}", use_container_width=True):
+				ai_info_key = f"ins_ex_ai_info_{student_id}"
+				ex_c1, ex_c2, ex_c3, ex_c4 = ui.columns([2.0, 1.05, 0.85, 0.8], vertical_alignment="bottom")
+				ex_name = ex_c1.text_input("Ekstra Yiyecek / Atıştırmalık Adı", placeholder="Örn: 1 paket çubuk kraker / ev yapımı kek", key=f"ins_ex_nm_{student_id}")
+				with ex_c2:
+					if ui.button(
+						"✨ AI ile Bilgi Al",
+						key=f"ins_ex_ai_lookup_{student_id}",
+						type="secondary",
+						use_container_width=True,
+						help="Yazdığınız yemek veya atıştırmalık için karbonhidrat (g), kalori, porsiyon ve glisemik indeks bilgisini AI ile getirir.",
+					):
+						q_food = str(ex_name or "").strip()
+						if not q_food:
+							ui.warning("Lütfen önce yemek veya atıştırmalık adını yazın.")
+						elif not is_gai_on:
+							ui.warning("Gemini AI kapalı veya API anahtarı tanımlı değil (Ayarlar > Yapay Zekâ & KVKK).")
+						else:
+							with ui.spinner("Gemini AI besin değerlerini ve karbonhidrat miktarını hesaplıyor..."):
+								ok_lk, lk_res, used_lk = gai.estimate_extra_foods_carbs_with_gemini(
+									api_key=gai_key,
+									model=gai_model,
+									food_description=q_food,
+									student_age_years=growth.get("yas_yil"),
+								)
+							if ok_lk and lk_res.get("items"):
+								tot_c_lk = float(lk_res.get("total_carbs_g") or 0.0)
+								ui.session_state[f"ins_ex_cg_{student_id}"] = tot_c_lk
+								ui.session_state[ai_info_key] = {
+									"query": q_food,
+									"model": used_lk,
+									"items": lk_res["items"],
+									"total_carbs_g": tot_c_lk,
+									"total_kcal": float(lk_res.get("total_kcal") or 0.0),
+									"glycemic_note": str(lk_res.get("glycemic_note") or "").strip(),
+								}
+								ui.rerun()
+							else:
+								ui.error(f"AI bilgi alma hatası: {(lk_res or {}).get('error', 'Yanıt ayrıştırılamadı')}")
+
+				ex_cg = ex_c3.number_input("Karb (g)", min_value=0.0, max_value=250.0, step=1.0, value=15.0, key=f"ins_ex_cg_{student_id}")
+				with ex_c4:
+					if ui.button("➕ Ekle", key=f"ins_ex_add_{student_id}", type="primary", use_container_width=True):
 						if ex_name.strip():
-							ui.session_state[extras_key].append({"name": ex_name.strip(), "carbs_g": float(ex_cg), "gi": "Orta"})
+							cached_lk = ui.session_state.get(ai_info_key)
+							matched_lk = (
+								isinstance(cached_lk, dict)
+								and str(cached_lk.get("query") or "").strip().lower() == ex_name.strip().lower()
+								and bool(cached_lk.get("items"))
+							)
+							if matched_lk and len(cached_lk["items"]) > 1 and abs(float(ex_cg) - float(cached_lk.get("total_carbs_g") or 0.0)) < 0.2:
+								for lk_it in cached_lk["items"]:
+									p_txt = f" ({lk_it.get('portion')})" if lk_it.get("portion") else ""
+									ui.session_state[extras_key].append({
+										"name": f"{lk_it['name']}{p_txt}",
+										"carbs_g": float(lk_it.get("carbs_g") or 0.0),
+										"kcal": float(lk_it.get("kcal") or 0.0),
+										"gi": lk_it.get("gi") or "Orta",
+									})
+							else:
+								gi_pick = "Orta"
+								kcal_pick = 0.0
+								disp_nm_add = ex_name.strip()
+								if matched_lk and cached_lk["items"]:
+									it0 = cached_lk["items"][0]
+									gi_pick = str(it0.get("gi") or "Orta")
+									kcal_pick = float(it0.get("kcal") or 0.0)
+									if it0.get("portion") and it0["portion"] not in disp_nm_add:
+										disp_nm_add = f"{disp_nm_add} ({it0['portion']})"
+								ui.session_state[extras_key].append({
+									"name": disp_nm_add,
+									"carbs_g": float(ex_cg),
+									"kcal": kcal_pick,
+									"gi": gi_pick,
+								})
+							ui.session_state.pop(ai_info_key, None)
+							ui.session_state[f"ins_ex_nm_{student_id}"] = ""
 							ui.rerun()
+
+				cur_ai_info = ui.session_state.get(ai_info_key)
+				if isinstance(cur_ai_info, dict) and cur_ai_info.get("items"):
+					it_summaries = []
+					for _it in cur_ai_info["items"]:
+						_kc_s = f", ~{int(_it['kcal'])} kcal" if float(_it.get("kcal") or 0) > 0 else ""
+						it_summaries.append(
+							f"**{html.escape(str(_it['name']))}** ({html.escape(str(_it.get('portion') or '1 porsiyon'))}: "
+							f"`{float(_it.get('carbs_g') or 0):.1f}g karb`{_kc_s}, Gİ: *{_it.get('gi', 'Orta')}*)"
+						)
+					tot_kc_txt = f" · Yaklaşık **{int(cur_ai_info['total_kcal'])} kcal**" if float(cur_ai_info.get("total_kcal") or 0) > 0 else ""
+					gn_txt = f"\n\n💡 *{cur_ai_info['glycemic_note']}*" if cur_ai_info.get("glycemic_note") else ""
+					ui.info(
+						f"🤖 **AI Besin & Karbonhidrat Bilgisi** *(Karb kutusuna `{cur_ai_info['total_carbs_g']:.1f} g` aktarıldı{tot_kc_txt}; doğrudan **➕ Ekle** butonuna basabilirsiniz)*:\n"
+						+ " · ".join(it_summaries)
+						+ gn_txt
+					)
 
 				if is_gai_on:
 					with ui.expander("✨ Gemini AI ile Yiyecek Metni veya Tabak Fotoğrafından Karbonhidrat Hesapla", expanded=False):

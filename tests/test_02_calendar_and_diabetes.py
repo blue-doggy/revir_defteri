@@ -481,6 +481,30 @@ class TestInsulinDiabetes(unittest.TestCase):
         out = revir_ui.run_action_headless(persantil.render_insulin_diabetes, {"action": "render"})
         self.assertIn("main_html", out)
         self.assertNotIn("Çalışma Zamanı Hatası", out["main_html"])
+        self.assertIn("✨ AI ile Bilgi Al", out["main_html"])
+
+        # Yazılan atıştırmalık için "✨ AI ile Bilgi Al" tıklanınca Karb (g), kcal ve Gİ bilgisi gelmeli ve "➕ Ekle" ile listeye eklenmeli
+        persantil.save_app_settings({"gemini_enabled": "1", "gemini_api_key": "test-fake-key"})
+        revir_ui.session_state["ins_ex_nm_1"] = "1 paket çubuk kraker ve kutu ayran"
+        fake_food_ai = {
+            "items": [
+                {"name": "Çubuk Kraker", "portion": "1 paket (40g)", "carbs_g": 28.0, "kcal": 165.0, "gi": "Yüksek"},
+                {"name": "Ayran", "portion": "1 kutu (170ml)", "carbs_g": 4.5, "kcal": 65.0, "gi": "Düşük"},
+            ],
+            "total_carbs_g": 32.5,
+            "total_kcal": 230.0,
+            "glycemic_note": "Ayran krakerin glisemik yükseliş hızını dengeler.",
+        }
+        with mock.patch("gemini_assistant.estimate_extra_foods_carbs_with_gemini", return_value=(True, fake_food_ai, "gemini-3-flash-preview")):
+            out_lk = revir_ui.run_action_headless(persantil.render_insulin_diabetes, {"action": "click", "key": "ins_ex_ai_lookup_1"})
+        self.assertIn("AI Besin &amp; Karbonhidrat Bilgisi", out_lk["main_html"])
+        self.assertAlmostEqual(float(revir_ui.session_state.get("ins_ex_cg_1") or 0.0), 32.5, places=1)
+
+        out_add = revir_ui.run_action_headless(persantil.render_insulin_diabetes, {"action": "click", "key": "ins_ex_add_1"})
+        extras = revir_ui.session_state.get("ins_extras_list_1") or []
+        self.assertEqual(len(extras), 2)
+        self.assertAlmostEqual(sum(x["carbs_g"] for x in extras), 32.5, places=1)
+        self.assertIn("Çubuk Kraker", out_add["main_html"])
 
 
 if __name__ == "__main__":
