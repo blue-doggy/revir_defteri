@@ -61,8 +61,12 @@ class TestMediaPlayerModule(unittest.TestCase):
 		self.assertFalse(media_player.is_meb_safe_stream_url("https://localhost/stream.mp3"))
 		self.assertFalse(media_player.is_meb_safe_stream_url(""))
 
-		# Tüm yerleşik istasyonlar ve yedek URL'ler MEB güvenli olmalı
-		self.assertGreaterEqual(len(media_player.BUILTIN_MEB_SAFE_STATIONS), 7)
+		# Tüm yerleşik istasyonlar ve yedek URL'ler MEB güvenli olmalı (TRT + Kamu + Lo-Fi / Ambiyans)
+		self.assertGreaterEqual(len(media_player.BUILTIN_MEB_SAFE_STATIONS), 10)
+		builtin_ids = {s["id"] for s in media_player.BUILTIN_MEB_SAFE_STATIONS}
+		self.assertIn("lofi_code_radio", builtin_ids)
+		self.assertIn("lofi_box_radio", builtin_ids)
+		self.assertIn("ambient_sleeping_pill", builtin_ids)
 		for st in media_player.BUILTIN_MEB_SAFE_STATIONS:
 			self.assertTrue(media_player.is_meb_safe_stream_url(st["url"]), f"Güvensiz yerleşik istasyon: {st}")
 			for b_url in st.get("backup_urls", []):

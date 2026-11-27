@@ -161,6 +161,39 @@ BUILTIN_MEB_SAFE_STATIONS: list[dict[str, Any]] = [
 		"backup_urls": [],
 		"is_hls": True,
 	},
+	{
+		"id": "lofi_code_radio",
+		"name": "Code Radio (Lo-Fi & Odaklanma)",
+		"category": "Lo-Fi / Odaklanma",
+		"url": "https://coderadio-admin-v2.freecodecamp.org/listen/coderadio/radio.mp3",
+		"backup_urls": [
+			"https://coderadio-admin-v2.freecodecamp.org/listen/coderadio/low.mp3",
+		],
+		"is_hls": False,
+	},
+	{
+		"id": "lofi_box_radio",
+		"name": "Box Radio (Lo-Fi Chill Beats)",
+		"category": "Lo-Fi / Chillhop",
+		"url": "https://play.streamafrica.net/lofiradio",
+		"backup_urls": [
+			"https://radio.plaza.one/mp3",
+			"https://radio.plaza.one/mp3_low",
+		],
+		"is_hls": False,
+	},
+	{
+		"id": "ambient_sleeping_pill",
+		"name": "Ambient Sleeping Pill (Saf Ambiyans)",
+		"category": "Ambiyans / Dinlenme",
+		"url": "https://radio.stereoscenic.com/asp-h",
+		"backup_urls": [
+			"https://radio.stereoscenic.com/asp-s",
+			"https://radio.stereoscenic.com/ama-h",
+			"https://radio.stereoscenic.com/ama-s",
+		],
+		"is_hls": False,
+	},
 ]
 
 # MEB ağında tüm canlı akışlar engellense dahi %100 çevrimdışı çalışan revir ortam sesleri
