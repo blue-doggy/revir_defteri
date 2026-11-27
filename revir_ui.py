@@ -956,6 +956,7 @@ class _AppSession:
 		self.active_tabs: dict[str, int] = {}
 		self.open_expanders: dict[str, bool] = {}
 		self.sidebar_collapsed: bool = False
+		self.collapsed_nav_groups: set[str] = set()
 		self.dialog_stack: list[_ActiveDialog] = []
 		self.uploaded_files: dict[str, list[UploadedFile]] = {}
 		self.downloads: OrderedDict[str, tuple[Any, str, str]] = OrderedDict()
@@ -1533,8 +1534,21 @@ class _UIContainer:
 
 		chunks: list[str] = [f'<nav class="revir-nav-grouped" aria-label="Ana gezinme" data-key="{esc_wid}" data-kind="radio" data-value="{sel_idx}">']
 		running_idx = 0
-		for g_title, items in groups:
-			chunks.append(f'<div class="revir-nav-sec-hdr">{html_lib.escape(str(g_title))}</div>')
+		for g_idx, (g_title, items) in enumerate(groups):
+			g_key = str(g_title or f"grp_{g_idx}")
+			esc_gkey = html_lib.escape(g_key, quote=True)
+			is_grp_col = g_key in ctx.session.collapsed_nav_groups
+			col_cls = " collapsed" if is_grp_col else ""
+			aria_exp = "false" if is_grp_col else "true"
+			chunks.append(
+				f'<div class="revir-nav-sec-group{col_cls}" data-nav-group="{esc_gkey}">'
+				f'<button type="button" class="revir-nav-sec-hdr" aria-expanded="{aria_exp}" '
+				f'onclick="window.__revirToggleNavGroup(this, event)">'
+				f'<span class="revir-nav-sec-title">{html_lib.escape(str(g_title))}</span>'
+				f'<span class="revir-nav-sec-caret" aria-hidden="true">▾</span>'
+				f'</button>'
+				f'<div class="revir-nav-sec-items">'
+			)
 			for it in items:
 				val = str(it["value"])
 				ico = str(it.get("icon") or "•")
@@ -1556,6 +1570,7 @@ class _UIContainer:
 					f'{badge_html}</button>'
 				)
 				running_idx += 1
+			chunks.append("</div></div>")
 		chunks.append("</nav>")
 		ctx.emit("".join(chunks))
 		return str(cur)
@@ -3497,12 +3512,25 @@ html, body {
 .revir-w-full { width: 100%; }
 
 /* Yan Menü Navigasyonu (Gruplu & İkon Rayı Destekli) */
-.revir-nav-group, .revir-nav-grouped { display: flex; flex-direction: column; gap: 2px; margin: 6px 0; }
+.revir-nav-group, .revir-nav-grouped { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; }
+.revir-nav-sec-group { display: flex; flex-direction: column; gap: 2px; }
+.revir-nav-sec-items { display: flex; flex-direction: column; gap: 2px; }
+.revir-sidebar:not(.collapsed) .revir-nav-sec-group.collapsed .revir-nav-sec-items { display: none; }
 .revir-nav-sec-hdr {
+	width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 6px;
+	background: transparent; border: none; border-radius: 7px; cursor: pointer; font-family: inherit;
 	font-size: 10.5px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase;
-	color: var(--text-muted); padding: 10px 10px 4px 10px; user-select: none;
+	color: var(--text-muted); padding: 7px 10px 5px 10px; margin-top: 2px;
+	user-select: none; text-align: left; transition: background 0.14s ease, color 0.14s ease;
 }
-.revir-nav-sec-hdr:first-child { padding-top: 2px; }
+.revir-nav-sec-group:first-child .revir-nav-sec-hdr { margin-top: 0; padding-top: 4px; }
+.revir-nav-sec-hdr:hover { background: rgba(13,148,136,0.08); color: var(--teal); }
+.revir-nav-sec-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.revir-nav-sec-caret {
+	font-size: 11px; line-height: 1; transition: transform 0.16s ease;
+	display: inline-block; opacity: 0.82; flex-shrink: 0;
+}
+.revir-nav-sec-group.collapsed .revir-nav-sec-caret { transform: rotate(-90deg); }
 .revir-nav-item {
 	width: 100%; text-align: left; padding: 8px 10px; border-radius: 9px;
 	border: 1px solid transparent; background: transparent; color: var(--text-main);
@@ -5268,6 +5296,9 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 				sb.removeChild(existingMpDock);
 			}
 			sb.innerHTML = data.sidebar_html || "";
+			if (window.__revirSyncNavGroups) {
+				window.__revirSyncNavGroups(sb);
+			}
 			if (window.__revirMountAndSyncMediaPlayer) {
 				window.__revirMountAndSyncMediaPlayer(sb, data.media_player);
 			}
@@ -6138,6 +6169,55 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 			headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
 			body: JSON.stringify({ kind: "sidebar", value: !!collapsed })
 		}).catch(function(){});
+	};
+
+	function _readNavCollapsedMap() {
+		try {
+			var raw = localStorage.getItem("revir_nav_collapsed_v1");
+			if (!raw) return {};
+			var parsed = JSON.parse(raw);
+			return (parsed && typeof parsed === "object") ? parsed : {};
+		} catch (e) {
+			return {};
+		}
+	}
+
+	window.__revirSyncNavGroups = function(rootEl) {
+		if (!rootEl) return;
+		var map = _readNavCollapsedMap();
+		rootEl.querySelectorAll(".revir-nav-sec-group[data-nav-group]").forEach(function(grp) {
+			var gKey = grp.getAttribute("data-nav-group") || "";
+			if (!gKey || !Object.prototype.hasOwnProperty.call(map, gKey)) return;
+			var isCol = !!map[gKey];
+			grp.classList.toggle("collapsed", isCol);
+			var hdr = grp.querySelector(".revir-nav-sec-hdr");
+			if (hdr) hdr.setAttribute("aria-expanded", isCol ? "false" : "true");
+		});
+	};
+
+	window.__revirToggleNavGroup = function(btn, ev) {
+		if (ev) {
+			ev.preventDefault();
+			ev.stopPropagation();
+		}
+		var grp = btn && btn.closest ? btn.closest(".revir-nav-sec-group") : null;
+		if (!grp) return;
+		var gKey = grp.getAttribute("data-nav-group") || "";
+		var nextCol = !grp.classList.contains("collapsed");
+		grp.classList.toggle("collapsed", nextCol);
+		btn.setAttribute("aria-expanded", nextCol ? "false" : "true");
+		if (gKey) {
+			try {
+				var map = _readNavCollapsedMap();
+				map[gKey] = nextCol;
+				localStorage.setItem("revir_nav_collapsed_v1", JSON.stringify(map));
+			} catch (e) {}
+			fetch("/api/ui_state", {
+				method: "POST",
+				headers: { "Content-Type": "application/json", "X-Revir-Token": CSRF },
+				body: JSON.stringify({ kind: "nav_group", id: gKey, collapsed: nextCol })
+			}).catch(function(){});
+		}
 	};
 
 	// Global Komut & Kişi Arama Paleti (Cmd/Ctrl+K)
@@ -9321,6 +9401,13 @@ class LocalUIServer:
 								server_ref.session.open_expanders[str(payload.get("id"))] = bool(payload.get("value", False))
 							elif kind == "sidebar":
 								server_ref.session.sidebar_collapsed = bool(payload.get("value", False))
+							elif kind == "nav_group":
+								gid = str(payload.get("id") or "")
+								if gid:
+									if bool(payload.get("collapsed", False)):
+										server_ref.session.collapsed_nav_groups.add(gid)
+									else:
+										server_ref.session.collapsed_nav_groups.discard(gid)
 						self._send_bytes(HTTPStatus.OK, "application/json", b'{"ok":true}')
 					except Exception:
 						self._send_bytes(HTTPStatus.BAD_REQUEST, "application/json", b'{"ok":false}')

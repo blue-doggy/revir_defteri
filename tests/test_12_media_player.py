@@ -455,6 +455,30 @@ class TestMediaPlayerModule(unittest.TestCase):
 				frm.Dispose()
 		stop_ev.set()
 
+	def test_sidebar_collapsible_groups_and_no_active_person_box(self) -> None:
+		revir_ui.reset_session()
+		with isolated_real_db() as (_tmp_p, _db_p, connect_fn):
+			with connect_fn() as conn:
+				conn.execute("INSERT INTO classes(id, name) VALUES (1, '5-A')")
+				conn.execute(
+					"INSERT INTO students(id, full_name, sex, birth_date, class_id, student_no, person_type) "
+					"VALUES (101, 'Zeynep Kaya', 'K', '2015-04-12', 1, '42', 'student')"
+				)
+				conn.commit()
+			persantil.set_active_person(101)
+			res = revir_ui.run_action_headless(persantil.main, {"action": "init"})
+			sb_html = res.get("sidebar_html") or ""
+			self.assertNotIn("Aktif Seçili Kişi", sb_html)
+			self.assertNotIn("sidebar_goto_dossier_btn", sb_html)
+			self.assertNotIn("sidebar_clear_active_person", sb_html)
+			for grp_title in ("GÜNLÜK KLİNİK", "KİŞİ &amp; TARAMA", "GELİŞİM &amp; PLAN", "BELGE &amp; SİSTEM"):
+				self.assertIn(f'data-nav-group="{grp_title}"', sb_html)
+			self.assertIn("window.__revirToggleNavGroup(this, event)", sb_html)
+
+			revir_ui._ACTIVE_SESSION.collapsed_nav_groups.add("KİŞİ & TARAMA")
+			res2 = revir_ui.run_action_headless(persantil.main, {"action": "init"})
+			self.assertIn('class="revir-nav-sec-group collapsed" data-nav-group="KİŞİ &amp; TARAMA"', res2["sidebar_html"])
+
 
 if __name__ == "__main__":
 	unittest.main()

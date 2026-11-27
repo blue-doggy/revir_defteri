@@ -142,7 +142,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return (Path(meipass_raw) if meipass_raw else _BUNDLE_DIR) / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.51.0"
+_DEFAULT_APP_VERSION = "1.51.1"
 
 
 def _load_app_version() -> str:
@@ -36806,21 +36806,6 @@ def main() -> None:
 
 		page = ui.sidebar_nav_groups(nav_groups, key="main_menu_page", default_value=cur_page_val)
 		ui.divider()
-
-		if active_person:
-			with ui.container(border=True):
-				ui.caption("📌 **Aktif Seçili Kişi**")
-				ui.markdown(f"**{mask_kvkk_value(active_person['full_name'], 'name')}**")
-				sno_txt = f" · No: {active_person['student_no']}" if active_person["student_no"] else ""
-				ui.caption(f"{active_person['class_name']}{sno_txt}")
-			sb_c1, sb_c2 = ui.columns([1.6, 1])
-			with sb_c1:
-				if ui.button("📂 Dosya", key="sidebar_goto_dossier_btn", type="primary", use_container_width=True):
-					open_person_dossier_dialog(active_person["id"])
-			with sb_c2:
-				if ui.button("Temizle", key="sidebar_clear_active_person", use_container_width=True):
-					set_active_person(None)
-					ui.rerun()
 
 		ui.caption(f"🔒 Yerel Veri · 🚀 **v{APP_VERSION}**")
 		ui.markdown(
