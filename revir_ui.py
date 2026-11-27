@@ -7993,7 +7993,7 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 		var MP_STORAGE_KEY = "revir_mp_state_v1";
 		var audioEl = document.getElementById("revir-persistent-audio");
 		var dockEl = null;
-		var mpServerCfg = { visible: false, stations: [], tracks: [], ambient_presets: [], music_folder: "", music_folder_name: "muzikler" };
+		var mpServerCfg = { visible: false, stations: [], tracks: [], music_folder: "", music_folder_name: "muzikler" };
 		var mpState = {
 			mode: "radio",
 			volume: 0.75,
@@ -8001,7 +8001,6 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 			shuffle: false,
 			listOpen: false,
 			stationId: "",
-			ambientId: "",
 			trackId: ""
 		};
 		var playlistQuery = "";
@@ -8014,13 +8013,12 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 		try {
 			var savedMp = JSON.parse(localStorage.getItem(MP_STORAGE_KEY) || "{}");
 			if (savedMp && typeof savedMp === "object") {
-				if (savedMp.mode === "radio" || savedMp.mode === "folder" || savedMp.mode === "ambient") mpState.mode = savedMp.mode;
+				mpState.mode = (savedMp.mode === "folder") ? "folder" : "radio";
 				if (typeof savedMp.volume === "number" && savedMp.volume >= 0 && savedMp.volume <= 1) mpState.volume = savedMp.volume;
 				if (typeof savedMp.muted === "boolean") mpState.muted = savedMp.muted;
 				if (typeof savedMp.shuffle === "boolean") mpState.shuffle = savedMp.shuffle;
 				if (typeof savedMp.listOpen === "boolean") mpState.listOpen = savedMp.listOpen;
 				if (typeof savedMp.stationId === "string") mpState.stationId = savedMp.stationId;
-				if (typeof savedMp.ambientId === "string") mpState.ambientId = savedMp.ambientId;
 				if (typeof savedMp.trackId === "string") mpState.trackId = savedMp.trackId;
 			}
 		} catch (_e) {}
@@ -8052,7 +8050,6 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 
 		function getStations() { return Array.isArray(mpServerCfg.stations) ? mpServerCfg.stations : []; }
 		function getTracks() { return Array.isArray(mpServerCfg.tracks) ? mpServerCfg.tracks : []; }
-		function getAmbients() { return Array.isArray(mpServerCfg.ambient_presets) ? mpServerCfg.ambient_presets : []; }
 
 		function getActiveStation() {
 			var list = getStations();
@@ -8061,16 +8058,6 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 				if (list[i].id === mpState.stationId) return list[i];
 			}
 			mpState.stationId = list[0].id;
-			return list[0];
-		}
-
-		function getActiveAmbient() {
-			var list = getAmbients();
-			if (!list.length) return null;
-			for (var i = 0; i < list.length; i++) {
-				if (list[i].id === mpState.ambientId) return list[i];
-			}
-			mpState.ambientId = list[0].id;
 			return list[0];
 		}
 
@@ -8129,12 +8116,6 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 						title = st.name;
 						artist = st.category || "Canlı Radyo (HTTPS)";
 					}
-				} else if (mpState.mode === "ambient") {
-					var am = getActiveAmbient();
-					if (am) {
-						title = am.name;
-						artist = "Çevrimdışı Revir Ambiyansı";
-					}
 				} else {
 					var tr = getActiveTrack();
 					if (tr) {
@@ -8160,17 +8141,14 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 			var itemsEl = dockEl.querySelector("#revir-mp-pl-items");
 			var searchInp = dockEl.querySelector("#revir-mp-pl-search");
 
-			var totalLen = 0;
-			if (mpState.mode === "folder") totalLen = getTracks().length;
-			else if (mpState.mode === "radio") totalLen = getStations().length;
-			else totalLen = getAmbients().length;
+			var totalLen = (mpState.mode === "folder") ? getTracks().length : getStations().length;
 
 			if (cntEl) cntEl.textContent = totalLen > 0 ? String(totalLen) : "";
 			if (listBtn) {
 				listBtn.classList.toggle("open", !!mpState.listOpen);
 				listBtn.title = mpState.mode === "folder"
 					? "Klasördeki Şarkıları Mini Liste Olarak Göster (" + totalLen + " parça)"
-					: "İstasyon / Ses Listesini Aç";
+					: "İstasyon Listesini Aç";
 			}
 			if (!panel || !itemsEl) return;
 			panel.classList.toggle("open", !!mpState.listOpen);
@@ -8209,7 +8187,7 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 				if (!htmlParts.length) {
 					htmlParts.push('<div class="revir-mp-pl-empty">' + (tracks.length ? 'Aramaya uygun şarkı yok.' : 'Klasörde ses dosyası yok. Üstteki 📁 simgesiyle klasör seçin.') + '</div>');
 				}
-			} else if (mpState.mode === "radio") {
+			} else {
 				var stations = getStations();
 				var activeSt = getActiveStation();
 				stations.forEach(function(st, idx) {
@@ -8223,22 +8201,6 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 								'<span class="revir-mp-pl-sub">' + escHtml(st.category || "HTTPS 443") + '</span>' +
 							'</span>' +
 							'<span class="revir-mp-pl-idx">' + (isActR && isPlaying ? '●' : (idx + 1)) + '</span>' +
-						'</button>'
-					);
-				});
-			} else {
-				var ambs = getAmbients();
-				var activeAm = getActiveAmbient();
-				ambs.forEach(function(am) {
-					var isActA = !!(activeAm && activeAm.id === am.id);
-					htmlParts.push(
-						'<button type="button" class="revir-mp-pl-item' + (isActA ? ' active' : '') + '" data-pl-kind="ambient" data-pl-id="' + escHtml(am.id) + '">' +
-							'<span class="revir-mp-pl-thumb">' + escHtml(am.icon || "🌊") + '</span>' +
-							'<span class="revir-mp-pl-txt">' +
-								'<span class="revir-mp-pl-name">' + escHtml(am.name) + '</span>' +
-								'<span class="revir-mp-pl-sub">Sıfır İnternet · Çevrimdışı Ses</span>' +
-							'</span>' +
-							'<span class="revir-mp-pl-idx">' + (isActA && isPlaying ? '♫' : '') + '</span>' +
 						'</button>'
 					);
 				});
@@ -8261,7 +8223,6 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 					'<div class="revir-mp-top">' +
 						'<div class="revir-mp-modes">' +
 							'<button type="button" class="revir-mp-mode-btn active" data-mp-mode="radio">📻 Radyo</button>' +
-							'<button type="button" class="revir-mp-mode-btn" data-mp-mode="ambient" title="İnternetsiz Dinlendirici Revir Sesleri">🌊 Ortam</button>' +
 							'<button type="button" class="revir-mp-mode-btn" data-mp-mode="folder">🎵 Klasörüm</button>' +
 						'</div>' +
 						'<button type="button" class="revir-mp-icon-act" id="revir-mp-aux-btn" title="Çevrimiçi HTTPS Radyoları Yenile">🌐</button>' +
@@ -8359,7 +8320,6 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 				var pkind = rowBtn.getAttribute("data-pl-kind");
 				if (!pid) return;
 				if (pkind === "folder") mpState.trackId = pid;
-				else if (pkind === "ambient") mpState.ambientId = pid;
 				else mpState.stationId = pid;
 				saveMpState();
 				playCurrentSelection();
@@ -8369,17 +8329,14 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 				e.stopPropagation();
 				if (mpState.mode === "radio") {
 					refreshOnlineStations();
-				} else if (mpState.mode === "folder") {
-					pickMusicFolderInteractive();
 				} else {
-					showToast("🌊 Çevrimdışı ortam sesleri internet bağlantısı gerektirmez.");
+					pickMusicFolderInteractive();
 				}
 			});
 
 			dockEl.querySelector("#revir-mp-select").addEventListener("change", function(e) {
 				var val = e.target.value;
 				if (mpState.mode === "radio") mpState.stationId = val;
-				else if (mpState.mode === "ambient") mpState.ambientId = val;
 				else mpState.trackId = val;
 				saveMpState();
 				playCurrentSelection();
@@ -8497,7 +8454,7 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 						miniBtn.textContent = isPlaying ? "⏸" : "🎵";
 					}
 				} else {
-					miniBtn.textContent = isPlaying ? "⏸" : (mpState.mode === "radio" ? "📻" : "🌊");
+					miniBtn.textContent = isPlaying ? "⏸" : "📻";
 				}
 			}
 
@@ -8507,16 +8464,13 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 
 			var auxBtn = dockEl.querySelector("#revir-mp-aux-btn");
 			if (auxBtn) {
+				auxBtn.style.display = "inline-flex";
 				if (mpState.mode === "radio") {
-					auxBtn.style.display = "inline-flex";
 					auxBtn.textContent = "🌐";
 					auxBtn.title = "MEB Uyumlu HTTPS Radyo Listesini Güncelle (443 Portu)";
-				} else if (mpState.mode === "folder") {
-					auxBtn.style.display = "inline-flex";
+				} else {
 					auxBtn.textContent = "📁";
 					auxBtn.title = "Müzik Klasörü Seç (Aktif: " + (mpServerCfg.music_folder || "muzikler") + ")";
-				} else {
-					auxBtn.style.display = "none";
 				}
 			}
 
@@ -8536,16 +8490,6 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 							if (activeSt && st.id === activeSt.id) o.selected = true;
 							selEl.appendChild(o);
 						});
-					} else if (mpState.mode === "ambient") {
-						var ambs = getAmbients();
-						var activeAm = getActiveAmbient();
-						ambs.forEach(function(am) {
-							var oa = document.createElement("option");
-							oa.value = am.id;
-							oa.textContent = (am.icon || "🌊") + " " + am.name;
-							if (activeAm && am.id === activeAm.id) oa.selected = true;
-							selEl.appendChild(oa);
-						});
 					} else {
 						var tracks = getTracks();
 						var activeTr = getActiveTrack();
@@ -8560,7 +8504,7 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 				} else {
 					var targetVal = mpState.mode === "radio"
 						? (getActiveStation() || {}).id
-						: (mpState.mode === "ambient" ? (getActiveAmbient() || {}).id : (getActiveTrack() || {}).id);
+						: (getActiveTrack() || {}).id;
 					if (targetVal && selEl.value !== targetVal) selEl.value = targetVal;
 				}
 			}
@@ -8591,15 +8535,6 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 				if (badgeEl) {
 					badgeEl.textContent = isPlaying ? "● CANLI" : "RADYO";
 					badgeEl.classList.toggle("live", isPlaying);
-				}
-			} else if (mpState.mode === "ambient") {
-				var amNow = getActiveAmbient();
-				nowText = amNow ? amNow.name : "Ortam Sesi";
-				subText = "İnternetsiz Revir Ambiyansı";
-				renderCoverSlot("", amNow ? (amNow.icon || "🌊") : "🌊");
-				if (badgeEl) {
-					badgeEl.classList.remove("live");
-					badgeEl.textContent = isPlaying ? "● AKTİF" : "ÇEVRİMDIŞI";
 				}
 			} else {
 				var trNow = getActiveTrack();
@@ -8703,13 +8638,6 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 				}
 				var chain = buildStationUrlChain(st);
 				startAudioWithCandidates(chain, false);
-			} else if (mpState.mode === "ambient") {
-				var am = getActiveAmbient();
-				if (!am || !am.url) {
-					showToast("⚠️ Ortam sesi bulunamadı.", "warn");
-					return;
-				}
-				startAudioWithCandidates([am.url], true);
 			} else {
 				var tr = getActiveTrack();
 				if (!tr) {
@@ -8763,21 +8691,6 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 				}
 				var nextSIdx = (sIdx + delta + stations.length) % stations.length;
 				mpState.stationId = stations[nextSIdx].id;
-				saveMpState();
-				renderDockState(false);
-				playCurrentSelection();
-				return;
-			}
-
-			if (mpState.mode === "ambient") {
-				var ambs = getAmbients();
-				if (!ambs.length) return;
-				var curAm = getActiveAmbient();
-				var aIdx = 0;
-				for (var k = 0; k < ambs.length; k++) {
-					if (curAm && ambs[k].id === curAm.id) { aIdx = k; break; }
-				}
-				mpState.ambientId = ambs[(aIdx + delta + ambs.length) % ambs.length].id;
 				saveMpState();
 				renderDockState(false);
 				playCurrentSelection();
@@ -8881,8 +8794,6 @@ body.revir-layout-edit #revir-widget-tray.open { display: flex; animation: revir
 			audioEl.addEventListener("ended", function() {
 				if (mpState.mode === "folder" && getTracks().length > 0) {
 					stepTrack(1);
-				} else if (mpState.mode === "ambient") {
-					playCurrentSelection();
 				} else {
 					renderDockState(false);
 				}

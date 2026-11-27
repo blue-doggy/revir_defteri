@@ -1,5 +1,5 @@
 """
-Yan Menü (Sidebar) MEB Uyumlu Radyo, Çevrimdışı Ortam Sesleri & Kapaklı Yerel MP3 Medya Sunucusu Modülü.
+Yan Menü (Sidebar) MEB Uyumlu Radyo & Kapaklı Yerel MP3 Medya Sunucusu Modülü.
 
 Özellikler:
 1. MEB / Fatih Ağı Uyumluluğu ve Akıllı Yerel Ses Köprüsü:
@@ -11,9 +11,7 @@ Yan Menü (Sidebar) MEB Uyumlu Radyo, Çevrimdışı Ortam Sesleri & Kapaklı Ye
      HTML engel sayfalarını anında algılayıp yedek adrese geçer, TRT .aac ID3 bloklarını temizler.
    - Sistem sertifika deposu (truststore) + özel MEB sertifikası (.cer/.crt/.pem, DER->PEM otomatik)
      ve tek tıkla MEB Radyo Ağ & Sertifika Tanılama (diagnose_radio_connectivity) desteği içerir.
-2. Çevrimdışı Dinlendirici Revir Ortam Sesleri (/ambient/<id>):
-   - Dış radyo akışlarının tamamen kapalı olduğu ağlarda sıfır internetle çalışan yerleşik WAV üreteci.
-3. Albüm Kapaklı & HTTP Range Destekli Yerel Klasör Müzik Sunucusu (/stream/<id>, /cover/<id>):
+2. Albüm Kapaklı & HTTP Range Destekli Yerel Klasör Müzik Sunucusu (/stream/<id>, /cover/<id>):
    - MP3 (ID3v2 APIC + TIT2/TPE1), M4A (covr) ve FLAC (PICTURE) gömülü albüm kapaklarını ve
      klasör içi kapak görsellerini saf Python ile okur; yoksa estetik SVG kapak üretir.
 """
@@ -195,35 +193,6 @@ BUILTIN_MEB_SAFE_STATIONS: list[dict[str, Any]] = [
 		"is_hls": False,
 	},
 ]
-
-# MEB ağında tüm canlı akışlar engellense dahi %100 çevrimdışı çalışan revir ortam sesleri
-BUILTIN_AMBIENT_PRESETS: list[dict[str, str]] = [
-	{
-		"id": "amb_rain",
-		"name": "Hafif Yağmur & Dinlenme",
-		"category": "Çevrimdışı Revir Ambiyansı",
-		"icon": "🌧️",
-	},
-	{
-		"id": "amb_waves",
-		"name": "Sakin Deniz Dalgaları",
-		"category": "Çevrimdışı Revir Ambiyansı",
-		"icon": "🌊",
-	},
-	{
-		"id": "amb_breeze",
-		"name": "Yumuşak Doğa Esintisi",
-		"category": "Çevrimdışı Revir Ambiyansı",
-		"icon": "🍃",
-	},
-	{
-		"id": "amb_calm432",
-		"name": "Huzurlu Akustik Ton (432 Hz)",
-		"category": "Çevrimdışı Revir Ambiyansı",
-		"icon": "🎹",
-	},
-]
-
 
 def configure_ssl_options(*, custom_cert_path: str = "", allow_relaxed_ssl: bool = False) -> None:
 	global _CUSTOM_MEB_CERT_PATH, _ALLOW_RELAXED_SSL
@@ -637,7 +606,7 @@ def diagnose_radio_connectivity(
 	if ssl_cnt > 0 and ok_cnt == 0:
 		rec = "🔒 Bilgisayarda MEB kök sertifikası doğrulama hatası algılandı. Aşağıdan MEB_SERTIFIKASI.cer dosyasını seçin veya 'MEB Esnek SSL Modu'nu etkinleştirin."
 	elif ok_cnt == 0:
-		rec = "⛔ Bu ağda dış canlı radyo akışları tamamen engellenmiş görünüyor. Yan menüdeki '🌊 Ortam' (Çevrimdışı Sesler) veya '🎵 Klasörüm' (Yerel MP3) modunu kesintisiz kullanabilirsiniz."
+		rec = "⛔ Bu ağda dış canlı radyo akışları tamamen engellenmiş görünüyor. Yan menüdeki '🎵 Klasörüm' (Yerel MP3) modunu kesintisiz kullanabilirsiniz."
 	elif blk_cnt > 0:
 		rec = f"ℹ️ Ticari radyoların bir kısmı ({blk_cnt} kanal) ağ filtresine takıldı ancak {ok_cnt} kanal (ör. TRT yayınları) aktif ve dinlenebilir durumda."
 	else:
@@ -973,90 +942,6 @@ def build_fallback_cover_svg(title: str, subtitle: str = "") -> bytes:
 	return svg.encode("utf-8")
 
 
-# ==============================================================================
-# ÇEVRİMDIŞI DİNLENDİRİCİ ORTAM SESİ WAV ÜRETECİ (SIFIR İNTERNET)
-# ==============================================================================
-
-_AMBIENT_WAV_CACHE: dict[str, bytes] = {}
-_AMBIENT_WAV_LOCK = threading.Lock()
-
-
-def generate_ambient_wav_bytes(preset_id: str, duration_sec: float = 8.0, sample_rate: int = 16000) -> bytes:
-	"""Belirtilen dinlendirici ortam sesi için pürüzsüz döngülü 16-bit PCM WAV ses verisi üretir."""
-	key = f"{preset_id}:{duration_sec}:{sample_rate}"
-	with _AMBIENT_WAV_LOCK:
-		if key in _AMBIENT_WAV_CACHE:
-			return _AMBIENT_WAV_CACHE[key]
-
-	total_samples = max(4000, int(duration_sec * sample_rate))
-	rng = random.Random(preset_id)
-	samples = bytearray(total_samples * 2)
-	fade_n = min(int(sample_rate * 0.4), total_samples // 6)
-
-	lp1 = 0.0
-	lp2 = 0.0
-	two_pi = 2.0 * math.pi
-
-	for i in range(total_samples):
-		t = i / float(sample_rate)
-		if preset_id == "amb_calm432":
-			# Yumuşak harmonik 432 Hz + 216 Hz + 648 Hz akustik pad
-			mod = 0.72 + 0.28 * math.sin(two_pi * t / duration_sec)
-			val = (
-				0.48 * math.sin(two_pi * 216.0 * t)
-				+ 0.34 * math.sin(two_pi * 432.0 * t)
-				+ 0.14 * math.sin(two_pi * 540.0 * t)
-			) * mod * 0.28
-		elif preset_id == "amb_waves":
-			# Yavaş yükselen ve çekilen deniz dalgası zarfı
-			white = rng.uniform(-1.0, 1.0)
-			lp1 = lp1 * 0.965 + white * 0.035
-			swell = 0.30 + 0.70 * (0.5 + 0.5 * math.sin(two_pi * t / (duration_sec * 0.5) - math.pi / 2.0))
-			val = lp1 * swell * 0.75
-		elif preset_id == "amb_breeze":
-			white = rng.uniform(-1.0, 1.0)
-			lp1 = lp1 * 0.982 + white * 0.018
-			lp2 = lp2 * 0.94 + lp1 * 0.06
-			gust = 0.55 + 0.45 * math.sin(two_pi * t / duration_sec)
-			val = lp2 * gust * 0.95
-		else:
-			# amb_rain: yumuşak filtrelenmiş yağmur dokusu
-			white = rng.uniform(-1.0, 1.0)
-			lp1 = lp1 * 0.86 + white * 0.14
-			val = lp1 * 0.36
-
-		# Döngü geçişinde çıtlamayı önleyen yumuşak giriş/çıkış zarfı
-		if i < fade_n:
-			val *= i / float(fade_n)
-		elif i >= total_samples - fade_n:
-			val *= (total_samples - 1 - i) / float(fade_n)
-
-		pcm = max(-32767, min(32767, int(val * 32767.0)))
-		struct.pack_into("<h", samples, i * 2, pcm)
-
-	data_size = len(samples)
-	wav_hdr = struct.pack(
-		"<4sI4s4sIHHIIHH4sI",
-		b"RIFF",
-		36 + data_size,
-		b"WAVE",
-		b"fmt ",
-		16,
-		1,  # PCM
-		1,  # Mono
-		sample_rate,
-		sample_rate * 2,
-		2,
-		16,
-		b"data",
-		data_size,
-	)
-	wav_bytes = wav_hdr + bytes(samples)
-	with _AMBIENT_WAV_LOCK:
-		_AMBIENT_WAV_CACHE[key] = wav_bytes
-	return wav_bytes
-
-
 def resolve_music_folder(custom_folder_setting: str, default_base_dir: Path) -> Path:
 	"""
 	Ayarlardaki custom_music_folder geçerli bir klasörse onu döndürür;
@@ -1236,7 +1121,6 @@ class LocalMediaStreamServer:
 	- /cover/<id>   : Albüm kapak fotoğrafı (gömülü ID3/M4A/FLAC, klasör resmi veya SVG kapak)
 	- /hls_live     : MEB-uyumlu HTTPS .m3u8 canlı ses köprüsü (ön doğrulamalı + ID3 temizlemeli)
 	- /radio_proxy  : MEB-uyumlu HTTPS doğrudan MP3/AAC akış köprüsü
-	- /ambient/<id> : Sıfır internet çevrimdışı dinlendirici ortam sesi (WAV)
 	"""
 
 	def __init__(self, host: str = "127.0.0.1", port: int = 0) -> None:
@@ -1413,20 +1297,6 @@ class LocalMediaStreamServer:
 			self._cover_cache[clean_id] = res
 		return res
 
-	def get_ambient_presets(self) -> list[dict[str, Any]]:
-		self.start()
-		out: list[dict[str, Any]] = []
-		for p in BUILTIN_AMBIENT_PRESETS:
-			pid = p["id"]
-			out.append({
-				"id": pid,
-				"name": p["name"],
-				"category": p["category"],
-				"icon": p["icon"],
-				"url": f"{self.base_url}/ambient/{pid}",
-			})
-		return out
-
 	def _build_handler(self):
 		server_ref = self
 
@@ -1483,16 +1353,6 @@ class LocalMediaStreamServer:
 					qs = urllib.parse.parse_qs(parsed.query)
 					stream_url = str((qs.get("url") or [""])[0]).strip()
 					self._stream_direct_radio_proxy(stream_url, send_body=send_body)
-					return
-
-				if path.startswith("/ambient/"):
-					preset_id = urllib.parse.unquote(path[len("/ambient/") :]).split("/", 1)[0].strip()
-					valid_ids = {p["id"] for p in BUILTIN_AMBIENT_PRESETS}
-					if preset_id not in valid_ids:
-						self._send_simple(HTTPStatus.NOT_FOUND, "Ambient Preset Not Found")
-						return
-					wav_data = generate_ambient_wav_bytes(preset_id)
-					self._serve_bytes_with_range(wav_data, "audio/wav", send_body=send_body)
 					return
 
 				if path.startswith("/cover/"):
@@ -1889,8 +1749,8 @@ def build_sidebar_media_player_payload(
 	force_rescan: bool = False,
 ) -> dict[str, Any]:
 	"""
-	revir_ui.py yan menü oynatıcısına gönderilecek yapılandırma, MEB-güvenli radyo istasyonları,
-	çevrimdışı ortam sesleri ve albüm kapaklı yerel MP3 çalma listesini hazırlar.
+	revir_ui.py yan menü oynatıcısına gönderilecek yapılandırma, MEB-güvenli radyo istasyonları
+	ve albüm kapaklı yerel MP3 çalma listesini hazırlar.
 	"""
 	configure_ssl_options(
 		custom_cert_path=str(app_cfg.get("meb_custom_cert_path", "")).strip(),
@@ -1910,7 +1770,6 @@ def build_sidebar_media_player_payload(
 		if visible
 		else []
 	)
-	ambient = srv.get_ambient_presets() if visible else []
 	return {
 		"visible": visible,
 		"stream_base_url": srv.base_url,
@@ -1921,5 +1780,4 @@ def build_sidebar_media_player_payload(
 		"track_count": len(tracks),
 		"stations": stations,
 		"station_count": len(stations),
-		"ambient_presets": ambient,
 	}

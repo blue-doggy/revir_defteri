@@ -216,36 +216,6 @@ class TestMediaPlayerModule(unittest.TestCase):
 			finally:
 				srv.stop()
 
-	def test_offline_ambient_wav_generator_and_endpoint(self) -> None:
-		wav_bytes = media_player.generate_ambient_wav_bytes("amb_calm432", duration_sec=1.0, sample_rate=8000)
-		self.assertTrue(wav_bytes.startswith(b"RIFF"))
-		self.assertIn(b"WAVEfmt ", wav_bytes[:24])
-		self.assertGreater(len(wav_bytes), 16000)
-
-		srv = media_player.LocalMediaStreamServer(host="127.0.0.1", port=0)
-		srv.start()
-		try:
-			presets = srv.get_ambient_presets()
-			self.assertGreaterEqual(len(presets), 4)
-			rain_url = next(p["url"] for p in presets if p["id"] == "amb_rain")
-
-			with urllib.request.urlopen(rain_url, timeout=4.0) as resp:
-				self.assertEqual(resp.status, 200)
-				self.assertEqual(resp.headers.get("Content-Type"), "audio/wav")
-				data = resp.read(64)
-				self.assertTrue(data.startswith(b"RIFF"))
-
-			req_part = urllib.request.Request(rain_url, headers={"Range": "bytes=0-43"})
-			with urllib.request.urlopen(req_part, timeout=4.0) as resp_part:
-				self.assertEqual(resp_part.status, 206)
-				self.assertEqual(len(resp_part.read()), 44)
-
-			with self.assertRaises(urllib.error.HTTPError) as exc_404:
-				urllib.request.urlopen(f"{srv.base_url}/ambient/olmayan_ses", timeout=3.0)
-			self.assertEqual(exc_404.exception.code, 404)
-		finally:
-			srv.stop()
-
 	def test_meb_firewall_block_detection_id3_strip_and_proxy_chain(self) -> None:
 		# 1. MEB / FortiGuard HTML engel sayfası algılama
 		self.assertTrue(media_player.is_meb_block_or_html_payload("text/html; charset=utf-8", b"<html><body>FortiGuard</body></html>"))
@@ -381,7 +351,7 @@ class TestMediaPlayerModule(unittest.TestCase):
 			self.assertIn("revir-mp-cover", revir_ui._SHELL_HTML)
 			self.assertIn("revir-mp-list-btn", revir_ui._SHELL_HTML)
 			self.assertIn("revir-mp-playlist-panel", revir_ui._SHELL_HTML)
-			self.assertIn('data-mp-mode="ambient"', revir_ui._SHELL_HTML)
+			self.assertNotIn('data-mp-mode="ambient"', revir_ui._SHELL_HTML)
 			self.assertIn("meb_custom_cert_path", persantil.DEFAULT_APP_SETTINGS)
 			self.assertIn("meb_ssl_relaxed", persantil.DEFAULT_APP_SETTINGS)
 
@@ -390,7 +360,7 @@ class TestMediaPlayerModule(unittest.TestCase):
 			self.assertIsInstance(mp_cfg, dict)
 			self.assertTrue(mp_cfg["visible"])
 			self.assertGreaterEqual(mp_cfg["station_count"], 7)
-			self.assertGreaterEqual(len(mp_cfg.get("ambient_presets") or []), 4)
+			self.assertNotIn("ambient_presets", mp_cfg)
 			self.assertTrue(any(s.get("hls_proxy_url") for s in mp_cfg["stations"] if s.get("is_hls")))
 			self.assertTrue(all(len(s.get("proxy_chain") or []) >= 1 for s in mp_cfg["stations"]))
 

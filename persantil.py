@@ -141,7 +141,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return (Path(meipass_raw) if meipass_raw else _BUNDLE_DIR) / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.49.0"
+_DEFAULT_APP_VERSION = "1.49.1"
 
 
 def _load_app_version() -> str:
@@ -35028,7 +35028,7 @@ def render_settings() -> None:
 					ui.markdown("#### 🛡️ MEB / Fatih Ağı Radyo Uyumluluk, Sertifika & Bağlantı Tanılama")
 					ui.caption(
 						"Okul ağında radyo akışları SSL sertifikası nedeniyle kesiliyorsa `MEB_SERTIFIKASI.cer` dosyasını yükleyebilir veya "
-						"tanılama testiyle hangi kanalların açık / engelli olduğunu saniyeler içinde görebilirsiniz. Tüm dış yayınlar kapalıysa yan menüdeki **🌊 Ortam** sekmesi internetsiz çalışır."
+						"tanılama testiyle hangi kanalların açık / engelli olduğunu saniyeler içinde görebilirsiniz."
 					)
 					cur_cert_p = str(current_cfg.get("meb_custom_cert_path", "")).strip()
 					cur_relaxed = str(current_cfg.get("meb_ssl_relaxed", "0")).strip() == "1"
