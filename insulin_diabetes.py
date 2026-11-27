@@ -1,26 +1,20 @@
 """
 Okul Revir Defteri — Pediatrik Diyabet & İnsülin Doz Yönetim Merkezi (insulin_diabetes.py)
 
-Özellikler:
-- Hekim reçeteli İKO (Sabah/Öğle/Ara Öğün), İDF, Hedef KŞ, Düzeltme Eşiği, Kalem Hassasiyeti ve Maksimum Bolus Sınırı
-- Kesin deterministik pediatrik bolus matematiği + Aktif İnsülin (IOB / Stacking Koruması)
-- Aylık Okul Yemek Programı yönetimi + Gemini AI (PDF / Fotoğraf / Excel / Word / Metin) otomatik karbonhidrat çıkarıcı
-- Tabağın tüketim yüzdesi (%0–%150) + Türk Okul/Kantin hızlı ekstra yiyecek kataloğu + Gemini tabak fotoğrafı/metin karb tahminleyici
-- Fiziksel aktivite / beden eğitimi indirim motoru + egzersiz öncesi KŞ/Keton güvenlik kalkanı
-- 15-15 Hipoglisemi & Hiperglisemi/Keton acil müdahale protokolü
-- Enjeksiyon bölgesi rotasyon takibi (lipohipertrofi önleme & engel/uzuv profili duyarlılığı)
-- Öğrencinin yaşı, boyu, kilosu, WHO persantil/Z-skoru ve TDD/kg verileriyle entegre Gemini AI klinik yorum + Veli SMS taslağı
-- Glisemik trend (TIR %70–180) analizi + Resmi MEB antetli Word (.docx) & Excel (.xlsx) aylık plan ve izlem çıktıları
+Minimalist Klinik UX Mimarisi:
+- Tek yüzeyde birleşik hasta bağlam şeridi (yaş, boy/kilo persantili, hekim İKO/İDF, aktif IOB, son enjeksiyon & glukagon)
+- Segmente 4 sekme: 🧮 Doz Hesapla · 🍽️ Yemek & Aylık Plan · 📈 İzlem & Trend · ⚙️ Reçete Profili
+- Kademeli açılan (progressive disclosure) 4 adımlı yalın giriş akışı + açılır kantin/fotoğraf araçları
+- Birleşik Doz & Onay Kokpiti (anlık glisemik güvenlik kalkanı, 15-15 sayacı, 4'lü mikro özet ve doğrudan kayıt)
+- Gemini AI klinik değerlendirme, veli SMS taslağı, glisemik trend (TIR %70–180) ve MEB Word/Excel çıktıları
 """
 from __future__ import annotations
 
 import html
-import io
 import json
-import math
 import re
 import sqlite3
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import pandas as pd
@@ -68,6 +62,7 @@ MEAL_TYPE_OPTIONS: list[str] = [
 	"Öğle Yemeği",
 	"Kahvaltı",
 	"İkindi / Ara Öğün",
+	"Akşam Yemeği",
 	"Sadece Düzeltme (Öğünsüz)",
 ]
 
@@ -118,6 +113,143 @@ TR_MONTH_NAMES: dict[int, str] = {
 	1: "Ocak", 2: "Şubat", 3: "Mart", 4: "Nisan", 5: "Mayıs", 6: "Haziran",
 	7: "Temmuz", 8: "Ağustos", 9: "Eylül", 10: "Ekim", 11: "Kasım", 12: "Aralık",
 }
+
+TAB_CALC = "🧮 Doz Hesapla"
+TAB_MENU = "🍽️ Yemek & Aylık Plan"
+TAB_LOGS = "📈 İzlem & Trend"
+TAB_PROF = "⚙️ Reçete Profili"
+
+_DIABETES_MINIMAL_CSS = """
+<style>
+.ins-hdr-row {
+	display: flex; align-items: center; justify-content: space-between;
+	gap: 12px; flex-wrap: wrap; margin-bottom: 10px;
+}
+.ins-hdr-title {
+	display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+}
+.ins-hdr-title h2 {
+	margin: 0; font-size: 1.24rem; font-weight: 800; letter-spacing: -0.02em; color: var(--text-heading);
+}
+.ins-hdr-sub {
+	font-size: 0.82rem; color: var(--text-muted); font-weight: 500;
+}
+.ins-hdr-badges {
+	display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
+.ins-pill {
+	display: inline-flex; align-items: center; gap: 5px;
+	padding: 3px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 600;
+	background: var(--sidebar-bg); border: 1px solid var(--line); color: var(--text-muted);
+	line-height: 1.35; white-space: nowrap;
+}
+.ins-pill-blue {
+	background: rgba(2,132,199,0.10); border-color: rgba(2,132,199,0.28); color: #0284c7;
+}
+.ins-pill-teal {
+	background: rgba(13,148,136,0.11); border-color: rgba(13,148,136,0.30); color: var(--teal);
+}
+.ins-pill-amber {
+	background: rgba(245,158,11,0.13); border-color: rgba(245,158,11,0.35); color: #b45309;
+}
+.ins-pill-red {
+	background: rgba(239,68,68,0.12); border-color: rgba(239,68,68,0.35); color: #dc2626;
+}
+.ins-pill-purple {
+	background: rgba(124,58,237,0.10); border-color: rgba(124,58,237,0.28); color: #6d28d9;
+}
+.ins-patient-banner {
+	display: flex; flex-direction: column; gap: 6px;
+	padding: 10px 14px; border-radius: 12px;
+	background: var(--card-bg); border: 1px solid var(--line);
+	margin: 4px 0 12px 0;
+	box-shadow: 0 1px 3px rgba(15,23,42,0.03);
+}
+.ins-patient-top {
+	display: flex; align-items: center; justify-content: space-between;
+	gap: 8px; flex-wrap: wrap;
+}
+.ins-patient-id {
+	display: flex; align-items: center; gap: 7px; flex-wrap: wrap; font-size: 0.92rem; color: var(--text-main);
+}
+.ins-patient-name {
+	font-weight: 800; font-size: 0.98rem; color: var(--text-heading);
+}
+.ins-patient-meta {
+	display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; color: var(--text-muted);
+}
+.ins-step-hdr {
+	display: flex; align-items: center; justify-content: space-between;
+	gap: 8px; margin-bottom: 8px;
+}
+.ins-step-left {
+	display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 0.92rem; color: var(--text-heading);
+}
+.ins-step-num {
+	display: inline-flex; align-items: center; justify-content: center;
+	width: 21px; height: 21px; border-radius: 6px;
+	background: rgba(13,148,136,0.12); color: var(--teal);
+	font-size: 11.5px; font-weight: 800; flex-shrink: 0;
+}
+.ins-cockpit-hero {
+	background: var(--mint); border: 1.5px solid rgba(13,148,136,0.45);
+	border-radius: 12px; padding: 13px 14px; margin-bottom: 10px;
+}
+.ins-cockpit-hero.warn {
+	background: rgba(245,158,11,0.08); border-color: rgba(245,158,11,0.48);
+}
+.ins-cockpit-hero.danger {
+	background: rgba(239,68,68,0.09); border-color: rgba(239,68,68,0.55);
+}
+.ins-cockpit-top {
+	display: flex; align-items: center; justify-content: space-between;
+	gap: 6px; font-size: 11px; font-weight: 700; text-transform: uppercase;
+	letter-spacing: 0.04em; color: var(--text-muted);
+}
+.ins-cockpit-dose {
+	font-size: 2.05rem; font-weight: 900; line-height: 1.15;
+	font-variant-numeric: tabular-nums; color: var(--teal);
+	margin: 6px 0 10px 0; letter-spacing: -0.02em;
+}
+.ins-cockpit-hero.warn .ins-cockpit-dose { color: #d97706; }
+.ins-cockpit-hero.danger .ins-cockpit-dose { color: #dc2626; }
+.ins-stat-grid {
+	display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+	gap: 6px; padding-top: 9px; border-top: 1px solid rgba(148,163,184,0.22);
+}
+.ins-stat-cell {
+	display: flex; flex-direction: column; gap: 1px;
+}
+.ins-stat-lbl {
+	font-size: 10.5px; font-weight: 600; color: var(--text-muted);
+}
+.ins-stat-val {
+	font-size: 13px; font-weight: 800; font-variant-numeric: tabular-nums; color: var(--text-heading);
+}
+.ins-sub-divider {
+	height: 1px; background: var(--line); margin: 10px 0;
+}
+.ins-extra-item {
+	display: flex; align-items: center; justify-content: space-between;
+	gap: 8px; padding: 5px 9px; border-radius: 8px;
+	background: var(--sidebar-bg); border: 1px solid var(--line);
+	font-size: 12.5px; margin-bottom: 4px;
+}
+.ins-sec-label {
+	font-size: 11.5px; font-weight: 800; text-transform: uppercase;
+	letter-spacing: 0.04em; color: var(--text-muted);
+	margin: 10px 0 6px 0; display: flex; align-items: center; gap: 6px;
+}
+.ins-tir-wrap {
+	padding: 8px 12px; border-radius: 10px; background: var(--card-bg);
+	border: 1px solid var(--line); margin: 6px 0 12px 0;
+}
+.ins-tir-track {
+	display: flex; height: 9px; border-radius: 999px; overflow: hidden;
+	background: var(--sidebar-bg); margin: 5px 0;
+}
+</style>
+"""
 
 
 # ==============================================================================
@@ -612,32 +744,32 @@ def calculate_bolus_recommendation(
 		alerts.append({
 			"level": "critical",
 			"title": "🚨 AĞIR HİPOGLİSEMİ (<54 mg/dL) — İNSÜLİN KESİNLİKLE YAPILMAZ!",
-			"body": "Bilinç açıksa hemen 15-20 g hızlı karbonhidrat (150 ml meyve suyu veya 4 kesme şeker) verin, 15 dk sonra KŞ tekrar ölçün. Bilinç bulanıksa veya yutamıyorsa HİÇBİR ŞEY İÇİRMEYİN, GLUKAGON uygulayıp 112 ve veliyi arayın!",
+			"body": "Bilinç açıksa hemen 15-20 g hızlı karbonhidrat (150 ml meyve suyu veya 4 kesme şeker) verin, 15 dk sonra KŞ tekrar ölçün. Bilinç bulanıksa HİÇBİR ŞEY İÇİRMEYİN, GLUKAGON uygulayıp 112 ve veliyi arayın!",
 		})
 	elif is_hypo:
 		alerts.append({
 			"level": "critical",
 			"title": f"🚨 HİPOGLİSEMİ (<{hypo_thresh:.0f} mg/dL) — 15-15 ACİL PROTOKOLÜ!",
-			"body": "Önce 15 g hızlı etkili karbonhidrat verip 15 dk dinlendirin ve KŞ'yi tekrar ölçün. Kan şekeri en az 80–100 mg/dL üzerine çıkmadan insülin enjeksiyonu yapılmaz!",
+			"body": "Önce 15 g hızlı etkili karbonhidrat verip 15 dk dinlendirin ve KŞ'yi tekrar ölçün. Kan şekeri en az 80–100 mg/dL üzerine çıkmadan insülin yapılmaz!",
 		})
 
 	if ketone_positive:
 		alerts.append({
 			"level": "critical",
 			"title": "🚨 KETON POZİTİF (+) — EGZERSİZ YASAK & ACİL HEKİM/VELİ BİLDİRİMİ!",
-			"body": "Pozitif keton varlığında beden eğitimi / fiziksel aktivite kesinlikle yapılmaz (DKA riski). Bol su içirilmeli, veli ve çocuk endokrinoloji hekimi derhal bilgilendirilmelidir.",
+			"body": "Pozitif keton varlığında beden eğitimi / fiziksel aktivite kesinlikle yapılmaz (DKA riski). Bol su içirin, veli ve hekimi derhal bilgilendirin.",
 		})
 	elif is_hyper_ketone:
 		alerts.append({
 			"level": "warning",
 			"title": f"⚠️ YÜKSEK KAN ŞEKERİ (≥{hyper_thresh:.0f} mg/dL) — KETON KONTROLÜ GEREKLİ!",
-			"body": "İdrar veya kan ketonu kontrol edilmeli, öğrenciye bol su içirilmelidir. Keton pozitif çıkarsa egzersiz yapılmamalıdır.",
+			"body": "İdrar/kan ketonu kontrol edilmeli ve bol su içirilmelidir. Keton pozitifse egzersiz yapılmamalıdır.",
 		})
 	elif ketone_trace:
 		alerts.append({
 			"level": "warning",
 			"title": "⚠️ Eser / Sınırda Keton — Sıvı Alımı & 1-2 Saat Sonra Tekrar Ölçüm",
-			"body": "Bol su içirin, egzersiz şiddetini sınırlandırın ve 1-2 saat içinde kan şekeri + keton tekrarı yapın.",
+			"body": "Bol su içirin, egzersiz şiddetini sınırlandırın ve 1-2 saat içinde KŞ + keton tekrarı yapın.",
 		})
 
 	if act_pct > 0 and bg_mg_dl is not None:
@@ -645,7 +777,7 @@ def calculate_bolus_recommendation(
 			alerts.append({
 				"level": "warning",
 				"title": "🏃 Egzersiz Öncesi Düşük-Normal KŞ (70–99 mg/dL)",
-				"body": "Fiziksel aktivite öncesi hipoglisemiyi önlemek için ek 15 g karbonhidrat (1 küçük meyve/kraker) verilmesi ve 15 dk sonra tekrar KŞ bakılması önerilir.",
+				"body": "Aktivite öncesi hipoglisemiyi önlemek için ek 15 g karbonhidrat verilmesi ve 15 dk sonra tekrar KŞ bakılması önerilir.",
 			})
 		elif bg_mg_dl >= hyper_thresh:
 			alerts.append({
@@ -657,30 +789,28 @@ def calculate_bolus_recommendation(
 	if iob_units > 0.1:
 		alerts.append({
 			"level": "info",
-			"title": f"⏱️ Aktif İnsülin (IOB) Koruması Devrede: {iob_units:.2f} Ü",
-			"body": f"Son {profile.get('insulin_duration_hours', 3.5)} saat içinde uygulanan dozdan kalan {iob_units:.2f} Ü aktif insülin çifte doz (stacking) riskini önlemek için düzeltme dozundan düşüldü.",
+			"title": f"⏱️ Aktif İnsülin (IOB) Koruması: {iob_units:.2f} Ü",
+			"body": f"Son {profile.get('insulin_duration_hours', 3.5)} saat içindeki dozdan kalan {iob_units:.2f} Ü aktif insülin çifte doz riskini önlemek için düzeltme dozundan düşüldü.",
 		})
 
 	if exceeds_max:
 		alerts.append({
 			"level": "critical",
 			"title": f"🛑 Maksimum Tek Bolus Sınırı Aşıldı ({recommended_dose:.2f} Ü > {max_bolus:.1f} Ü)!",
-			"body": "Hesaplanan doz profildeki tek seferlik maksimum güvenlik sınırını aşıyor. Karbonhidrat girişini, İKO/İDF değerlerini doğrulayın ve hekim/veli onayı olmadan uygulamayın!",
+			"body": "Hesaplanan doz profildeki tek seferlik güvenlik sınırını aşıyor. Karbonhidrat girişini ve İKO/İDF değerlerini doğrulayın; hekim/veli onayı olmadan uygulamayın!",
 		})
 
-	# TDD/kg pediatrik referans kontrolü
 	tdd_kg_note = ""
 	if tdd_per_kg is not None:
 		if tdd_per_kg < 0.45:
 			tdd_kg_note = f"{tdd_per_kg:.2f} Ü/kg/gün (Balayı / Düşük İhtiyaç Dönemi)"
 		elif tdd_per_kg <= 1.0:
-			tdd_kg_note = f"{tdd_per_kg:.2f} Ü/kg/gün (Okul Çağı Tipik Pediatrik Aralık: 0.5–1.0 Ü/kg)"
+			tdd_kg_note = f"{tdd_per_kg:.2f} Ü/kg/gün (Okul Çağı Tipik Aralık: 0.5–1.0 Ü/kg)"
 		elif tdd_per_kg <= 1.5:
-			tdd_kg_note = f"{tdd_per_kg:.2f} Ü/kg/gün (Ergenlik / Büyüme Atılımı Aralığı: 1.0–1.5 Ü/kg)"
+			tdd_kg_note = f"{tdd_per_kg:.2f} Ü/kg/gün (Ergenlik / Büyüme Atılımı: 1.0–1.5 Ü/kg)"
 		else:
 			tdd_kg_note = f"{tdd_per_kg:.2f} Ü/kg/gün (Yüksek Doz İhtiyacı — Endokrinoloji Değerlendirmesi)"
 
-	# Adım adım şeffaf formül dökümü
 	formula_steps: list[str] = []
 	if meal_type != "Sadece Düzeltme (Öğünsüz)":
 		formula_steps.append(
@@ -834,8 +964,17 @@ def compute_glycemic_tir_stats(logs_df: pd.DataFrame, hypo_thresh: float = 70.0,
 
 
 # ==============================================================================
-# 5. ANA ARAYÜZ: 💉 İNSÜLİN & DİYABET YÖNETİM MERKEZİ (4 SEKME)
+# 5. ANA ARAYÜZ: MİNİMALİST & KULLANIŞLI İNSÜLİN & DİYABET MERKEZİ
 # ==============================================================================
+
+def _step_hdr_html(num: int | str, title: str, badge_html: str = "") -> str:
+	return (
+		f"<div class='ins-step-hdr'>"
+		f"<div class='ins-step-left'><span class='ins-step-num'>{html.escape(str(num))}</span><span>{html.escape(title)}</span></div>"
+		f"<div>{badge_html}</div>"
+		f"</div>"
+	)
+
 
 def _build_student_growth_bundle(ctx_api: dict[str, Any], person: sqlite3.Row) -> dict[str, Any]:
 	pid = int(person["id"])
@@ -860,9 +999,9 @@ def _build_student_growth_bundle(ctx_api: dict[str, Any], person: sqlite3.Row) -
 		"boy_cm": round(float(h_cm), 1) if h_cm else None,
 		"kilo_kg": round(float(w_kg), 1) if w_kg else None,
 		"vki_bmi": round(float(bmi_v), 2) if bmi_v else None,
-		"boy_persantil": f"%{h_ev['percentile']:.1f}p (Z: {h_ev['z']:+.2f})" if h_ev else "—",
-		"kilo_persantil": f"%{w_ev['percentile']:.1f}p (Z: {w_ev['z']:+.2f})" if w_ev else "—",
-		"vki_persantil": f"%{b_ev['percentile']:.1f}p ({b_ev['status']})" if b_ev else "—",
+		"boy_persantil": f"%{h_ev['percentile']:.0f}p" if h_ev else "—",
+		"kilo_persantil": f"%{w_ev['percentile']:.0f}p" if w_ev else "—",
+		"vki_persantil": f"%{b_ev['percentile']:.0f}p ({b_ev['status']})" if b_ev else "—",
 		"son_olcum_tarihi": meas.get("latest_measured_on") if meas.get("has_data") else None,
 	}
 
@@ -870,11 +1009,6 @@ def _build_student_growth_bundle(ctx_api: dict[str, Any], person: sqlite3.Row) -
 def render_insulin_diabetes_page(ctx_api: dict[str, Any]) -> None:
 	"""
 	`persantil.py` tarafından çağrılan ana '💉 İnsülin & Diyabet Yönetimi' sayfası.
-	ctx_api: connect_db, get_person_by_id, set_active_person, get_app_settings,
-	         _get_active_gemini_config, _build_person_anon_bundle, get_person_latest_measurements,
-	         evaluate_measurement, age_in_months, build_ai_custom_report_docx,
-	         build_ai_custom_report_excel, mask_kvkk_value, get_person_disability_profile,
-	         format_disability_badge_text, sync_after_person_mutation, clear_all_data_caches
 	"""
 	connect_db_fn = ctx_api["connect_db"]
 	with connect_db_fn() as conn:
@@ -896,16 +1030,22 @@ def render_insulin_diabetes_page(ctx_api: dict[str, Any]) -> None:
 			   ORDER BY COALESCE(dp.is_diabetic, 0) DESC, c.name ASC, s.full_name ASC"""
 		).fetchall()
 
-	ui.markdown("## 💉 Okulda Diyabet & İnsülin Doz Yönetim Merkezi")
-	ui.caption(
-		"Öğrenci profili (yaş, boy, kilo, WHO persantil, İKO/İDF), aylık okul yemek programı, ekstra yiyecekler, fiziksel aktivite ve aktif insülin (IOB) korumasıyla kesin pediatrik bolus hesabı + Gemini AI klinik değerlendirme."
+	ui.markdown(_DIABETES_MINIMAL_CSS, unsafe_allow_html=True)
+
+	safety_tip = (
+		"Bu modül, çocuk endokrinoloji hekiminin belirlediği İKO / İDF / Hedef KŞ parametrelerine göre "
+		"okul hemşiresine karar desteği sağlar. Uygulama öncesi kan şekeri ölçümü ve hekim reçetesi doğrulanmalıdır."
 	)
 	ui.markdown(
-		"<div style='background:rgba(2,132,199,0.08);border:1px solid rgba(2,132,199,0.28);border-left:4px solid #0284c7;"
-		"padding:8px 12px;border-radius:8px;margin-bottom:10px;font-size:12.5px;'>"
-		"⚕️ <strong>Klinik Güvenlik Notu:</strong> Bu modül, çocuğun çocuk endokrinoloji hekimi tarafından belirlenen İKO / İDF / Hedef KŞ parametrelerine göre okul hemşiresine karar desteği sağlar. "
-		"Her uygulama öncesi kan şekeri ölçümü doğrulanmalı, hekim reçetesi esas alınmalıdır."
-		"</div>",
+		f"<div class='ins-hdr-row'>"
+		f"<div class='ins-hdr-title'>"
+		f"<h2>💉 Diyabet &amp; İnsülin Yönetimi</h2>"
+		f"<span class='ins-hdr-sub'>Pediatrik Bolus · Yemek Karbonhidratı · Glisemik İzlem</span>"
+		f"</div>"
+		f"<div class='ins-hdr-badges'>"
+		f"<span class='ins-pill ins-pill-blue'>💙 {len(diab_rows)} Takipli</span>"
+		f"<span class='ins-pill' title='{html.escape(safety_tip, quote=True)}' style='cursor:help;'>⚕️ Hekim Reçetesi Karar Desteği</span>"
+		f"</div></div>",
 		unsafe_allow_html=True,
 	)
 
@@ -913,49 +1053,48 @@ def render_insulin_diabetes_page(ctx_api: dict[str, Any]) -> None:
 		ui.info("Sistemde henüz kayıtlı öğrenci bulunmuyor. Önce '👥 Öğrenciler' sayfasından öğrenci ekleyin.")
 		return
 
-	# 1-Tık Diyabet Takipli Öğrenci Hızlı Geçiş Hapları
+	# Diyabet takipli öğrenciler için tek tık hızlı geçiş şeridi
 	is_sec_vis = ctx_api.get("is_section_visible") or (lambda _k: True)
 	active_pid = ui.session_state.get("active_person_id")
 	if diab_rows and is_sec_vis("insulin_quick_chips"):
-		ui.caption("⚡ **Diyabet Takipli Öğrenciler (Tek Tıkla Geçiş):**")
-		chip_n = min(5, len(diab_rows))
-		chip_cols = ui.columns(chip_n)
+		chip_n = min(6, len(diab_rows))
+		chip_cols = ui.columns(chip_n, gap="small")
 		for d_idx, dr in enumerate(diab_rows):
 			d_sid = int(dr["student_id"])
 			is_cur_d = (active_pid is not None and int(active_pid) == d_sid)
 			d_nm = ctx_api["mask_kvkk_value"](dr["full_name"], "name")
-			btn_lbl = f"{'✅ ' if is_cur_d else '💙 '}{d_nm} ({dr['class_name'] or '—'})"
+			btn_lbl = f"{'✓ ' if is_cur_d else '💙 '}{d_nm} · {dr['class_name'] or '—'}"
 			with chip_cols[d_idx % chip_n]:
 				if ui.button(btn_lbl, key=f"ins_quick_diab_chip_{d_sid}", type=("primary" if is_cur_d else "secondary"), use_container_width=True):
 					ctx_api["set_active_person"](d_sid)
 					ui.session_state.pop("ins_main_person_picker", None)
 					ui.rerun()
 
-	# Hızlı Öğrenci Seçici (Diyabetli öğrenciler 💙 etiketiyle en üstte!)
+	# Öğrenci Seçici + Hızlı Reçete Kısayolu
 	opts_labels: list[str] = []
 	lbl_to_id: dict[str, int] = {}
 	sel_idx = 0
 	for idx, sr in enumerate(all_stu_rows):
-		tag = "💙 [Diyabet Takipli] " if int(sr["is_diab"] or 0) == 1 else "👤 "
-		sno = f" (No: {sr['student_no']})" if sr["student_no"] else ""
-		lbl = f"{tag}{sr['full_name']} · {sr['class_name']}{sno}"
+		tag = "💙 " if int(sr["is_diab"] or 0) == 1 else "👤 "
+		sno = f" · No:{sr['student_no']}" if sr["student_no"] else ""
+		lbl = f"{tag}{sr['full_name']} ({sr['class_name']}{sno})"
 		opts_labels.append(lbl)
 		lbl_to_id[lbl] = int(sr["id"])
 		if active_pid and int(sr["id"]) == int(active_pid):
 			sel_idx = idx
 
-	# Aktif kişi başka yerden (chip / Cmd+K) değiştiyse picker'ı senkronize et
 	if ui.session_state.get("ins_picker_synced_pid") != active_pid:
 		ui.session_state["ins_main_person_picker"] = opts_labels[sel_idx]
 		ui.session_state["ins_picker_synced_pid"] = active_pid
 
-	top_s1, top_s2 = ui.columns([2.6, 1.4])
-	with top_s1:
+	pick_c1, pick_c2 = ui.columns([3.3, 0.9], gap="small", vertical_alignment="bottom")
+	with pick_c1:
 		picked_lbl = ui.selectbox(
-			"🎓 Diyabet / İnsülin Takibi Yapılacak Öğrenci (Diyabetli öğrenciler en üsttedir)",
+			"Öğrenci",
 			opts_labels,
 			index=sel_idx,
 			key="ins_main_person_picker",
+			label_visibility="collapsed",
 		)
 	sel_pid = lbl_to_id.get(picked_lbl, int(all_stu_rows[0]["id"]))
 	if sel_pid != active_pid:
@@ -968,61 +1107,84 @@ def render_insulin_diabetes_page(ctx_api: dict[str, Any]) -> None:
 		return
 
 	prof = get_diabetes_profile(connect_db_fn, sel_pid)
+	with pick_c2:
+		prof_btn_lbl = "⚙️ Reçete Düzenle" if (prof.get("_exists") and prof.get("is_diabetic")) else "⚙️ Reçete Tanımla"
+		if ui.button(prof_btn_lbl, key=f"ins_jump_prof_{sel_pid}", type="secondary", use_container_width=True):
+			ui.session_state["_force_tab_label"] = TAB_PROF
+			ui.rerun()
+
 	growth = _build_student_growth_bundle(ctx_api, person)
 	dp_dis = ctx_api["get_person_disability_profile"](sel_pid, person=person)
 	now_dt = datetime.now()
 	iob_now, active_boluses = calculate_active_iob(connect_db_fn, sel_pid, now_dt, float(prof.get("insulin_duration_hours") or 3.5))
 	last_site, last_site_dt = get_last_injection_site(connect_db_fn, sel_pid)
 
-	with top_s2:
-		ui.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
-		ui.metric("💙 Diyabet Takipli Öğrenci", f"{len(diab_rows)} öğrenci")
-
-	# Öğrenci Klinik Özet Bandı (Yaş, Boy, Kilo, VKİ/Persantil, İKO/İDF, IOB, Engel)
+	# Tek Yüzeyli Kompakt Hasta Bağlam Bandı
 	disp_name = ctx_api["mask_kvkk_value"](person["full_name"], "name")
-	bw_str = (
-		f"📏 Boy: <b>{growth['boy_cm']} cm</b> ({growth['boy_persantil']}) · ⚖️ Kilo: <b>{growth['kilo_kg']} kg</b> ({growth['kilo_persantil']}) · VKİ: <b>{growth['vki_bmi']}</b>"
+	anthro_html = (
+		f"<span class='ins-pill'>📏 {growth['boy_cm']} cm ({growth['boy_persantil']})</span>"
+		f"<span class='ins-pill'>⚖️ {growth['kilo_kg']} kg ({growth['kilo_persantil']})</span>"
+		f"<span class='ins-pill'>VKİ {growth['vki_bmi']}</span>"
 		if (growth["boy_cm"] and growth["kilo_kg"])
-		else "📏 Boy/Kilo ölçümü girilmemiş *(AI daha doğru yorum için boy-kilo ölçümünü kullanır)*"
+		else "<span class='ins-pill ins-pill-amber'>📏 Boy/kilo kaydı yok</span>"
 	)
-	prof_status_html = (
-		f"<span style='background:#0284c7;color:#fff;padding:2px 9px;border-radius:999px;font-size:11.5px;font-weight:700;'>💙 {html.escape(str(prof['diabetes_type']))}</span> "
-		f"<b>İKO (S/Ö/A):</b> 1/{prof['icr_breakfast']:.0f}g · 1/{prof['icr_lunch']:.0f}g · 1/{prof['icr_snack']:.0f}g &nbsp;|&nbsp; "
-		f"<b>İDF:</b> {prof['isf']:.0f} &nbsp;|&nbsp; <b>Hedef:</b> {prof['target_bg']:.0f} mg/dL &nbsp;|&nbsp; "
-		f"<b>Aktif IOB:</b> <code>{iob_now:.2f} Ü</code>"
-		if prof.get("_exists") and prof.get("is_diabetic")
-		else "<span style='background:#f59e0b;color:#fff;padding:2px 9px;border-radius:999px;font-size:11.5px;font-weight:700;'>⚠️ Diyabet Profili Henüz Tanımlanmadı</span> — '⚙️ Diyabet Profili' sekmesinden hekim İKO/İDF değerlerini kaydedin (varsayılan 1/15g ve İDF 50 ile önizleme yapılıyor)."
-	)
-	dis_line = f"<div style='margin-top:4px;color:#6d28d9;font-size:12px;'>♿ <b>Özel Gereksinim/Engel:</b> {html.escape(ctx_api['format_disability_badge_text'](dp_dis))}</div>" if dp_dis.get("has_disability") else ""
-	site_line = f" · 💉 <b>Son Enjeksiyon:</b> {html.escape(last_site)} ({html.escape(last_site_dt)})" if last_site else ""
-	gluc_line = f" · 🆘 <b>Glukagon:</b> {html.escape(str(prof.get('glucagon_location') or ''))}" if prof.get("glucagon_location") else ""
 
-	with ui.container(border=True):
-		ui.markdown(
-			f"<div style='display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;'>"
-			f"<div><strong style='font-size:1.05rem;'>👤 {html.escape(disp_name)}</strong> · {html.escape(str(person['class_name']))} · {growth['cinsiyet']} · 🎂 {growth['yas_etiketi']}</div>"
-			f"<div style='font-size:12.5px;'>{prof_status_html}</div>"
-			f"</div>"
-			f"<div style='margin-top:5px;font-size:12.5px;color:var(--text-muted);'>{bw_str}{site_line}{gluc_line}</div>"
-			f"{dis_line}",
-			unsafe_allow_html=True,
+	iob_cls = "ins-pill ins-pill-amber" if iob_now > 0.1 else "ins-pill ins-pill-teal"
+	if prof.get("_exists") and prof.get("is_diabetic"):
+		rx_pills = (
+			f"<span class='ins-pill ins-pill-blue'>💙 {html.escape(str(prof['diabetes_type']).split(' (')[0])}</span>"
+			f"<span class='ins-pill'>İKO {prof['icr_breakfast']:.0f} / {prof['icr_lunch']:.0f} / {prof['icr_snack']:.0f} g</span>"
+			f"<span class='ins-pill'>İDF {prof['isf']:.0f}</span>"
+			f"<span class='ins-pill'>Hedef {prof['target_bg']:.0f}</span>"
+			f"<span class='{iob_cls}'>⏱️ IOB {iob_now:.2f} Ü</span>"
+		)
+	else:
+		rx_pills = (
+			f"<span class='ins-pill ins-pill-amber'>⚠️ Reçete tanımlanmadı (Varsayılan İKO 1/15g · İDF 50)</span>"
+			f"<span class='{iob_cls}'>⏱️ IOB {iob_now:.2f} Ü</span>"
 		)
 
-	tabs = ui.tabs([
-		"🧮 İnsülin Doz Hesaplayıcı & AI Yorum",
-		"📅 Aylık Yemek Programı & İnsülin Planı",
-		"⚙️ Öğrenci Diyabet Profili (İKO / İDF)",
-		"📈 Uygulama Defteri, TIR Trendi & Raporlar",
-	], lazy=True)
+	extra_meta_parts: list[str] = []
+	if last_site:
+		extra_meta_parts.append(f"<span>💉 <b>Son Bölge:</b> {html.escape(last_site)} <small>({html.escape(last_site_dt)})</small></span>")
+	if prof.get("glucagon_location"):
+		extra_meta_parts.append(f"<span>🆘 <b>Glukagon:</b> {html.escape(str(prof['glucagon_location']))}</span>")
+	if prof.get("cgm_device"):
+		extra_meta_parts.append(f"<span>📡 <b>Sensör:</b> {html.escape(str(prof['cgm_device']))}</span>")
+	if dp_dis.get("has_disability"):
+		extra_meta_parts.append(
+			f"<span class='ins-pill ins-pill-purple'>♿ {html.escape(ctx_api['format_disability_badge_text'](dp_dis))}</span>"
+		)
+	extra_meta_html = (
+		f"<div class='ins-patient-meta'>{' &nbsp;·&nbsp; '.join(extra_meta_parts)}</div>"
+		if extra_meta_parts else ""
+	)
 
+	ui.markdown(
+		f"<div class='ins-patient-banner'>"
+		f"<div class='ins-patient-top'>"
+		f"<div class='ins-patient-id'>"
+		f"<span class='ins-patient-name'>👤 {html.escape(disp_name)}</span>"
+		f"<span class='ins-pill'>{html.escape(str(person['class_name']))}</span>"
+		f"<span class='ins-pill'>{growth['cinsiyet']} · {growth['yas_etiketi']}</span>"
+		f"{anthro_html}"
+		f"</div>"
+		f"<div class='ins-hdr-badges'>{rx_pills}</div>"
+		f"</div>"
+		f"{extra_meta_html}"
+		f"</div>",
+		unsafe_allow_html=True,
+	)
+
+	tabs = ui.tabs([TAB_CALC, TAB_MENU, TAB_LOGS, TAB_PROF], orientation="segmented", lazy=True)
 	tabs.render(0, lambda: _render_tab_bolus_calculator(ctx_api, person, sel_pid, prof, growth, dp_dis, iob_now, active_boluses, last_site))
 	tabs.render(1, lambda: _render_tab_monthly_menu(ctx_api, person, sel_pid, prof))
-	tabs.render(2, lambda: _render_tab_diabetes_profile(ctx_api, person, sel_pid, prof, growth))
-	tabs.render(3, lambda: _render_tab_logs_and_trends(ctx_api, person, sel_pid, prof, growth))
+	tabs.render(2, lambda: _render_tab_logs_and_trends(ctx_api, person, sel_pid, prof, growth))
+	tabs.render(3, lambda: _render_tab_diabetes_profile(ctx_api, person, sel_pid, prof, growth))
 
 
 # ==============================================================================
-# SEKME 1: AKILLI BOLUS HESAPLAYICI + MENÜ + EKSTRA YİYECEK + AKTİVİTE + GEMİNİ
+# SEKME 1: MİNİMALİST BOLUS HESAPLAYICI & BİRLEŞİK ONAY KOKPİTİ
 # ==============================================================================
 
 def _render_tab_bolus_calculator(
@@ -1040,7 +1202,6 @@ def _render_tab_bolus_calculator(
 	is_gai_on, gai_key, gai_model = ctx_api["_get_active_gemini_config"]()
 	disp_name = ctx_api["mask_kvkk_value"](person["full_name"], "name")
 
-	# Ekstra yiyecek oturum listesi
 	extras_key = f"ins_extras_list_{student_id}"
 	if extras_key not in ui.session_state or not isinstance(ui.session_state[extras_key], list):
 		ui.session_state[extras_key] = []
@@ -1050,31 +1211,36 @@ def _render_tab_bolus_calculator(
 	if f_msg:
 		ui.success(f_msg)
 
-	col_in, col_out = ui.columns([1.22, 0.98], gap="large", sticky_last_col=True)
+	col_in, col_out = ui.columns([1.18, 0.96], gap="medium", sticky_last_col=True)
 
 	with col_in:
+		# --- ADIM 1: Kan Şekeri, Öğün & Kompakt Zaman Seçici ---
 		with ui.container(border=True):
-			hdr_m1, hdr_m2, hdr_m3 = ui.columns([2.3, 0.85, 0.85])
-			with hdr_m1:
-				ui.markdown("##### 1️⃣ Öğün, Kan Şekeri ve Keton Durumu")
-			with hdr_m2:
-				if ui.button("📅 Bugün", key=f"ins_dt_today_{student_id}", type="secondary", use_container_width=True):
-					ui.session_state[f"ins_calc_date_{student_id}"] = date.today()
-					ui.rerun()
-			with hdr_m3:
-				if ui.button("➡️ Yarın", key=f"ins_dt_tom_{student_id}", type="secondary", use_container_width=True):
-					ui.session_state[f"ins_calc_date_{student_id}"] = date.today() + timedelta(days=1)
-					ui.rerun()
-			d1, d2, d3 = ui.columns(3)
-			sel_date = d1.date_input("Tarih", value=date.today(), key=f"ins_calc_date_{student_id}")
-			sel_time = d2.time_input("Saat", value=datetime.now().replace(second=0, microsecond=0).time(), key=f"ins_calc_time_{student_id}")
-			meal_type = d3.selectbox("Öğün Türü", MEAL_TYPE_OPTIONS, index=0, key=f"ins_calc_meal_{student_id}")
+			bg_prev_str = str(ui.session_state.get(f"ins_calc_bg_{student_id}") or "").strip()
+			bg_badge_html = "<span class='ins-pill'>KŞ opsiyonel</span>"
+			if bg_prev_str:
+				try:
+					_bp = float(bg_prev_str.replace(",", "."))
+					if 20.0 <= _bp <= 900.0:
+						if _bp < float(prof.get("hypo_threshold") or 70.0):
+							bg_badge_html = f"<span class='ins-pill ins-pill-red'>🚨 Hipo · {_bp:.0f} mg/dL</span>"
+						elif _bp >= float(prof.get("hyper_ketone_threshold") or 250.0):
+							bg_badge_html = f"<span class='ins-pill ins-pill-red'>🔺 Yüksek · {_bp:.0f} mg/dL</span>"
+						elif _bp > float(prof.get("correction_threshold") or 150.0):
+							bg_badge_html = f"<span class='ins-pill ins-pill-amber'>🟡 Düzeltme · {_bp:.0f} mg/dL</span>"
+						else:
+							bg_badge_html = f"<span class='ins-pill ins-pill-teal'>🟢 Hedef Aralık · {_bp:.0f} mg/dL</span>"
+				except ValueError:
+					pass
 
-			b1, b2 = ui.columns([1.15, 1.35])
-			bg_raw = b1.text_input(
-				"🩸 Güncel Kan Şekeri (mg/dL)",
+			ui.markdown(_step_hdr_html(1, "Kan Şekeri & Öğün", bg_badge_html), unsafe_allow_html=True)
+
+			p1, p2, p3 = ui.columns([1.15, 1.0, 1.15], gap="small")
+			meal_type = p1.selectbox("Öğün", MEAL_TYPE_OPTIONS, index=0, key=f"ins_calc_meal_{student_id}")
+			bg_raw = p2.text_input(
+				"🩸 Kan Şekeri (mg/dL)",
 				value="",
-				placeholder="Örn: 165 (boş bırakılabilir)",
+				placeholder="Örn: 145",
 				key=f"ins_calc_bg_{student_id}",
 			)
 			bg_val: float | None = None
@@ -1085,93 +1251,123 @@ def _render_tab_bolus_calculator(
 						bg_val = parsed_bg
 				except ValueError:
 					ui.warning("Kan şekeri sayısal olmalıdır (örn: 145).")
-			ketone_st = b2.selectbox("🧪 Keton Durumu (KŞ ≥ 250 ise kontrol edin)", KETONE_OPTIONS, index=0, key=f"ins_calc_ket_{student_id}")
+			ketone_st = p3.selectbox("🧪 Keton", KETONE_OPTIONS, index=0, key=f"ins_calc_ket_{student_id}")
 
-		# 2. Günün Aylık Yemek Menüsü
+			# Kademeli açılan kompakt zaman çubuğu (Varsayılan: Bugün & Şimdi)
+			raw_d_state = ui.session_state.get(f"ins_calc_date_{student_id}")
+			prev_d = raw_d_state if isinstance(raw_d_state, date) else date.today()
+			is_other_day = (prev_d != date.today())
+			d_tag = "Bugün" if not is_other_day else prev_d.strftime("%d.%m.%Y")
+			with ui.expander(f"🕒 Uygulama Zamanı: {d_tag} (Tarih / Saat Değiştir)", expanded=is_other_day):
+				t1, t2, t3, t4 = ui.columns([1.2, 1.0, 0.75, 0.75], gap="small", vertical_alignment="bottom")
+				sel_date = t1.date_input("Tarih", value=date.today(), key=f"ins_calc_date_{student_id}") or date.today()
+				sel_time = t2.time_input("Saat", value=datetime.now().replace(second=0, microsecond=0).time(), key=f"ins_calc_time_{student_id}") or datetime.now().replace(second=0, microsecond=0).time()
+				with t3:
+					if ui.button("Bugün", key=f"ins_dt_today_{student_id}", type="secondary", use_container_width=True):
+						ui.session_state[f"ins_calc_date_{student_id}"] = date.today()
+						ui.rerun()
+				with t4:
+					if ui.button("Yarın", key=f"ins_dt_tom_{student_id}", type="secondary", use_container_width=True):
+						ui.session_state[f"ins_calc_date_{student_id}"] = date.today() + timedelta(days=1)
+						ui.rerun()
+
+		# --- ADIM 2: Okul Yemek Menüsü ---
 		menu_carbs_raw = 0.0
 		menu_consumed_pct = 100.0
 		selected_menu_dish_names: list[str] = []
 
 		if meal_type != "Sadece Düzeltme (Öğünsüz)":
 			with ui.container(border=True):
-				ui.markdown(f"##### 2️⃣ Günün Okul Yemek Menüsü ({sel_date.strftime('%d.%m.%Y')} · {meal_type})")
 				day_menu = get_school_menu_for_date(connect_db_fn, sel_date.isoformat(), meal_type)
-				if day_menu and day_menu.get("source") == "cafeteria_module":
-					ui.caption("🍽️ **Yemekhane Yönetimi** modülündeki günlük menü planından karbonhidrat değerleri otomatik aktarıldı.")
+				src_badge = (
+					"<span class='ins-pill ins-pill-teal'>🍽️ Yemekhane Senkron</span>"
+					if (day_menu and day_menu.get("source") == "cafeteria_module")
+					else f"<span class='ins-pill'>{sel_date.strftime('%d.%m')} · {html.escape(meal_type)}</span>"
+				)
+				ui.markdown(_step_hdr_html(2, "Okul Menüsü", src_badge), unsafe_allow_html=True)
+
 				if day_menu and day_menu.get("items"):
 					m_items = day_menu["items"]
 					item_labels = [
-						f"{it['name']} — {it.get('portion', '1 porsiyon')} ({float(it.get('carbs_g') or 0):.0f} g karb)"
+						f"{it['name']} ({float(it.get('carbs_g') or 0):.0f}g)"
 						for it in m_items
 					]
 					picked_dishes = ui.multiselect(
-						"Öğrencinin Tabak / Menüden Aldığı Yemekler (Yemediğini çıkarabilirsiniz)",
+						"Tüketilen Menü Kalemleri",
 						item_labels,
 						default=item_labels,
 						key=f"ins_menu_pick_{student_id}_{sel_date.isoformat()}_{meal_type}",
 					)
+					gi_warns: list[str] = []
 					for lbl_i, it in zip(item_labels, m_items):
 						if lbl_i in picked_dishes:
 							menu_carbs_raw += float(it.get("carbs_g") or 0.0)
 							selected_menu_dish_names.append(f"{it['name']} ({float(it.get('carbs_g') or 0):.0f}g)")
 							if str(it.get("fat_protein_note") or "").strip():
-								ui.caption(f"⚠️ **{it['name']}:** {it['fat_protein_note']}")
+								gi_warns.append(f"**{it['name']}:** {it['fat_protein_note']}")
+					if gi_warns:
+						ui.caption("⚠️ " + " · ".join(gi_warns))
 
-					cons_c1, cons_c2 = ui.columns([1.4, 1.0])
-					with cons_c1:
-						cons_opts = {
-							"🍽️ Tamamını Yedi (%100)": 100.0,
-							"🍽️ Çoğunu Yedi (%75)": 75.0,
-							"🍽️ Yarısını Yedi (%50)": 50.0,
-							"🍽️ Çok Az Yedi (%25)": 25.0,
-							"🍽️ Ekstra / Büyük Porsiyon (%125)": 125.0,
-							"🍽️ Hiç Yemedi (%0)": 0.0,
-						}
-						cons_lbl = ui.selectbox(
-							"Tüketilen Porsiyon Oranı",
-							list(cons_opts.keys()),
-							index=0,
-							key=f"ins_menu_cons_{student_id}_{sel_date.isoformat()}",
-						)
-						menu_consumed_pct = cons_opts[cons_lbl]
-					with cons_c2:
-						manual_menu_c = ui.number_input(
-							"Menü Karb Düzeltme (g)",
-							min_value=0.0,
-							max_value=300.0,
-							step=1.0,
-							value=round(menu_carbs_raw, 1),
-							key=f"ins_menu_ovr_{student_id}_{sel_date.isoformat()}_{len(picked_dishes)}",
-						)
-						menu_carbs_raw = float(manual_menu_c)
+					cons_c1, cons_c2 = ui.columns([1.35, 1.0], gap="small")
+					cons_opts = {
+						"Tamamını Yedi (%100)": 100.0,
+						"Çoğunu Yedi (%75)": 75.0,
+						"Yarısını Yedi (%50)": 50.0,
+						"Az Yedi (%25)": 25.0,
+						"Büyük Porsiyon (%125)": 125.0,
+						"Hiç Yemedi (%0)": 0.0,
+					}
+					cons_lbl = cons_c1.selectbox(
+						"Tüketim Oranı",
+						list(cons_opts.keys()),
+						index=0,
+						key=f"ins_menu_cons_{student_id}_{sel_date.isoformat()}",
+					)
+					menu_consumed_pct = cons_opts[cons_lbl]
+					manual_menu_c = cons_c2.number_input(
+						"Menü Karb (g)",
+						min_value=0.0,
+						max_value=300.0,
+						step=1.0,
+						value=round(menu_carbs_raw, 1),
+						key=f"ins_menu_ovr_{student_id}_{sel_date.isoformat()}_{len(picked_dishes)}",
+					)
+					menu_carbs_raw = float(manual_menu_c or 0.0)
 				else:
-					ui.caption(f"📅 `{sel_date.strftime('%d.%m.%Y')}` için kayıtlı menü yok — Yemekhane veya Aylık Yemek Programı'ndan ekleyebilir ya da aşağıya manuel girebilirsiniz.")
+					mc_1, mc_2 = ui.columns([2.1, 1.0], gap="small", vertical_alignment="bottom")
 					menu_carbs_raw = float(
-						ui.number_input(
-							"Manuel Öğün Karbonhidratı (g)",
+						mc_1.number_input(
+							"Öğün Karbonhidratı (g) — Kayıtlı menü yok",
 							min_value=0.0,
 							max_value=300.0,
 							step=1.0,
 							value=0.0,
 							key=f"ins_manual_meal_carbs_{student_id}",
-						)
+						) or 0.0
 					)
+					with mc_2:
+						if ui.button("📅 Menü Planla", key=f"ins_go_menu_tab_{student_id}", type="secondary", use_container_width=True):
+							ui.session_state["_force_tab_label"] = TAB_MENU
+							ui.rerun()
 					menu_consumed_pct = 100.0
 
-			# 3. Ekstra Yiyecekler / Kantin / Beslenme Çantası + Gemini AI Karb Tahminleyici
+			# --- ADIM 3: Ekstra Yiyecek & Atıştırmalık (Sadeleştirilmiş + AI Sorgu + Popover Araçlar) ---
 			with ui.container(border=True):
-				ui.markdown("##### 3️⃣ Ekstra Yedikleri / Yiyecekleri *(Kantin, Beslenme Çantası, Ara Öğün)*")
-				ui.caption("Tek tıkla sık tüketilen okul yiyeceklerinden ekleyin veya Gemini AI'ya yazılı/fotoğraflı karb hesaplattırın:")
-				q_cols = ui.columns(4)
-				for qi, qf in enumerate(QUICK_EXTRA_FOODS[:8]):
-					with q_cols[qi % 4]:
-						if ui.button(qf["label"], key=f"ins_qf_{student_id}_{qi}", type="secondary", use_container_width=True):
-							ui.session_state[extras_key].append({"name": qf["name"], "carbs_g": qf["carbs_g"], "gi": qf["gi"]})
-							ui.rerun()
+				cur_extras_prev: list[dict[str, Any]] = ui.session_state.get(extras_key) or []
+				ex_prev_sum = sum(float(x.get("carbs_g") or 0.0) for x in cur_extras_prev)
+				ex_badge = (
+					f"<span class='ins-pill ins-pill-teal'>🥨 +{ex_prev_sum:.1f} g ({len(cur_extras_prev)} kalem)</span>"
+					if cur_extras_prev else "<span class='ins-pill'>Kantin / Beslenme</span>"
+				)
+				ui.markdown(_step_hdr_html(3, "Ekstra Yedikleri / Atıştırmalık", ex_badge), unsafe_allow_html=True)
 
 				ai_info_key = f"ins_ex_ai_info_{student_id}"
-				ex_c1, ex_c2, ex_c3, ex_c4 = ui.columns([2.0, 1.05, 0.85, 0.8], vertical_alignment="bottom")
-				ex_name = ex_c1.text_input("Ekstra Yiyecek / Atıştırmalık Adı", placeholder="Örn: 1 paket çubuk kraker / ev yapımı kek", key=f"ins_ex_nm_{student_id}")
+				ex_c1, ex_c2, ex_c3, ex_c4 = ui.columns([2.0, 1.05, 0.82, 0.78], gap="small", vertical_alignment="bottom")
+				ex_name = ex_c1.text_input(
+					"Ekstra Yiyecek / Atıştırmalık Adı",
+					placeholder="Örn: 1 paket çubuk kraker / ev yapımı kek",
+					key=f"ins_ex_nm_{student_id}",
+				)
 				with ex_c2:
 					if ui.button(
 						"✨ AI ile Bilgi Al",
@@ -1186,7 +1382,7 @@ def _render_tab_bolus_calculator(
 						elif not is_gai_on:
 							ui.warning("Gemini AI kapalı veya API anahtarı tanımlı değil (Ayarlar > Yapay Zekâ & KVKK).")
 						else:
-							with ui.spinner("Gemini AI besin değerlerini ve karbonhidrat miktarını hesaplıyor..."):
+							with ui.spinner("Gemini AI besin değerlerini hesaplıyor..."):
 								ok_lk, lk_res, used_lk = gai.estimate_extra_foods_carbs_with_gemini(
 									api_key=gai_key,
 									model=gai_model,
@@ -1218,7 +1414,7 @@ def _render_tab_bolus_calculator(
 								and str(cached_lk.get("query") or "").strip().lower() == ex_name.strip().lower()
 								and bool(cached_lk.get("items"))
 							)
-							if matched_lk and len(cached_lk["items"]) > 1 and abs(float(ex_cg) - float(cached_lk.get("total_carbs_g") or 0.0)) < 0.2:
+							if matched_lk and len(cached_lk["items"]) > 1 and abs(float(ex_cg or 0.0) - float(cached_lk.get("total_carbs_g") or 0.0)) < 0.2:
 								for lk_it in cached_lk["items"]:
 									p_txt = f" ({lk_it.get('portion')})" if lk_it.get("portion") else ""
 									ui.session_state[extras_key].append({
@@ -1239,7 +1435,7 @@ def _render_tab_bolus_calculator(
 										disp_nm_add = f"{disp_nm_add} ({it0['portion']})"
 								ui.session_state[extras_key].append({
 									"name": disp_nm_add,
-									"carbs_g": float(ex_cg),
+									"carbs_g": float(ex_cg or 0.0),
 									"kcal": kcal_pick,
 									"gi": gi_pick,
 								})
@@ -1256,76 +1452,116 @@ def _render_tab_bolus_calculator(
 							f"**{html.escape(str(_it['name']))}** ({html.escape(str(_it.get('portion') or '1 porsiyon'))}: "
 							f"`{float(_it.get('carbs_g') or 0):.1f}g karb`{_kc_s}, Gİ: *{_it.get('gi', 'Orta')}*)"
 						)
-					tot_kc_txt = f" · Yaklaşık **{int(cur_ai_info['total_kcal'])} kcal**" if float(cur_ai_info.get("total_kcal") or 0) > 0 else ""
+					tot_kc_txt = f" · ~**{int(cur_ai_info['total_kcal'])} kcal**" if float(cur_ai_info.get("total_kcal") or 0) > 0 else ""
 					gn_txt = f"\n\n💡 *{cur_ai_info['glycemic_note']}*" if cur_ai_info.get("glycemic_note") else ""
 					ui.info(
-						f"🤖 **AI Besin & Karbonhidrat Bilgisi** *(Karb kutusuna `{cur_ai_info['total_carbs_g']:.1f} g` aktarıldı{tot_kc_txt}; doğrudan **➕ Ekle** butonuna basabilirsiniz)*:\n"
+						f"🤖 **AI Besin & Karbonhidrat Bilgisi** *(`{cur_ai_info['total_carbs_g']:.1f} g` Karb kutusuna aktarıldı{tot_kc_txt}; **➕ Ekle** ile listeye alabilirsiniz)*:\n"
 						+ " · ".join(it_summaries)
 						+ gn_txt
 					)
 
-				if is_gai_on:
-					with ui.expander("✨ Gemini AI ile Yiyecek Metni veya Tabak Fotoğrafından Karbonhidrat Hesapla", expanded=False):
-						ai_food_txt = ui.text_input(
-							"Ne yedi / yiyecek? (Serbest Türkçe yazın)",
-							placeholder="Örn: 1 küçük tabak spagetti, 1 dilim karpuz ve yarım bardak ayran",
-							key=f"ins_ai_food_txt_{student_id}",
-						)
-						ai_food_img = ui.file_uploader(
-							"📸 Veya Yemek / Atıştırmalık Fotoğrafı Yükle (Opsiyonel)",
-							type=["png", "jpg", "jpeg", "webp"],
-							key=f"ins_ai_food_img_{student_id}",
-						)
-						if ui.button("✨ Gemini ile Karbonhidrat Hesapla ve Listeye Ekle", type="primary", key=f"ins_btn_ai_food_{student_id}", use_container_width=True):
-							f_bytes = ai_food_img.getvalue() if ai_food_img is not None else None
-							f_name = ai_food_img.name if ai_food_img is not None else ""
-							with ui.spinner("Gemini porsiyon karbonhidratlarını hesaplıyor..."):
-								ok_ef, ef_res, used_ef = gai.estimate_extra_foods_carbs_with_gemini(
-									api_key=gai_key,
-									model=gai_model,
-									food_description=ai_food_txt,
-									file_bytes=f_bytes,
-									file_name=f_name,
-									student_age_years=growth.get("yas_yil"),
-								)
-							if ok_ef and ef_res.get("items"):
-								for it in ef_res["items"]:
-									ui.session_state[extras_key].append({
-										"name": f"{it['name']} ({it.get('portion', '')})".strip(),
-										"carbs_g": float(it["carbs_g"]),
-										"gi": it.get("gi", "Orta"),
-									})
-								note_g = ef_res.get("glycemic_note") or ""
-								ui.session_state[flash_k] = f"✅ Gemini ({used_ef}) {len(ef_res['items'])} kalem (~{ef_res['total_carbs_g']:.1f}g karb) ekledi! {note_g}"
-								ui.rerun()
-							else:
-								ui.error(f"Karbonhidrat tahmin hatası: {ef_res.get('error', 'Ayrıştırılamadı')}")
+				# Minimalist Tek Satır Hızlı Araçlar (Hazır Kantin Kataloğu + Tabak Fotoğrafı AI)
+				qt_1, qt_2 = ui.columns(2, gap="small")
+				with qt_1:
+					with ui.popover("⚡ Hazır Kantin & Meyve Seç (12)", use_container_width=True):
+						ui.caption("Tek tıkla ekstra yiyecek listesine ekleyin:")
+						qp_cols = ui.columns(2, gap="small")
+						for qi, qf in enumerate(QUICK_EXTRA_FOODS):
+							with qp_cols[qi % 2]:
+								if ui.button(qf["label"], key=f"ins_qf_{student_id}_{qi}", type="secondary", use_container_width=True):
+									ui.session_state[extras_key].append({"name": qf["name"], "carbs_g": qf["carbs_g"], "gi": qf["gi"]})
+									ui.rerun()
+				with qt_2:
+					if is_gai_on:
+						with ui.popover("📸 Tabak Fotoğrafından AI Hesapla", use_container_width=True):
+							ai_food_img = ui.file_uploader(
+								"Yemek / Atıştırmalık Fotoğrafı",
+								type=["png", "jpg", "jpeg", "webp"],
+								key=f"ins_ai_food_img_{student_id}",
+							)
+							ai_food_txt = ui.text_input(
+								"Ek Açıklama (Opsiyonel)",
+								placeholder="Örn: Yarısını yiyecek",
+								key=f"ins_ai_food_txt_{student_id}",
+							)
+							if ui.button("✨ Fotoğraftan Hesapla & Ekle", type="primary", key=f"ins_btn_ai_food_{student_id}", use_container_width=True):
+								f_bytes = ai_food_img.getvalue() if ai_food_img is not None else None
+								f_name = ai_food_img.name if ai_food_img is not None else ""
+								with ui.spinner("Gemini tabak fotoğrafını analiz ediyor..."):
+									ok_ef, ef_res, used_ef = gai.estimate_extra_foods_carbs_with_gemini(
+										api_key=gai_key,
+										model=gai_model,
+										food_description=ai_food_txt,
+										file_bytes=f_bytes,
+										file_name=f_name,
+										student_age_years=growth.get("yas_yil"),
+									)
+								if ok_ef and ef_res.get("items"):
+									for it in ef_res["items"]:
+										ui.session_state[extras_key].append({
+											"name": f"{it['name']} ({it.get('portion', '')})".strip(),
+											"carbs_g": float(it["carbs_g"]),
+											"kcal": float(it.get("kcal") or 0.0),
+											"gi": it.get("gi", "Orta"),
+										})
+									note_g = ef_res.get("glycemic_note") or ""
+									ui.session_state[flash_k] = f"✅ Gemini ({used_ef}) {len(ef_res['items'])} kalem (~{ef_res['total_carbs_g']:.1f}g karb) ekledi! {note_g}"
+									ui.rerun()
+								else:
+									ui.error(f"Karbonhidrat tahmin hatası: {ef_res.get('error', 'Ayrıştırılamadı')}")
 
-				# Ekli Ekstra Yiyecekler Listesi
+				# Eklenen Ekstra Yiyecekler (Kompakt Satırlar)
 				cur_extras: list[dict[str, Any]] = ui.session_state[extras_key]
 				if cur_extras:
-					ex_tot_lbl = sum(float(x.get("carbs_g") or 0.0) for x in cur_extras)
-					ui.markdown(f"**Eklenen Ekstra Yiyecekler (Toplam: `{ex_tot_lbl:.1f} g`):**")
+					ui.markdown("<div class='ins-sub-divider'></div>", unsafe_allow_html=True)
 					for idx_e, ex_it in enumerate(cur_extras):
-						ec_l, ec_r = ui.columns([3.8, 0.7])
-						ec_l.markdown(f"• {html.escape(str(ex_it['name']))} — **`{float(ex_it['carbs_g']):.1f} g`** *(Gİ: {ex_it.get('gi', 'Orta')})*")
-						if ec_r.button("✖", key=f"ins_ex_rm_{student_id}_{idx_e}", use_container_width=True):
+						ec_l, ec_r = ui.columns([4.2, 0.55], gap="small", vertical_alignment="center")
+						kc_tag = f" · ~{int(ex_it['kcal'])} kcal" if float(ex_it.get("kcal") or 0) > 0 else ""
+						ec_l.markdown(
+							f"<div class='ins-extra-item'>"
+							f"<span>{html.escape(str(ex_it['name']))} <small style='color:var(--text-muted);'>(Gİ: {html.escape(str(ex_it.get('gi', 'Orta')))}{kc_tag})</small></span>"
+							f"<strong>{float(ex_it['carbs_g']):.1f} g</strong>"
+							f"</div>",
+							unsafe_allow_html=True,
+						)
+						if ec_r.button("✕", key=f"ins_ex_rm_{student_id}_{idx_e}", use_container_width=True):
 							ui.session_state[extras_key].pop(idx_e)
 							ui.rerun()
-					if ui.button("🗑️ Tüm Ekstraları Temizle", key=f"ins_ex_clr_{student_id}", type="secondary"):
-						ui.session_state[extras_key] = []
-						ui.rerun()
+					if len(cur_extras) > 1:
+						if ui.button("🗑️ Ekstraları Temizle", key=f"ins_ex_clr_{student_id}", type="secondary"):
+							ui.session_state[extras_key] = []
+							ui.rerun()
 
-		# 4. Fiziksel Aktivite / Beden Eğitimi
+		# --- ADIM 4: Fiziksel Aktivite (Kademeli Açılan Yalın Tasarım) ---
 		with ui.container(border=True):
-			ui.markdown("##### 4️⃣ Planlanan / Yapılan Fiziksel Aktivite & Beden Eğitimi")
-			act1, act2 = ui.columns([2.2, 1.0])
-			act_level = act1.selectbox("🏃 Aktivite Şiddeti", list(ACTIVITY_PRESETS.keys()), index=0, key=f"ins_act_lvl_{student_id}")
-			act_dur = act2.number_input("Süre (dk)", min_value=0, max_value=240, step=5, value=0 if act_level == "Yok / Normal Sınıf Dersi" else 40, key=f"ins_act_dur_{student_id}")
+			act_prev = str(ui.session_state.get(f"ins_act_lvl_{student_id}") or "Yok / Normal Sınıf Dersi")
+			act_pct_prev = ACTIVITY_PRESETS.get(act_prev, {}).get("pct", 0.0)
+			act_badge = (
+				f"<span class='ins-pill ins-pill-teal'>🏃 -%{act_pct_prev:.0f} öğün indirimi</span>"
+				if act_prev != "Yok / Normal Sınıf Dersi" else "<span class='ins-pill'>Normal ders</span>"
+			)
+			ui.markdown(_step_hdr_html(4, "Fiziksel Aktivite & Beden Eğitimi", act_badge), unsafe_allow_html=True)
+
+			act_level = ui.selectbox(
+				"Aktivite Durumu",
+				list(ACTIVITY_PRESETS.keys()),
+				index=0,
+				key=f"ins_act_lvl_{student_id}",
+				label_visibility="collapsed",
+			)
+			act_dur = 0
 			custom_act_pct = None
-			if act_level == "Özel Yüzde Belirle":
-				custom_act_pct = float(ui.number_input("Özel İnsülin Azaltma Yüzdesi (%)", min_value=0.0, max_value=70.0, step=5.0, value=20.0, key=f"ins_act_cust_{student_id}"))
-			act_note = ui.text_input("Aktivite Detayı (Opsiyonel)", placeholder="Örn: Öğleden sonra 2 saat beden eğitimi / futbol turnuvası", key=f"ins_act_note_{student_id}")
+			act_note = ""
+			if act_level != "Yok / Normal Sınıf Dersi":
+				if act_level == "Özel Yüzde Belirle":
+					ac1, ac2, ac3 = ui.columns([0.9, 0.9, 1.6], gap="small")
+					act_dur = int(ac1.number_input("Süre (dk)", min_value=0, max_value=240, step=5, value=40, key=f"ins_act_dur_{student_id}") or 0)
+					custom_act_pct = float(ac2.number_input("Azaltma (%)", min_value=0.0, max_value=70.0, step=5.0, value=20.0, key=f"ins_act_cust_{student_id}") or 0.0)
+					act_note = ac3.text_input("Aktivite Notu", placeholder="Örn: Futbol antrenmanı", key=f"ins_act_note_{student_id}")
+				else:
+					ac1, ac2 = ui.columns([0.9, 2.1], gap="small")
+					act_dur = int(ac1.number_input("Süre (dk)", min_value=0, max_value=240, step=5, value=40, key=f"ins_act_dur_{student_id}") or 0)
+					act_note = ac2.text_input("Aktivite Notu (Opsiyonel)", placeholder="Örn: Öğleden sonra beden eğitimi", key=f"ins_act_note_{student_id}")
 
 	# Kesin deterministik bolus hesabını çalıştır
 	cur_extras_final: list[dict[str, Any]] = ui.session_state.get(extras_key) or []
@@ -1349,8 +1585,19 @@ def _render_tab_bolus_calculator(
 		student_age_years=growth.get("yas_yil"),
 	)
 
+	# Önceden üretilmiş AI yorumu varsa kayıt sırasında kullanmak üzere hazırla
+	ai_res_key = f"ins_ai_review_{student_id}"
+	ai_comment_for_log = ""
+	ia_pre = ui.session_state.get(ai_res_key)
+	if isinstance(ia_pre, dict) and ia_pre.get("ok") and isinstance(ia_pre.get("data"), dict):
+		_dp = ia_pre["data"]
+		ai_comment_for_log = (
+			f"[{_dp.get('safety_badge', 'AI')}] {_dp.get('anthropometry_tdd_comment', '')} | "
+			f"{_dp.get('meal_glycemic_comment', '')} | {_dp.get('nurse_action_plan', '')}"
+		).strip(" |")
+
 	with col_out:
-		# Güvenlik Uyarıları
+		# 1. Kritik / Uyarı Bildirimleri
 		for al in calc["alerts"]:
 			if al["level"] == "critical":
 				ui.error(f"**{al['title']}**\n\n{al['body']}")
@@ -1359,13 +1606,13 @@ def _render_tab_bolus_calculator(
 			else:
 				ui.info(f"**{al['title']}**\n\n{al['body']}")
 
-		# Hipoglisemi (<70) ise 15-15 Kuralı Canlı Geri Sayım Sayacı
+		# Hipoglisemi 15-15 Canlı Geri Sayım Sayacı
 		if calc["is_hypo"]:
 			clk_id = f"hypo_clk_{student_id}"
 			ui.markdown(
 				f"<div class='revir-hypo-timer'>"
-				f"<div><div style='font-size:12px;font-weight:800;color:#dc2626;'>⏱️ 15-15 KURALI CANLI GERİ SAYIM</div>"
-				f"<div style='font-size:11.5px;color:var(--text-muted);'>15g hızlı karbonhidrat verin ve 15 dk sonra KŞ tekrar ölçün</div></div>"
+				f"<div><div style='font-size:12px;font-weight:800;color:#dc2626;'>⏱️ 15-15 KURALI GERİ SAYIM</div>"
+				f"<div style='font-size:11.5px;color:var(--text-muted);'>15g hızlı karb verin · 15 dk sonra KŞ ölçün</div></div>"
 				f"<div style='display:flex;align-items:center;gap:8px;'>"
 				f"<span id='{clk_id}' class='revir-hypo-clock'>15:00</span>"
 				f"<button type='button' class='revir-btn revir-btn-primary revir-btn-sm' onclick=\"window.__revirStartHypoTimer('{clk_id}', 900)\">▶ Başlat</button>"
@@ -1374,114 +1621,49 @@ def _render_tab_bolus_calculator(
 				unsafe_allow_html=True,
 			)
 
-		# Büyük Önerilen Doz Kartı (Karanlık Mod Uyumlu)
+		# 2. Birleşik Doz & Uygulama Kokpit Kartı
 		is_danger_card = bool(calc["is_hypo"] or calc["exceeds_max_bolus"] or calc["ketone_positive"])
-		hero_cls = "revir-dose-hero danger" if is_danger_card else "revir-dose-hero"
-		dose_big = "0.0 Ü (DURDURULDU)" if calc["is_hypo"] else f"{calc['recommended_dose_units']:.2f} Ünite"
+		is_warn_card = (not is_danger_card) and bool(calc["is_hyper_ketone"] or calc["net_correction_dose"] > 0)
+		hero_cls = "ins-cockpit-hero danger" if is_danger_card else ("ins-cockpit-hero warn" if is_warn_card else "ins-cockpit-hero")
+		dose_big = "0.0 Ü · DURDURULDU" if calc["is_hypo"] else f"{calc['recommended_dose_units']:.2f} Ü"
+		brand_short = str(prof.get("insulin_brand") or "Hızlı İnsülin").split(" (")[0]
 
 		with ui.container(border=True):
 			ui.markdown(
 				f"<div class='{hero_cls}'>"
-				f"<div style='font-size:12px;font-weight:700;color:var(--text-muted);letter-spacing:0.4px;'>HESAPLANAN ÖNERİLEN BOLUS DOZU ({html.escape(str(prof.get('insulin_brand', 'Hızlı İnsülin')))})</div>"
-				f"<div class='revir-dose-hero-val'>💉 {dose_big}</div>"
-				f"<div style='font-size:12px;color:var(--text-muted);'>Toplam Karb: <b>{calc['total_carbs_g']:.1f} g</b> · Öğün Bolusu: <b>{calc['adjusted_carb_dose']:.2f} Ü</b> · Düzeltme: <b>{calc['net_correction_dose']:.2f} Ü</b> · IOB: <b>{calc['iob_units']:.2f} Ü</b></div>"
-				f"</div>",
+				f"<div class='ins-cockpit-top'>"
+				f"<span>ÖNERİLEN BOLUS DOZU</span>"
+				f"<span>{html.escape(brand_short)} · {calc['pen_increment']:g} Ü hassasiyet</span>"
+				f"</div>"
+				f"<div class='ins-cockpit-dose'>💉 {dose_big}</div>"
+				f"<div class='ins-stat-grid'>"
+				f"<div class='ins-stat-cell'><span class='ins-stat-lbl'>Toplam Karb</span><span class='ins-stat-val'>{calc['total_carbs_g']:.1f} g</span></div>"
+				f"<div class='ins-stat-cell'><span class='ins-stat-lbl'>Öğün Bolusu</span><span class='ins-stat-val'>{calc['adjusted_carb_dose']:.2f} Ü</span></div>"
+				f"<div class='ins-stat-cell'><span class='ins-stat-lbl'>Düzeltme</span><span class='ins-stat-val'>{calc['net_correction_dose']:.2f} Ü</span></div>"
+				f"<div class='ins-stat-cell'><span class='ins-stat-lbl'>Aktif IOB</span><span class='ins-stat-val'>{calc['iob_units']:.2f} Ü</span></div>"
+				f"</div></div>",
 				unsafe_allow_html=True,
 			)
 
-			st_c1, st_c2, st_c3 = ui.columns(3)
-			st_c1.metric("Toplam Karb", f"{calc['total_carbs_g']:.1f} g")
-			st_c2.metric("Öğün / Düzeltme", f"{calc['adjusted_carb_dose']:.2f} / {calc['net_correction_dose']:.2f} Ü")
-			st_c3.metric("Aktif IOB", f"{calc['iob_units']:.2f} Ü")
-
-			if calc.get("tdd_kg_note"):
-				ui.caption(f"⚖️ **Günlük İnsülin / Kilo (TDD/kg):** {calc['tdd_kg_note']}")
-
-			with ui.expander("📐 Adım Adım Hesaplama Formül Dökümü (Denetim İçin)", expanded=True):
+			with ui.expander("📐 Hesaplama Adımları & Referans Detayı", expanded=False):
 				for step in calc["formula_steps"]:
 					ui.markdown(f"- {step}")
+				if calc.get("tdd_kg_note"):
+					ui.caption(f"⚖️ **TDD/kg:** {calc['tdd_kg_note']}")
 
-		# Gemini AI Klinik Değerlendirme Kartı
-		is_sec_vis_calc = ctx_api.get("is_section_visible") or (lambda _k: True)
-		ai_res_key = f"ins_ai_review_{student_id}"
-		ai_comment_for_log = ""
-		if is_sec_vis_calc("insulin_ai_review"):
-			with ui.container(border=True):
-				ui.markdown("##### 🤖 Gemini AI Pediatrik Diyabet Klinik Yorumu")
-				ui.caption("Öğrencinin yaşı, boyu, kilosu, WHO persantili, TDD/kg oranı, menüsü, ekstra yiyecekleri, aktivitesi ve varsa engel/alerji profiliyle birlikte yorumlar.")
-				ai_q_extra = ui.text_input(
-					"💬 Gemini'ye Özel Soru / Ek Not (Opsiyonel)",
-					placeholder="Örn: Öğrenci biraz halsiz görünüyor, 1 saat sonra futbol oynayacak, nelere dikkat edelim?",
-					key=f"ins_ai_q_{student_id}",
-				)
-				if ui.button(
-					"✨ Gemini AI ile Dozu, Büyüme Profilini & Menüyü Yorumla",
-					type="primary",
-					disabled=not is_gai_on,
-					use_container_width=True,
-					key=f"ins_btn_ai_analyze_{student_id}",
-				):
-					anon_ctx, _, full_nm = ctx_api["_build_person_anon_bundle"](student_id)
-					app_cfg = ctx_api["get_app_settings"]()
-					logs_recent_df = get_student_bolus_logs_df(connect_db_fn, student_id, days_back=14)
-					recent_list = logs_recent_df[["Tarih", "Saat", "Öğün", "Kan_Sekeri", "Toplam_Karb", "Uygulanan_Doz", "Aktivite"]].head(10).to_dict(orient="records") if not logs_recent_df.empty else []
-					meal_payload = {
-						"ogun_turu": meal_type,
-						"menu_yemekleri": selected_menu_dish_names,
-						"menu_tuketim_yuzdesi": menu_consumed_pct,
-						"ekstra_yiyecekler": cur_extras_final,
-						"fiziksel_aktivite": act_level,
-						"aktivite_suresi_dk": int(act_dur or 0),
-						"aktivite_notu": act_note,
-						"son_enjeksiyon_bolgesi": last_site,
-					}
-					with ui.spinner("Gemini yaş, boy, kilo, WHO persantil, yemek menüsü ve aktivite verilerini analiz ediyor..."):
-						ok_ia, ia_data, used_ia = gai.analyze_insulin_dose_with_gemini(
-							api_key=gai_key,
-							model=gai_model,
-							anon_student_context=anon_ctx,
-							growth_info=growth,
-							diabetes_profile={k: v for k, v in prof.items() if k not in ("student_id", "_exists", "physician_name")},
-							calc_result=calc,
-							meal_details=meal_payload,
-							recent_bg_trend=recent_list,
-							school_name=app_cfg.get("school_name", "Okul Reviri"),
-							nurse_name=app_cfg.get("nurse_name", "Okul Revir Sorumlusu"),
-							extra_instruction=ai_q_extra,
-						)
-					ui.session_state[ai_res_key] = {"ok": ok_ia, "data": ia_data, "model": used_ia}
-					ui.session_state.pop(f"ins_sms_draft_{student_id}", None)
-					ui.rerun()
-
-				ia_saved = ui.session_state.get(ai_res_key)
-				if isinstance(ia_saved, dict):
-					if not ia_saved.get("ok"):
-						ui.error(f"Gemini AI hatası: {ia_saved.get('data', {}).get('error', 'Bilinmeyen hata')}")
-					else:
-						d_ia = ia_saved["data"]
-						badge = d_ia.get("safety_badge", "✅ Değerlendirildi")
-						ui.markdown(f"**{badge}** <small>({ia_saved.get('model')})</small>", unsafe_allow_html=True)
-						ui.markdown(f"📏 **Yaş / Boy / Kilo & TDD/kg:** {d_ia.get('anthropometry_tdd_comment', '—')}")
-						ui.markdown(f"🍽️ **Menü, Ekstralar & Glisemik Analiz:** {d_ia.get('meal_glycemic_comment', '—')}")
-						ui.markdown(f"🏃 **Aktivite & Hipoglisemi Kalkanı:** {d_ia.get('activity_hypo_comment', '—')}")
-						ui.info(f"👩‍⚕️ **Hemşire İzlem Planı:** {d_ia.get('nurse_action_plan', '—')}")
-						sms_raw = str(d_ia.get("guardian_sms_draft") or "")
-						if sms_raw:
-							sms_final = sms_raw.replace("[ÖĞRENCİ_ADI]", disp_name).replace("[Öğrenci Adı]", disp_name)
-							ui.text_area("📱 Veli Bilgilendirme (WhatsApp / SMS) Taslağı", value=sms_final, height=90, key=f"ins_sms_draft_{student_id}")
-						ai_comment_for_log = (
-							f"[{badge}] {d_ia.get('anthropometry_tdd_comment', '')} | "
-							f"{d_ia.get('meal_glycemic_comment', '')} | {d_ia.get('nurse_action_plan', '')}"
-						).strip(" |")
-
-		# Uygulama & Rotasyon Kayıt Formu
-		with ui.container(border=True):
-			ui.markdown("##### 💉 Uygulamayı Onayla & İnsülin Defterine Kaydet")
-			# Enjeksiyon bölgesi rotasyon önerisi + uzuv engeli uyarısı
+			# Enjeksiyon Rotasyonu & Doğrudan Kayıt
 			def_site_idx = 0
+			rot_badge = ""
 			if last_site in INJECTION_SITE_OPTIONS:
 				def_site_idx = (INJECTION_SITE_OPTIONS.index(last_site) + 1) % len(INJECTION_SITE_OPTIONS)
-				ui.caption(f"🔄 **Rotasyon Önerisi:** Son enjeksiyon `{last_site}` bölgesine yapılmıştı; lipohipertrofiyi önlemek için sıradaki farklı bölge önerildi.")
+				rot_badge = f"<span class='ins-pill ins-pill-teal'>🔄 Sıradaki: {html.escape(INJECTION_SITE_OPTIONS[def_site_idx])}</span>"
+			ui.markdown(
+				f"<div style='display:flex;align-items:center;justify-content:space-between;gap:6px;margin:6px 0;'>"
+				f"<strong style='font-size:0.88rem;color:var(--text-heading);'>✅ Uygulamayı Onayla &amp; Kaydet</strong>"
+				f"{rot_badge}</div>",
+				unsafe_allow_html=True,
+			)
+
 			if dp_dis.get("has_disability"):
 				lmap = dp_dis.get("limb_status") or {}
 				limb_warns = []
@@ -1490,11 +1672,11 @@ def _render_tab_bolus_calculator(
 				if str(lmap.get("left_arm") or "").startswith(("Doğuştan", "Kullanamıyor")):
 					limb_warns.append("Sol Kol")
 				if limb_warns:
-					ui.warning(f"♿ **Uzuv Profili Hatırlatması:** Öğrencinin profilinde **{', '.join(limb_warns)}** kısıtlılığı/yokluğu kayıtlı — uygun farklı enjeksiyon bölgesi seçin.")
+					ui.warning(f"♿ **Uzuv Kısıtlılığı:** **{', '.join(limb_warns)}** yerine uygun farklı enjeksiyon bölgesi seçin.")
 
-			ap1, ap2 = ui.columns(2)
+			ap1, ap2 = ui.columns([0.95, 1.25], gap="small")
 			applied_dose = ap1.number_input(
-				"Uygulanan Gerçek Doz (Ü)",
+				"Uygulanan Doz (Ü)",
 				min_value=0.0,
 				max_value=60.0,
 				step=float(prof.get("pen_increment") or 0.5),
@@ -1502,8 +1684,13 @@ def _render_tab_bolus_calculator(
 				key=f"ins_applied_dose_{student_id}_{calc['recommended_dose_units']}",
 			)
 			inj_site = ap2.selectbox("Enjeksiyon Bölgesi", INJECTION_SITE_OPTIONS, index=def_site_idx, key=f"ins_inj_site_{student_id}")
-			log_note = ui.text_input("Hemşire Uygulama Notu", placeholder="Örn: Yemekten 10 dk önce yapıldı, 2 saat sonra KŞ kontrolü planlandı", key=f"ins_log_note_{student_id}")
-			sync_vital_chk = ui.checkbox("💓 Ölçülen kan şekerini 'Vital Takip' kayıtlarına da işle", value=True, key=f"ins_sync_vital_{student_id}")
+			log_note = ui.text_input(
+				"Uygulama Notu",
+				placeholder="Opsiyonel not (örn: Yemekten 10 dk önce uygulandı)",
+				key=f"ins_log_note_{student_id}",
+				label_visibility="collapsed",
+			)
+			sync_vital_chk = ui.checkbox("💓 Kan şekerini Vital Takip kayıtlarına da işle", value=True, key=f"ins_sync_vital_{student_id}")
 
 			if ui.button("💾 İnsülin Dozunu & Kan Şekerini Kaydet", type="primary", use_container_width=True, key=f"ins_btn_save_log_{student_id}"):
 				app_cfg = ctx_api["get_app_settings"]()
@@ -1518,6 +1705,7 @@ def _render_tab_bolus_calculator(
 				if act_note:
 					meal_sum_parts.append(f"Aktivite: {act_note}")
 
+				applied_val = float(applied_dose or 0.0)
 				with connect_db_fn() as conn:
 					ensure_diabetes_tables(conn)
 					conn.execute(
@@ -1550,7 +1738,7 @@ def _render_tab_bolus_calculator(
 							calc["adjusted_carb_dose"],
 							calc["net_correction_dose"],
 							calc["recommended_dose_units"],
-							float(applied_dose),
+							applied_val,
 							inj_site,
 							" | ".join(meal_sum_parts),
 							ai_comment_for_log,
@@ -1560,7 +1748,7 @@ def _render_tab_bolus_calculator(
 						),
 					)
 					if sync_vital_chk and bg_val is not None:
-						g_ctx = "Açlık / Öğün Öncesi" if meal_type in ("Kahvaltı", "Öğle Yemeği") else "Rastgele / Ara Öğün"
+						g_ctx = "Açlık / Öğün Öncesi" if meal_type in ("Kahvaltı", "Öğle Yemeği", "Akşam Yemeği") else "Rastgele / Ara Öğün"
 						conn.execute(
 							"""INSERT INTO vital_readings(student_id, measured_at, glucose_mg_dl, glucose_context, notes)
 							   VALUES (?, ?, ?, ?, ?)""",
@@ -1569,17 +1757,91 @@ def _render_tab_bolus_calculator(
 								f"{sel_date.isoformat()} {sel_time.strftime('%H:%M')}",
 								bg_val,
 								g_ctx,
-								f"İnsülin modülü ({meal_type}) · Uygulanan: {applied_dose:.2f} Ü ({inj_site})",
+								f"İnsülin modülü ({meal_type}) · Uygulanan: {applied_val:.2f} Ü ({inj_site})",
 							),
 						)
 				ui.session_state[extras_key] = []
 				ctx_api["sync_after_person_mutation"](student_id)
-				ui.session_state[flash_k] = f"✅ {applied_dose:.2f} Ü insülin uygulaması ({inj_site}) kaydedildi!"
+				ui.session_state[flash_k] = f"✅ {applied_val:.2f} Ü insülin uygulaması ({inj_site}) kaydedildi!"
 				ui.rerun()
+
+		# 3. Minimalist Gemini AI Klinik Değerlendirme & Veli SMS Kartı
+		is_sec_vis_calc = ctx_api.get("is_section_visible") or (lambda _k: True)
+		if is_sec_vis_calc("insulin_ai_review"):
+			with ui.container(border=True):
+				ui.markdown(
+					"<div class='ins-step-hdr'>"
+					"<div class='ins-step-left'><span>🤖 AI Klinik Yorum &amp; Veli Bilgilendirme</span></div>"
+					"<span class='ins-pill'>Persantil · Menü · Aktivite</span></div>",
+					unsafe_allow_html=True,
+				)
+				ai_q_extra = ui.text_input(
+					"AI Ek Soru",
+					placeholder="Opsiyonel soru veya klinik gözlem (örn: Halsiz görünüyor, maç var)...",
+					key=f"ins_ai_q_{student_id}",
+					label_visibility="collapsed",
+				)
+				if ui.button(
+					"✨ AI ile Klinik Değerlendirme & Veli SMS Hazırla",
+					type="secondary",
+					disabled=not is_gai_on,
+					use_container_width=True,
+					key=f"ins_btn_ai_analyze_{student_id}",
+				):
+					anon_ctx, _, _ = ctx_api["_build_person_anon_bundle"](student_id)
+					app_cfg = ctx_api["get_app_settings"]()
+					logs_recent_df = get_student_bolus_logs_df(connect_db_fn, student_id, days_back=14)
+					recent_list = logs_recent_df[["Tarih", "Saat", "Öğün", "Kan_Sekeri", "Toplam_Karb", "Uygulanan_Doz", "Aktivite"]].head(10).to_dict(orient="records") if not logs_recent_df.empty else []
+					meal_payload = {
+						"ogun_turu": meal_type,
+						"menu_yemekleri": selected_menu_dish_names,
+						"menu_tuketim_yuzdesi": menu_consumed_pct,
+						"ekstra_yiyecekler": cur_extras_final,
+						"fiziksel_aktivite": act_level,
+						"aktivite_suresi_dk": int(act_dur or 0),
+						"aktivite_notu": act_note,
+						"son_enjeksiyon_bolgesi": last_site,
+					}
+					with ui.spinner("Gemini klinik verileri değerlendiriyor..."):
+						ok_ia, ia_data, used_ia = gai.analyze_insulin_dose_with_gemini(
+							api_key=gai_key,
+							model=gai_model,
+							anon_student_context=anon_ctx,
+							growth_info=growth,
+							diabetes_profile={k: v for k, v in prof.items() if k not in ("student_id", "_exists", "physician_name")},
+							calc_result=calc,
+							meal_details=meal_payload,
+							recent_bg_trend=recent_list,
+							school_name=app_cfg.get("school_name", "Okul Reviri"),
+							nurse_name=app_cfg.get("nurse_name", "Okul Revir Sorumlusu"),
+							extra_instruction=ai_q_extra,
+						)
+					ui.session_state[ai_res_key] = {"ok": ok_ia, "data": ia_data, "model": used_ia}
+					ui.session_state.pop(f"ins_sms_draft_{student_id}", None)
+					ui.rerun()
+
+				ia_saved = ui.session_state.get(ai_res_key)
+				if isinstance(ia_saved, dict):
+					if not ia_saved.get("ok"):
+						ui.error(f"Gemini AI hatası: {ia_saved.get('data', {}).get('error', 'Bilinmeyen hata')}")
+					else:
+						d_ia = ia_saved["data"]
+						badge = d_ia.get("safety_badge", "✅ Değerlendirildi")
+						ui.markdown(f"**{badge}** <small style='color:var(--text-muted);'>({ia_saved.get('model')})</small>", unsafe_allow_html=True)
+						ui.markdown(
+							f"- 📏 **Büyüme & TDD/kg:** {d_ia.get('anthropometry_tdd_comment', '—')}\n"
+							f"- 🍽️ **Menü & Glisemik Etki:** {d_ia.get('meal_glycemic_comment', '—')}\n"
+							f"- 🏃 **Aktivite Kalkanı:** {d_ia.get('activity_hypo_comment', '—')}"
+						)
+						ui.info(f"👩‍⚕️ **İzlem Planı:** {d_ia.get('nurse_action_plan', '—')}")
+						sms_raw = str(d_ia.get("guardian_sms_draft") or "")
+						if sms_raw:
+							sms_final = sms_raw.replace("[ÖĞRENCİ_ADI]", disp_name).replace("[Öğrenci Adı]", disp_name)
+							ui.text_area("📱 Veli Bilgilendirme (WhatsApp / SMS)", value=sms_final, height=82, key=f"ins_sms_draft_{student_id}")
 
 
 # ==============================================================================
-# SEKME 2: AYLIK YEMEK PROGRAMI & GEMİNİ KARBONHİDRAT ÇIKARICI + AYLIK PLAN
+# SEKME 2: AYLIK YEMEK PROGRAMI & ÖĞÜN İNSÜLİN PLANI
 # ==============================================================================
 
 def _render_tab_monthly_menu(
@@ -1590,7 +1852,6 @@ def _render_tab_monthly_menu(
 ) -> None:
 	connect_db_fn = ctx_api["connect_db"]
 	is_gai_on, gai_key, gai_model = ctx_api["_get_active_gemini_config"]()
-	disp_name = ctx_api["mask_kvkk_value"](person["full_name"], "name")
 
 	today = date.today()
 	ym_options: list[str] = []
@@ -1603,156 +1864,327 @@ def _render_tab_monthly_menu(
 	def _fmt_ym(ym_s: str) -> str:
 		try:
 			yy, mm = ym_s.split("-")
-			return f"{TR_MONTH_NAMES.get(int(mm), mm)} {yy} ({ym_s})"
+			return f"{TR_MONTH_NAMES.get(int(mm), mm)} {yy}"
 		except Exception:
 			return ym_s
-
-	ym_c1, ym_c2 = ui.columns([1.6, 2.4])
-	with ym_c1:
-		sel_ym = ui.selectbox(
-			"📅 Çalışılacak Ay (Yemek Programı)",
-			ym_options,
-			index=ym_options.index(cur_ym_default) if cur_ym_default in ym_options else 2,
-			format_func=_fmt_ym,
-			key="ins_menu_sel_ym",
-		)
-	with ym_c2:
-		ui.caption("Okulun aylık yemek listesini **PDF, Fotoğraf, Excel, Word veya Metin** olarak yükleyin; Gemini AI her günün yemeklerini ve tahmini karbonhidratlarını otomatik çıkarıp takvime işler.")
 
 	flash_m = ui.session_state.pop("ins_menu_flash", None)
 	if flash_m:
 		ui.success(flash_m)
 
-	# A. Gemini AI Aylık Menü Yükleyici
-	with ui.expander("✨ Gemini AI ile Aylık Yemek Programını Otomatik Oku & Karbonhidrat Çıkar", expanded=True):
-		mc1, mc2 = ui.columns([1.6, 1.4])
-		with mc1:
-			up_menu_file = ui.file_uploader(
-				"📎 Aylık Yemek Listesi Dosyası (.pdf, .png, .jpg, .xlsx, .docx)",
+	# Üst Araç Çubuğu: Ay Seçimi + Hızlı İndirme + Kayıtlı Gün Sil
+	tb1, tb2, tb3, tb4 = ui.columns([1.35, 1.15, 1.15, 0.85], gap="small", vertical_alignment="bottom")
+	with tb1:
+		sel_ym = ui.selectbox(
+			"📅 Plan Ayı",
+			ym_options,
+			index=ym_options.index(cur_ym_default) if cur_ym_default in ym_options else 2,
+			format_func=_fmt_ym,
+			key="ins_menu_sel_ym",
+		)
+
+	plan_df, _ = build_monthly_insulin_plan_df(connect_db_fn, student_id, sel_ym)
+	raw_menus = get_school_menus_for_month(connect_db_fn, sel_ym)
+	p_slug = re.sub(r"[^A-Za-z0-9_-]+", "_", str(person["full_name"] or "ogrenci")).strip("_") or "ogrenci"
+	plan_title = f"{person['full_name']} ({person['class_name']}) — {_fmt_ym(sel_ym)} Aylık Yemek & İnsülin Planı"
+	plan_sub = (
+		f"İKO (Sabah/Öğle/Ara): 1/{prof['icr_breakfast']:.0f}g · 1/{prof['icr_lunch']:.0f}g · 1/{prof['icr_snack']:.0f}g | "
+		f"İDF: {prof['isf']:.0f} | Hedef: {prof['target_bg']:.0f} mg/dL | İnsülin: {prof['insulin_brand']}"
+	)
+
+	with tb2:
+		ui.download_button(
+			"📄 Word Plan (.docx)",
+			data=lambda _t=plan_title, _s=plan_sub, _df=plan_df.copy(): ctx_api["build_ai_custom_report_docx"](_t, subtitle=_s, df=_df),
+			file_name=f"{p_slug}_aylik_insulin_plani_{sel_ym}.docx",
+			mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+			type="primary",
+			disabled=plan_df.empty,
+			use_container_width=True,
+			key=f"ins_dl_plan_docx_{student_id}_{sel_ym}",
+		)
+	with tb3:
+		ui.download_button(
+			"📊 Excel Plan (.xlsx)",
+			data=lambda _t=plan_title, _df=plan_df.copy(): ctx_api["build_ai_custom_report_excel"](_t, df=_df),
+			file_name=f"{p_slug}_aylik_insulin_plani_{sel_ym}.xlsx",
+			mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+			type="secondary",
+			disabled=plan_df.empty,
+			use_container_width=True,
+			key=f"ins_dl_plan_xlsx_{student_id}_{sel_ym}",
+		)
+	with tb4:
+		if raw_menus:
+			with ui.popover("🗑️ Gün Sil", use_container_width=True):
+				del_opts = {f"{m['menu_date']} · {m['meal_type']} ({m['total_carbs_g']:.0f}g)": int(m["id"]) for m in raw_menus}
+				del_lbl = ui.selectbox("Silinecek Öğün", list(del_opts.keys()), key="ins_del_menu_sel")
+				if ui.button("🗑️ Seçili Günü Sil", type="secondary", key="ins_del_menu_btn", use_container_width=True):
+					delete_school_menu_by_id(connect_db_fn, del_opts[del_lbl])
+					ui.rerun()
+
+	# Akıllı Kademeli Menü Ekleme Paneli (Ay boşsa açık, doluysa tek satırda kapalı)
+	with ui.expander("📥 Aylık Yemek Listesi Yükle (AI) veya Tek Gün Ekle", expanded=plan_df.empty):
+		imp_l, imp_r = ui.columns([1.2, 1.0], gap="medium")
+		with imp_l:
+			ui.markdown("<div class='ins-sec-label'>✨ Gemini AI ile Dosya / Metin Aktarımı</div>", unsafe_allow_html=True)
+			mc1, mc2 = ui.columns([1.45, 1.05], gap="small")
+			up_menu_file = mc1.file_uploader(
+				"Menü Dosyası (.pdf, .jpg, .png, .xlsx, .docx)",
 				type=["pdf", "png", "jpg", "jpeg", "webp", "xlsx", "xls", "docx", "txt"],
 				key="ins_menu_ai_file",
 			)
-		with mc2:
-			def_mtype_ai = ui.selectbox("Varsayılan Öğün Türü", ["Öğle Yemeği", "Kahvaltı", "İkindi / Ara Öğün"], index=0, key="ins_menu_ai_mtype")
-		paste_menu_txt = ui.text_area(
-			"📋 Veya Aylık Yemek Listesi Metnini Buraya Yapıştırın",
-			height=105,
-			placeholder="Örn:\n02.11.2026: Mercimek Çorbası, Orman Kebabı, Pirinç Pilavı, Ayran\n03.11.2026: Tarhana Çorbası, Fırın Köfte, Makarna, Mandalina...",
-			key="ins_menu_ai_text",
-		)
-		if ui.button(
-			"✨ Gemini AI ile Menüyü Çözümle ve Takvime Kaydet",
-			type="primary",
-			disabled=not is_gai_on,
-			use_container_width=True,
-			key="ins_btn_parse_menu_ai",
-		):
-			fb = up_menu_file.getvalue() if up_menu_file is not None else None
-			fn = up_menu_file.name if up_menu_file is not None else ""
-			with ui.spinner("Gemini aylık yemek listesini gün gün ayrıştırıyor ve Türk porsiyon karbonhidratlarını hesaplıyor..."):
-				ok_pm, parsed_days, used_pm = gai.parse_monthly_school_menu_with_gemini(
-					api_key=gai_key,
-					model=gai_model,
-					year_month=sel_ym,
-					file_bytes=fb,
-					file_name=fn,
-					raw_text=paste_menu_txt,
-					default_meal_type=def_mtype_ai,
-				)
-			if ok_pm and parsed_days:
-				for day_obj in parsed_days:
-					upsert_school_meal_menu(
-						connect_db_fn,
-						day_obj["menu_date"],
-						day_obj["meal_type"],
-						day_obj["items"],
-						source_note=f"Gemini AI ({used_pm})",
-					)
-				ui.session_state["ins_menu_flash"] = f"✅ {len(parsed_days)} günlük yemek menüsü ve karbonhidrat değerleri Gemini ({used_pm}) ile başarıyla kaydedildi!"
-				ui.rerun()
-			else:
-				ui.error(f"Menü ayrıştırma hatası: {used_pm}")
-
-	# B. Manuel Günlük Menü Ekle / Düzenle
-	with ui.expander("✏️ Tek Günlük Yemek Menüsü Elle Ekle / Düzenle", expanded=False):
-		with ui.form("form_manual_daily_menu"):
-			mm1, mm2 = ui.columns(2)
-			man_date = mm1.date_input("Menü Tarihi", value=date.today(), key="ins_man_mdate")
-			man_type = mm2.selectbox("Öğün Türü", ["Öğle Yemeği", "Kahvaltı", "İkindi / Ara Öğün"], key="ins_man_mtype")
-			man_lines = ui.text_area(
-				"Yemekler (Her satıra: Yemek Adı | Karbonhidrat gram | Porsiyon — örn: Mercimek Çorbası | 18 | 1 kase)",
-				height=115,
-				placeholder="Mercimek Çorbası | 18 | 1 kase\nEtli Kuru Fasulye | 22 | 1 porsiyon\nPirinç Pilavı | 30 | 4 kaşık\nAyran | 4 | 1 kutu",
-				key="ins_man_mlines",
+			def_mtype_ai = mc2.selectbox("Öğün Türü", ["Öğle Yemeği", "Kahvaltı", "İkindi / Ara Öğün", "Akşam Yemeği"], index=0, key="ins_menu_ai_mtype")
+			paste_menu_txt = ui.text_area(
+				"Veya Yemek Listesi Metnini Yapıştırın",
+				height=92,
+				placeholder="02.11.2026: Mercimek Çorbası, Orman Kebabı, Pirinç Pilavı, Ayran...",
+				key="ins_menu_ai_text",
 			)
-			if ui.form_submit_button("💾 Günlük Menüyü Kaydet", type="primary", use_container_width=True):
-				man_items: list[dict[str, Any]] = []
-				for ln in (man_lines or "").splitlines():
-					s = ln.strip()
-					if not s:
-						continue
-					parts = [p.strip() for p in s.split("|")]
-					nm = parts[0]
-					try:
-						cg = float(parts[1].replace(",", ".").replace("g", "").strip()) if len(parts) > 1 else 15.0
-					except Exception:
-						cg = 15.0
-					por = parts[2] if len(parts) > 2 else "1 porsiyon"
-					man_items.append({"name": nm, "portion": por, "carbs_g": max(0.0, round(cg, 1)), "gi": "Orta", "fat_protein_note": ""})
-				if man_items:
-					upsert_school_meal_menu(connect_db_fn, man_date.isoformat(), man_type, man_items, source_note="Manuel Giriş")
-					ui.session_state["ins_menu_flash"] = f"✅ {man_date.strftime('%d.%m.%Y')} ({man_type}) menüsü kaydedildi!"
+			if ui.button(
+				"✨ AI ile Çözümle & Takvime Kaydet",
+				type="primary",
+				disabled=not is_gai_on,
+				use_container_width=True,
+				key="ins_btn_parse_menu_ai",
+			):
+				fb = up_menu_file.getvalue() if up_menu_file is not None else None
+				fn = up_menu_file.name if up_menu_file is not None else ""
+				with ui.spinner("Gemini aylık yemek listesini ayrıştırıyor..."):
+					ok_pm, parsed_days, used_pm = gai.parse_monthly_school_menu_with_gemini(
+						api_key=gai_key,
+						model=gai_model,
+						year_month=sel_ym,
+						file_bytes=fb,
+						file_name=fn,
+						raw_text=paste_menu_txt,
+						default_meal_type=def_mtype_ai,
+					)
+				if ok_pm and parsed_days:
+					for day_obj in parsed_days:
+						upsert_school_meal_menu(
+							connect_db_fn,
+							day_obj["menu_date"],
+							day_obj["meal_type"],
+							day_obj["items"],
+							source_note=f"Gemini AI ({used_pm})",
+						)
+					ui.session_state["ins_menu_flash"] = f"✅ {len(parsed_days)} günlük menü Gemini ({used_pm}) ile kaydedildi!"
 					ui.rerun()
 				else:
-					ui.warning("Lütfen en az bir yemek satırı girin.")
+					ui.error(f"Menü ayrıştırma hatası: {used_pm}")
 
-	# C. Seçili Öğrenci İçin Aylık Yemek & Tahmini Öğün İnsülin Planı Tablosu + Word/Excel İndirme
-	plan_df, _ = build_monthly_insulin_plan_df(connect_db_fn, student_id, sel_ym)
-	ui.markdown(f"#### 📊 {ctx_api['mask_kvkk_value'](person['full_name'], 'name')} — {_fmt_ym(sel_ym)} Aylık Menü & Tahmini İnsülin Planı")
+		with imp_r:
+			ui.markdown("<div class='ins-sec-label'>✏️ Tek Günlük Manuel Giriş</div>", unsafe_allow_html=True)
+			with ui.form("form_manual_daily_menu", border=False):
+				mm1, mm2 = ui.columns(2, gap="small")
+				man_date = mm1.date_input("Tarih", value=date.today(), key="ins_man_mdate")
+				man_type = mm2.selectbox("Öğün", ["Öğle Yemeği", "Kahvaltı", "İkindi / Ara Öğün", "Akşam Yemeği"], key="ins_man_mtype")
+				man_lines = ui.text_area(
+					"Yemek Adı | Karb (g) | Porsiyon",
+					height=98,
+					placeholder="Mercimek Çorbası | 18 | 1 kase\nPirinç Pilavı | 30 | 4 kaşık\nAyran | 4 | 1 kutu",
+					key="ins_man_mlines",
+				)
+				if ui.form_submit_button("💾 Günlük Menüyü Kaydet", type="secondary", use_container_width=True):
+					man_items: list[dict[str, Any]] = []
+					for ln in (man_lines or "").splitlines():
+						s = ln.strip()
+						if not s:
+							continue
+						parts = [p.strip() for p in s.split("|")]
+						nm = parts[0]
+						try:
+							cg = float(parts[1].replace(",", ".").replace("g", "").strip()) if len(parts) > 1 else 15.0
+						except Exception:
+							cg = 15.0
+						por = parts[2] if len(parts) > 2 else "1 porsiyon"
+						man_items.append({"name": nm, "portion": por, "carbs_g": max(0.0, round(cg, 1)), "gi": "Orta", "fat_protein_note": ""})
+					if man_items:
+						upsert_school_meal_menu(connect_db_fn, man_date.isoformat(), man_type, man_items, source_note="Manuel Giriş")
+						ui.session_state["ins_menu_flash"] = f"✅ {man_date.strftime('%d.%m.%Y')} ({man_type}) menüsü kaydedildi!"
+						ui.rerun()
+					else:
+						ui.warning("Lütfen en az bir yemek satırı girin.")
+
 	if plan_df.empty:
-		ui.info(f"`{_fmt_ym(sel_ym)}` ayı için henüz kayıtlı okul yemek menüsü yok. Yukarıdan aylık yemek listesini yükleyin veya elle gün ekleyin.")
+		ui.info(f"`{_fmt_ym(sel_ym)}` ayı için henüz kayıtlı yemek menüsü bulunmuyor.")
 	else:
-		ui.caption("Tablodaki dozlar **yalnızca öğün karbonhidratına** göre öğrencinin profilindeki İKO ile hesaplanmış öngörüdür (yüksek şeker düzeltmesi ve IOB günlük ölçümde ayrıca eklenir).")
+		avg_c = round(float(plan_df["Toplam Karb (g)"].mean()), 1)
+		avg_d = round(float(plan_df["Tam Porsiyon Doz (Ü)"].mean()), 2)
+		ui.markdown(
+			f"<div style='display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin:10px 0 6px 0;'>"
+			f"<strong style='font-size:0.95rem;'>📊 {_fmt_ym(sel_ym)} Tahmini Öğün İnsülin Tablosu</strong>"
+			f"<div class='ins-hdr-badges'>"
+			f"<span class='ins-pill'>{len(plan_df)} öğün</span>"
+			f"<span class='ins-pill'>Ort. {avg_c} g karb</span>"
+			f"<span class='ins-pill ins-pill-teal'>Ort. {avg_d} Ü tam porsiyon</span>"
+			f"</div></div>",
+			unsafe_allow_html=True,
+		)
 		ui.dataframe(plan_df, width="stretch", hide_index=True)
-
-		p_slug = re.sub(r"[^A-Za-z0-9_-]+", "_", str(person["full_name"] or "ogrenci")).strip("_") or "ogrenci"
-		plan_title = f"{person['full_name']} ({person['class_name']}) — {_fmt_ym(sel_ym)} Aylık Yemek & İnsülin Planı"
-		plan_sub = f"İKO (Sabah/Öğle/Ara): 1/{prof['icr_breakfast']:.0f}g · 1/{prof['icr_lunch']:.0f}g · 1/{prof['icr_snack']:.0f}g | İDF: {prof['isf']:.0f} | Hedef: {prof['target_bg']:.0f} mg/dL | İnsülin: {prof['insulin_brand']}"
-
-		dl1, dl2 = ui.columns(2)
-		with dl1:
-			ui.download_button(
-				"📄 Aylık İnsülin & Yemek Planını Word İndir (.docx)",
-				data=lambda _t=plan_title, _s=plan_sub, _df=plan_df.copy(): ctx_api["build_ai_custom_report_docx"](_t, subtitle=_s, df=_df),
-				file_name=f"{p_slug}_aylik_insulin_plani_{sel_ym}.docx",
-				mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-				type="primary",
-				use_container_width=True,
-				key=f"ins_dl_plan_docx_{student_id}_{sel_ym}",
-			)
-		with dl2:
-			ui.download_button(
-				"📊 Aylık İnsülin & Yemek Planını Excel İndir (.xlsx)",
-				data=lambda _t=plan_title, _df=plan_df.copy(): ctx_api["build_ai_custom_report_excel"](_t, df=_df),
-				file_name=f"{p_slug}_aylik_insulin_plani_{sel_ym}.xlsx",
-				mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-				type="secondary",
-				use_container_width=True,
-				key=f"ins_dl_plan_xlsx_{student_id}_{sel_ym}",
-			)
-
-		# Kayıtlı gün silme kolaylığı
-		raw_menus = get_school_menus_for_month(connect_db_fn, sel_ym)
-		with ui.expander("🗑️ Kayıtlı Menü Günü Sil", expanded=False):
-			del_opts = {f"{m['menu_date']} · {m['meal_type']} ({m['total_carbs_g']:.0f}g)": int(m["id"]) for m in raw_menus}
-			del_lbl = ui.selectbox("Silinecek Menü Günü", list(del_opts.keys()), key="ins_del_menu_sel")
-			if ui.button("🗑️ Seçili Günü Sil", type="secondary", key="ins_del_menu_btn"):
-				delete_school_menu_by_id(connect_db_fn, del_opts[del_lbl])
-				ui.rerun()
 
 
 # ==============================================================================
-# SEKME 3: ÖĞRENCİ DİYABET & HEKİM REÇETE PARAMETRELERİ
+# SEKME 3: İNSÜLİN DEFTERİ, GLİSEMİK TREND (TIR) & RAPORLAR
+# ==============================================================================
+
+def _render_tab_logs_and_trends(
+	ctx_api: dict[str, Any],
+	person: sqlite3.Row,
+	student_id: int,
+	prof: dict[str, Any],
+	growth: dict[str, Any],
+) -> None:
+	connect_db_fn = ctx_api["connect_db"]
+	is_gai_on, gai_key, gai_model = ctx_api["_get_active_gemini_config"]()
+
+	# Üst Aksiyon Çubuğu
+	lt1, lt2, lt3, lt4, lt5 = ui.columns([1.15, 1.35, 1.05, 1.05, 0.75], gap="small", vertical_alignment="bottom")
+	days_back = lt1.selectbox("İzlem Aralığı", [7, 14, 30, 90, 365], index=2, format_func=lambda d: f"Son {d} Gün", key=f"ins_log_days_{student_id}")
+	logs_df = get_student_bolus_logs_df(connect_db_fn, student_id, days_back=int(days_back))
+	hypo_th = float(prof.get("hypo_threshold") or 70.0)
+	tir = compute_glycemic_tir_stats(logs_df, hypo_thresh=hypo_th, hyper_high=180.0)
+
+	disp_df = logs_df.drop(columns=["id"], errors="ignore")
+	trend_key = f"ins_ai_trend_{student_id}"
+	saved_tr = ui.session_state.get(trend_key)
+	ai_trend_md = str(saved_tr.get("text") or "") if (isinstance(saved_tr, dict) and saved_tr.get("ok")) else ""
+
+	p_slug = re.sub(r"[^A-Za-z0-9_-]+", "_", str(person["full_name"] or "ogrenci")).strip("_") or "ogrenci"
+	rep_title = f"{person['full_name']} ({person['class_name']}) — Okul İçi İnsülin & Kan Şekeri İzlem Raporu"
+	rep_sub = (
+		f"Son {days_back} Gün | Ort. KŞ: {tir['avg_bg'] or '—'} mg/dL | TIR (%70-180): %{tir['tir_pct'] if tir['tir_pct'] is not None else '—'} | "
+		f"Hipo: {tir['hypo_cnt']} · Hiper: {tir['hyper_cnt']} | İKO (S/Ö/A): 1/{prof['icr_breakfast']:.0f}·1/{prof['icr_lunch']:.0f}·1/{prof['icr_snack']:.0f}"
+	)
+	secs = [{"heading": "🤖 Glisemik Trend & Klinik Değerlendirme (Gemini AI)", "body": ai_trend_md}] if ai_trend_md else None
+
+	with lt2:
+		if ui.button(
+			"✨ AI Trend Özeti",
+			type="secondary",
+			disabled=(not is_gai_on or logs_df.empty),
+			use_container_width=True,
+			key=f"ins_btn_ai_trend_{student_id}",
+		):
+			anon_ctx, _, _ = ctx_api["_build_person_anon_bundle"](student_id)
+			logs_rec = disp_df[["Tarih", "Saat", "Öğün", "Kan_Sekeri", "Toplam_Karb", "Aktivite", "Uygulanan_Doz", "Enjeksiyon_Bolgesi"]].head(30).to_dict(orient="records")
+			with ui.spinner("Gemini glisemik trend ve TIR verilerini analiz ediyor..."):
+				ok_tr, tr_md, used_tr = gai.analyze_glycemic_trend_with_gemini(
+					api_key=gai_key,
+					model=gai_model,
+					anon_student_context=anon_ctx,
+					growth_info=growth,
+					tir_stats=tir,
+					logs_summary=logs_rec,
+				)
+			ui.session_state[trend_key] = {"ok": ok_tr, "text": tr_md, "model": used_tr}
+			ui.rerun()
+	with lt3:
+		ui.download_button(
+			"📄 Word Rapor (.docx)",
+			data=lambda _t=rep_title, _s=rep_sub, _sc=secs, _df=disp_df.copy(): ctx_api["build_ai_custom_report_docx"](_t, subtitle=_s, sections=_sc, df=_df),
+			file_name=f"{p_slug}_insulin_izlem_raporu.docx",
+			mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+			type="primary",
+			disabled=logs_df.empty,
+			use_container_width=True,
+			key=f"ins_dl_logs_docx_{student_id}",
+		)
+	with lt4:
+		ui.download_button(
+			"📊 Excel Defter (.xlsx)",
+			data=lambda _t=rep_title, _df=disp_df.copy(), _sc=secs: ctx_api["build_ai_custom_report_excel"](_t, df=_df, sections=_sc),
+			file_name=f"{p_slug}_insulin_izlem_defteri.xlsx",
+			mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+			type="secondary",
+			disabled=logs_df.empty,
+			use_container_width=True,
+			key=f"ins_dl_logs_xlsx_{student_id}",
+		)
+	with lt5:
+		if not logs_df.empty:
+			with ui.popover("🗑️ Sil", use_container_width=True):
+				del_l_map = {
+					f"#{int(r['id'])} · {r['Tarih']} {r['Saat']} ({r['Uygulanan_Doz']} Ü)": int(r["id"])
+					for _, r in logs_df.iterrows()
+				}
+				sel_del_l = ui.selectbox("Silinecek Kayıt", list(del_l_map.keys()), key=f"ins_del_log_sel_{student_id}")
+				if ui.button("🗑️ Kalıcı Olarak Sil", type="secondary", key=f"ins_del_log_btn_{student_id}", use_container_width=True):
+					with connect_db_fn() as conn:
+						conn.execute("DELETE FROM insulin_bolus_logs WHERE id=?", (del_l_map[sel_del_l],))
+					ui.rerun()
+
+	k1, k2, k3, k4, k5 = ui.columns(5, gap="small")
+	k1.metric("Uygulama", f"{tir['total_logs']}")
+	k2.metric("Ortalama KŞ", f"{tir['avg_bg']} mg/dL" if tir["avg_bg"] is not None else "—")
+	k3.metric("🎯 Hedef Aralık (TIR)", f"%{tir['tir_pct']}" if tir["tir_pct"] is not None else "—")
+	k4.metric(f"🔻 Hipo (<{hypo_th:.0f})", f"{tir['hypo_cnt']}")
+	k5.metric("🔺 Hiper (>180)", f"{tir['hyper_cnt']}")
+
+	if logs_df.empty:
+		ui.info("Seçili tarih aralığında kayıtlı insülin veya kan şekeri uygulaması bulunmuyor.")
+		return
+
+	# Görsel 3 Renkli TIR Dağılım Çubuğu + Enjeksiyon Bölgesi Dağılımı
+	if tir["bg_count"] > 0:
+		p_lo = round(tir["hypo_cnt"] / tir["bg_count"] * 100.0, 1)
+		p_hi = round(tir["hyper_cnt"] / tir["bg_count"] * 100.0, 1)
+		p_ok = max(0.0, round(100.0 - p_lo - p_hi, 1))
+		rot_txt = (
+			" · ".join(f"{html.escape(k)}: <b>{v}</b>" for k, v in list(tir["site_counts"].items())[:5])
+			if tir["site_counts"] else "Bölge kaydı yok"
+		)
+		ui.markdown(
+			f"<div class='ins-tir-wrap'>"
+			f"<div style='display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;font-size:11.5px;'>"
+			f"<span><b>Glisemik Dağılım ({tir['bg_count']} ölçüm):</b> "
+			f"<span style='color:#dc2626;'>🔻 %{p_lo} Hipo</span> · "
+			f"<span style='color:var(--teal);'>🟢 %{p_ok} Hedef ({hypo_th:.0f}–180)</span> · "
+			f"<span style='color:#d97706;'>🔺 %{p_hi} Hiper</span></span>"
+			f"<span style='color:var(--text-muted);'>🔄 <b>Rotasyon:</b> {rot_txt}</span>"
+			f"</div>"
+			f"<div class='ins-tir-track'>"
+			f"<div style='width:{p_lo}%;background:#ef4444;'></div>"
+			f"<div style='width:{p_ok}%;background:#0d9488;'></div>"
+			f"<div style='width:{p_hi}%;background:#f59e0b;'></div>"
+			f"</div></div>",
+			unsafe_allow_html=True,
+		)
+
+	if isinstance(saved_tr, dict):
+		if saved_tr.get("ok"):
+			with ui.container(border=True):
+				ui.markdown(f"**🤖 Gemini AI Glisemik Trend Özeti** <small style='color:var(--text-muted);'>({saved_tr.get('model')})</small>", unsafe_allow_html=True)
+				ui.markdown(ai_trend_md)
+		else:
+			ui.error(f"Gemini AI hatası: {saved_tr.get('text')}")
+
+	# Kan Şekeri Zaman Serisi Grafiği
+	bg_chart_df = logs_df.dropna(subset=["Kan_Sekeri"]).copy()
+	if not bg_chart_df.empty:
+		try:
+			import altair as alt
+			bg_chart_df["Zaman_Str"] = bg_chart_df["Tarih"].astype(str) + " " + bg_chart_df["Saat"].astype(str)
+			bg_chart_df["Zaman"] = pd.to_datetime(bg_chart_df["Zaman_Str"], errors="coerce")
+			bg_chart_df = bg_chart_df.dropna(subset=["Zaman"]).sort_values("Zaman")
+			if not bg_chart_df.empty:
+				line = alt.Chart(bg_chart_df).mark_line(point=True, color="#0d9488", strokeWidth=2.4).encode(
+					x=alt.X("Zaman:T", title="Tarih & Saat"),
+					y=alt.Y("Kan_Sekeri:Q", title="Kan Şekeri (mg/dL)"),
+					tooltip=["Tarih", "Saat", "Öğün", "Kan_Sekeri", "Toplam_Karb", "Uygulanan_Doz", "Enjeksiyon_Bolgesi"],
+				)
+				rule_lo = alt.Chart(pd.DataFrame({"y": [hypo_th]})).mark_rule(color="#ef4444", strokeDash=[4, 4]).encode(y="y:Q")
+				rule_hi = alt.Chart(pd.DataFrame({"y": [180.0]})).mark_rule(color="#f59e0b", strokeDash=[4, 4]).encode(y="y:Q")
+				ui.altair_chart(alt.layer(line, rule_lo, rule_hi).properties(height=245), use_container_width=True)
+		except Exception:
+			pass
+
+	ui.dataframe(disp_df, width="stretch", hide_index=True)
+
+
+# ==============================================================================
+# SEKME 4: ÖĞRENCİ REÇETE & DİYABET PROFİLİ (GRUPLANMIŞ YALIN FORM)
 # ==============================================================================
 
 def _render_tab_diabetes_profile(
@@ -1763,19 +2195,20 @@ def _render_tab_diabetes_profile(
 	growth: dict[str, Any],
 ) -> None:
 	connect_db_fn = ctx_api["connect_db"]
-	ui.markdown(f"#### ⚙️ {ctx_api['mask_kvkk_value'](person['full_name'], 'name')} — Hekim Diyabet & İnsülin Parametreleri")
-	ui.caption("Çocuk endokrinoloji hekiminin okul diyabet bakım planında belirttiği İKO, İDF, hedef kan şekeri ve güvenlik sınırlarını girin.")
 
-	# 500/1800 pediatrik referans yardımcı bilgi kutusu (TDD giriliyse)
 	cur_tdd = float(prof.get("tdd_units") or 0.0)
 	if cur_tdd > 0:
 		ref_icr = round(500.0 / cur_tdd, 1)
 		ref_isf = round(1800.0 / cur_tdd, 0)
 		kg_txt = f" · TDD/kg: **{cur_tdd / growth['kilo_kg']:.2f} Ü/kg**" if growth.get("kilo_kg") else ""
-		ui.info(f"📐 **Pediatrik Referans Kontrolü (TDD={cur_tdd:.1f} Ü{kg_txt}):** 500 Kuralı tahmini İKO ≈ `1/{ref_icr}g` · 1800 Kuralı tahmini İDF ≈ `{ref_isf:.0f} mg/dL/Ü` *(Daima hekimin yazılı planı esas alınır)*.")
+		ui.info(
+			f"📐 **Pediatrik 500/1800 Referansı (TDD={cur_tdd:.1f} Ü{kg_txt}):** "
+			f"Tahmini İKO ≈ `1/{ref_icr}g` · Tahmini İDF ≈ `{ref_isf:.0f} mg/dL/Ü` *(Hekimin yazılı reçetesi esas alınır)*."
+		)
 
 	with ui.form(f"form_diab_prof_{student_id}"):
-		p1, p2, p3 = ui.columns(3)
+		ui.markdown("<div class='ins-sec-label'>💙 1. Tanı &amp; İnsülin Rejimi</div>", unsafe_allow_html=True)
+		p1, p2, p3 = ui.columns([0.85, 1.15, 1.2], gap="small", vertical_alignment="bottom")
 		f_is_diab = p1.checkbox("💙 Diyabet Takibi Aktif", value=bool(prof.get("is_diabetic", True) or not prof.get("_exists")), key=f"dp_isd_{student_id}")
 		cur_dt = prof.get("diabetes_type") or DIABETES_TYPE_OPTIONS[0]
 		dt_idx = DIABETES_TYPE_OPTIONS.index(cur_dt) if cur_dt in DIABETES_TYPE_OPTIONS else 0
@@ -1783,48 +2216,48 @@ def _render_tab_diabetes_profile(
 
 		cur_br = prof.get("insulin_brand") or INSULIN_BRAND_OPTIONS[0]
 		br_opts = INSULIN_BRAND_OPTIONS if cur_br in INSULIN_BRAND_OPTIONS else [cur_br, *INSULIN_BRAND_OPTIONS]
-		f_brand = p3.selectbox("Hızlı Etkili (Bolus) İnsülin", br_opts, index=br_opts.index(cur_br), key=f"dp_brand_{student_id}")
+		f_brand = p3.selectbox("Bolus (Hızlı) İnsülin", br_opts, index=br_opts.index(cur_br), key=f"dp_brand_{student_id}")
 
-		q1, q2, q3 = ui.columns(3)
+		q1, q2, q3 = ui.columns([1.3, 1.1, 0.8], gap="small")
 		cur_deliv = prof.get("delivery_method") or DELIVERY_METHOD_OPTIONS[0]
 		dv_opts = DELIVERY_METHOD_OPTIONS if cur_deliv in DELIVERY_METHOD_OPTIONS else [cur_deliv, *DELIVERY_METHOD_OPTIONS]
-		f_deliv = q1.selectbox("Uygulama Aracı & Hassasiyet", dv_opts, index=dv_opts.index(cur_deliv), key=f"dp_deliv_{student_id}")
-		f_basal = q2.text_input("Bazal (Uzun Etkili) İnsülin", value=str(prof.get("basal_insulin") or ""), placeholder="Örn: Lantus 12 Ü akşam / Tresiba / Pompa bazal", key=f"dp_basal_{student_id}")
-		f_tdd = q3.number_input("Günlük Toplam İnsülin — TDD (Ü)", min_value=0.0, max_value=200.0, step=0.5, value=float(prof.get("tdd_units") or 0.0), key=f"dp_tdd_{student_id}")
+		f_deliv = q1.selectbox("Kalem / Pompa Hassasiyeti", dv_opts, index=dv_opts.index(cur_deliv), key=f"dp_deliv_{student_id}")
+		f_basal = q2.text_input("Bazal İnsülin", value=str(prof.get("basal_insulin") or ""), placeholder="Örn: Lantus 12 Ü akşam", key=f"dp_basal_{student_id}")
+		f_tdd = q3.number_input("Günlük Toplam Doz — TDD (Ü)", min_value=0.0, max_value=200.0, step=0.5, value=float(prof.get("tdd_units") or 0.0), key=f"dp_tdd_{student_id}")
 
-		ui.markdown("##### 📐 İnsülin / Karbonhidrat Oranları (İKO — 1 Ünite kaç gram karbonhidrat karşılar?)")
-		ic1, ic2, ic3 = ui.columns(3)
-		f_icr_b = ic1.number_input("🌅 Sabah Kahvaltı İKO (g/Ü)", min_value=2.0, max_value=60.0, step=0.5, value=float(prof.get("icr_breakfast") or 15.0), key=f"dp_icrb_{student_id}")
-		f_icr_l = ic2.number_input("☀️ Öğle Yemeği İKO (g/Ü)", min_value=2.0, max_value=60.0, step=0.5, value=float(prof.get("icr_lunch") or 15.0), key=f"dp_icrl_{student_id}")
-		f_icr_s = ic3.number_input("🍎 İkindi / Ara Öğün İKO (g/Ü)", min_value=2.0, max_value=60.0, step=0.5, value=float(prof.get("icr_snack") or 18.0), key=f"dp_icrs_{student_id}")
+		ui.markdown("<div class='ins-sub-divider'></div><div class='ins-sec-label'>🍽️ 2. Öğün İKO Oranları (1 Ünite Kaç Gram Karbonhidrat Karşılar?)</div>", unsafe_allow_html=True)
+		ic1, ic2, ic3 = ui.columns(3, gap="small")
+		f_icr_b = ic1.number_input("🌅 Kahvaltı İKO (g/Ü)", min_value=2.0, max_value=60.0, step=0.5, value=float(prof.get("icr_breakfast") or 15.0), key=f"dp_icrb_{student_id}")
+		f_icr_l = ic2.number_input("☀️ Öğle / Akşam İKO (g/Ü)", min_value=2.0, max_value=60.0, step=0.5, value=float(prof.get("icr_lunch") or 15.0), key=f"dp_icrl_{student_id}")
+		f_icr_s = ic3.number_input("🍎 Ara Öğün İKO (g/Ü)", min_value=2.0, max_value=60.0, step=0.5, value=float(prof.get("icr_snack") or 18.0), key=f"dp_icrs_{student_id}")
 
-		ui.markdown("##### 🎯 İDF, Hedef Kan Şekeri ve Güvenlik Bariyerleri")
-		sf1, sf2, sf3, sf4 = ui.columns(4)
-		f_isf = sf1.number_input("İDF (1 Ü kaç mg/dL düşürür?)", min_value=10.0, max_value=250.0, step=1.0, value=float(prof.get("isf") or 50.0), key=f"dp_isf_{student_id}")
-		f_tgt = sf2.number_input("Hedef Kan Şekeri (mg/dL)", min_value=80.0, max_value=160.0, step=5.0, value=float(prof.get("target_bg") or 120.0), key=f"dp_tgt_{student_id}")
-		f_cth = sf3.number_input("Düzeltme Başlangıç Eşiği", min_value=110.0, max_value=220.0, step=5.0, value=float(prof.get("correction_threshold") or 150.0), key=f"dp_cth_{student_id}")
-		f_hypo = sf4.number_input("Hipoglisemi Eşiği (mg/dL)", min_value=55.0, max_value=90.0, step=5.0, value=float(prof.get("hypo_threshold") or 70.0), key=f"dp_hypo_{student_id}")
+		ui.markdown("<div class='ins-sub-divider'></div><div class='ins-sec-label'>🛡️ 3. İDF, Hedef Kan Şekeri &amp; Güvenlik Sınırları</div>", unsafe_allow_html=True)
+		sf1, sf2, sf3, sf4 = ui.columns(4, gap="small")
+		f_isf = sf1.number_input("İDF (mg/dL / 1 Ü)", min_value=10.0, max_value=250.0, step=1.0, value=float(prof.get("isf") or 50.0), key=f"dp_isf_{student_id}")
+		f_tgt = sf2.number_input("Hedef KŞ (mg/dL)", min_value=80.0, max_value=160.0, step=5.0, value=float(prof.get("target_bg") or 120.0), key=f"dp_tgt_{student_id}")
+		f_cth = sf3.number_input("Düzeltme Eşiği (mg/dL)", min_value=110.0, max_value=220.0, step=5.0, value=float(prof.get("correction_threshold") or 150.0), key=f"dp_cth_{student_id}")
+		f_hypo = sf4.number_input("Hipo Eşiği (mg/dL)", min_value=55.0, max_value=90.0, step=5.0, value=float(prof.get("hypo_threshold") or 70.0), key=f"dp_hypo_{student_id}")
 
-		sf5, sf6, sf7 = ui.columns(3)
+		sf5, sf6, sf7 = ui.columns(3, gap="small")
 		f_ket_th = sf5.number_input("Keton Kontrol Eşiği (mg/dL)", min_value=200.0, max_value=350.0, step=10.0, value=float(prof.get("hyper_ketone_threshold") or 250.0), key=f"dp_ketth_{student_id}")
-		f_dur = sf6.number_input("Aktif İnsülin (IOB) Süresi (Saat)", min_value=2.0, max_value=5.0, step=0.5, value=float(prof.get("insulin_duration_hours") or 3.5), key=f"dp_dur_{student_id}")
-		f_maxb = sf7.number_input("Maksimum Tek Bolus Sınırı (Ü)", min_value=1.0, max_value=40.0, step=0.5, value=float(prof.get("max_single_bolus") or 12.0), key=f"dp_maxb_{student_id}")
+		f_dur = sf6.number_input("Aktif İnsülin Süresi — IOB (saat)", min_value=2.0, max_value=5.0, step=0.5, value=float(prof.get("insulin_duration_hours") or 3.5), key=f"dp_dur_{student_id}")
+		f_maxb = sf7.number_input("Maks. Tek Bolus Sınırı (Ü)", min_value=1.0, max_value=40.0, step=0.5, value=float(prof.get("max_single_bolus") or 12.0), key=f"dp_maxb_{student_id}")
 
-		ui.markdown("##### 🆘 Sensör, Glukagon & Hekim İletişim Bilgileri")
-		ex1, ex2, ex3 = ui.columns(3)
-		f_cgm = ex1.text_input("CGM / Sensör Modeli", value=str(prof.get("cgm_device") or ""), placeholder="Örn: Dexcom G7 / FreeStyle Libre 2", key=f"dp_cgm_{student_id}")
-		f_gluc = ex2.text_input("Okuldaki Glukagon / Baqsimi Konumu", value=str(prof.get("glucagon_location") or ""), placeholder="Örn: Revir dolabı üst raf + sınıf acil çantası", key=f"dp_gluc_{student_id}")
-		f_doc = ex3.text_input("Takip Eden Endokrinoloji Hekimi", value=str(prof.get("physician_name") or ""), placeholder="Örn: Prof. Dr. ... / Şehir Hastanesi", key=f"dp_doc_{student_id}")
+		ui.markdown("<div class='ins-sub-divider'></div><div class='ins-sec-label'>🆘 4. Sensör, Glukagon &amp; Hekim Eylem Planı</div>", unsafe_allow_html=True)
+		ex1, ex2, ex3 = ui.columns(3, gap="small")
+		f_cgm = ex1.text_input("CGM / Sensör", value=str(prof.get("cgm_device") or ""), placeholder="Örn: FreeStyle Libre 2 / Dexcom G7", key=f"dp_cgm_{student_id}")
+		f_gluc = ex2.text_input("Glukagon / Baqsimi Konumu", value=str(prof.get("glucagon_location") or ""), placeholder="Örn: Revir dolabı üst raf", key=f"dp_gluc_{student_id}")
+		f_doc = ex3.text_input("Takip Eden Hekim / Merkez", value=str(prof.get("physician_name") or ""), placeholder="Örn: Çocuk Endokrinoloji Kliniği", key=f"dp_doc_{student_id}")
 
 		f_proto = ui.text_area(
-			"📋 Hekim Özel Talimatları & Acil Eylem Planı",
+			"Hekim Özel Talimatları & Acil Eylem Planı",
 			value=str(prof.get("emergency_protocol") or ""),
-			height=85,
-			placeholder="Örn: Yemekten 10 dk önce uygula; KŞ < 80 ise yemek sonrası uygula; beden eğitimi öncesi KŞ < 100 ise 15g meyve suyu ver...",
+			height=72,
+			placeholder="Örn: Yemekten 10 dk önce uygula; KŞ < 80 ise yemek sonrası uygula...",
 			key=f"dp_proto_{student_id}",
 		)
-		sync_ch_chk = ui.checkbox("📋 Sağlık profilindeki 'Kronik Hastalıklar' alanına da diyabet tanısını otomatik işle", value=True, key=f"dp_sync_ch_{student_id}")
-		save_dp = ui.form_submit_button("💾 Öğrenci Diyabet & İnsülin Profilini Kaydet", type="primary", use_container_width=True)
+		sync_ch_chk = ui.checkbox("📋 Sağlık profilindeki 'Kronik Hastalıklar' alanına diyabet tanısını otomatik işle", value=True, key=f"dp_sync_ch_{student_id}")
+		save_dp = ui.form_submit_button("💾 Reçete & Diyabet Profilini Kaydet", type="primary", use_container_width=True)
 
 	if save_dp:
 		save_diabetes_profile(
@@ -1858,135 +2291,3 @@ def _render_tab_diabetes_profile(
 		ctx_api["sync_after_person_mutation"](student_id)
 		ui.success("✅ Öğrenci diyabet ve insülin reçete parametreleri kaydedildi!")
 		ui.rerun()
-
-
-# ==============================================================================
-# SEKME 4: İNSÜLİN & KAN ŞEKERİ DEFTERİ, TIR TRENDİ, ROTASYON & RAPORLAR
-# ==============================================================================
-
-def _render_tab_logs_and_trends(
-	ctx_api: dict[str, Any],
-	person: sqlite3.Row,
-	student_id: int,
-	prof: dict[str, Any],
-	growth: dict[str, Any],
-) -> None:
-	connect_db_fn = ctx_api["connect_db"]
-	is_gai_on, gai_key, gai_model = ctx_api["_get_active_gemini_config"]()
-	disp_name = ctx_api["mask_kvkk_value"](person["full_name"], "name")
-
-	p_c1, p_c2 = ui.columns([1.2, 2.8])
-	days_back = p_c1.selectbox("İzlem Aralığı", [7, 14, 30, 90, 365], index=2, format_func=lambda d: f"Son {d} Gün", key=f"ins_log_days_{student_id}")
-	logs_df = get_student_bolus_logs_df(connect_db_fn, student_id, days_back=int(days_back))
-	tir = compute_glycemic_tir_stats(logs_df, hypo_thresh=float(prof.get("hypo_threshold") or 70.0), hyper_high=180.0)
-
-	k1, k2, k3, k4, k5 = ui.columns(5)
-	k1.metric("Toplam Uygulama", f"{tir['total_logs']}")
-	k2.metric("Ortalama KŞ", f"{tir['avg_bg']} mg/dL" if tir["avg_bg"] is not None else "—")
-	k3.metric("🎯 Hedef Aralık (TIR)", f"%{tir['tir_pct']}" if tir["tir_pct"] is not None else "—")
-	k4.metric("🔻 Hipoglisemi (<70)", f"{tir['hypo_cnt']}")
-	k5.metric("🔺 Hiperglisemi (>180)", f"{tir['hyper_cnt']}")
-
-	if logs_df.empty:
-		ui.info("Seçili aralıkta henüz kaydedilmiş insülin veya kan şekeri uygulaması bulunmuyor.")
-		return
-
-	# Görsel Kan Şekeri Trend Grafiği (Hedef 70-180 bandı — :T Zaman Ekseni)
-	bg_chart_df = logs_df.dropna(subset=["Kan_Sekeri"]).copy()
-	if not bg_chart_df.empty:
-		try:
-			import altair as alt
-			bg_chart_df["Zaman_Str"] = bg_chart_df["Tarih"].astype(str) + " " + bg_chart_df["Saat"].astype(str)
-			bg_chart_df["Zaman"] = pd.to_datetime(bg_chart_df["Zaman_Str"], errors="coerce")
-			bg_chart_df = bg_chart_df.dropna(subset=["Zaman"]).sort_values("Zaman")
-			if not bg_chart_df.empty:
-				line = alt.Chart(bg_chart_df).mark_line(point=True, color="#0d9488", strokeWidth=2.5).encode(
-					x=alt.X("Zaman:T", title="Tarih & Saat"),
-					y=alt.Y("Kan_Sekeri:Q", title="Kan Şekeri (mg/dL)"),
-					tooltip=["Tarih", "Saat", "Öğün", "Kan_Sekeri", "Toplam_Karb", "Uygulanan_Doz", "Enjeksiyon_Bolgesi"],
-				)
-				rule_lo = alt.Chart(pd.DataFrame({"y": [float(prof.get("hypo_threshold") or 70)]})).mark_rule(color="#ef4444", strokeDash=[4, 4]).encode(y="y:Q")
-				rule_hi = alt.Chart(pd.DataFrame({"y": [180.0]})).mark_rule(color="#f59e0b", strokeDash=[4, 4]).encode(y="y:Q")
-				ui.altair_chart(alt.layer(line, rule_lo, rule_hi).properties(height=280), use_container_width=True)
-		except Exception:
-			pass
-
-	# Enjeksiyon Bölgesi Rotasyon Özeti
-	if tir["site_counts"]:
-		site_pills = " · ".join(f"`{k}`: **{v}** kez" for k, v in tir["site_counts"].items())
-		ui.markdown(f"🔄 **Enjeksiyon Bölgesi Rotasyon Dağılımı:** {site_pills}")
-
-	# Tablo
-	disp_df = logs_df.drop(columns=["id"], errors="ignore")
-	ui.dataframe(disp_df, width="stretch", hide_index=True)
-
-	# Gemini AI 14-30 Günlük Glisemik Trend & Hekim Kontrol Özeti
-	trend_key = f"ins_ai_trend_{student_id}"
-	if is_gai_on:
-		if ui.button("✨ Gemini AI ile Glisemik Trend & Endokrinoloji Kontrol Özeti Oluştur", type="primary", use_container_width=True, key=f"ins_btn_ai_trend_{student_id}"):
-			anon_ctx, _, _ = ctx_api["_build_person_anon_bundle"](student_id)
-			logs_rec = disp_df[["Tarih", "Saat", "Öğün", "Kan_Sekeri", "Toplam_Karb", "Aktivite", "Uygulanan_Doz", "Enjeksiyon_Bolgesi"]].head(30).to_dict(orient="records")
-			with ui.spinner("Gemini son glisemik trend ve TIR verilerini analiz ediyor..."):
-				ok_tr, tr_md, used_tr = gai.analyze_glycemic_trend_with_gemini(
-					api_key=gai_key,
-					model=gai_model,
-					anon_student_context=anon_ctx,
-					growth_info=growth,
-					tir_stats=tir,
-					logs_summary=logs_rec,
-				)
-			ui.session_state[trend_key] = {"ok": ok_tr, "text": tr_md, "model": used_tr}
-			ui.rerun()
-
-	saved_tr = ui.session_state.get(trend_key)
-	ai_trend_md = ""
-	if isinstance(saved_tr, dict):
-		if saved_tr.get("ok"):
-			ai_trend_md = str(saved_tr.get("text") or "")
-			with ui.container(border=True):
-				ui.markdown(f"##### 🤖 Gemini AI Glisemik Trend Özeti <small>({saved_tr.get('model')})</small>", unsafe_allow_html=True)
-				ui.markdown(ai_trend_md)
-		else:
-			ui.error(f"Gemini AI hatası: {saved_tr.get('text')}")
-
-	# Word & Excel Rapor Çıktıları
-	p_slug = re.sub(r"[^A-Za-z0-9_-]+", "_", str(person["full_name"] or "ogrenci")).strip("_") or "ogrenci"
-	rep_title = f"{person['full_name']} ({person['class_name']}) — Okul İçi İnsülin & Kan Şekeri İzlem Raporu"
-	rep_sub = (
-		f"Son {days_back} Gün | Ort. KŞ: {tir['avg_bg'] or '—'} mg/dL | TIR (%70-180): %{tir['tir_pct'] if tir['tir_pct'] is not None else '—'} | "
-		f"Hipo: {tir['hypo_cnt']} · Hiper: {tir['hyper_cnt']} | İKO (S/Ö/A): 1/{prof['icr_breakfast']:.0f}·1/{prof['icr_lunch']:.0f}·1/{prof['icr_snack']:.0f}"
-	)
-	secs = [{"heading": "🤖 Glisemik Trend & Klinik Değerlendirme (Gemini AI)", "body": ai_trend_md}] if ai_trend_md else None
-
-	rd1, rd2 = ui.columns(2)
-	with rd1:
-		ui.download_button(
-			"📄 İnsülin & Kan Şekeri İzlem Raporu İndir (.docx)",
-			data=lambda _t=rep_title, _s=rep_sub, _sc=secs, _df=disp_df.copy(): ctx_api["build_ai_custom_report_docx"](_t, subtitle=_s, sections=_sc, df=_df),
-			file_name=f"{p_slug}_insulin_izlem_raporu.docx",
-			mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-			type="primary",
-			use_container_width=True,
-			key=f"ins_dl_logs_docx_{student_id}",
-		)
-	with rd2:
-		ui.download_button(
-			"📊 İnsülin & Kan Şekeri Defterini Excel İndir (.xlsx)",
-			data=lambda _t=rep_title, _df=disp_df.copy(), _sc=secs: ctx_api["build_ai_custom_report_excel"](_t, df=_df, sections=_sc),
-			file_name=f"{p_slug}_insulin_izlem_defteri.xlsx",
-			mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-			type="secondary",
-			use_container_width=True,
-			key=f"ins_dl_logs_xlsx_{student_id}",
-		)
-
-	with ui.expander("🗑️ Hatalı İnsülin Kaydı Sil", expanded=False):
-		del_l_map = {
-			f"#{int(r['id'])} · {r['Tarih']} {r['Saat']} — {r['Öğün']} ({r['Uygulanan_Doz']} Ü)": int(r["id"])
-			for _, r in logs_df.iterrows()
-		}
-		sel_del_l = ui.selectbox("Silinecek Kayıt", list(del_l_map.keys()), key=f"ins_del_log_sel_{student_id}")
-		if ui.button("🗑️ Seçili Kaydı Kalıcı Olarak Sil", type="secondary", key=f"ins_del_log_btn_{student_id}"):
-			with connect_db_fn() as conn:
-				conn.execute("DELETE FROM insulin_bolus_logs WHERE id=?", (del_l_map[sel_del_l],))
-			ui.rerun()

@@ -482,6 +482,8 @@ class TestInsulinDiabetes(unittest.TestCase):
         self.assertIn("main_html", out)
         self.assertNotIn("Çalışma Zamanı Hatası", out["main_html"])
         self.assertIn("✨ AI ile Bilgi Al", out["main_html"])
+        self.assertIn("🧮 Doz Hesapla", out["main_html"])
+        self.assertIn("ÖNERİLEN BOLUS DOZU", out["main_html"])
 
         # Yazılan atıştırmalık için "✨ AI ile Bilgi Al" tıklanınca Karb (g), kcal ve Gİ bilgisi gelmeli ve "➕ Ekle" ile listeye eklenmeli
         persantil.save_app_settings({"gemini_enabled": "1", "gemini_api_key": "test-fake-key"})
@@ -505,6 +507,16 @@ class TestInsulinDiabetes(unittest.TestCase):
         self.assertEqual(len(extras), 2)
         self.assertAlmostEqual(sum(x["carbs_g"] for x in extras), 32.5, places=1)
         self.assertIn("Çubuk Kraker", out_add["main_html"])
+
+        # Uygulamayı kaydet ve diğer sekmelerin de hatasız render edildiğini doğrula
+        revir_ui.session_state["ins_calc_bg_1"] = "165"
+        out_save = revir_ui.run_action_headless(persantil.render_insulin_diabetes, {"action": "click", "key": "ins_btn_save_log_1"})
+        self.assertNotIn("Çalışma Zamanı Hatası", out_save["main_html"])
+
+        for tab_lbl in ("🍽️ Yemek & Aylık Plan", "📈 İzlem & Trend", "⚙️ Reçete Profili"):
+            revir_ui.session_state["_force_tab_label"] = tab_lbl
+            out_t = revir_ui.run_action_headless(persantil.render_insulin_diabetes, {"action": "render"})
+            self.assertNotIn("Çalışma Zamanı Hatası", out_t["main_html"])
 
 
 if __name__ == "__main__":
