@@ -4,14 +4,15 @@ Bu projede Microsoft Store için gerekli tüm teknik paketleme, ikon üretimi, `
 
 ---
 
-## 1. Partner Center Kimlik Bilgilerinizi `msix_config.json` Dosyasına Girin
+## 1. Partner Center Kimlik Bilgileriniz (`msix_config.json` İçine İşlendi ✅)
 
-1. [Microsoft Partner Center](https://partner.microsoft.com/dashboard) hesabınıza girin.
-2. **Apps and games -> New product -> MSIX or PWA app** adımıyla uygulama adınızı (`Okul Revir Defteri`) rezerve edin.
-3. Sol menüden **Product management -> Product identity** sayfasını açın ve oradaki 3 satırı kopyalayıp proje kökündeki `msix_config.json` dosyasına yapıştırın:
-   - `Package/Identity/Name` $\rightarrow$ `"identity_name"`
-   - `Package/Identity/Publisher` (`CN=...` ile başlar) $\rightarrow$ `"publisher"`
-   - `Package/Properties/PublisherDisplayName` $\rightarrow$ `"publisher_display_name"`
+Partner Center resmi uygulama kimlik değerleriniz `msix_config.json` ve `build_msix.py` içine tanımlanmıştır:
+- **Package/Identity/Name:** `blueddreamer.RevirDefteri`
+- **Package/Identity/Publisher:** `CN=1096CE83-946D-45FB-AD8B-94E6437B5EFD`
+- **PublisherDisplayName:** `blueddreamer`
+- **DisplayName:** `Revir Defteri` *(Partner Center'da rezerve ettiğiniz ad birebir farklıysa `msix_config.json` içindeki `"display_name"` alanını o adla eşleştirin)*
+- **Package Family Name:** `blueddreamer.RevirDefteri_93bhc84zrfnny`
+- **Store ID:** `9N8629W34880` (`https://apps.microsoft.com/detail/9N8629W34880`)
 
 > **Not:** Paketi kendi bilgisayarınızda sertifikayla imzalamanıza **gerek yoktur**; Microsoft Store `.msix` dosyasını yüklediğinizde kendi kök sertifikasıyla ücretsiz imzalar.
 

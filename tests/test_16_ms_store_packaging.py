@@ -35,6 +35,8 @@ class TestMicrosoftStorePackaging(unittest.TestCase):
 		}
 		ident = root.find("m:Identity", ns)
 		self.assertIsNotNone(ident)
+		self.assertEqual(ident.attrib["Name"], "blueddreamer.RevirDefteri")
+		self.assertEqual(ident.attrib["Publisher"], "CN=1096CE83-946D-45FB-AD8B-94E6437B5EFD")
 		self.assertEqual(ident.attrib["Version"], "1.52.0.0")
 		self.assertEqual(ident.attrib["ProcessorArchitecture"], "x64")
 
@@ -52,7 +54,8 @@ class TestMicrosoftStorePackaging(unittest.TestCase):
 		with tempfile.TemporaryDirectory() as tmp:
 			tmp_p = Path(tmp)
 			fake_dist = tmp_p / "dist" / "RevirDefteri"
-			(fake_dist / "_internal").mkdir(parents=True)
+			(fake_dist / "_internal" / "docx" / "templates" / "default-docx-template").mkdir(parents=True)
+			(fake_dist / "_internal" / "docx" / "templates" / "default-docx-template" / "[Content_Types].xml").write_text("<Types/>", encoding="utf-8")
 			(fake_dist / "kisi_verileri").mkdir(parents=True)
 			(fake_dist / "RevirDefteri.exe").write_bytes(b"MZ-fake-exe")
 			(fake_dist / "revir_defteri.db").write_bytes(b"secret-user-db")

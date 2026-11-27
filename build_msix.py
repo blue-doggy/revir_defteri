@@ -42,6 +42,7 @@ EXCLUDED_FILE_NAMES = {
 	".revir_desktop.pid",
 	"RevirDefteri_RootCA.cer",
 	"RevirDefteri_CodeSign.pfx",
+	"[Content_Types].xml",
 }
 
 EXCLUDED_DIR_NAMES = {
@@ -52,6 +53,7 @@ EXCLUDED_DIR_NAMES = {
 	"guncellemeler",
 	".webview2_cache",
 	"__pycache__",
+	"default-docx-template",
 }
 
 # MSIX paketi içindeki zorunlu ve önerilen ölçekli görsel varlıklar: (dosya_adı, genişlik, yükseklik, dolgu_oranı)
@@ -94,10 +96,13 @@ def to_msix_quad_version(semver: str) -> str:
 
 def load_msix_config(config_path: Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]:
 	defaults: dict[str, Any] = {
-		"identity_name": "BlueDoggy.OkulRevirDefteri",
-		"publisher": "CN=00000000-0000-0000-0000-000000000000",
-		"publisher_display_name": "Okul Sağlığı ve Revir Bilgi Sistemi",
-		"display_name": "Okul Revir Defteri",
+		"identity_name": "blueddreamer.RevirDefteri",
+		"publisher": "CN=1096CE83-946D-45FB-AD8B-94E6437B5EFD",
+		"publisher_display_name": "blueddreamer",
+		"display_name": "Revir Defteri",
+		"package_family_name": "blueddreamer.RevirDefteri_93bhc84zrfnny",
+		"package_sid": "S-1-15-2-821227329-492232997-165842215-2630038997-1000387688-1387758346-1805854164",
+		"store_id": "9N8629W34880",
 		"description": (
 			"Okul revirleri için yerel veritabanlı sağlık izlem, WHO büyüme persantili, "
 			"ilaç ve diyabet karar destek, okul taraması ve resmi raporlama sistemi."
@@ -304,7 +309,12 @@ def stage_msix_directory(
 			low = n.lower()
 			if n in EXCLUDED_FILE_NAMES or n in EXCLUDED_DIR_NAMES:
 				ignored.add(n)
-			elif low.endswith((".db", ".db-wal", ".db-shm", ".cer", ".pfx", ".pdb")):
+			elif (
+				low.endswith((".db", ".db-wal", ".db-shm", ".cer", ".pfx", ".pdb"))
+				or "[" in n
+				or "]" in n
+				or ("persantil veriler" in cur_dir.lower() and low.startswith("ogrenci_"))
+			):
 				ignored.add(n)
 		return ignored
 
@@ -417,12 +427,15 @@ def ensure_makeappx_exe(auto_download: bool = True) -> Path | None:
 
 def pack_msix(makeappx_exe: Path, staging_dir: Path, output_msix: Path) -> None:
 	output_msix.parent.mkdir(parents=True, exist_ok=True)
+	for old_msix in output_msix.parent.glob("RevirDefteri_Store_v*.msix"):
+		if old_msix.resolve() != output_msix.resolve():
+			old_msix.unlink(missing_ok=True)
 	if output_msix.exists():
 		output_msix.unlink()
 	cmd = [str(makeappx_exe), "pack", "/d", str(staging_dir), "/p", str(output_msix), "/o"]
-	res = subprocess.run(cmd, capture_output=True, text=True)
+	res = subprocess.run(cmd, capture_output=True)
 	if res.returncode != 0 or not output_msix.exists():
-		out_txt = (res.stdout or "") + "\n" + (res.stderr or "")
+		out_txt = (res.stdout or b"").decode("cp1254", errors="replace") + "\n" + (res.stderr or b"").decode("cp1254", errors="replace")
 		raise RuntimeError(f"makeappx.exe paketleme hatası (kod {res.returncode}):\n{out_txt.strip()}")
 
 

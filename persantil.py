@@ -142,7 +142,7 @@ def _resolve_bundled_asset(rel_name: str) -> Path:
 	return (Path(meipass_raw) if meipass_raw else _BUNDLE_DIR) / rel_name
 
 
-_DEFAULT_APP_VERSION = "1.52.1"
+_DEFAULT_APP_VERSION = "1.52.2"
 
 
 def _load_app_version() -> str:
@@ -36082,6 +36082,10 @@ def render_settings() -> None:
 						ui.info(
 							"🛍️ **Microsoft Store Sürümü:** Uygulama güncellemeleri Microsoft Store üzerinden "
 							"otomatik olarak indirilir ve doğrulanır; harici kurulum dosyası indirmenize gerek yoktur."
+						)
+						ui.link_button(
+							"🛍️ Microsoft Store Uygulama Sayfasını Aç ↗",
+							url="https://apps.microsoft.com/detail/9N8629W34880",
 						)
 				else:
 					with ui.container(border=True):
